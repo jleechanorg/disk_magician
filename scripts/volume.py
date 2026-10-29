@@ -2,6 +2,8 @@
 """Opt-in, fail-closed Scratch-volume helpers used by diskm."""
 from __future__ import annotations
 import fcntl
+import signal
+from contextlib import contextmanager
 import errno
 import hashlib
 import json
@@ -3182,12 +3184,46 @@ def audit_tmp(path: str | Path | None = None) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def pressure_signals():
+    """Keep scheduler TERM/HUP/INT inside our owned receipt/recovery lifecycle."""
+    state = {"signal": 0, "process": None}
+    def forward(signum, _frame):
+        state["signal"] = signum
+        process = state["process"]
+        if process is not None and process.poll() is None:
+            try: os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+    previous = {sig: signal.signal(sig, forward) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    try: yield state
+    finally:
+        for sig, handler in previous.items(): signal.signal(sig, handler)
+
+
+def pressure_process(arguments, state, env=None, recovery=False):
+    if state["signal"] and not recovery:
+        return subprocess.CompletedProcess(arguments, 128 + state["signal"])
+    process = subprocess.Popen(arguments, env=env, start_new_session=True)
+    state["process"] = process
+    try:
+        # Close the signal-before-Popen handoff race. Recovery is separately
+        # bounded and remains allowed after the initial cancellation.
+        if state["signal"] and not recovery:
+            try: os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+        return subprocess.CompletedProcess(arguments, process.wait())
+    finally:
+        state["process"] = None
+
+
 def reclaim_cmd(clean: bool = False, available_floor: bool = False) -> int:
     script = Path(__file__).resolve().parent / "volume_reclaim.sh"
     arguments = ["bash", str(script)]
     if clean:
         arguments.append("--clean")
-    if available_floor:
+    if not available_floor:
+        return subprocess.run(arguments, check=False).returncode
+    with pressure_signals() as signals:
         from job_receipt import JobReceiptStore
         store = JobReceiptStore()
         run_id = store.begin("volume_reclaim", trigger=os.environ.get("DISK_MAGICIAN_TRIGGER", "manual"),
@@ -3203,31 +3239,29 @@ def reclaim_cmd(clean: bool = False, available_floor: bool = False) -> int:
             store.finish("volume_reclaim", run_id=run_id, outcome="error", reason="bounded-runtime-unavailable")
             return 75
         arguments = [timeout, "--signal=TERM", "--kill-after=2s", "310s", *arguments]
-    if not available_floor:
-        return subprocess.run(arguments, check=False).returncode
-    def recover():
-        # recover never allocates without a durable exact-volume release intent.
-        return subprocess.run([timeout, "--signal=TERM", "--kill-after=2s", "12s",
-                               sys.executable, str(Path(__file__).resolve()),
-                               "ballast", "recover", "scratch"], check=False).returncode
-    try:
-        env = dict(os.environ, DISK_MAGICIAN_RECLAIM_RECEIPT_ID=run_id)
-        result = subprocess.run(arguments, env=env, check=False)
-        timed_out = result.returncode in (124, 137, 143)
-        recovery_rc = recover() if timed_out and clean else 0
-        # The child normally closes this exact receipt. Lock refusal, timeout,
-        # or a killed child still needs a terminal result; never close peers.
-        if any(row.get("id") == run_id for row in store.read("volume_reclaim")["active"]):
-            store.finish("volume_reclaim", run_id=run_id,
-                         outcome="timeout" if timed_out else ("skipped_lock" if result.returncode == 75 else "error"),
-                         reason="bounded-runtime-expired" if timed_out else "child-ended-without-terminal-receipt",
-                         postcondition={"target_reached": None, "ballast_recovery_rc": recovery_rc})
-            if result.returncode == 0:
-                return 1
-        return result.returncode
-    except Exception as error:
-        store.finish("volume_reclaim", run_id=run_id, outcome="error", reason=str(error))
-        return 75
+        def recover():
+            # recover never allocates without a durable exact-volume release intent.
+            return pressure_process([timeout, "--signal=TERM", "--kill-after=2s", "12s",
+                                   sys.executable, str(Path(__file__).resolve()),
+                                   "ballast", "recover", "scratch"], signals, recovery=True).returncode
+        try:
+            env = dict(os.environ, DISK_MAGICIAN_RECLAIM_RECEIPT_ID=run_id)
+            result = pressure_process(arguments, signals, env=env)
+            timed_out = result.returncode in (124, 137, 143, -signal.SIGKILL, -signal.SIGTERM, -signal.SIGINT, -signal.SIGHUP) or bool(signals["signal"])
+            recovery_rc = recover() if timed_out and clean else 0
+            # The child normally closes this exact receipt. Lock refusal, timeout,
+            # or a killed child still needs a terminal result; never close peers.
+            if any(row.get("id") == run_id for row in store.read("volume_reclaim")["active"]):
+                store.finish("volume_reclaim", run_id=run_id,
+                             outcome="timeout" if timed_out else ("skipped_lock" if result.returncode == 75 else "error"),
+                             reason=("scheduler-interrupted" if signals["signal"] else "bounded-runtime-expired") if timed_out else "child-ended-without-terminal-receipt",
+                             postcondition={"target_reached": None, "ballast_recovery_rc": recovery_rc})
+                if result.returncode == 0 and not timed_out:
+                    return 1
+            return 128 + signals["signal"] if signals["signal"] else (128 - result.returncode if result.returncode < 0 else result.returncode)
+        except Exception as error:
+            store.finish("volume_reclaim", run_id=run_id, outcome="error", reason=str(error))
+            return 75
 
 
 def verify_mount(root: str) -> int:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import shutil
+import os
+import json
+import signal
+import time
 import subprocess
 import sys
 import tempfile
@@ -59,6 +63,7 @@ class InventoryPackageTests(unittest.TestCase):
                             "launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template"):
                     self.assertEqual(wheel.read("disk_magician/" + rel), (REPO / rel).read_bytes(), rel)
 
+                self.assertEqual(wheel.read("disk_magician/cli.py"), (REPO / "src/disk_magician/cli.py").read_bytes())
                 self.assertIn("disk_magician/scripts/directory_inventory.py", names)
                 expected_wheel_systemd = {f"disk_magician/{rel}" for rel in EXPECTED_SYSTEMD}
                 self.assertTrue(expected_wheel_systemd <= names, expected_wheel_systemd - names)
@@ -80,6 +85,36 @@ class InventoryPackageTests(unittest.TestCase):
                 for command in ("diskm", "disk-magician"):
                     wrapper = (install / "bin" / command).read_text()
                     self.assertIn("from disk_magician.cli import main", wrapper)
+                timeout = shutil.which("timeout") or shutil.which("gtimeout")
+                if timeout:
+                    sandbox = Path(tmp) / "signal-fixture"
+                    sandbox.mkdir()
+                    fake = sandbox / "blocked-diskm"
+                    fake.write_text("#!/bin/bash\nsleep 4\n")
+                    fake.chmod(0o700)
+                    binary = sandbox / "bin"
+                    binary.mkdir()
+                    wrapper = binary / "timeout"
+                    wrapper.write_text('#!/bin/bash\nexec ' + timeout + ' --signal=TERM --kill-after=0.1s 2s "${@:4}"\n')
+                    wrapper.chmod(0o700)
+                    state = sandbox / "state"
+                    env = dict(os.environ, HOME=str(sandbox), DISK_MAGICIAN_STATE_DIR=str(state),
+                               DISK_MAGICIAN_DISKM_BIN=str(fake), PYTHONPATH=str(install),
+                               PATH=str(binary) + os.pathsep + os.environ["PATH"])
+                    process = subprocess.Popen([str(install / "bin/diskm"), "volume", "reclaim", "--available-floor", "--clean"],
+                                               env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                               start_new_session=True)
+                    receipt_path = state / "receipts/volume_reclaim.json"
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline and not receipt_path.exists():
+                        time.sleep(.02)
+                    self.assertTrue(receipt_path.exists())
+                    process.send_signal(signal.SIGTERM)
+                    output, error = process.communicate(timeout=8)
+                    self.assertEqual(process.returncode, 143, error.decode())
+                    receipt = json.loads(receipt_path.read_text())
+                    self.assertEqual(receipt["active"], [])
+                    self.assertEqual(receipt["last_terminal"]["reason"], "scheduler-interrupted")
                 expected_templates = {f"disk_magician/{rel}" for rel in EXPECTED_SCHEDULER | EXPECTED_POLKIT}
                 self.assertTrue(expected_templates <= names, expected_templates - names)
                 for rel in EXPECTED_SCHEDULER | EXPECTED_POLKIT:

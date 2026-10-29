@@ -1352,16 +1352,97 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertEqual(receipt["last_terminal"]["outcome"], "timeout")
         self.assertEqual(receipt["last_terminal"]["postcondition"]["ballast_recovery_rc"], 0)
 
+    def test_pressure_timeout_hard_kill_still_recovers_and_finishes_receipt(self):
+        import job_receipt
+        timeout = volume.shutil.which("timeout") or volume.shutil.which("gtimeout")
+        if not timeout:
+            self.skipTest("GNU timeout unavailable")
+        fixture = self.root / "hardkill/scripts"
+        fixture.mkdir(parents=True)
+        counter = self.root / "hardkill-recovery"
+        (fixture / "volume.py").write_text("from pathlib import Path\nPath(" + repr(str(counter)) + ").write_text('recovered')\n")
+        (fixture / "volume_reclaim.sh").write_text("#!/bin/bash\ntrap '' TERM\nsleep 3\n")
+        wrapper = self.root / "hardkill-timeout"
+        wrapper.write_text('#!/bin/bash\nexec ' + timeout + ' --signal=TERM --kill-after=0.1s 0.2s "${@:4}"\n')
+        wrapper.chmod(0o700)
+        with mock.patch.object(volume, "__file__", str(fixture / "volume.py")), \
+             mock.patch.object(volume.shutil, "which", return_value=str(wrapper)):
+            self.assertIn(volume.reclaim_cmd(True, True), (-9, 137))
+        self.assertEqual(counter.read_text(), "recovered")
+        receipt = job_receipt.JobReceiptStore().read("volume_reclaim")
+        self.assertEqual(receipt["active"], [])
+        self.assertEqual(receipt["last_terminal"]["outcome"], "timeout")
+
+    def test_scheduler_term_cli_closes_owned_receipt_and_recovers_pending_reserve(self):
+        import signal
+        import time
+        import job_receipt
+        import plistlib
+        timeout = volume.shutil.which("timeout") or volume.shutil.which("gtimeout")
+        if not timeout:
+            self.skipTest("GNU timeout unavailable")
+        self.make_fit()
+        fake = self.root / "blocked-diskm"
+        fake.write_text("#!/bin/bash\nsleep 4\n")
+        fake.chmod(0o700)
+        binary = self.root / "bin"
+        binary.mkdir()
+        wrapper = binary / "timeout"
+        child_pid_file = self.root / "timeout-pid"
+        wrapper.write_text('#!/bin/bash\necho $$ > "$TEST_TIMEOUT_PID"\nexec ' + timeout +
+                           ' --signal=TERM --kill-after=0.1s 2s "${@:4}"\n')
+        wrapper.chmod(0o700)
+        mac_args = plistlib.loads((ROOT / "launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template").read_bytes())["ProgramArguments"][1:]
+        linux_line = next(line for line in (ROOT / "systemd/diskm-scratch-reclaim.service.in").read_text().splitlines() if line.startswith("ExecStart="))
+        linux_args = linux_line.split("@ORCHESTRATOR@ ", 1)[1].split()
+        self.assertEqual(mac_args, linux_args)
+        env = dict(os.environ, DISK_MAGICIAN_DISKM_BIN=str(fake), TEST_TIMEOUT_PID=str(child_pid_file),
+                   PATH=str(binary) + os.pathsep + os.environ["PATH"])
+        for group_signal, arguments, signum in ((False, mac_args, signal.SIGTERM), (True, linux_args, signal.SIGTERM),
+                                                (False, mac_args, signal.SIGHUP), (False, linux_args, signal.SIGINT)):
+            with self.subTest(group_signal=group_signal, signum=signum):
+                self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+                child_pid_file.unlink(missing_ok=True)
+                runner = [sys.executable, str(ROOT / "src/disk_magician/cli.py")] if arguments is mac_args else ["bash", str(ROOT / "disk_magician.sh")]
+                process = volume.subprocess.Popen([*runner, *arguments],
+                                                 env=env, start_new_session=True,
+                                                 stdout=volume.subprocess.PIPE, stderr=volume.subprocess.PIPE)
+                deadline = time.monotonic() + 8
+                store = job_receipt.JobReceiptStore()
+                while time.monotonic() < deadline:
+                    if child_pid_file.exists() and store.read("volume_reclaim")["active"]:
+                        break
+                    time.sleep(.02)
+                self.assertTrue(child_pid_file.exists())
+                child_pid = int(child_pid_file.read_text())
+                process.send_signal(signum)
+                if group_signal:
+                    try: os.killpg(child_pid, signal.SIGTERM)
+                    except ProcessLookupError: pass
+                output, error = process.communicate(timeout=8)
+                self.assertEqual(process.returncode, 128 + signum, error.decode())
+                receipt = store.read("volume_reclaim")
+                self.assertEqual(receipt["active"], [])
+                self.assertEqual(receipt["last_terminal"]["reason"], "scheduler-interrupted")
+                # On Linux this is the actual fake-diskutil recovery dispatcher;
+                # Darwin's separate production mountpoint guard refuses temp roots.
+                if os.uname().sysname != "Darwin":
+                    self.assertEqual(receipt["last_terminal"]["postcondition"]["ballast_recovery_rc"], 0)
+                    self.assertTrue(volume.ballast_ok(str(self.mp)))
+                    self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+                else:
+                    self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+
     def test_pressure_timeout_recovers_only_recorded_release_and_finishes_owned_receipt(self):
         import job_receipt
         store = mock.Mock()
         store.begin.return_value = "owned-run"
         store.read.return_value = {"active": [{"id": "owned-run"}, {"id": "other-run"}]}
-        def execute(args, **kwargs):
+        def execute(args, *unused, **kwargs):
             return mock.Mock(returncode=0 if "recover" in args else 124)
         with mock.patch.object(job_receipt, "JobReceiptStore", return_value=store), \
              mock.patch.object(volume.shutil, "which", return_value="/usr/bin/timeout"), \
-             mock.patch.object(volume.subprocess, "run", side_effect=execute) as run:
+             mock.patch.object(volume, "pressure_process", side_effect=execute) as run:
             self.assertEqual(volume.reclaim_cmd(True, True), 124)
         self.assertEqual(sum("recover" in call.args[0] for call in run.call_args_list), 1)
         self.assertEqual(store.finish.call_args.kwargs["run_id"], "owned-run")
