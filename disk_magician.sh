@@ -98,6 +98,7 @@ Commands:
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
   scratch-dir [subpath]  Resolve active scratch root or create/return a subdirectory.
+  disposable ...          Opt-in Linux native 3-day cleanup for a NEW separate disposable namespace.
   volume ...              Inspect/create/mount Scratch volumes; Linux native migration accepts explicit --admin-transport docker --admin-image-id sha256:<digest>; volume fsck scratch is a separately gated diagnostic.
   evidence-push          Sync local evidence dir to remote storage.
   admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
@@ -446,6 +447,9 @@ case "$CMD" in
     ;;
   tmp-scratch-sweep)
     exec bash "$SCRIPT_DIR/scripts/tmp_scratch_sweep.sh" "$@"
+    ;;
+  disposable)
+    exec python3 "$SCRIPT_DIR/scripts/native_disposable.py" "$@"
     ;;
   volume)
     exec python3 "$SCRIPT_DIR/scripts/volume.py" "$@"

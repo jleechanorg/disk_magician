@@ -1,5 +1,6 @@
 include disk_magician.sh
 include config.json.template
+include safety.local.json.template
 include README.md
 recursive-include config *.txt
 recursive-include scripts *.sh *.py *.swift

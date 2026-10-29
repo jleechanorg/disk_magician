@@ -5,7 +5,7 @@ from setuptools.command.build_py import build_py as _build_py
 
 CANONICAL_PATTERNS = (
     "disk_magician.sh",
-    "config.json.template",
+    "config.json.template", "safety.local.json.template",
     "config/*.txt",
     "scripts/*.sh",
     "scripts/*.py",
