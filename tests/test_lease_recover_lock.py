@@ -15,6 +15,8 @@ import time
 import importlib.util
 
 
+SCRATCH = os.environ.get("CLAUDE_CODE_TMPDIR") or os.environ.get("DISKM_SCRATCH") or os.environ.get("RUNNER_TEMP")
+assert SCRATCH and Path(SCRATCH).is_dir(), "configured Scratch or RUNNER_TEMP directory required"
 ROOT = Path(__file__).resolve().parent.parent
 CLI = ["bash", str(ROOT / "disk_magician.sh"), "lease-recover-lock"]
 SPEC = importlib.util.spec_from_file_location("lease_recover_lock", ROOT / "scripts/lease_recover_lock.py")
@@ -65,7 +67,7 @@ def partial_lock_bytes(lock: Path) -> dict[str, bytes]:
     return {name: (lock / name).read_bytes() for name in ("pid", "acquired_at")}
 
 
-with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir=os.environ.get("CLAUDE_CODE_TMPDIR", "/tmp")) as temp:
+with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir=SCRATCH) as temp:
     state = Path(temp) / "state"
     state.mkdir()
     os.chmod(state, 0o755)
@@ -549,7 +551,7 @@ def test_writer_critical_sections():
     import signal
     import sys
 
-    artifact_root = os.environ.get('DISKM_TEST_ARTIFACT_DIR') or os.environ.get('CLAUDE_CODE_TMPDIR')
+    artifact_root = os.environ.get('DISKM_TEST_ARTIFACT_DIR') or os.environ.get('CLAUDE_CODE_TMPDIR') or os.environ.get('DISKM_SCRATCH') or os.environ.get('RUNNER_TEMP')
     temp = Path(tempfile.mkdtemp(prefix='lock-scope-', dir=artifact_root))
     library = ROOT / 'scripts/lib/worktree_lease.sh'
     quarantine = ROOT / 'scripts/lib/quarantine.sh'

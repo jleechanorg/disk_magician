@@ -42,7 +42,7 @@ def outer_call(path: Path, public: Optional[str], inner: str) -> str:
 
 class OuterCallerInterruptionTest(unittest.TestCase):
     def test_quarantine_subshell_records_live_holder_after_parent_kill(self):
-        scratch = os.environ.get("CLAUDE_CODE_TMPDIR") or os.environ.get("DISKM_SCRATCH")
+        scratch = os.environ.get("CLAUDE_CODE_TMPDIR") or os.environ.get("DISKM_SCRATCH") or os.environ.get("RUNNER_TEMP")
         self.assertTrue(scratch and Path(scratch).is_dir(), "configured Scratch directory required")
         with tempfile.TemporaryDirectory(prefix="lease-quarantine-", dir=scratch) as tmp:
             work = Path(tmp)
@@ -98,7 +98,7 @@ class OuterCallerInterruptionTest(unittest.TestCase):
                 proc.communicate(timeout=6)
 
     def test_outer_callers_release_on_term_and_exit(self):
-        scratch = os.environ.get("CLAUDE_CODE_TMPDIR") or os.environ.get("DISKM_SCRATCH")
+        scratch = os.environ.get("CLAUDE_CODE_TMPDIR") or os.environ.get("DISKM_SCRATCH") or os.environ.get("RUNNER_TEMP")
         self.assertTrue(scratch and Path(scratch).is_dir(), "configured Scratch directory required")
         for label, (path, public, inner) in CALLERS.items():
             for mode in ("term", "exit"):
