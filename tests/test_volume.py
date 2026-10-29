@@ -452,6 +452,41 @@ class LinuxScratchTest(VolumeTestBase):
             self.assertEqual(volume.linux_mount_cmd("scratch"), 0)
         self.assertEqual(mountpoint.stat().st_mode & 0o777, 0o500)
 
+    def test_linux_mount_opt_in_uses_fuse2fs_fakeroot_without_arbitrary_options(self):
+        scratch = self.set_linux_image_config(1)
+        document = json.loads(self.config.read_text())
+        document["volumes"]["fuse2fs_fakeroot"] = True
+        self.config.write_text(json.dumps(document))
+        image = pathlib.Path(scratch["image_path"])
+        with image.open("wb") as stream:
+            stream.truncate(volume.GIB)
+        mountpoint = pathlib.Path(scratch["mountpoint"])
+        mountpoint.mkdir(parents=True, mode=0o500)
+        mountpoint.chmod(0o500)
+        entry = {"state": "active", "image_path": str(image), "mountpoint": str(mountpoint),
+                 "quota_bytes": volume.GIB, "filesystem_uuid": "4f9f36b2-6896-46b3-b909-8bedf1a2273f"}
+        mount_reads = iter([None, ("fuse.ext4", str(image)), ("fuse.ext4", str(image))])
+        process = mock.Mock()
+        process.poll.return_value = None
+        with (
+            mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": entry}}),
+            mock.patch.object(volume, "linux_fs_uuid", return_value=entry["filesystem_uuid"]),
+            mock.patch.object(volume, "linux_mount_record", side_effect=lambda _: next(mount_reads)),
+            mock.patch.object(volume.subprocess, "Popen", return_value=process) as popen,
+        ):
+            self.assertEqual(volume.linux_mount_cmd("scratch"), 0)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[4], "noatime,fakeroot")
+        self.assertNotIn("rw", command)
+        self.assertNotIn("exec", command)
+
+    def test_config_rejects_non_boolean_fuse2fs_fakeroot(self):
+        document = json.loads(self.config.read_text())
+        document["volumes"]["fuse2fs_fakeroot"] = "true"
+        self.config.write_text(json.dumps(document))
+        with self.assertRaisesRegex(ValueError, "fuse2fs_fakeroot must be a boolean"):
+            volume.config()
+
     def test_linux_mount_validation_failure_unmounts_only_its_image(self):
         scratch = self.set_linux_image_config(1)
         image = pathlib.Path(scratch["image_path"])
