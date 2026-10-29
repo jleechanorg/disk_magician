@@ -578,7 +578,7 @@ os.execv(os.environ['REAL_PYTHON'], [os.environ['REAL_PYTHON'], *sys.argv[1:]])
         shim.chmod(0o755)
         script = home / 'case.sh'
         script.write_text('set -euo pipefail\nsource "' + str(quarantine) + '"\n' + trap + '\n' + body + '\n')
-        env = {**os.environ, 'HOME': str(home), 'PATH': str(home / 'bin') + ':/usr/bin:/bin',
+        env = {**os.environ, 'HOME': str(home), 'PATH': str(home / 'bin') + ':/usr/bin:/bin:/usr/sbin',
                'DISK_MAGICIAN_STATE_DIR': str(home / 'state'), 'DISK_MAGICIAN_LEASE_TTL_HOURS': ttl,
                'DISK_MAGICIAN_CONFIG': str(home / 'config.json'), 'BASH_ENV': '', 'REAL_PYTHON': real_python}
         result = subprocess.run(['bash', '-c', 'source "$1"; lease_path_for "$HOME/candidate"', 'bash', str(library)],
