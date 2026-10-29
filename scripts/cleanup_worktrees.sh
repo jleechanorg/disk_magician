@@ -970,7 +970,7 @@ _process_repo_local_worktrees() {
         return 0
     fi
 
-    repo_abs=$(cd "$repo" && pwd -P)
+    repo_abs=$(cd "$repo" && pwd -P) || return 3
     main_wt_path="$repo_abs"
 
     echo ""
@@ -1208,12 +1208,12 @@ _process_repo_local_worktrees() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$ACT_STOP" == 0 ]] || break
         if [[ -z "$line" ]]; then
-            flush_block
+            flush_block || return $?
             continue
         fi
         case "$line" in
             worktree\ *)
-                flush_block
+                flush_block || return $?
                 wt_path="${line#worktree }"
                 ;;
             HEAD\ *)
