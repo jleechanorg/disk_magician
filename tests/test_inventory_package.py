@@ -38,7 +38,7 @@ class InventoryPackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="disk-magician-package-test-") as tmp:
             fixture = Path(tmp) / "fixture"
             fixture.mkdir()
-            for filename in ("setup.py", "pyproject.toml", "README.md", "disk_magician.sh", "config.json.template"):
+            for filename in ("setup.py", "pyproject.toml", "README.md", "disk_magician.sh", "config.json.template", "safety.local.json.template"):
                 shutil.copy2(REPO / filename, fixture / filename)
             shutil.copytree(REPO / "src" / "disk_magician", fixture / "src" / "disk_magician", dirs_exist_ok=True)
             for dirname in ("config", "scripts", "launchd", "tools", "hooks", "systemd", "templates"):
@@ -58,7 +58,7 @@ class InventoryPackageTests(unittest.TestCase):
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
                 names = set(wheel.namelist())
-                for rel in ("systemd/diskm-scratch-reclaim.service.in", "systemd/diskm-scratch-reclaim.timer.in",
+                for rel in ("safety.local.json.template", "scripts/native_disposable.py", "systemd/diskm-scratch-reclaim.service.in", "systemd/diskm-scratch-reclaim.timer.in",
                             "scripts/volume_reclaim.sh", "scripts/scratch_pressure.py",
                             "launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template"):
                     self.assertEqual(wheel.read("disk_magician/" + rel), (REPO / rel).read_bytes(), rel)
@@ -85,6 +85,22 @@ class InventoryPackageTests(unittest.TestCase):
                 for command in ("diskm", "disk-magician"):
                     wrapper = (install / "bin" / command).read_text()
                     self.assertIn("from disk_magician.cli import main", wrapper)
+                # Fresh installed HOME has no machine-local safety file: the
+                # canonical safe baseline must ship, never silently allow-all.
+                clean_home = Path(tmp) / "clean-home"
+                clean_home.mkdir()
+                clean_env = {"PATH": os.environ["PATH"], "HOME": str(clean_home),
+                             "PYTHONPATH": str(install), "XDG_CONFIG_HOME": str(clean_home / ".config"),
+                             "XDG_STATE_HOME": str(clean_home / ".local/state")}
+                plan = subprocess.run([str(install / "bin/diskm"), "disposable", "init",
+                                       "--root", "/not-created-native-package-fixture"],
+                                      env=clean_env, text=True, capture_output=True)
+                if sys.platform.startswith("linux"):
+                    self.assertEqual(plan.returncode, 0, plan.stderr)
+                    self.assertEqual(json.loads(plan.stdout)["status"], "plan-only")
+                    self.assertFalse(Path("/not-created-native-package-fixture").exists())
+                else:
+                    self.assertNotEqual(plan.returncode, 0)  # Linux-only contract
                 timeout = shutil.which("timeout") or shutil.which("gtimeout")
                 if timeout:
                     sandbox = Path(tmp) / "signal-fixture"
