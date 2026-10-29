@@ -37,12 +37,14 @@ if bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --clean >/dev/null 
   echo "approval gate failed" >&2; exit 1
 fi
 
-truncate -s 101M "$DOWNLOADS/big.iso" "$DOWNLOADS/.env.local" \
-  "$DOWNLOADS/Credentials.zip" "$DOWNLOADS/API_TOKEN.tar" "$DOWNLOADS/PRIVATE.key"
+python3 -c 'import os,sys; [(open(path, "wb").close(), os.truncate(path, 101 * 1024 * 1024)) for path in sys.argv[1:]]' \
+  "$DOWNLOADS/big.iso" "$DOWNLOADS/.env.local" "$DOWNLOADS/Credentials.zip" \
+  "$DOWNLOADS/API_TOKEN.tar" "$DOWNLOADS/PRIVATE.key"
 printf 'credential' >"$DOWNLOADS/api_credentials.txt"
 mkdir "$DOWNLOADS/extracted-dir"
 ln -s "$DOWNLOADS/big.iso" "$DOWNLOADS/link.iso"
-touch -d '2020-01-01' "$SCREENSHOTS/old-screenshot.png"
+python3 -c 'import os,sys; open(sys.argv[1], "wb").close(); os.utime(sys.argv[1], (1577836800, 1577836800))' \
+  "$SCREENSHOTS/old-screenshot.png"
 touch "$SCREENSHOTS/Screenshot-current.png"
 DRY="$(FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run)"
 grep -q 'would remove large download' <<<"$DRY"
