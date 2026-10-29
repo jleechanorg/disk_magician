@@ -21,6 +21,9 @@ c14_remove() {
 }
 
 quarantine_remove() {
+  if ! _lease_scope_is_owner; then
+    if _lease_lock_scope release quarantine_remove "$@"; then return 0; else return $?; fi
+  fi
   local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 dkb=0 dact=remove lease_lock_held=0
   [[ $# -ge 1 ]] || { echo kept:check-failed; return 0; }
   path_arg="$1"; verdict_path="$1"; shift
@@ -61,6 +64,7 @@ quarantine_remove() {
       _lock_acquired=1
       break
     fi
+    [[ -z "$_lease_scope_signals" ]] || break
     sleep 0.1 2>/dev/null || sleep 1
   done
   if [[ "$_lock_acquired" -ne 1 ]]; then

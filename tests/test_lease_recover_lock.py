@@ -541,3 +541,254 @@ esac
     assert retry_mark.read_text() == "TERM handled\n"
     assert not Path(str(retry_lease) + ".reuse-lock").exists()
     print("PASS: a returning caller TERM trap does not poison the next acquisition")
+
+
+# Full-lifetime regressions use only isolated HOME/state and controllable children.
+def test_writer_critical_sections():
+    import signal
+    import sys
+
+    artifact_root = os.environ.get('DISKM_TEST_ARTIFACT_DIR')
+    temp = Path(tempfile.mkdtemp(prefix='lock-scope-', dir=artifact_root))
+    library = ROOT / 'scripts/lib/worktree_lease.sh'
+    quarantine = ROOT / 'scripts/lib/quarantine.sh'
+    records = []
+
+    def fixture(name, body, *, ttl='24', trap=''):
+        home = temp / name
+        home.mkdir()
+        (home / 'candidate').mkdir()
+        (home / 'bin').mkdir()
+        real_python = str(Path(sys.executable).resolve())
+        shim = home / 'bin/python3'
+        shim.write_text('#!' + real_python + '\n' + r'''
+import os, pathlib, sys, time
+home = pathlib.Path(os.environ['HOME'])
+writer = sys.argv[1:2] == ['-'] and len(sys.argv) > 2 and sys.argv[2] == os.environ.get('LEASE_TEST_LEASE')
+rename = len(sys.argv) > 2 and sys.argv[1].endswith('/quarantine_rename.py') and sys.argv[2] == 'remove'
+if (writer and os.environ.get('BLOCK_WRITER')) or (rename and os.environ.get('BLOCK_RENAME')):
+    stage = 'writer' if writer else 'rename'
+    (home / (stage + '-ready')).touch()
+    while not (home / (stage + '-go')).exists(): time.sleep(.01)
+os.execv(os.environ['REAL_PYTHON'], [os.environ['REAL_PYTHON'], *sys.argv[1:]])
+''')
+        shim.chmod(0o755)
+        script = home / 'case.sh'
+        script.write_text('set -euo pipefail\nsource "' + str(quarantine) + '"\n' + trap + '\n' + body + '\n')
+        env = {**os.environ, 'HOME': str(home), 'PATH': str(home / 'bin') + ':/usr/bin:/bin',
+               'DISK_MAGICIAN_STATE_DIR': str(home / 'state'), 'DISK_MAGICIAN_LEASE_TTL_HOURS': ttl,
+               'DISK_MAGICIAN_CONFIG': str(home / 'config.json'), 'BASH_ENV': '', 'REAL_PYTHON': real_python}
+        result = subprocess.run(['bash', '-c', 'source "$1"; lease_path_for "$HOME/candidate"', 'bash', str(library)],
+                                env=env, text=True, capture_output=True, check=True)
+        env['LEASE_TEST_LEASE'] = result.stdout.strip()
+        return home, env, script
+
+    def start(env, script):
+        return subprocess.Popen(['bash', str(script)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def wait_ready(home, stage):
+        limit = time.monotonic() + 8
+        while not (home / (stage + '-ready')).exists():
+            assert time.monotonic() < limit, (home, stage)
+            time.sleep(.01)
+
+    def locks(home):
+        return sorted((home / 'state/worktree_leases').glob('*.reuse-lock'))
+
+    def finish(name, home, p, expected):
+        out, err = p.communicate(timeout=12)
+        record = {'case': name, 'returncode': p.returncode, 'stdout': out, 'stderr': err,
+                  'locks': {str(lock): {f.name: f.read_text() for f in lock.iterdir()} for lock in locks(home)}}
+        records.append(record)
+        (temp / 'results.json').write_text(json.dumps(records, indent=2))
+        assert p.returncode == expected, record
+        return record
+
+    def contender(home, env):
+        p = subprocess.run(['bash', '-c', 'source "$1"; lease_write "$HOME/other" --kind scratch',
+                            'bash', str(library)], env=env, text=True, capture_output=True, timeout=4)
+        assert p.returncode == 1, (p.returncode, p.stdout, p.stderr)
+        assert (home / 'state/worktree_leases/.owner-mutation.reuse-lock').is_dir()
+
+    for name, body, expected in (
+        ('bare-error', 'lease_write "$HOME/candidate" --kind scratch', 1),
+        ('guarded-error', 'if ! lease_write "$HOME/candidate" --kind scratch; then exit 2; fi', 2),
+        ('pending-error', 'lease_write_pending "$HOME/missing" "-\t-\t-"', 1),
+    ):
+        home, env, script = fixture(name, body, ttl='invalid')
+        finish(name, home, start(env, script), expected)
+        assert not locks(home), name
+        print('PASS: ' + name + ' releases all acquired locks under set -e')
+
+    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        name = 'writer-' + signal.Signals(signum).name
+        trap = '''trap 'rc=$?; [[ ! -d "$DISK_MAGICIAN_STATE_DIR/worktree_leases/.owner-mutation.reuse-lock" ]]; printf "exit:%s\\n" "$rc" >> "$HOME/traps"' EXIT
+trap '[[ ! -d "$DISK_MAGICIAN_STATE_DIR/worktree_leases/.owner-mutation.reuse-lock" ]]; printf "signal\\n" >> "$HOME/traps"; exit 42' ''' + signal.Signals(signum).name
+        home, env, script = fixture(name, 'lease_write "$HOME/candidate" --kind scratch', trap=trap)
+        env['BLOCK_WRITER'] = '1'
+        p = start(env, script)
+        wait_ready(home, 'writer')
+        assert len(locks(home)) == 2
+        p.send_signal(signum)
+        time.sleep(.1)
+        assert p.poll() is None and len(locks(home)) == 2
+        contender(home, env)
+        (home / 'writer-go').touch()
+        finish(name, home, p, 42)
+        assert not locks(home) and Path(env['LEASE_TEST_LEASE']).is_file()
+        assert (home / 'traps').read_text() == 'signal\nexit:42\n'
+        print('PASS: ' + name + ' waits for writing child, releases, then delivers caller signal and EXIT')
+
+    dispositions = []
+    for sig in ('HUP', 'INT', 'TERM'):
+        dispositions.extend((
+            ('ignored-' + sig, "trap '' " + sig, 0),
+            ('returning-' + sig, "trap 'rc=$?; printf handled >> \"$HOME/traps\"' " + sig, 0),
+        ))
+    for name, trap, expected in dispositions:
+        body = '''before="$(trap -p TERM)"
+if lease_write "$HOME/candidate" --kind scratch; then rc=0; else rc=$?; fi
+[[ "$before" == "$(trap -p TERM)" ]]
+'''
+        body += '[[ "$rc" == 0 ]]' if name.startswith('ignored-') else '''[[ "$rc" == 1 ]]
+lease_write "$HOME/candidate" --kind scratch'''
+        home, env, script = fixture(name, body, trap=trap)
+        env['BLOCK_WRITER'] = '1'
+        p = start(env, script)
+        wait_ready(home, 'writer'); p.send_signal(getattr(signal, 'SIG' + name.split('-')[1])); time.sleep(.1)
+        assert p.poll() is None and len(locks(home)) == 2
+        (home / 'writer-go').touch()
+        finish(name, home, p, expected)
+        assert not locks(home)
+        if name.startswith('returning-'): assert (home / 'traps').read_text() == 'handled'
+        print('PASS: ' + name + ' retains disposition and permits a fresh acquisition')
+
+    verdict = r'''artifact_removal_verdict() {
+python3 -c 'import json,os,pathlib,sys,time
+p,out=sys.argv[1:]; s=os.lstat(p)
+json.dump([{"path":".","dev":s.st_dev,"ino":s.st_ino,"type":"dir"}],open(out,"w"))
+h=pathlib.Path(os.environ["HOME"]); (h/"verdict-ready").touch()
+while not (h/"verdict-go").exists(): time.sleep(.01)
+print("remove")' "$1" "$3"
+}
+quarantine_remove "$HOME/candidate"'''
+    home, env, script = fixture('c14-term', verdict)
+    env['BLOCK_RENAME'] = '1'
+    p = start(env, script)
+    wait_ready(home, 'verdict'); p.terminate(); time.sleep(.1)
+    assert p.poll() is None and len(locks(home)) == 1
+    contender(home, env)
+    (home / 'verdict-go').touch()
+    wait_ready(home, 'rename')
+    assert p.poll() is None and len(locks(home)) == 1 and (home / 'candidate').is_dir()
+    contender(home, env)
+    (home / 'rename-go').touch()
+    finish('c14-term', home, p, -signal.SIGTERM)
+    assert not locks(home) and not (home / 'candidate').exists()
+    print('PASS: TERM during C14 verdict retains registry serialization through rename, then cleans')
+
+    body = r'''(lease_write "$HOME/candidate" --kind scratch)
+[[ ! -e "$HOME/exits" ]]
+( trap 'printf child >> "$HOME/exits"' EXIT; lease_write "$HOME/candidate" --kind scratch )
+[[ "$(cat "$HOME/exits")" == child ]]'''
+    home, env, script = fixture('caller-subshell-traps', body,
+                                trap="trap 'printf parent >> \"$HOME/exits\"' EXIT")
+    finish('caller-subshell-traps', home, start(env, script), 0)
+    assert not locks(home) and (home / 'exits').read_text() == 'childparent'
+    print('PASS: inactive inherited EXIT remains inactive; locally installed child and parent EXIT each run once')
+
+    body = r'''outer() {
+  lease_mutation_lock_enter "$LEASE_TEST_LEASE" || return 1
+  nested() { lease_write "$HOME/candidate" --kind scratch --lock-held; }
+  value="$(nested)" || return 1
+  if value="$(lease_reuse_lock_release "$LEASE_TEST_LEASE")"; then return 1; fi
+  ( _lease_lock_scope release nested ) || return 1
+  doomed() { exit 7; }
+  if value="$(_lease_lock_scope release doomed)"; then return 1; else [[ $? == 7 ]] || return 1; fi
+  [[ -d "$LEASE_TEST_LEASE.reuse-lock" && -d "$(lease_dir)/.owner-mutation.reuse-lock" ]]
+}
+_lease_lock_scope release outer'''
+    home, env, script = fixture('nested', body)
+    finish('nested', home, start(env, script), 0)
+    assert not locks(home)
+    print('PASS: nested substitutions, subshells and --lock-held writes never release outer locks')
+
+    for status in (0, 7):
+        body = 'probe() { lease_registry_mutation_lock_enter || return 1; exit ' + str(status) + '; }; _lease_lock_scope release probe'
+        trap = '''trap 'rc=$?; [[ ! -d "$DISK_MAGICIAN_STATE_DIR/worktree_leases/.owner-mutation.reuse-lock" ]]; printf "%s\\n" "$rc" >> "$HOME/exit-status"' EXIT'''
+        name = 'explicit-exit-' + str(status)
+        home, env, script = fixture(name, body, trap=trap)
+        finish(name, home, start(env, script), status)
+        assert not locks(home) and (home / 'exit-status').read_text() == str(status) + '\n'
+        print('PASS: ' + name + ' cleans before caller EXIT and preserves $?')
+
+    body = r'''outer() {
+lease_mutation_lock_enter "$LEASE_TEST_LEASE" || return 1
+nested() {
+  printf '%s\n' "$BASHPID" > "$HOME/child-pid"
+  lease_write "$HOME/candidate" --kind scratch --lock-held
+}
+if value="$(nested)"; then return 1; else [[ $? == 143 ]] || return 1; fi
+[[ -d "$LEASE_TEST_LEASE.reuse-lock" && -d "$(lease_dir)/.owner-mutation.reuse-lock" ]]
+}
+_lease_lock_scope release outer'''
+    home, env, script = fixture('nested-term', body)
+    env['BLOCK_WRITER'] = '1'
+    p = start(env, script); wait_ready(home, 'writer')
+    os.kill(int((home / 'child-pid').read_text()), signal.SIGTERM)
+    time.sleep(.1)
+    assert p.poll() is None and len(locks(home)) == 2
+    (home / 'writer-go').touch()
+    finish('nested-term', home, p, 0)
+    assert not locks(home)
+    print('PASS: nested TERM re-delivers to the child, never cleans or signals the parent')
+
+    body = r'''probe() {
+lease_registry_mutation_lock_enter || return 1
+lock="$(lease_dir)/.owner-mutation.reuse-lock"
+mv "$lock" "$HOME/owned-lock"
+mkdir "$lock"
+printf '%s\n' "$$" > "$lock/pid"
+printf '%s\n' 1793220000 > "$lock/acquired_at"
+}
+_lease_lock_scope release probe'''
+    home, env, script = fixture('replacement', body)
+    finish('replacement', home, start(env, script), 0)
+    assert len(locks(home)) == 1 and (home / 'owned-lock/pid').is_file()
+    print('PASS: scope cleanup preserves replacement lock identity and original moved lock')
+
+    body = r'''probe() {
+lease_registry_mutation_lock_enter || return 1
+: > "$(lease_dir)/.owner-mutation.reuse-lock/acquired_at"
+}
+_lease_lock_scope release probe'''
+    home, env, script = fixture('changed-metadata', body)
+    finish('changed-metadata', home, start(env, script), 0)
+    assert len(locks(home)) == 1 and (locks(home)[0] / 'acquired_at').read_text() == ''
+    print('PASS: full acquired lock with changed metadata is preserved, even on the same directory inode')
+
+    home, env, script = fixture('sigkill', 'lease_write "$HOME/candidate" --kind scratch')
+    env['BLOCK_WRITER'] = '1'
+    p = start(env, script); wait_ready(home, 'writer')
+    p.kill(); p.wait(timeout=5)
+    for lock in locks(home):
+        assert (lock / 'pid').read_text().strip() == str(p.pid)
+        assert (lock / 'acquired_at').read_text().strip().isdigit()
+    assert len(locks(home)) == 2
+    (home / 'writer-go').touch()
+    finish('sigkill', home, p, -signal.SIGKILL)
+    assert Path(env['LEASE_TEST_LEASE']).is_file()
+    contender(home, env)
+    for lock in locks(home):
+        lease = str(lock)[:-len('.reuse-lock')]
+        for age, expected in ((3590, 1), (3610, 0)):
+            (lock / 'acquired_at').write_text(str(int(time.time()) - age) + '\n')
+            result = subprocess.run(['bash', '-c', 'source "$1"; [[ "$LEASE_REUSE_LOCK_TTL_SEC" == 3600 ]]; lease_reuse_lock_recover "$2"',
+                                     'bash', str(library), lease], env=env, text=True, capture_output=True, timeout=5)
+            assert result.returncode == expected, (age, result.stdout, result.stderr)
+    assert not locks(home)
+    print('PASS: SIGKILL retains full lock shape and existing dead-PID 3600-second recovery')
+    print('Critical-section artifacts: ' + str(temp))
+
+
+test_writer_critical_sections()
