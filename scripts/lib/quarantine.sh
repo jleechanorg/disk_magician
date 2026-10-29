@@ -55,13 +55,39 @@ quarantine_remove() {
   # Serialize lease-owner acquisition across all paths against the complete
   # verdict-to-rename interval. C14 considers ancestor and descendant leases,
   # so a candidate-only lock would leave those owner births able to cross it.
-  local _lock_acquired=0 _lock_tries=100
+  local _lock_acquired=0 _lock_tries=100 _lock_sleep
   while (( _lock_tries-- > 0 )); do
+    if [[ "$deadline_seen" == 1 ]] && (( _lock_tries < 99 )); then
+      # The first attempt is immediate; before every retry, stop once the
+      # caller's monotonic budget has expired.
+      python3 - "$deadline" <<'PY' >/dev/null 2>&1 || break
+import sys, time
+try:
+    sys.exit(0 if time.monotonic() < float(sys.argv[1]) else 1)
+except (ValueError, IndexError):
+    sys.exit(1)
+PY
+    fi
     if lease_registry_mutation_lock_enter; then
       _lock_acquired=1
       break
     fi
-    sleep 0.1 2>/dev/null || sleep 1
+    if [[ "$deadline_seen" == 1 ]]; then
+      _lock_sleep="$(python3 - "$deadline" <<'PY'
+import sys, time
+try:
+    remaining = float(sys.argv[1]) - time.monotonic()
+except (ValueError, IndexError):
+    sys.exit(1)
+if remaining > 0:
+    print(min(0.1, remaining))
+PY
+)" || break
+      [[ -n "$_lock_sleep" ]] || break
+      sleep "$_lock_sleep" 2>/dev/null || break
+    else
+      sleep 0.1 2>/dev/null || sleep 1
+    fi
   done
   if [[ "$_lock_acquired" -ne 1 ]]; then
     rm -f "$inv" "$binding"; echo kept:lease-busy; return 0

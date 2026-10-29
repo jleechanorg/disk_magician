@@ -145,6 +145,29 @@ check 'phase1 deadline returns before the 2.5s probe completes' python3 -c "impo
 for bad in nan inf -1; do
   check "phase1 rejects $bad deadline before lock" [ "$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$bad")" = kept:check-failed ]
 done
+
+# quarantine_remove's shared lease-registry lock retry must honor the caller's
+# monotonic deadline. Keep the busy lock inside this fixture's isolated state.
+fixture
+mkdir -p "$DISK_MAGICIAN_STATE_DIR/worktree_leases/.owner-mutation.reuse-lock"
+read -r LOCK_RESULT LOCK_ELAPSED <<<"$(python3 - "$ROOT" "$A" "$TMP" <<'PY'
+import os, subprocess, sys, time
+root, artifact, tmp = sys.argv[1:]
+deadline = time.monotonic() + 0.2
+command = (
+    f"source '{root}/scripts/lib/quarantine.sh'; "
+    f"quarantine_remove '{artifact}' --deadline-at {deadline:.6f}"
+)
+env = os.environ.copy()
+env["TMPDIR"] = tmp
+started = time.monotonic()
+proc = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, check=True)
+print(f"{proc.stdout.strip()} {time.monotonic() - started:.6f}")
+PY
+)"
+check "registry-lock contention returns at the caller deadline (elapsed ${LOCK_ELAPSED}s)" python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)" "$LOCK_ELAPSED"
+check 'registry-lock deadline contention keeps the original artifact' bash -c '[[ "$1" == kept:lease-busy && -f "$2/report.md" && "$(cat "$2/report.md")" == AAAA ]]' _ "$LOCK_RESULT" "$A"
+
 # An expired phase 2 must not commit an intact item to delete-only.
 prepare_quarantine; EXPIRED_AT="$(python3 -c 'import time; print(time.monotonic())')"
 EXPIRED_PHASE2="$(python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" --deadline-at "$EXPIRED_AT")"
