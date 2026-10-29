@@ -960,7 +960,8 @@ else
     echo "--- Antigravity orphans: root missing ($WORKTREE_ROOT), skipping ---"
 fi
 
-process_repo_local_worktrees() {
+process_repo_local_worktrees() { _lease_lock_scope release _process_repo_local_worktrees "$@"; }
+_process_repo_local_worktrees() {
     local repo="$1"
     local repo_abs main_wt_path
 

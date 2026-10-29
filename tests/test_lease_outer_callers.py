@@ -20,6 +20,8 @@ CALLERS = {
     "worktree-reap": (ROOT / "scripts/worktree_reap.sh", "process_lease", "_process_lease"),
     "worktree-remove-hook": (ROOT / "scripts/worktree_remove_hook.sh", "wrh_main", "_wrh_main"),
     "task-scratch": (ROOT / "scripts/cleanup_task_scratch.sh", None, "task_scratch_run"),
+    "cleanup-worktrees": (ROOT / "scripts/cleanup_worktrees.sh", "process_repo_local_worktrees", "_process_repo_local_worktrees"),
+    "cleanup-codex-documents": (ROOT / "scripts/cleanup_codex_documents.sh", "process_task", "_process_task"),
 }
 
 

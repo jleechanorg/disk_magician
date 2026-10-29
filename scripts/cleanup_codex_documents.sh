@@ -473,7 +473,8 @@ quarantine_gate() {
   [[ -n "$DEADLINE" ]] && args+=(--deadline-at "$DEADLINE")
   DM_DELETION_LOGGED=1 quarantine_remove "$task" ${args[@]+"${args[@]}"} 2>/dev/null || echo "kept:check-failed"
 }
-process_task() {
+process_task() { _lease_lock_scope release _process_task "$@"; }
+_process_task() {
   local task="$1" rc reason kb main wt removed_worktrees=0 qout wrh_out wrh_rc wrh_inv wrh_c14_verdict
   if [[ -L "$task" ]]; then keep symlink "$task"; return; fi
   reason="$(safety_gate "$task")" && rc=0 || rc=$?
