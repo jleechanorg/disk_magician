@@ -254,9 +254,22 @@ def gate(root, exclusive):
     finally: os.close(fd)
 
 
-def require_idle(root):
+def require_idle(root, allow_install_pending=False):
     if read_json(root / 'control/pending.json').get('phase') != 'idle':
         raise ValueError('incomplete native attempt requires explicit audit reconciliation')
+    install_record = root / 'control/schedule-transaction.json'
+    marker_path = root / 'control/schedule-admission.json'
+    if allow_install_pending: return
+    if marker_path.exists() or install_record.exists():
+        if not marker_path.exists() or not install_record.exists():
+            raise ValueError('incomplete schedule installation requires explicit recovery')
+        transaction = read_json(install_record); marker = read_json(marker_path)
+        if (transaction.get('phase') not in ('installed', 'rolled-back')
+                or marker.get('phase') != transaction.get('phase')
+                or not transaction.get('id') or marker.get('transaction_id') != transaction.get('id')
+                or marker.get('identity') != transaction.get('identity')
+                or transaction.get('identity') != read_json(root/'control/identity.json')):
+            raise ValueError('incomplete schedule installation requires explicit recovery')
 
 
 def producer(root, command):
@@ -468,10 +481,11 @@ def render_schedule(root, binary):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('init', 'run', 'clean', 'reconcile', 'schedule'))
+    parser.add_argument('action', choices=('init', 'run', 'clean', 'reconcile', 'schedule', 'schedule-install', 'schedule-recover'))
     parser.add_argument('--root', required=True)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--diskm-bin')
+    parser.add_argument('--accept-cooperative-producers', action='store_true')
     parser.add_argument('--tmpfiles-bin', default='/usr/bin/systemd-tmpfiles')
     argv = list(sys.argv[1:] if argv is None else argv)
     command = []
@@ -480,7 +494,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.action == 'run': return producer(args.root, command)
-        if args.action == 'schedule':
+        if args.action in ('schedule-install', 'schedule-recover'):
+            import native_disposable_install
+            import native_disposable
+            result = native_disposable_install.install(args.root, args.diskm_bin, args.accept_cooperative_producers,
+                                                       args.execute, native_disposable, args.action == 'schedule-recover')
+        elif args.action == 'schedule':
             if args.execute: raise ValueError('schedule is render-only; --execute cannot install units')
             result = render_schedule(args.root, args.diskm_bin)
         elif args.action == 'clean': result = clean(args.root, args.tmpfiles_bin, args.execute)

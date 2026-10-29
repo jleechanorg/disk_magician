@@ -7,7 +7,7 @@ It does not change the Mac/Linux 20-minute Scratch job or its strictly-below
 domain unless an operator independently provisions an appropriate separate
 namespace; no XDG path or capacity relationship is guessed.
 
-## Explicit entry point; no installation or host activation
+## Explicit entry point; installation is separately gated
 
 Use the existing `diskm` entry point, with an absolute user-selected path:
 
@@ -44,11 +44,75 @@ does not silently switch existing units to newly selected fallback files.
 Initialization fsyncs control inodes and namespace/parent directory entries before
 publishing its identity admission record; a durability error prevents admission.
 
-No tmpfiles.d file, timer, service, sudo operation, host setting, or migration is
-installed. An existing authorized operator may later arrange invocations; source
-approval is not permission to activate them. Linux systemd-tmpfiles >=255 is
+No host installation or activation was performed while developing or testing
+this source. The explicit installation path below is for a separately authorized
+operator; source approval alone is not permission to activate it. Linux systemd-tmpfiles >=255 is
 required for execution. The default binary is `/usr/bin/systemd-tmpfiles`; an
 explicit `--tmpfiles-bin` must be a trusted absolute, non-symlink executable.
+
+## Explicit user-unit install/enable and recovery
+
+`diskm disposable schedule-install --root /absolute/private/disposable
+--diskm-bin /absolute/installed/bin/diskm --accept-cooperative-producers` is
+plan-only. Adding `--execute` explicitly installs the reviewed unit text into
+`$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`), reloads the
+user manager, enables and starts **the timer**, and verifies its manager state.
+It does not run an immediate cleanup or claim that a cleanup has executed.
+The acknowledgement means every producer/consumer follows the inherited-lock
+contract below; it is not a claim that arbitrary existing data became safe.
+
+Installation requires exclusive namespace admission, idle native audit, valid
+registered payloads, a trusted shared launcher, and private/non-symlink user
+configuration ancestry. An additional installation flock serializes this path.
+Manager subprocesses inherit both locks. Existing unit bytes must match exactly;
+drift, another resolved fragment, unsupported timer state or a running service
+refuses rather than replacing another writer's files. Changing an installed
+launcher/policy binding requires deliberate operator reconciliation, not an
+implicit overwrite. Manager calls have an8-second bound each and a120-second transaction deadline;
+exhaustion leaves pending state if rollback cannot finish. The same shared sandbox
+guard covers both user-unit directory and user-manager runtime before writes or
+bus access. The manager environment preserves the validated XDG config directory
+but drops arbitrary bus/host selectors. Both loaded fragments must resolve to
+the expected files; any drop-ins/transient units, foreign timer association or
+unexpected effective ExecStart, Environment, environment-file/pass/unset lists,
+NoNewPrivileges, UMask or KillMode fail closed before mutation/recovery and after
+reload. Install currently requires a simple ASCII launcher path without spaces
+or expansion characters; rendering alone supports quoted spaces.
+
+A fsynced transaction records original unit presence, enabled/active state,
+new file identities and desired bytes before activation. Ordinary failures stop
+and disable only newly activated state, remove only exact identity-bound files
+created by this transaction, reload, restore prior state and verify it. Failed
+rollback or controller interruption retains an independent admission marker;
+ordinary producer and cleanup admission refuses while it is pending, regardless
+of whether an installed-journal rename is already visible. The marker binds a
+unique transaction ID and namespace identity; mismatches are not adopted. `diskm disposable schedule-recover --root
+/absolute/private/disposable --accept-cooperative-producers --execute` explicitly
+attempts the same bounded rollback under both locks. It does not claim successful
+installation. Unexpected file replacement, drift, corrupt journal or an unbound
+file from a crash before identity journaling requires operator reconciliation;
+those files are preserved. Exact expected bytes and inode identity are checked
+around reload/enable/start and immediately before rollback unlink, including
+in-place edits that retain the same inode. No automatic adoption or broad removal
+is permitted. This remains cooperative same-user coordination: other policy/unit
+writers must honor the installation lock, not race the final check/unlink syscall.
+The durable commit point is a successful fsync of the terminal transaction
+journal. Only afterward is the admission marker changed to the matching terminal
+phase. If this last marker write fails, the command reports incomplete with
+`committed: true`: a remaining pending marker blocks and recovery rolls back; a
+visible terminal marker proves the prior durable commit and recovery verifies
+manager/source state and re-fsyncs finalization without stop/enable operations.
+A crash can conservatively restore an older pending marker, never admit an
+ambiguous journal-only commit. A recorded predecessor marker permits recovery
+of interruption between a new intent and marker advance, before any file/manager
+mutation. Verified already-absent/inactive/disabled units are no-op rollback,
+not an attempt to stop a nonexistent timer.
+
+Tests intercept live-manager operations in synthetic namespaces. A real
+`systemctl --user --no-reload enable` test uses only fixture HOME/config/runtime
+(no bus socket) to verify custom-XDG file lookup and enablement symlinks; removing
+XDG_CONFIG_HOME genuinely fails lookup. This is not live user-manager, launchd,
+or systemd activation evidence.
 
 ## Producer/consumer contract and threat boundary
 
