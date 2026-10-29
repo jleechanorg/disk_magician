@@ -18,6 +18,8 @@ CANONICAL_PATTERNS = (
     "tools/guards/*",
     "hooks/*.sh",
     "systemd/*.template",
+    "systemd/*.service.in",
+    "systemd/*.timer.in",
     "templates/systemd/*.template",
     "templates/polkit/*.template",
 )

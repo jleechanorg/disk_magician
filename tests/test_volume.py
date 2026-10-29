@@ -33,7 +33,8 @@ class VolumeTestBase(unittest.TestCase):
         self.mp = self.root / "Volumes" / "diskm-scratch"
         self.config = self.root / "config.json"
         self.config.write_text(json.dumps({"volumes": {"swap_headroom_gb": 40, "alarm_floor_gb": 20, "encryption": "none", "encryption_acknowledged_at": "2026-10-25T00:00:00Z", "classes": {"scratch": {"name": "diskm-scratch", "quota_gb": 30, "mountpoint": str(self.mp)}}}}))
-        self.env = {k: os.environ.get(k) for k in ("DISK_MAGICIAN_DISKUTIL_BIN", "FAKE_DISKUTIL_STATE", "FAKE_DISKUTIL_CALLS", "DISK_MAGICIAN_STATE_DIR", "DISK_MAGICIAN_CONFIG", "DISK_MAGICIAN_DELETION_LOG", "FAKE_DISKUTIL_MOUNTPOINT")}
+        self.env = {k: os.environ.get(k) for k in ("HOME", "DISK_MAGICIAN_DISKUTIL_BIN", "FAKE_DISKUTIL_STATE", "FAKE_DISKUTIL_CALLS", "DISK_MAGICIAN_STATE_DIR", "DISK_MAGICIAN_CONFIG", "DISK_MAGICIAN_DELETION_LOG", "FAKE_DISKUTIL_MOUNTPOINT")}
+        os.environ["HOME"] = str(self.root)
         os.environ["DISK_MAGICIAN_DISKUTIL_BIN"] = str(ROOT / "tests/lib/fake_diskutil.py")
         os.environ["FAKE_DISKUTIL_STATE"] = str(self.state)
         os.environ["FAKE_DISKUTIL_CALLS"] = str(self.calls_file)
@@ -248,11 +249,19 @@ class LinuxScratchTest(VolumeTestBase):
              mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=3)):
             with mock.patch.object(volume, "__file__", str(previous / "scripts/volume.py")):
                 self.assertEqual(volume.linux_scheduler_install_cmd("scratch"), 0)
+            # Reproduce installed pre-policy hourly units, not a second copy
+            # of the new renderer. Upgrade must migrate BOTH exact units.
+            old_template = previous / "systemd/diskm-scratch-reclaim.service.in"
+            old_template.write_text(old_template.read_text().replace(" --available-floor", "").replace("TimeoutStartSec=350\n", ""))
+            service.write_text(service.read_text().replace(" --available-floor", "").replace("TimeoutStartSec=350\n", ""))
+            timer.write_text(timer.read_text().replace("OnCalendar=*:0/20", "OnCalendar=hourly"))
             old = service.read_bytes()
+            old_timer = timer.read_bytes()
             with mock.patch.object(volume, "__file__", str(current / "scripts/volume.py")):
                 with mock.patch.object(volume, "linux_command", side_effect=[RuntimeError("reload failed"), ""]):
                     self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 75)
                 self.assertEqual(service.read_bytes(), old)
+                self.assertEqual(timer.read_bytes(), old_timer)
                 timer_before = timer.read_text()
                 atomic_write = volume.linux_atomic_bytes
                 changed = False
@@ -299,7 +308,7 @@ class LinuxScratchTest(VolumeTestBase):
             service = (units / (unit_name + ".service")).read_text()
             self.assertIn("OnBootSec=5s\nOnUnitActiveSec=20s\nAccuracySec=1s", timer)
             self.assertNotIn("Persistent", timer)
-            self.assertIn("volume reclaim --clean", service)
+            self.assertIn("volume reclaim --available-floor --clean", service)
             self.assertIn("Restart=no", service)
             self.assertIn(str(self.config), service)
             self.assertIn(str(self.state_dir), service)
@@ -1114,6 +1123,9 @@ class LifecycleTest(VolumeTestBase):
 
 class StatusAndBallastTest(VolumeTestBase):
     def make_fit(self):
+        home_patch = mock.patch.dict(os.environ, {"HOME": str(self.root)})
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
         data = json.loads(self.state.read_text())
         data["container"]["ceiling"] = 1000 * 2**30
         self.state.write_text(json.dumps(data))
@@ -1445,6 +1457,246 @@ class StatusAndBallastTest(VolumeTestBase):
         result = volume.fit_result()
         self.assertEqual(result["max_quota_gb_that_fits"], 22)
         self.assertEqual(volume.main(["plan-fit", "--json"]), 0)
+
+    def test_real_pressure_timeout_closes_receipt_and_runs_bounded_recovery(self):
+        import job_receipt
+        timeout = volume.shutil.which("timeout")
+        if not timeout:
+            self.skipTest("GNU timeout unavailable")
+        fixture = self.root / "runtime/scripts"
+        fixture.mkdir(parents=True)
+        counter = self.root / "recovery-calls"
+        (fixture / "volume.py").write_text("from pathlib import Path\nwith Path(" + repr(str(counter)) + ").open('a') as f: f.write('recover\\n')\n")
+        (fixture / "volume_reclaim.sh").write_text("#!/bin/bash\nsleep 3\n")
+        wrapper = self.root / "bounded-timeout"
+        wrapper.write_text('#!/bin/bash\nexec ' + timeout + ' --signal=TERM --kill-after=0.1s 0.2s "${@:4}"\n')
+        wrapper.chmod(0o700)
+        with mock.patch.object(volume, "__file__", str(fixture / "volume.py")), \
+             mock.patch.object(volume.shutil, "which", return_value=str(wrapper)):
+            self.assertEqual(volume.reclaim_cmd(True, True), 124)
+        self.assertEqual(counter.read_text().splitlines(), ["recover"])
+        receipt = job_receipt.JobReceiptStore().read("volume_reclaim")
+        self.assertEqual(receipt["active"], [])
+        self.assertEqual(receipt["last_terminal"]["outcome"], "timeout")
+        self.assertEqual(receipt["last_terminal"]["postcondition"]["ballast_recovery_rc"], 0)
+
+    def test_pressure_timeout_recovers_only_recorded_release_and_finishes_owned_receipt(self):
+        import job_receipt
+        store = mock.Mock()
+        store.begin.return_value = "owned-run"
+        store.read.return_value = {"active": [{"id": "owned-run"}, {"id": "other-run"}]}
+        def execute(args, **kwargs):
+            return mock.Mock(returncode=0 if "recover" in args else 124)
+        with mock.patch.object(job_receipt, "JobReceiptStore", return_value=store), \
+             mock.patch.object(volume.shutil, "which", return_value="/usr/bin/timeout"), \
+             mock.patch.object(volume.subprocess, "run", side_effect=execute) as run:
+            self.assertEqual(volume.reclaim_cmd(True, True), 124)
+        self.assertEqual(sum("recover" in call.args[0] for call in run.call_args_list), 1)
+        self.assertEqual(store.finish.call_args.kwargs["run_id"], "owned-run")
+        self.assertEqual(store.finish.call_args.kwargs["outcome"], "timeout")
+        self.assertTrue(all("other-run" not in str(call) for call in store.finish.call_args_list))
+
+    def test_pending_ballast_release_recovers_after_final_log_failure(self):
+        self.make_fit()
+        with mock.patch.object(volume, "log_ballast_release", side_effect=[True, False]):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        pending = volume.registry()["volumes"]["scratch"]["ballast_recovery"]
+        self.assertEqual(pending, {"volume_uuid": "SCRATCH-UUID", "mountpoint": str(self.mp)})
+        self.assertFalse(volume.ballast_ok(self.mp))
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+        self.assertTrue(volume.ballast_ok(self.mp))
+        self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+
+    def make_partial_recovery(self, interrupt=True):
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        real_fdopen = os.fdopen
+        class PartialWriter:
+            def __init__(self, descriptor):
+                self.stream = real_fdopen(descriptor, "wb")
+                self.wrote = False
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.stream.close()
+            def write(self, block):
+                if self.wrote:
+                    if interrupt:
+                        raise SystemExit(92)
+                    raise OSError(errno.ENOSPC, "actual partial allocation failure")
+                self.wrote = True
+                return self.stream.write(block[:4096])
+            def flush(self):
+                self.stream.flush()
+            def fileno(self):
+                return self.stream.fileno()
+        def open_stream(fd, mode, *args, **kwargs):
+            return PartialWriter(fd) if mode == "wb" else real_fdopen(fd, mode, *args, **kwargs)
+        with mock.patch.object(volume.os, "fdopen", side_effect=open_stream):
+            if interrupt:
+                with self.assertRaises(SystemExit):
+                    volume.ballast_cmd("recover", "scratch")
+            else:
+                self.assertEqual(volume.ballast_cmd("recover", "scratch"), 76)
+        return volume.ballast_path(str(self.mp))
+
+    def test_actual_enospc_normalizes_bound_partial_before_same_pass_reclaim(self):
+        path = self.make_partial_recovery(interrupt=False)
+        self.assertFalse(path.exists())
+        self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(volume.path_cmd("scratch", for_reclaim=True), 0)
+
+    def test_allocation_failure_before_creation_retains_intent_and_allows_reclaim(self):
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        with mock.patch.object(volume, "write_ballast", side_effect=OSError(errno.ENOSPC, "full before create")):
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 76)
+        self.assertFalse(volume.ballast_path(str(self.mp)).exists())
+        self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+
+    def test_journal_failure_before_allocation_identity_commit_preserves_unbound_file(self):
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        with mock.patch.object(volume, "save_registry", side_effect=OSError("identity journal unavailable")):
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 75)
+        path = volume.ballast_path(str(self.mp))
+        self.assertTrue(path.exists())
+        before = path.stat()
+        self.assertNotIn("allocation", volume.registry()["volumes"]["scratch"]["ballast_recovery"])
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 75)
+        self.assertEqual((path.stat().st_dev, path.stat().st_ino), (before.st_dev, before.st_ino))
+
+    def test_process_exit_before_identity_callback_preserves_unbound_reserve(self):
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        path = volume.ballast_path(str(self.mp))
+        child = """
+import os,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import volume
+path=Path(sys.argv[2]); original=os.fstat
+def crash_at_allocation(fd):
+ details=original(fd)
+ if path.exists():
+  named=path.lstat()
+  if (details.st_dev,details.st_ino)==(named.st_dev,named.st_ino) and details.st_size==0:
+   os._exit(91)
+ return details
+volume.os.fstat=crash_at_allocation
+raise SystemExit(volume.ballast_cmd('recover','scratch'))
+"""
+        result = volume.subprocess.run([sys.executable, "-c", child, str(ROOT / "scripts"), str(path)], capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 91, result.stderr)
+        self.assertEqual(path.stat().st_size, 0)
+        before = path.stat()
+        self.assertNotIn("allocation", volume.registry()["volumes"]["scratch"]["ballast_recovery"])
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 75)
+        self.assertEqual((path.stat().st_dev,path.stat().st_ino),(before.st_dev,before.st_ino))
+
+    def test_owned_interrupted_partial_recovers_exact_file_only(self):
+        path = self.make_partial_recovery()
+        self.assertEqual(path.stat().st_size, 4096)
+        self.assertIn("allocation", volume.registry()["volumes"]["scratch"]["ballast_recovery"])
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        self.assertIn("allocation", volume.registry()["volumes"]["scratch"]["ballast_recovery"])
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+        self.assertTrue(volume.ballast_ok(self.mp))
+
+    def test_partial_recovery_preserves_replaced_file(self):
+        path = self.make_partial_recovery()
+        path.rename(self.mp / "original-partial")
+        path.write_text("foreign replacement")
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 75)
+        self.assertEqual(path.read_text(), "foreign replacement")
+
+    def test_partial_recovery_preserves_symlink(self):
+        path = self.make_partial_recovery()
+        path.rename(self.mp / "original-partial")
+        sentinel = self.root / "sentinel"; sentinel.write_text("preserve")
+        path.symlink_to(sentinel)
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 75)
+        self.assertTrue(path.is_symlink()); self.assertEqual(sentinel.read_text(), "preserve")
+
+    def test_partial_recovery_preserves_hardlink(self):
+        path = self.make_partial_recovery()
+        os.link(path, self.root / "hardlink")
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 75)
+        self.assertEqual(path.stat().st_nlink, 2)
+
+    def test_recovery_checks_actual_availability_not_only_quota(self):
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        stats = mock.Mock(f_bavail=0, f_frsize=4096)
+        with mock.patch.object(volume.os, "statvfs", return_value=stats), \
+             mock.patch.object(volume, "write_ballast") as write:
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 76)
+            write.assert_not_called()
+        self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+
+    def test_ballast_recovery_respects_active_cleanup_lock_and_inherited_owner(self):
+        import scratch_lock
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+        volume.fcntl.flock(fd, volume.fcntl.LOCK_EX | volume.fcntl.LOCK_NB)
+        try:
+            command = [sys.executable, str(ROOT / "scripts/volume.py"), "ballast", "recover", "scratch"]
+            result = volume.subprocess.run(command, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 75)
+            self.assertFalse(volume.ballast_ok(self.mp))
+            self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+        finally:
+            os.close(fd)
+        result = volume.subprocess.run([sys.executable, str(ROOT / "scripts/scratch_lock.py"),
+            "run", "--caller", "recovery-test", "--script", sys.executable, "--args", "--",
+            str(ROOT / "scripts/volume.py"), "ballast", "recover", "scratch"], capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(volume.ballast_ok(self.mp))
+
+    def test_pending_recovery_reports_typed_low_space_without_clearing_intent(self):
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        data = json.loads(self.state.read_text())
+        scratch = next(row for row in data["volumes"] if row["name"] == "diskm-scratch")
+        scratch["used"] = scratch["quota"] - 64 * volume.MIB
+        self.state.write_text(json.dumps(data))
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 76)
+        self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+        self.assertFalse(volume.ballast_ok(self.mp))
+        scratch["used"] = scratch["quota"] - 2 * volume.GIB
+        self.state.write_text(json.dumps(data))
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+        self.assertTrue(volume.ballast_ok(self.mp))
+
+    def test_failed_restore_preserves_durable_recovery_obligation(self):
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        with mock.patch.object(volume, "write_ballast", side_effect=OSError("no space")):
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 75)
+        self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+        self.assertFalse(volume.ballast_ok(self.mp))
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+
+    def test_release_does_not_unlink_when_recovery_intent_cannot_commit(self):
+        self.make_fit()
+        with mock.patch.object(volume, "save_registry", side_effect=OSError("durable intent failed")):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        self.assertTrue(volume.ballast_ok(self.mp))
+
+    def test_ballast_recover_never_allocates_without_own_matching_intent(self):
+        self.make_fit()
+        with mock.patch.object(volume, "write_ballast") as write:
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+            write.assert_not_called()
+        path, _ = volume.registry_paths()
+        data = volume.registry()
+        data["volumes"]["scratch"]["ballast_recovery"] = {"volume_uuid": "OTHER", "mountpoint": str(self.mp)}
+        path.write_text(json.dumps(data))
+        with mock.patch.object(volume, "write_ballast") as write:
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 75)
+            write.assert_not_called()
 
     def test_ballast_release_logs_verified_volume_identity(self):
         self.make_fit()
