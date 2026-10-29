@@ -243,13 +243,14 @@ if [[ $RC_DISKM -eq 0 ]] || [[ "$(cat "$LAUNCHAGENTS_DIR/com.disk-magician.needs
 fi
 
 # Test --consolidate flag:
-# 1. Tests that --consolidate successfully installs the 6 selected templates:
+# 1. Tests that --consolidate successfully installs the 7 selected templates:
 #    - com.jleechanorg.disk-magician-main-sweeper.plist.template
 #    - com.jleechanorg.disk-magician-worktree-reap.plist.template
 #    - com.jleechanorg.disk-magician-govern.plist.template
 #    - com.jleechanorg.disk-magician-govern-measure.plist.template
 #    - com.disk-magician.claude-state.plist.template
 #    - com.disk-magician.worktree-venvs.plist
+#    - com.jleechanorg.disk-magician-scratch-pressure.plist.template
 # 2. Tests that redundant plists are archived to .consolidated/ ONLY after successful installation.
 CONSOLIDATE_SRC="$TMP_ROOT/launchd_consolidate"
 CONSOLIDATE_LAUNCHAGENTS="$TMP_ROOT/LaunchAgents_consolidate"
@@ -264,6 +265,7 @@ cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-govern.plist.template" "$CO
 cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-govern-measure.plist.template" "$CONSOLIDATE_SRC/"
 cp "$REPO_ROOT/launchd/com.disk-magician.claude-state.plist.template" "$CONSOLIDATE_SRC/"
 cp "$REPO_ROOT/launchd/com.disk-magician.worktree-venvs.plist" "$CONSOLIDATE_SRC/"
+cp "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template" "$CONSOLIDATE_SRC/"
 
 printf '<plist><dict><key>Label</key><string>com.disk-magician.colima-prune</string></dict></plist>\n' > "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.colima-prune.plist"
 
@@ -307,6 +309,12 @@ if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.worktree-venvs.plist" ]]
   echo "FAIL: worktree-venvs.plist not installed under --consolidate" >&2
   exit 1
 fi
+python3 - "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-scratch-pressure.plist" <<'PYVERIFY'
+import plistlib,sys
+with open(sys.argv[1],"rb") as stream: value=plistlib.load(stream)
+assert value["StartInterval"] == 1200
+assert value["ProgramArguments"][-4:] == ["volume", "reclaim", "--available-floor", "--clean"]
+PYVERIFY
 if [[ -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.colima-prune.plist" ]]; then
   echo "FAIL: redundant colima-prune.plist was not removed from LaunchAgents" >&2
   exit 1
