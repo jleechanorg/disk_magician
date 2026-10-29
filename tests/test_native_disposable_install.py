@@ -412,3 +412,88 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'installation'):native.require_idle(self.root)
         self.assertEqual(self.perform(recover=True)['status'],'rolled-back')
         self.assertTrue(self.active and self.enabled);native.require_idle(self.root)
+
+    def test_launcher_replacement_after_render_refuses_before_host_mutation(self):
+        original=native.render_schedule
+        def replace(*args,**kwargs):
+            result=original(*args,**kwargs)
+            self.binary.rename(self.binary.with_name('original-launcher'))
+            self.binary.write_text('from disk_magician.cli import main\n# replacement\n');self.binary.chmod(0o700)
+            return result
+        with mock.patch.object(native,'render_schedule',side_effect=replace),self.assertRaisesRegex(ValueError,'launcher'):self.perform()
+        self.assertEqual(self.calls,[]);self.assertFalse(self.directory.exists())
+        self.assertIn('replacement',self.binary.read_text())
+
+    def test_launcher_inplace_edit_during_preflight_blocks_activation(self):
+        original=install.manager;changed=[]
+        def edit(*args,**kwargs):
+            if args[0]=='show' and not changed:
+                self.binary.write_text(self.binary.read_text()+'# edited preflight\n');changed.append(True)
+            return original(*args,**kwargs)
+        with mock.patch.object(install,'manager',side_effect=edit),self.assertRaisesRegex(ValueError,'launcher'):self.perform()
+        self.assertFalse(any(c[0] in ('daemon-reload','enable','start','stop','disable') for c in self.calls))
+        self.assertIn('edited preflight',self.binary.read_text())
+        self.assertFalse(list(self.directory.glob('*.service')))
+
+    def test_launcher_change_after_reload_blocks_enable_and_start(self):
+        original=install.manager
+        def edit(*args,**kwargs):
+            result=original(*args,**kwargs)
+            if args[0]=='daemon-reload':self.binary.write_text(self.binary.read_text()+'# edited reload\n')
+            return result
+        with mock.patch.object(install,'manager',side_effect=edit),self.assertRaisesRegex(ValueError,'launcher'):self.perform()
+        self.assertFalse(any(c[0] in ('enable','start') for c in self.calls))
+
+    def test_recovery_rejects_changed_launcher_without_mutating_it(self):
+        self.perform();self.binary.write_text(self.binary.read_text()+'# operator update\n');self.calls=[]
+        with self.assertRaisesRegex(ValueError,'launcher'):self.perform(recover=True)
+        self.assertEqual(self.calls,[]);self.assertIn('operator update',self.binary.read_text())
+
+    def test_launcher_mode_or_symlink_change_is_not_adopted_on_recovery(self):
+        self.perform();self.binary.chmod(0o777);self.calls=[]
+        with self.assertRaisesRegex(ValueError,'launcher'):self.perform(recover=True)
+        self.assertEqual(self.calls,[])
+        self.binary.chmod(0o700);self.binary.rename(self.binary.with_name('linked-target'))
+        self.binary.symlink_to(self.binary.with_name('linked-target'))
+        with self.assertRaisesRegex(ValueError,'launcher'):self.perform(recover=True)
+        self.assertTrue(self.binary.is_symlink());self.assertEqual(self.calls,[])
+
+    def test_launcher_edit_during_enable_prevents_start(self):
+        original=install.manager
+        def edit(*args,**kwargs):
+            result=original(*args,**kwargs)
+            if args[0]=='enable':self.binary.write_text(self.binary.read_text()+'# edit during enable\n')
+            return result
+        with mock.patch.object(install,'manager',side_effect=edit),self.assertRaisesRegex(ValueError,'launcher'):self.perform()
+        self.assertFalse(any(c[0]=='start' for c in self.calls))
+        self.assertEqual(native.read_json(self.root/'control/schedule-admission.json')['phase'],'pending')
+
+    def test_launcher_writable_ancestor_refused_before_manager(self):
+        directory=self.base/'unsafe-bin';directory.mkdir();self.binary.rename(directory/'diskm');self.binary=directory/'diskm'
+        directory.chmod(0o777)
+        with self.assertRaisesRegex(ValueError,'ancestor'):self.perform()
+        self.assertEqual(self.calls,[])
+
+    def test_launcher_foreign_owned_ancestor_refused_before_manager(self):
+        directory=self.base/'foreign-bin';directory.mkdir();self.binary.rename(directory/'diskm');self.binary=directory/'diskm'
+        original=Path.lstat
+        def foreign(path,*args,**kwargs):
+            result=original(path,*args,**kwargs)
+            if path==directory:
+                values=list(result);values[4]=os.getuid()+1;return os.stat_result(values)
+            return result
+        with mock.patch.object(Path,'lstat',foreign),self.assertRaisesRegex(ValueError,'ancestor'):self.perform()
+        self.assertEqual(self.calls,[])
+
+    def test_launcher_ancestor_substitution_keeps_leaf_but_refuses_recovery(self):
+        directory=self.base/'trusted-bin';directory.mkdir();self.binary.rename(directory/'diskm');self.binary=directory/'diskm'
+        self.perform();directory.rename(self.base/'old-bin');directory.mkdir()
+        (self.base/'old-bin/diskm').rename(self.binary);self.calls=[]
+        with self.assertRaisesRegex(ValueError,'launcher'):self.perform(recover=True)
+        self.assertEqual(self.calls,[])
+
+    def test_launcher_ancestor_mode_change_refuses_recovery(self):
+        directory=self.base/'trusted-bin';directory.mkdir(mode=0o700);self.binary.rename(directory/'diskm');self.binary=directory/'diskm'
+        self.perform();directory.chmod(0o755);self.calls=[]
+        with self.assertRaisesRegex(ValueError,'launcher'):self.perform(recover=True)
+        self.assertEqual(self.calls,[])

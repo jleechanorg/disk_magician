@@ -33,7 +33,15 @@ keeps pending intent until explicit reconciliation. `schedule --execute` refuses
 this command cannot install, enable, start or operate a host service. Rendered
 units are source artifacts, **not evidence that periodic cleanup is scheduled**.
 An authorized operator must verify the reviewed installed launcher and apply the
-units separately. Launcher updates are outside the cooperative identity boundary.
+units separately. The rendered result records the resolved launcher path,
+no-follow inode/device/owner/mode/link/size/timestamps and SHA256. Installation
+and recovery bind this record and revalidate it before writes and around every
+manager mutation; replaced or in-place edited launchers are preserved and refused.
+The launcher and package writers must honor the installation lock during the
+transaction. This is not protection against a hostile same-UID writer replacing
+code between the final validation and execution, nor a hash of the entire Python
+package. Intentional launcher/package updates require a new reviewed operator
+checkpoint; recovery never silently adopts changed or older unbound launchers.
 The service binds the winning absolute config/safety files, HOME, state directory
 and supported shared protection/sandbox overrides, including empty resets. Missing
 bound files fail closed; later holds in those files are read on each invocation.
@@ -208,3 +216,5 @@ These are isolated native/process/audit proofs, not live-host acceptance,
 performance proof, protection for noncooperative consumers, a C14 replacement,
 or deployment/merge approval. Privileged Docker FITRIM lifecycle work remains
 separately held and is not included in this native namespace change.
+
+Launcher binding includes every ancestor directory identity, owner, group and mode. Foreign-owned or group/world-writable non-sticky ancestors are refused; trusted sticky roots such as `/tmp` are permitted only with trusted owned descendants. Parent replacement or permission changes require explicit reviewed reconciliation, even when launcher bytes and inode remain unchanged. This does not make a writable same-UID Python installation immutable; cooperative package/launcher owners must preserve the installed contract while the timer is enabled.
