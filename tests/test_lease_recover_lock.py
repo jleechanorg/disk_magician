@@ -728,7 +728,7 @@ _lease_lock_scope release outer'''
     body = r'''outer() {
 lease_mutation_lock_enter "$LEASE_TEST_LEASE" || return 1
 nested() {
-  printf '%s\n' "$BASHPID" > "$HOME/child-pid"
+  printf '%s\n' "${BASHPID:-$(exec sh -c 'echo "$PPID"')}" > "$HOME/child-pid"
   lease_write "$HOME/candidate" --kind scratch --lock-held
 }
 if value="$(nested)"; then return 1; else [[ $? == 143 ]] || return 1; fi

@@ -534,8 +534,18 @@ _lease_scope_restore_traps() {
     done
 }
 
+_lease_scope_is_internal_trap() {
+    local saved="$1" expected="$2"
+    [[ -n "$saved" ]] || return 1
+    eval "set -- ${saved#trap -- }"
+    [[ "$1" == "$expected" ]]
+}
+
 _lease_scope_is_owner() {
-    [[ "${_lease_scope_owner:-}" == "${BASHPID:-$$}:$BASH_SUBSHELL" ]]
+    local pid="${BASHPID:-}"
+    [[ -n "${_lease_scope_owner:-}" ]] || return 1
+    [[ -n "$pid" ]] || pid="$(exec sh -c 'echo "$PPID"')" || return 1
+    [[ "$pid" == "${_lease_scope_pid:-}" ]]
 }
 
 _lease_scope_cleanup() {
@@ -568,6 +578,8 @@ _lease_lock_scope() {
     if _lease_scope_is_owner; then
         if "$@"; then return 0; else return $?; fi
     fi
+    local _lease_scope_inherited=0
+    [[ -z "${_lease_scope_owner:-}" ]] || _lease_scope_inherited=1
     local _lease_scope_owner="${BASHPID:-$$}:$BASH_SUBSHELL"
     local _lease_scope_pid="${BASHPID:-}"
     [[ -n "$_lease_scope_pid" ]] || _lease_scope_pid="$(exec sh -c 'echo "$PPID"')" || return 1
@@ -579,6 +591,12 @@ _lease_lock_scope() {
     trap - KILL
     _lease_scope_hup="$(trap -p HUP)"; _lease_scope_int="$(trap -p INT)"
     _lease_scope_term="$(trap -p TERM)"; _lease_scope_exit="$(trap -p EXIT)"
+    if (( _lease_scope_inherited )); then
+        if _lease_scope_is_internal_trap "$_lease_scope_hup" "_lease_scope_signals+=' HUP'"; then _lease_scope_hup=""; fi
+        if _lease_scope_is_internal_trap "$_lease_scope_int" "_lease_scope_signals+=' INT'"; then _lease_scope_int=""; fi
+        if _lease_scope_is_internal_trap "$_lease_scope_term" "_lease_scope_signals+=' TERM'"; then _lease_scope_term=""; fi
+        if _lease_scope_is_internal_trap "$_lease_scope_exit" '_lease_scope_on_exit $?'; then _lease_scope_exit=""; fi
+    fi
     for _lease_scope_signal in HUP INT TERM; do
         case "$_lease_scope_signal" in
             HUP) _lease_scope_target="$_lease_scope_hup" ;; INT) _lease_scope_target="$_lease_scope_int" ;;
