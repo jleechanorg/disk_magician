@@ -53,6 +53,7 @@ Commands:
   evict-fileprovider     Evict fully-uploaded cloud-storage (FileProvider) files back to cloud-only; dry-run unless --clean + FILEPROVIDER_EVICT_APPROVED=1.
   cleanup-pr-scratch     Safely clean abandoned PR analyzer and scratch work in /private/tmp.
   cleanup-task-scratch   Safely clean aged task-scratch containers in ~/projects and ~/projects_other.
+  cleanup-personal-files Preview/remove large Downloads files and old screenshots.
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk
                          (use --native-docker for the verified Linux daemon).
@@ -540,6 +541,9 @@ case "$CMD" in
     ;;
   cleanup_task_scratch|cleanup-task-scratch)
     "$SCRIPT_DIR/scripts/cleanup_task_scratch.sh" "$@"
+    ;;
+  cleanup_personal_files|cleanup-personal-files)
+    "$SCRIPT_DIR/scripts/cleanup-personal-files.sh" "$@"
     ;;
   cleanup_codex_documents|cleanup-codex-documents)
     "$SCRIPT_DIR/scripts/cleanup_codex_documents.sh" "$@"

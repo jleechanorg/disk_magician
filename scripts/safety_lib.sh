@@ -217,10 +217,20 @@ deletion_log_removal() {
 # rm_logged <path> — `rm -rf` one path (callers keep their own safety gates);
 # logs only when the path is actually gone. rc follows rm.
 rm_logged() {
-  local kb rc=0
+  local kb rc=0 file_only=false
+  if [[ "${2:-}" == "--file" ]]; then
+    file_only=true
+  fi
   [[ -e "$1" || -L "$1" ]] || return 0
+  if [[ "$file_only" == true && ( ! -f "$1" || -L "$1" ) ]]; then
+    return 0
+  fi
   kb="$(deletion_size_kb "$1")"
-  rm -rf -- "$1" || rc=$?
+  if [[ "$file_only" == true ]]; then
+    rm -f -- "$1" || rc=$?
+  else
+    rm -rf -- "$1" || rc=$?
+  fi
   [[ -e "$1" || -L "$1" ]] || deletion_log_removal "$1" "$kb"
   return "$rc"
 }
