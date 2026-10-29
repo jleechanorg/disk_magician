@@ -77,7 +77,7 @@ else
   "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
 fi
 # The installed hourly entry point also drives quota-volume C14 reclaim.
-volume_args=(volume reclaim)
+volume_args=(volume reclaim --available-floor)
 [[ "$clean_flag" == "--clean" ]] && volume_args+=(--clean)
 VOLUME_TIMEOUT_BIN="${DISK_MAGICIAN_VOLUME_TIMEOUT_BIN:-}"
 if [[ -z "$VOLUME_TIMEOUT_BIN" ]]; then
@@ -117,7 +117,7 @@ if (( VOLUME_RC == 124 || VOLUME_RC == 137 || VOLUME_RC == 143 )); then
   VOLUME_OUTPUT="${VOLUME_OUTPUT:+$VOLUME_OUTPUT$'\n'}skipped:runtime-timeout"
   VOLUME_BALLAST_FAILURES=0
   if [[ "$clean_flag" == "--clean" && "$VOLUME_COMMAND_STARTED" == true ]]; then
-    "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s 12s "$SCRIPT_DIR/../disk_magician.sh" volume ballast ensure scratch >/dev/null 2>&1 || VOLUME_BALLAST_FAILURES=1
+    "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s 12s "$SCRIPT_DIR/../disk_magician.sh" volume ballast recover scratch >/dev/null 2>&1 || VOLUME_BALLAST_FAILURES=1
   fi
   VOLUME_ACTIVE="$(python3 "$RECEIPT_HELPER" read --job volume_reclaim --active 2>/dev/null || true)"
   VOLUME_RUN_IDS="$(python3 - "$VOLUME_ACTIVE" "$CHILD_TRIGGER" <<'PY'
@@ -251,7 +251,7 @@ if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && ( "$VOLUME_REMOVED" == "null" 
 elif [[ "$clean_flag" == "--dry-run" ]]; then
   SAFETY='{"status": "no_mutation", "reason": "dry-run sweep completed without deletions", "delegated": false}'
 else
-  SAFETY='{"status": "delegated", "reason": "delegated to cleanup_tmp, cleanup_claude_state, and quota volume reclaim", "delegated": true}'
+  SAFETY='{"status": "delegated", "reason": "delegated to cleanup_tmp, cleanup_claude_state, and pressure-gated volume reclaim", "delegated": true}'
 fi
 LOCK_ARGS=()
 if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 ]]; then

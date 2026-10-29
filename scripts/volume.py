@@ -2,6 +2,7 @@
 """Opt-in, fail-closed Scratch-volume helpers used by diskm."""
 from __future__ import annotations
 import fcntl
+import errno
 import hashlib
 import json
 import os
@@ -340,7 +341,7 @@ def locked_registry() -> tuple[Path, Any]:
     return registry_file, handle
 
 
-def save_registry(path: Path, lock_handle: Any, value: dict[str, Any]) -> None:
+def save_registry(path: Path, lock_handle: Any, value: dict[str, Any], *, release_lock: bool = True) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix=".registry-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w") as stream:
@@ -354,7 +355,8 @@ def save_registry(path: Path, lock_handle: Any, value: dict[str, Any]) -> None:
         finally:
             os.close(directory_fd)
     finally:
-        lock_handle.close()
+        if release_lock:
+            lock_handle.close()
 
 
 def validate_entry(
@@ -463,10 +465,43 @@ def unlink_ballast_verified(mountpoint: str) -> bool:
         os.close(directory_fd)
 
 
-def write_ballast(mountpoint: str) -> None:
+def ballast_allocation_matches(details, allocation) -> bool:
+    return (isinstance(allocation, dict) and set(allocation) == {"device", "inode"}
+            and all(type(value) is int and value >= 0 for value in allocation.values())
+            and (details.st_dev, details.st_ino) == (allocation["device"], allocation["inode"])
+            and stat.S_ISREG(details.st_mode) and details.st_uid == os.geteuid()
+            and details.st_nlink == 1 and 0 <= details.st_size <= BALLAST_BYTES)
+
+
+def remove_owned_partial_ballast(mountpoint: str, allocation, volume_uuid: str) -> bool:
+    """Remove only our journal-bound incomplete reserve, never an unknown file."""
+    path = ballast_path(mountpoint)
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+        try:
+            if not ballast_allocation_matches(os.fstat(fd), allocation):
+                return False
+            if not log_ballast_release(path, volume_uuid, "release_partial_ballast_intent"):
+                return False
+            current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if not ballast_allocation_matches(current, allocation):
+                return False
+            os.unlink(path.name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return log_ballast_release(path, volume_uuid, "release_partial_ballast")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def write_ballast(mountpoint: str, on_created=None) -> None:
     path = ballast_path(mountpoint)
     descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
+        if on_created is not None:
+            on_created(os.fstat(descriptor))
         stream = os.fdopen(descriptor, "wb")
     except Exception:
         try:
@@ -639,7 +674,14 @@ def log_ballast_release(path: Path, volume_uuid: str, action: str) -> bool:
 def ballast_cmd(action: str, name: str) -> int:
     registry_file = None
     lock_handle = None
+    cleanup_fd = None
     try:
+        if action in {"ensure", "recover"}:
+            import scratch_lock
+            inherited = os.environ.get(scratch_lock.ENV_FD, "")
+            if not (inherited.isdigit() and scratch_lock.verify_fd(int(inherited))):
+                cleanup_fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+                fcntl.flock(cleanup_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         registry_file, lock_handle = locked_registry()
         if linux_backend_enabled(name):
             settings, scratch = cls(name)
@@ -652,20 +694,79 @@ def ballast_cmd(action: str, name: str) -> int:
             container, settings, entry, volume = exact_entry(name, {"active", "retired"})
         mountpoint = settings["classes"]["scratch"]["mountpoint"]
         path = ballast_path(mountpoint)
-        if action == "ensure":
+        data = registry()
+        record = data["volumes"][name]
+        expected_intent = {"volume_uuid": volume.uuid, "mountpoint": mountpoint}
+        pending = record.get("ballast_recovery")
+        if "ballast_recovery" in record and (not isinstance(pending, dict)
+                or set(pending) - {"volume_uuid", "mountpoint", "allocation"}
+                or {key: pending.get(key) for key in expected_intent} != expected_intent):
+            return 75
+        if action == "recover" and pending is None:
+            return 0
+        def clear_intent():
+            if "ballast_recovery" in record:
+                del record["ballast_recovery"]
+                save_registry(registry_file, lock_handle, data, release_lock=False)
+        if action in {"ensure", "recover"}:
+            allocation = pending.get("allocation") if isinstance(pending, dict) else None
+            if isinstance(pending, dict) and "allocation" in pending:
+                if (not isinstance(allocation, dict) or set(allocation) != {"device", "inode"}
+                        or not all(type(value) is int and value >= 0 for value in allocation.values())):
+                    return 75
+                if os.path.lexists(path):
+                    if not ballast_allocation_matches(path.lstat(), allocation):
+                        return 75
+                    if not ballast_ok(mountpoint) and not remove_owned_partial_ballast(mountpoint, allocation, volume.uuid):
+                        return 75
+                pending.pop("allocation")
+                save_registry(registry_file, lock_handle, data, release_lock=False)
             if ballast_ok(mountpoint):
+                clear_intent()
                 return 0
             if os.path.lexists(path):
                 return 75
             used = require_nonnegative(volume.used, "volume usage")
             quota = require_positive(volume.quota, "volume quota")
-            if quota - used < BALLAST_RECREATE_FREE_BYTES:
+            from scratch_pressure import available_bytes
+            if min(quota - used, available_bytes(mountpoint)) < BALLAST_RECREATE_FREE_BYTES:
+                return 76 if action == "recover" else 75
+            def bind_allocation(details):
+                record["ballast_recovery"] = {**expected_intent,
+                    "allocation": {"device": details.st_dev, "inode": details.st_ino}}
+                save_registry(registry_file, lock_handle, data, release_lock=False)
+            try:
+                write_ballast(mountpoint, on_created=bind_allocation)
+            except OSError as error:
+                if action == "recover" and error.errno in {errno.ENOSPC, errno.EDQUOT}:
+                    # Retryable means the same pass can resolve its Scratch
+                    # path. Normalize only an identity DURABLY committed by
+                    # this allocator; a failed callback leaves an unknown file.
+                    if os.path.lexists(path):
+                        durable = registry()["volumes"][name].get("ballast_recovery", {})
+                        binding = durable.get("allocation") if isinstance(durable, dict) else None
+                        if not ballast_allocation_matches(path.lstat(), binding):
+                            return 75
+                        if not ballast_ok(mountpoint):
+                            if not remove_owned_partial_ballast(mountpoint, binding, volume.uuid):
+                                return 75
+                            record["ballast_recovery"] = expected_intent
+                            save_registry(registry_file, lock_handle, data, release_lock=False)
+                    return 76
+                raise
+            if not ballast_ok(mountpoint):
                 return 75
-            write_ballast(mountpoint)
-            return 0 if ballast_ok(mountpoint) else 75
+            clear_intent()
+            return 0
         if action == "release":
+            if isinstance(pending, dict) and "allocation" in pending:
+                return 75
             if not log_ballast_release(path, volume.uuid, "release_ballast_intent"):
                 return 75
+            # Commit recovery intent before unlink while retaining the same
+            # registry lock. A killed caller can never erase this obligation.
+            record["ballast_recovery"] = expected_intent
+            save_registry(registry_file, lock_handle, data, release_lock=False)
             if not unlink_ballast_verified(mountpoint):
                 return 75
             path = ballast_path(mountpoint)
@@ -676,6 +777,8 @@ def ballast_cmd(action: str, name: str) -> int:
     finally:
         if lock_handle is not None:
             lock_handle.close()
+        if cleanup_fd is not None:
+            os.close(cleanup_fd)
 
 
 def encryption_is_acknowledged(settings: dict[str, Any]) -> bool:
@@ -1816,7 +1919,7 @@ def linux_scheduler_candidate_runtime(runtime: Path, candidates: Path) -> bool:
 
 def linux_scheduler_install_cmd(name: str, interval: int | None = None,
                                 upgrade_from: str | None = None) -> int:
-    replaced: tuple[Path, bytes, bytes, os.stat_result] | None = None
+    replaced: list[tuple[Path, bytes, bytes, os.stat_result]] = []
     try:
         if name != "scratch" or not linux_backend_enabled(name):
             return 2
@@ -1854,18 +1957,18 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
             if (not linux_scheduler_candidate_runtime(previous_runtime, candidates)
                     or not linux_scheduler_candidate_runtime(runtime, candidates)):
                 return 75
-        cadence = "OnCalendar=hourly\nPersistent=true"
+        cadence = "OnCalendar=*:0/20\nPersistent=true"
         if interval is not None:
             cadence = f"OnBootSec=5s\nOnUnitActiveSec={interval}s\nAccuracySec=1s"
         units = []
         unit_dir = Path.home() / ".config/systemd/user"
         for suffix in ("service", "timer"):
             template = (runtime / "systemd" / f"diskm-scratch-reclaim.{suffix}.in").read_text()
-            def render(orchestrator: str) -> str:
-                content = template
+            def render(orchestrator: str, source: str = template, timing: str = cadence) -> str:
+                content = source
                 for key, value in {**values, "@ORCHESTRATOR@": orchestrator}.items():
                     content = content.replace(key, systemd_quote(value))
-                return content.replace("@UNIT_NAME@", unit_name).replace("@CADENCE@", cadence)
+                return content.replace("@UNIT_NAME@", unit_name).replace("@CADENCE@", timing)
             content = render(values["@ORCHESTRATOR@"])
             if "@" in content:
                 return 75
@@ -1875,7 +1978,12 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
                 return 75
             old_content = target.read_text() if target.exists() else None
             if old_content is not None and old_content != content:
-                if previous_runtime is None or suffix != "service" or old_content != render(str(previous_runtime / "disk_magician.sh")):
+                if previous_runtime is None:
+                    return 75
+                previous_template = (previous_runtime / "systemd" / f"diskm-scratch-reclaim.{suffix}.in").read_text()
+                previous_cadence = cadence if interval is not None else "OnCalendar=hourly\nPersistent=true"
+                if old_content not in (render(str(previous_runtime / "disk_magician.sh")),
+                        render(str(previous_runtime / "disk_magician.sh"), previous_template, previous_cadence)):
                     return 75
             units.append((target, content, old_content))
         if previous_runtime is not None:
@@ -1910,7 +2018,7 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
                         os.fsync(stream.fileno())
                 details = target.stat()
                 linux_atomic_bytes(target, content.encode(), details)
-                replaced = (target, previous_bytes, content.encode(), details)
+                replaced.append((target, previous_bytes, content.encode(), details))
         linux_command(["systemctl", "--user", "daemon-reload"])
         linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
         linux_command(["systemctl", "--user", "enable", "--now", unit_name + ".timer"])
@@ -1923,14 +2031,17 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
         return 0
     except Exception as error:
         print("volume scheduler: " + str(error), file=sys.stderr)
-        if replaced is not None:
-            target, previous_bytes, installed_bytes, details = replaced
+        for target, previous_bytes, installed_bytes, details in reversed(replaced):
             try:
                 if target.read_bytes() == installed_bytes:
                     linux_atomic_bytes(target, previous_bytes, details)
-                    linux_command(["systemctl", "--user", "daemon-reload"])
             except Exception as rollback_error:
                 print("volume scheduler rollback: " + str(rollback_error), file=sys.stderr)
+        if replaced:
+            try:
+                linux_command(["systemctl", "--user", "daemon-reload"])
+            except Exception as rollback_error:
+                print("volume scheduler rollback reload: " + str(rollback_error), file=sys.stderr)
         return 75
 
 
@@ -3071,13 +3182,52 @@ def audit_tmp(path: str | Path | None = None) -> dict[str, Any]:
     }
 
 
-def reclaim_cmd(clean: bool = False) -> int:
+def reclaim_cmd(clean: bool = False, available_floor: bool = False) -> int:
     script = Path(__file__).resolve().parent / "volume_reclaim.sh"
     arguments = ["bash", str(script)]
     if clean:
         arguments.append("--clean")
-    result = subprocess.run(arguments, check=False)
-    return result.returncode
+    if available_floor:
+        from job_receipt import JobReceiptStore
+        store = JobReceiptStore()
+        run_id = store.begin("volume_reclaim", trigger=os.environ.get("DISK_MAGICIAN_TRIGGER", "manual"),
+                             precondition={"policy": "available-floor", "available_floor_bytes": 50 * GIB})
+        arguments.append("--available-floor")
+        timeout = shutil.which("timeout") or shutil.which("gtimeout")
+        if timeout is None:
+            timeout = next((path for path in ("/opt/homebrew/bin/gtimeout", "/opt/homebrew/bin/timeout",
+                           "/usr/local/bin/gtimeout", "/usr/local/bin/timeout")
+                            if os.path.isfile(path) and os.access(path, os.X_OK)), None)
+        if timeout is None:
+            print("scratch pressure: bounded runtime unavailable", file=sys.stderr)
+            store.finish("volume_reclaim", run_id=run_id, outcome="error", reason="bounded-runtime-unavailable")
+            return 75
+        arguments = [timeout, "--signal=TERM", "--kill-after=2s", "310s", *arguments]
+    if not available_floor:
+        return subprocess.run(arguments, check=False).returncode
+    def recover():
+        # recover never allocates without a durable exact-volume release intent.
+        return subprocess.run([timeout, "--signal=TERM", "--kill-after=2s", "12s",
+                               sys.executable, str(Path(__file__).resolve()),
+                               "ballast", "recover", "scratch"], check=False).returncode
+    try:
+        env = dict(os.environ, DISK_MAGICIAN_RECLAIM_RECEIPT_ID=run_id)
+        result = subprocess.run(arguments, env=env, check=False)
+        timed_out = result.returncode in (124, 137, 143)
+        recovery_rc = recover() if timed_out and clean else 0
+        # The child normally closes this exact receipt. Lock refusal, timeout,
+        # or a killed child still needs a terminal result; never close peers.
+        if any(row.get("id") == run_id for row in store.read("volume_reclaim")["active"]):
+            store.finish("volume_reclaim", run_id=run_id,
+                         outcome="timeout" if timed_out else ("skipped_lock" if result.returncode == 75 else "error"),
+                         reason="bounded-runtime-expired" if timed_out else "child-ended-without-terminal-receipt",
+                         postcondition={"target_reached": None, "ballast_recovery_rc": recovery_rc})
+            if result.returncode == 0:
+                return 1
+        return result.returncode
+    except Exception as error:
+        store.finish("volume_reclaim", run_id=run_id, outcome="error", reason=str(error))
+        return 75
 
 
 def verify_mount(root: str) -> int:
@@ -3143,7 +3293,9 @@ def main(argv: list[str] | None = None) -> int:
         if arguments[:1] == ["verify-mount"] and len(arguments) > 1:
             return verify_mount(arguments[1])
         if arguments[:1] == ["reclaim"]:
-            return reclaim_cmd("--clean" in arguments[1:])
+            if any(arg not in ("--clean", "--available-floor") for arg in arguments[1:]):
+                return 2
+            return reclaim_cmd("--clean" in arguments[1:], "--available-floor" in arguments[1:])
         if arguments[:1] in (["fit"], ["plan-fit"]):
             print(json.dumps(fit_result(), sort_keys=True))
             return 0

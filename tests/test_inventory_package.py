@@ -54,6 +54,11 @@ class InventoryPackageTests(unittest.TestCase):
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
                 names = set(wheel.namelist())
+                for rel in ("systemd/diskm-scratch-reclaim.service.in", "systemd/diskm-scratch-reclaim.timer.in",
+                            "scripts/volume_reclaim.sh", "scripts/scratch_pressure.py",
+                            "launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template"):
+                    self.assertEqual(wheel.read("disk_magician/" + rel), (REPO / rel).read_bytes(), rel)
+
                 self.assertIn("disk_magician/scripts/directory_inventory.py", names)
                 expected_wheel_systemd = {f"disk_magician/{rel}" for rel in EXPECTED_SYSTEMD}
                 self.assertTrue(expected_wheel_systemd <= names, expected_wheel_systemd - names)
