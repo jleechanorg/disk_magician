@@ -1323,6 +1323,82 @@ def linux_docker_transport_info(image_id: str) -> tuple[str, dict[str, Any]]:
     return docker, info
 
 
+def linux_docker_trim_argv(docker: str, image_id: str, mountpoint: Path, device: int) -> list[str]:
+    """Run FITRIM on one verified bind mount with no host-wide write bind."""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise ValueError("admin image id must be a full sha256 digest")
+    if not mountpoint.is_absolute() or mountpoint.resolve(strict=True) != mountpoint:
+        raise ValueError("Scratch mountpoint identity is unsafe")
+    if any(char in str(mountpoint) for char in (",", "\n", "\r")):
+        raise ValueError("Scratch mountpoint cannot be encoded as a Docker bind")
+    if not stat.S_ISDIR(mountpoint.stat().st_mode):
+        raise ValueError("Scratch mountpoint is not a directory")
+    # The helper uses Python from the pinned local image. The exact Scratch
+    # mount is its sole host bind; no host root or Docker socket is visible.
+    helper = (
+        "import fcntl,json,os,stat,struct,sys\n"
+        f"path='/scratch'; expected_dev={device!r}\n"
+        "details=os.stat(path,follow_symlinks=False)\n"
+        "if not stat.S_ISDIR(details.st_mode) or details.st_dev!=expected_dev: raise SystemExit(75)\n"
+        "fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)\n"
+        "try:\n"
+        " if os.fstat(fd).st_dev!=expected_dev: raise SystemExit(75)\n"
+        " payload=bytearray(struct.pack('=QQQ',0,(1<<64)-1,0))\n"
+        " fcntl.ioctl(fd,0xc0185879,payload,True)\n"
+        " print(json.dumps({'trimmed_bytes':struct.unpack('=QQQ',payload)[1]}))\n"
+        "finally: os.close(fd)\n"
+    )
+    return [
+        docker, "--host", "unix:///var/run/docker.sock", "run", "--rm", "--pull", "never",
+        "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL",
+        "--cap-add", "SYS_ADMIN",
+        "--security-opt", "no-new-privileges", "--pids-limit", "32",
+        "--mount", f"type=bind,src={mountpoint},dst=/scratch",
+        "--entrypoint", "/usr/bin/python3", image_id, "-c", helper,
+    ]
+
+
+def linux_scratch_device(mountpoint: Path) -> int:
+    details = mountpoint.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(details.st_mode):
+        raise ValueError("Scratch mountpoint is not a directory")
+    return details.st_dev
+
+
+def linux_trim_cmd(arguments: list[str]) -> int:
+    if len(arguments) != 6 or arguments[:2] != ["scratch", "--admin-transport"] or arguments[2] != "docker" or arguments[3] != "--admin-image-id" or arguments[5] != "--execute":
+        return 2
+    image_id = arguments[4]
+    settings, scratch = cls("scratch")
+    if scratch.get("backend") != "native":
+        raise ValueError("Scratch trim requires the native Linux backend")
+    image, mountpoint = linux_paths(scratch)
+    entry = registry()["volumes"].get("scratch")
+    fs_uuid = linux_validate_native_mount(settings, scratch, entry)
+    docker, _ = linux_docker_transport_info(image_id)
+    # Recheck immediately before launching the helper, and bind the actual
+    # mounted filesystem device to its in-container check.
+    device = linux_scratch_device(mountpoint)
+    if linux_validate_native_mount(settings, scratch, entry) != fs_uuid:
+        raise ValueError("Scratch identity changed before trim")
+    if linux_scratch_device(mountpoint) != device:
+        raise ValueError("Scratch device changed before trim")
+    result = subprocess.run(linux_docker_trim_argv(docker, image_id, mountpoint, device),
+                            capture_output=True, text=True, timeout=180, check=False)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "Scratch FITRIM helper failed")
+    try:
+        receipt = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError("Scratch FITRIM helper returned invalid JSON") from error
+    trimmed = receipt.get("trimmed_bytes") if isinstance(receipt, dict) else None
+    if not is_int(trimmed) or trimmed < 0:
+        raise ValueError("Scratch FITRIM helper returned invalid byte count")
+    print(json.dumps({"volume": "scratch", "filesystem_uuid": fs_uuid,
+                      "mountpoint": str(mountpoint), "trimmed_bytes": trimmed}, sort_keys=True))
+    return 0
+
+
 def linux_docker_helper_argv(
     docker: str, image_id: str, runtime: Path, action: str,
     config_path: Path, state: Path, user_uid: str, runtime_sha256: str | None = None,
@@ -2922,6 +2998,8 @@ def verify_mount(root: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     arguments = list(argv if argv is not None else sys.argv[1:])
     try:
+        if arguments[:1] == ["trim"]:
+            return linux_trim_cmd(arguments[1:]) if sys.platform.startswith("linux") else 2
         if len(arguments) >= 2 and arguments[0] == "fstab" and arguments[1] in {"preview", "probe", "install", "remove"} and sys.platform.startswith("linux"):
             return linux_fstab_cmd(arguments[1], arguments[2:])
         if arguments[:1] == ["fsck"] and sys.platform.startswith("linux"):

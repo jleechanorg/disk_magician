@@ -52,6 +52,71 @@ class VolumeTestBase(unittest.TestCase):
             else: os.environ[key] = value
 
 class LinuxScratchTest(VolumeTestBase):
+    def test_trim_dispatch_rejects_wrong_backend_and_arguments(self):
+        image_id = "sha256:" + "a" * 64
+        for args in (["trim", "other"], ["trim", "scratch"],
+                     ["trim", "scratch", "--admin-transport", "sudo",
+                      "--admin-image-id", image_id, "--execute"]):
+            self.assertEqual(volume.main(args), 2)
+        with mock.patch.object(volume, "cls", return_value=({}, {"backend": "fuse"})), \
+             mock.patch.object(volume, "linux_docker_transport_info") as docker:
+            self.assertEqual(volume.main(["trim", "scratch", "--admin-transport", "docker",
+                                          "--admin-image-id", image_id, "--execute"]), 75)
+            docker.assert_not_called()
+
+    def test_trim_validates_identity_and_reports_helper_result(self):
+        image_id = "sha256:" + "a" * 64
+        mountpoint = self.root / "Scratch"
+        mountpoint.mkdir()
+        scratch = {"backend": "native", "image_path": str(self.root / "scratch.img"),
+                   "mountpoint": str(mountpoint)}
+        args = ["scratch", "--admin-transport", "docker", "--admin-image-id", image_id, "--execute"]
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
+             mock.patch.object(volume, "linux_validate_native_mount", side_effect=ValueError("identity")), \
+             mock.patch.object(volume, "linux_docker_transport_info") as docker:
+            self.assertEqual(volume.main(["trim", *args]), 75)
+            docker.assert_not_called()
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
+             mock.patch.object(volume, "linux_validate_native_mount", return_value="uuid") as verify, \
+             mock.patch.object(volume, "linux_docker_transport_info", return_value=("/usr/bin/docker", {})), \
+             mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=0, stdout='{"trimmed_bytes":1048576}')) as run:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(volume.main(["trim", *args]), 0)
+            self.assertEqual(verify.call_count, 2)
+            self.assertEqual(json.loads(output.getvalue())["trimmed_bytes"], 1048576)
+            argv = run.call_args.args[0]
+            self.assertIn("--cap-add", argv)
+            self.assertIn("SYS_ADMIN", argv)
+            self.assertIn("--network", argv)
+            self.assertIn("none", argv)
+            self.assertIn("--read-only", argv)
+            self.assertNotIn("--privileged", argv)
+            self.assertNotIn("--pid", argv)
+            self.assertNotIn("type=bind,src=/,dst=/host,readonly", argv)
+            mounts = [argv[index + 1] for index, item in enumerate(argv[:-1]) if item == "--mount"]
+            self.assertEqual(mounts, [f"type=bind,src={mountpoint},dst=/scratch"])
+            self.assertNotIn("SYS_CHROOT", argv)
+            self.assertIn(f"type=bind,src={mountpoint},dst=/scratch", argv)
+
+    def test_trim_refuses_device_change_before_helper(self):
+        image_id = "sha256:" + "a" * 64
+        mountpoint = self.root / "Scratch"
+        mountpoint.mkdir()
+        scratch = {"backend": "native", "image_path": str(self.root / "scratch.img"),
+                   "mountpoint": str(mountpoint)}
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
+             mock.patch.object(volume, "linux_validate_native_mount", return_value="uuid"), \
+             mock.patch.object(volume, "linux_docker_transport_info", return_value=("/usr/bin/docker", {})), \
+             mock.patch.object(volume, "linux_scratch_device", side_effect=[1, 2]), \
+             mock.patch.object(volume.subprocess, "run") as run:
+            self.assertEqual(volume.main(["trim", "scratch", "--admin-transport", "docker",
+                                          "--admin-image-id", image_id, "--execute"]), 75)
+            run.assert_not_called()
+
     def test_canonical_owner_release_requires_every_live_producer(self):
         artifact = self.root / "owned-artifact"
         artifact.mkdir()
