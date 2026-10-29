@@ -65,7 +65,7 @@ def partial_lock_bytes(lock: Path) -> dict[str, bytes]:
     return {name: (lock / name).read_bytes() for name in ("pid", "acquired_at")}
 
 
-with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as temp:
+with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir=os.environ.get("CLAUDE_CODE_TMPDIR", "/tmp")) as temp:
     state = Path(temp) / "state"
     state.mkdir()
     os.chmod(state, 0o755)
@@ -127,6 +127,7 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir="/tmp") as te
     os.utime(lock, (old, old))
     unsafe_leaf = unsafe_leaf_state / "quarantine" / "lease-locks"
     unsafe_leaf.mkdir(parents=True, mode=0o700)
+    os.chmod(unsafe_leaf.parent, 0o755)
     os.chmod(unsafe_leaf, 0o755)
     result = run(unsafe_leaf_state, 1, "--registry")
     assert "lease-lock quarantine has unexpected mode 0755" in result.stderr
@@ -548,7 +549,7 @@ def test_writer_critical_sections():
     import signal
     import sys
 
-    artifact_root = os.environ.get('DISKM_TEST_ARTIFACT_DIR')
+    artifact_root = os.environ.get('DISKM_TEST_ARTIFACT_DIR') or os.environ.get('CLAUDE_CODE_TMPDIR')
     temp = Path(tempfile.mkdtemp(prefix='lock-scope-', dir=artifact_root))
     library = ROOT / 'scripts/lib/worktree_lease.sh'
     quarantine = ROOT / 'scripts/lib/quarantine.sh'

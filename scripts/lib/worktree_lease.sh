@@ -569,6 +569,8 @@ _lease_lock_scope() {
         if "$@"; then return 0; else return $?; fi
     fi
     local _lease_scope_owner="${BASHPID:-$$}:$BASH_SUBSHELL"
+    local _lease_scope_pid="${BASHPID:-}"
+    [[ -n "$_lease_scope_pid" ]] || _lease_scope_pid="$(exec sh -c 'echo "$PPID"')" || return 1
     local _lease_scope_hup _lease_scope_int _lease_scope_term _lease_scope_exit
     local _lease_scope_signals="" _lease_scope_rc=0 _lease_scope_signal _lease_scope_target
     local -a _lease_scope_paths=() _lease_scope_ids=() _lease_scope_stamps=() _lease_scope_complete=()
@@ -616,7 +618,7 @@ _lease_reuse_lock_acquire() {
     slot=${#_lease_scope_paths[@]}
     _lease_scope_paths[slot]="$lease"; _lease_scope_ids[slot]="$identity"; _lease_scope_stamps[slot]=""; _lease_scope_complete[slot]=0
     [[ -z "$_lease_scope_signals" ]] || return 1
-    printf '%s\n' "$$" > "$lock/pid" 2>/dev/null || return 1
+    printf '%s\n' "$_lease_scope_pid" > "$lock/pid" 2>/dev/null || return 1
     stamp="$(date +%s 2>/dev/null)" || return 1
     [[ "$stamp" =~ ^[0-9]+$ && -z "$_lease_scope_signals" ]] || return 1
     _lease_scope_stamps[slot]="$stamp"
@@ -629,7 +631,7 @@ lease_reuse_lock_release() {
     if _lease_scope_is_owner; then
         for ((i=${#_lease_scope_paths[@]}-1; i>=0; i--)); do
             [[ "${_lease_scope_paths[i]}" == "$1" ]] || continue
-            python3 - "$1.reuse-lock" "${_lease_scope_ids[i]}" "$$" "${_lease_scope_stamps[i]}" "${_lease_scope_complete[i]}" <<'PYUNLOCK' || return 1
+            python3 - "$1.reuse-lock" "${_lease_scope_ids[i]}" "$_lease_scope_pid" "${_lease_scope_stamps[i]}" "${_lease_scope_complete[i]}" <<'PYUNLOCK' || return 1
 import os, stat, sys
 path, identity, pid, stamp, complete = sys.argv[1:]
 try:

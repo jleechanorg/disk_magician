@@ -372,7 +372,8 @@ wtn_reuse_unlock() {
 }
 
 
-wtn_reuse() {
+wtn_reuse() { _lease_lock_scope release _wtn_reuse "$@"; }
+_wtn_reuse() {
     local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash lease_repo owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
     wtn_branch_exists "$repo" "$branch" && return 1
     wtn_remote_branch_exists "$repo" "$branch" && return 1
