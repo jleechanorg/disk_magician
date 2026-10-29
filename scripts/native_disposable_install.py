@@ -130,7 +130,18 @@ def states(name, directory, control=manager, require_fragment=False, service_tex
     return {'active': active == 'active', 'enabled': enabled == 'enabled'}
 
 
+def verify_launcher(expected, native):
+    if not isinstance(expected, dict) or not isinstance(expected.get('path'), str):
+        raise ValueError('launcher identity missing; operator reconciliation required')
+    try:
+        actual = native.launcher_record(expected['path'])
+    except OSError as error:
+        raise ValueError('launcher unavailable or replaced') from error
+    if actual != expected: raise ValueError('launcher identity/content changed; operator reconciliation required')
+
+
 def verify_sources(directory, transaction, native, allow_missing_created=False):
+    verify_launcher(transaction.get('launcher'), native)
     for filename, content in transaction['desired'].items():
         path = directory / filename
         data = unit_bytes(path, native)
@@ -168,6 +179,7 @@ def rollback(root, transaction, native, control=manager):
     def guarded(*args, **kwargs):
         verify_sources(directory, transaction, native, allow_missing_created=True)
         unit_identity(name, directory, raw_control, service_text=service_text)
+        verify_sources(directory, transaction, native, allow_missing_created=True)
         return raw_control(*args, **kwargs)
     control = guarded
     current_state = states(name, directory, raw_control, service_text=service_text)
@@ -186,6 +198,7 @@ def rollback(root, transaction, native, control=manager):
     if transaction['before']['enabled']: control('enable', name + '.timer')
     if transaction['before']['active']: control('start', name + '.timer')
     after = states(name, directory, raw_control, service_text=service_text)
+    verify_sources(directory, transaction, native, allow_missing_created=True)
     if after != transaction['before']: raise ValueError('manager rollback state not verified')
     native.audit(root, {'event':'schedule-rollback', 'unit':name, 'status':'verified'})
     transaction['phase'] = 'rolled-back'
@@ -200,6 +213,7 @@ def install(root, binary, accepted, execute, native, recover=False):
     rendered = None if recover else native.render_schedule(root, binary)
     if not recover and re.search(r'[^A-Za-z0-9_./-]', str(Path(binary).resolve())):
         raise ValueError('install requires simple launcher path without whitespace/specifiers')
+    if rendered: verify_launcher(rendered.get('launcher'), native)
     directory = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home()/'.config'))) / 'systemd/user'
     if not directory.is_absolute(): raise ValueError('absolute XDG_CONFIG_HOME required')
     if Path(root) == directory or Path(root) in directory.parents or directory in Path(root).parents:
@@ -209,6 +223,7 @@ def install(root, binary, accepted, execute, native, recover=False):
         native.require_idle(root, allow_install_pending=True)
         native.snapshot(root)  # Unknown payloads/leases never become disposable by installation.
         if rendered and record != rendered['namespace_identity']: raise ValueError('namespace changed since render')
+        if rendered: verify_launcher(rendered.get('launcher'), native)
         manager_environment()  # Shared sandbox guard covers config and bus before mkdir or manager calls.
         private_directory(directory, native)
         lock = directory / '.diskm-disposable-install.lock'
@@ -226,6 +241,7 @@ def install(root, binary, accepted, execute, native, recover=False):
                     if not recover: raise ValueError('incomplete installation; explicit schedule-recover required')
                     if previous.get('phase') not in ('pending','installed','rolled-back') or not re.fullmatch(r'[a-f0-9]{32}', str(previous.get('id',''))):
                         raise ValueError('invalid installation transaction phase/id')
+                    verify_launcher(previous.get('launcher'), native)
                     marker_path = root/'control/schedule-admission.json'
                     marker = native.read_json(marker_path) if marker_path.exists() else None
                     if marker and (marker.get('transaction_id') != previous['id'] or marker.get('identity') != record):
@@ -254,6 +270,7 @@ def install(root, binary, accepted, execute, native, recover=False):
                         verify_sources(directory, previous, native, allow_missing_created=previous['phase']=='rolled-back')
                         expected_state = {'active':True,'enabled':True} if previous['phase']=='installed' else previous['before']
                         actual_state = states(previous['unit'], directory, control, service_text=previous['desired'][previous['unit']+'.service'])
+                        verify_sources(directory, previous, native, allow_missing_created=previous['phase']=='rolled-back')
                         if actual_state != expected_state: raise ValueError('committed installation state drift')
                         native.atomic_json(journal, previous)
                         uncertain = terminal_marker(root, previous, native)
@@ -272,16 +289,18 @@ def install(root, binary, accepted, execute, native, recover=False):
             before = states(name, directory, control, service_text=service_text)
             if (before['active'] or before['enabled']) and not all(original.values()):
                 raise ValueError('active/enabled units lack matching owned source files')
+            verify_launcher(rendered.get('launcher'), native)
             predecessor_path = root/'control/schedule-admission.json'
             predecessor = native.read_json(predecessor_path) if predecessor_path.exists() else None
             transaction = {'predecessor_marker':predecessor,'id':uuid.uuid4().hex,'phase':'pending','directory':str(directory),'identity':record,'unit':name,
-                           'desired':desired,'original':original,'original_identity':original_identity,'created':{},'before':before}
+                           'launcher':rendered['launcher'],'desired':desired,'original':original,'original_identity':original_identity,'created':{},'before':before}
             native.atomic_json(journal, transaction)
             native.atomic_json(root/'control/schedule-admission.json', admission_marker(transaction, 'pending'))
             native.audit(root, {'event':'schedule-install-intent','unit':name,'before':before})
             try:
                 for filename, content in desired.items():
                     if original[filename]: continue
+                    verify_launcher(transaction['launcher'], native)
                     path = directory / filename
                     file_fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | native.NOFOLLOW, 0o600)
                     with os.fdopen(file_fd, 'wb') as stream:
@@ -292,15 +311,19 @@ def install(root, binary, accepted, execute, native, recover=False):
                 native.validate(root)
                 verify_sources(directory, transaction, native)
                 unit_identity(name, directory, control, service_text=service_text)
+                verify_sources(directory, transaction, native)
                 control('daemon-reload')
                 verify_sources(directory, transaction, native)
                 unit_identity(name, directory, control, required=True, service_text=service_text)
+                verify_sources(directory, transaction, native)
                 control('enable', name + '.timer')
                 verify_sources(directory, transaction, native)
                 unit_identity(name, directory, control, required=True, service_text=service_text)
+                verify_sources(directory, transaction, native)
                 control('start', name + '.timer')
                 verify_sources(directory, transaction, native)
                 after = states(name, directory, control, require_fragment=True, service_text=service_text)
+                verify_sources(directory, transaction, native)
                 if after != {'active':True,'enabled':True}: raise ValueError('timer activation not verified')
                 native.audit(root, {'event':'schedule-installed','unit':name,'status':'manager-verified'})
                 transaction['phase'] = 'installed'

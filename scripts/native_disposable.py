@@ -444,6 +444,46 @@ def schedule_context(root):
     return context
 
 
+def launcher_ancestors(binary):
+    """Bind trusted parent directories, permitting trusted sticky temp roots."""
+    ancestor_identities(binary)  # Shared owner/type/non-sticky-write refusal.
+    fields = ('st_dev', 'st_ino', 'st_uid', 'st_gid', 'st_mode')
+    result = {}
+    for path in binary.parents:
+        details = path.lstat()
+        if (not stat.S_ISDIR(details.st_mode) or details.st_uid not in (0, os.getuid())
+                or (details.st_mode & 0o022 and not details.st_mode & stat.S_ISVTX)):
+            raise ValueError('untrusted launcher ancestor')
+        result[str(path)] = {key: getattr(details, key) for key in fields}
+    return result
+
+
+def launcher_record(binary):
+    """Bounded no-follow identity/content read of the reviewed shared launcher."""
+    binary = Path(binary)
+    if not binary.is_absolute() or binary.resolve() != binary:
+        raise ValueError('launcher path or ancestry changed')
+    ancestors = launcher_ancestors(binary)
+    fd = os.open(binary, os.O_RDONLY | NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        details = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid not in (0, os.getuid())
+                or details.st_mode & 0o022 or not os.access(binary, os.X_OK)):
+            raise ValueError('unsafe installed launcher')
+        data = stream.read(128 * 1024 + 1)
+        after = os.fstat(stream.fileno())
+    fields = ('st_dev','st_ino','st_uid','st_gid','st_mode','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
+    if any(getattr(details,key) != getattr(after,key) for key in fields):
+        raise ValueError('launcher changed during read')
+    if len(data) > 128 * 1024 or b'from disk_magician.cli import main' not in data:
+        raise ValueError('expected installed shared diskm CLI launcher')
+    if identity(binary.lstat()) != identity(after): raise ValueError('launcher path replaced during read')
+    if launcher_ancestors(binary) != ancestors:
+        raise ValueError('launcher ancestry changed during read')
+    return dict(path=str(binary), sha256=hashlib.sha256(data).hexdigest(), ancestors=ancestors,
+                **{key:getattr(after,key) for key in fields})
+
+
 def render_schedule(root, binary):
     """Return reviewable user-unit text only; never install/enable/start it."""
     with gate(root, False) as (root, record, _):
@@ -455,15 +495,7 @@ def render_schedule(root, binary):
         binary = Path(binary).resolve()
         if not re.fullmatch(r'/[A-Za-z0-9_./ -]+', str(binary)):
             raise ValueError('unsupported resolved launcher characters')
-        fd = os.open(binary, os.O_RDONLY | NOFOLLOW)
-        with os.fdopen(fd, 'rb') as stream:
-            details = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(details.st_mode) or details.st_uid not in (0, os.getuid())
-                    or details.st_mode & 0o022 or not os.access(binary, os.X_OK)):
-                raise ValueError('unsafe installed launcher')
-            data = stream.read(128 * 1024 + 1)
-        if len(data) > 128 * 1024 or b'from disk_magician.cli import main' not in data:
-            raise ValueError('expected installed shared diskm CLI launcher')
+        launcher = launcher_record(binary)
         name = 'diskm-disposable-' + hashlib.sha256(str(root).encode()).hexdigest()[:16]
         templates = Path(__file__).resolve().parent.parent / 'systemd'
         service = (templates / 'diskm-disposable-clean.service.in').read_text()
@@ -474,7 +506,7 @@ def render_schedule(root, binary):
         service = re.sub(r'@(DISKM_BIN|NAMESPACE|POLICY_ENV)@', lambda match: replacements[match.group(1)], service)
         timer = timer.replace('@UNIT_NAME@', name)
         return {'status':'render-only', 'unit':name, 'service':service, 'timer':timer,
-                'namespace_identity':record, 'launcher_sha256':hashlib.sha256(data).hexdigest(),
+                'namespace_identity':record, 'launcher_sha256':launcher['sha256'], 'launcher':launcher,
                 'activation':'not installed or enabled; operator must verify reviewed launcher and explicitly install user units',
                 'policy':'native 3d in separate disposable namespace; not Scratch pressure relief'}
 
