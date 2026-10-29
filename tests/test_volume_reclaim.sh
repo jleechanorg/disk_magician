@@ -64,6 +64,10 @@ case "$*" in
     exit "$rc"
     ;;
   'volume verify-mount '*) exit 0 ;;
+  'volume trim-auto scratch --clean')
+    [[ -z "${TEST_TRIM_CALLS_FILE:-}" ]] || printf 'trim\n' >>"$TEST_TRIM_CALLS_FILE"
+    printf '%s\n' "${TEST_TRIM_OUTPUT:-skipped:non-native-scratch}"
+    exit "${TEST_TRIM_RC:-0}" ;;
   'volume ballast release scratch') printf 'release\n' >> "$BALLAST_LOG"; exit "${TEST_RELEASE_RC:-0}" ;;
   'volume ballast ensure scratch')
     printf 'ensure\n' >> "$BALLAST_LOG"
@@ -169,6 +173,15 @@ if grep -q 'trim_target_not_reached' "$T/below-trigger-terminal-receipt.out"; th
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); previous=sys.argv[1]; assert r["outcome"]=="success_noop" and r["reason"]=="below-trigger"; assert r["trigger"]=="timer" and r["run_id"] and r["run_id"] != previous and r["id"]==r["run_id"]; assert r["precondition"]=={"allocated_bytes":899,"quota_bytes":1000,"used_pct":89,"reserve_available":True}; post=r["postcondition"]; assert post["allocated_bytes_after"]==899 and post["quota_bytes"]==1000 and not post["target_reached"] and post["reserve_available_before"] is True and post["reserve_available_after"] is True; assert r["candidates"]["aged_scanned"]==0 and r["candidates"]["removed"]==0; assert r["times"]["ended_at"] and r["outcome"]!="unknown"' "$PRIOR_RUN"
 [[ "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
 [[ -e "$TEST_ROOT/repo/evidence/oldest" ]]
+# Host trim runs on the same timer path even when guest usage is below 90%.
+: >"$T/trim.calls"; : >"$STATUS_CALLS_FILE"
+TEST_TRIM_CALLS_FILE="$T/trim.calls" TEST_TRIM_OUTPUT='{"status":"trimmed","host_free_delta_bytes":100}' TEST_USED=899 "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-trim.out"
+[[ "$(grep -c '^trim$' "$T/trim.calls")" == 1 ]]
+grep -q '"host_free_delta_bytes":100' "$T/below-trigger-trim.out"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["reason"]=="host-trimmed"'
+if TEST_TRIM_RC=75 TEST_TRIM_OUTPUT='missing pinned image' TEST_USED=899 "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/missing-image.out" 2>"$T/missing-image.err"; then exit 1; fi
+grep -q 'degraded:host-trim-unavailable:missing pinned image' "$T/missing-image.err"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="error" and r["reason"]=="host-trim-unavailable"'
 # A below-trigger clean pass still repairs a missing reserve without trimming.
 : >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
 BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_BALLAST_AVAILABLE_SEQUENCE="false true" TEST_STATUS_SEQUENCE="899 899" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-reserve-restored.out"

@@ -1365,10 +1365,7 @@ def linux_scratch_device(mountpoint: Path) -> int:
     return details.st_dev
 
 
-def linux_trim_cmd(arguments: list[str]) -> int:
-    if len(arguments) != 6 or arguments[:2] != ["scratch", "--admin-transport"] or arguments[2] != "docker" or arguments[3] != "--admin-image-id" or arguments[5] != "--execute":
-        return 2
-    image_id = arguments[4]
+def linux_trim_native(image_id: str) -> dict[str, Any]:
     settings, scratch = cls("scratch")
     if scratch.get("backend") != "native":
         raise ValueError("Scratch trim requires the native Linux backend")
@@ -1394,8 +1391,55 @@ def linux_trim_cmd(arguments: list[str]) -> int:
     trimmed = receipt.get("trimmed_bytes") if isinstance(receipt, dict) else None
     if not is_int(trimmed) or trimmed < 0:
         raise ValueError("Scratch FITRIM helper returned invalid byte count")
-    print(json.dumps({"volume": "scratch", "filesystem_uuid": fs_uuid,
-                      "mountpoint": str(mountpoint), "trimmed_bytes": trimmed}, sort_keys=True))
+    return {"volume": "scratch", "filesystem_uuid": fs_uuid,
+            "mountpoint": str(mountpoint), "trimmed_bytes": trimmed}
+
+
+def linux_trim_cmd(arguments: list[str]) -> int:
+    if len(arguments) != 6 or arguments[:2] != ["scratch", "--admin-transport"] or arguments[2] != "docker" or arguments[3] != "--admin-image-id" or arguments[5] != "--execute":
+        return 2
+    print(json.dumps(linux_trim_native(arguments[4]), sort_keys=True))
+    return 0
+
+
+def linux_trim_measure(image: Path, mountpoint: Path) -> tuple[int, int, int]:
+    return (image.stat().st_blocks * 512, shutil.disk_usage(mountpoint).used,
+            shutil.disk_usage(image.parent).free)
+
+
+def linux_trim_auto_cmd(arguments: list[str]) -> int:
+    if arguments != ["scratch", "--clean"]:
+        return 2
+    settings, scratch = cls("scratch")
+    if scratch.get("backend", "fuse") != "native":
+        print("skipped:non-native-scratch")
+        return 0
+    image, mountpoint = linux_paths(scratch)
+    entry = registry()["volumes"].get("scratch")
+    fs_uuid = linux_validate_native_mount(settings, scratch, entry)
+    image_id = scratch.get("trim_admin_image_id")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise ValueError("native Scratch trim admin image is missing or unpinned")
+    image_before, scratch_used, host_before = linux_trim_measure(image, mountpoint)
+    gap = max(0, image_before - scratch_used)
+    # Reclaim host blocks only when there is a meaningful image/guest gap and
+    # the host is below the capacity needed for a full runner burst.
+    if gap < 4 * GIB or host_before >= 80 * GIB:
+        print(json.dumps({"status": "skipped", "reason": "no-host-reclaim-pressure",
+                          "filesystem_uuid": fs_uuid, "image_gap_bytes": gap,
+                          "host_free_bytes": host_before}, sort_keys=True))
+        return 0
+    trim = linux_trim_native(image_id)
+    if trim["filesystem_uuid"] != fs_uuid:
+        raise ValueError("Scratch filesystem changed during automatic trim")
+    image_after, _, host_after = linux_trim_measure(image, mountpoint)
+    print(json.dumps({"status": "trimmed", "filesystem_uuid": fs_uuid,
+                      "image_allocated_before": image_before,
+                      "image_allocated_after": image_after,
+                      "image_reclaimed_bytes": image_before - image_after,
+                      "host_free_before": host_before, "host_free_after": host_after,
+                      "host_free_delta_bytes": host_after - host_before,
+                      "fitrim_requested_bytes": trim["trimmed_bytes"]}, sort_keys=True))
     return 0
 
 
@@ -1755,7 +1799,24 @@ def linux_unmount_cmd(name: str) -> int:
         return 75
 
 
-def linux_scheduler_install_cmd(name: str, interval: int | None = None) -> int:
+def linux_scheduler_candidate_runtime(runtime: Path, candidates: Path) -> bool:
+    if not runtime.is_absolute() or not runtime.is_relative_to(candidates):
+        return False
+    parts = runtime.relative_to(candidates).parts
+    return (len(parts) == 6 and re.fullmatch(r"[0-9a-f]{40}", parts[0]) is not None
+            and parts[1:3] == ("venv", "lib")
+            and re.fullmatch(r"python[0-9]+\.[0-9]+", parts[3]) is not None
+            and parts[4:] == ("site-packages", "disk_magician")
+            and not candidates.is_symlink() and candidates.is_dir()
+            and candidates.resolve(strict=True) == candidates
+            and candidates.stat().st_uid == os.geteuid()
+            and not runtime.is_symlink() and runtime.resolve(strict=True) == runtime
+            and (runtime / "disk_magician.sh").is_file())
+
+
+def linux_scheduler_install_cmd(name: str, interval: int | None = None,
+                                upgrade_from: str | None = None) -> int:
+    replaced: tuple[Path, bytes, bytes, os.stat_result] | None = None
     try:
         if name != "scratch" or not linux_backend_enabled(name):
             return 2
@@ -1786,46 +1847,89 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None) -> int:
                   "@DELETION_LOG@": str(state_root().resolve() / "deletions.log")}
         if any(any(c in value for c in "%$") for value in values.values()):
             return 75
+        previous_runtime = None
+        if upgrade_from is not None:
+            previous_runtime = Path(upgrade_from)
+            candidates = Path.home() / ".local/share/disk-magician/candidates"
+            if (not linux_scheduler_candidate_runtime(previous_runtime, candidates)
+                    or not linux_scheduler_candidate_runtime(runtime, candidates)):
+                return 75
         cadence = "OnCalendar=hourly\nPersistent=true"
         if interval is not None:
             cadence = f"OnBootSec=5s\nOnUnitActiveSec={interval}s\nAccuracySec=1s"
         units = []
         unit_dir = Path.home() / ".config/systemd/user"
         for suffix in ("service", "timer"):
-            content = (runtime / "systemd" / f"diskm-scratch-reclaim.{suffix}.in").read_text()
-            for key, value in values.items():
-                content = content.replace(key, systemd_quote(value))
-            content = content.replace("@UNIT_NAME@", unit_name).replace("@CADENCE@", cadence)
+            template = (runtime / "systemd" / f"diskm-scratch-reclaim.{suffix}.in").read_text()
+            def render(orchestrator: str) -> str:
+                content = template
+                for key, value in {**values, "@ORCHESTRATOR@": orchestrator}.items():
+                    content = content.replace(key, systemd_quote(value))
+                return content.replace("@UNIT_NAME@", unit_name).replace("@CADENCE@", cadence)
+            content = render(values["@ORCHESTRATOR@"])
             if "@" in content:
                 return 75
             target = unit_dir / f"{unit_name}.{suffix}"
             if target.is_symlink() or (target.exists() and
-                    (not target.is_file() or target.stat().st_uid != os.geteuid() or target.read_text() != content)):
+                    (not target.is_file() or target.stat().st_uid != os.geteuid())):
                 return 75
-            units.append((target, content))
+            old_content = target.read_text() if target.exists() else None
+            if old_content is not None and old_content != content:
+                if previous_runtime is None or suffix != "service" or old_content != render(str(previous_runtime / "disk_magician.sh")):
+                    return 75
+            units.append((target, content, old_content))
+        if previous_runtime is not None:
+            active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit_name + ".service"],
+                                    capture_output=True, timeout=15, check=False)
+            if active.returncode == 0:
+                return 75
+        if production:
+            usage = shutil.disk_usage(scratch["mountpoint"])
+            if (usage.total - usage.free) * 100 >= scratch["quota_gb"] * GIB * 90 or not ballast_ok(scratch["mountpoint"]):
+                return 75
         unit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        for target, content in units:
+        for target, content, old_content in units:
             if not target.exists():
                 with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
                     stream.write(content)
                     stream.flush()
                     os.fsync(stream.fileno())
+            elif old_content != content:
+                if target.read_text() != old_content:
+                    return 75
+                previous_bytes = old_content.encode()
+                backup = target.with_name(target.name + ".diskm-backup-" + hashlib.sha256(previous_bytes).hexdigest()[:16])
+                if backup.exists():
+                    if backup.is_symlink() or backup.read_bytes() != previous_bytes:
+                        return 75
+                else:
+                    with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
+                        stream.write(previous_bytes)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                details = target.stat()
+                linux_atomic_bytes(target, content.encode(), details)
+                replaced = (target, previous_bytes, content.encode(), details)
         linux_command(["systemctl", "--user", "daemon-reload"])
         linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
-        if production:
-            usage = shutil.disk_usage(scratch["mountpoint"])
-            if (usage.total - usage.free) * 100 >= scratch["quota_gb"] * GIB * 90 or not ballast_ok(scratch["mountpoint"]):
-                return 75
         linux_command(["systemctl", "--user", "enable", "--now", unit_name + ".timer"])
         linux_command(["systemctl", "--user", "is-active", "--quiet", unit_name + ".timer"])
         print(json.dumps({"unit": unit_name, "runtime": str(runtime), "config": str(config_path),
             "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
             "units": [{"path": str(p), "mtime_ns": p.stat().st_mtime_ns,
-                       "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p, _ in units]}, sort_keys=True))
+                       "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p, _, _ in units]}, sort_keys=True))
         print(unit_name)
         return 0
     except Exception as error:
         print("volume scheduler: " + str(error), file=sys.stderr)
+        if replaced is not None:
+            target, previous_bytes, installed_bytes, details = replaced
+            try:
+                if target.read_bytes() == installed_bytes:
+                    linux_atomic_bytes(target, previous_bytes, details)
+                    linux_command(["systemctl", "--user", "daemon-reload"])
+            except Exception as rollback_error:
+                print("volume scheduler rollback: " + str(rollback_error), file=sys.stderr)
         return 75
 
 
@@ -3000,6 +3104,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments[:1] == ["trim"]:
             return linux_trim_cmd(arguments[1:]) if sys.platform.startswith("linux") else 2
+        if arguments[:1] == ["trim-auto"]:
+            if not sys.platform.startswith("linux") and arguments[1:] == ["scratch", "--clean"]:
+                print("skipped:non-linux-scratch")
+                return 0
+            return linux_trim_auto_cmd(arguments[1:]) if sys.platform.startswith("linux") else 2
         if len(arguments) >= 2 and arguments[0] == "fstab" and arguments[1] in {"preview", "probe", "install", "remove"} and sys.platform.startswith("linux"):
             return linux_fstab_cmd(arguments[1], arguments[2:])
         if arguments[:1] == ["fsck"] and sys.platform.startswith("linux"):
@@ -3011,9 +3120,16 @@ def main(argv: list[str] | None = None) -> int:
             return linux_service_sync_config_cmd(arguments[2:])
         if arguments[:1] == ["scheduler"]:
             if arguments[1:] == ["--help"]:
-                print("volume scheduler install scratch [--interval-seconds POSITIVE_INTEGER (nonproduction only)]")
+                print("volume scheduler install scratch [--interval-seconds POSITIVE_INTEGER (nonproduction only)]\n"
+                      "volume scheduler upgrade scratch --from-runtime ABSOLUTE_INSTALLED_CANDIDATE")
                 return 0
-            if arguments[1:3] != ["install", "scratch"] or not sys.platform.startswith("linux"):
+            if not sys.platform.startswith("linux"):
+                return 2
+            if arguments[1:3] == ["upgrade", "scratch"]:
+                if len(arguments) != 5 or arguments[3] != "--from-runtime":
+                    return 2
+                return linux_scheduler_install_cmd("scratch", upgrade_from=arguments[4])
+            if arguments[1:3] != ["install", "scratch"]:
                 return 2
             interval = None
             if len(arguments) != 3:

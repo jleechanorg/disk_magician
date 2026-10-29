@@ -52,6 +52,49 @@ class VolumeTestBase(unittest.TestCase):
             else: os.environ[key] = value
 
 class LinuxScratchTest(VolumeTestBase):
+    def test_trim_auto_missing_image_is_degraded_without_helper(self):
+        scratch = {"backend": "native", "image_path": str(self.root / "scratch.img"),
+                   "mountpoint": str(self.root / "Scratch")}
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
+             mock.patch.object(volume, "linux_validate_native_mount", return_value="uuid"), \
+             mock.patch.object(volume, "linux_trim_native") as trim:
+            self.assertEqual(volume.main(["trim-auto", "scratch", "--clean"]), 75)
+            trim.assert_not_called()
+
+    def test_trim_auto_uses_measured_gap_and_host_delta(self):
+        image_id = "sha256:" + "a" * 64
+        scratch = {"backend": "native", "image_path": str(self.root / "scratch.img"),
+                   "mountpoint": str(self.root / "Scratch"), "trim_admin_image_id": image_id}
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
+             mock.patch.object(volume, "linux_validate_native_mount", return_value="uuid"), \
+             mock.patch.object(volume, "linux_trim_measure", side_effect=[(50*volume.GIB, 40*volume.GIB, 25*volume.GIB),
+                                                                            (45*volume.GIB, 40*volume.GIB, 30*volume.GIB)]), \
+             mock.patch.object(volume, "linux_trim_native", return_value={"filesystem_uuid": "uuid", "trimmed_bytes": 70*volume.GIB}) as trim, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(volume.main(["trim-auto", "scratch", "--clean"]), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["image_reclaimed_bytes"], 5*volume.GIB)
+            self.assertEqual(receipt["host_free_delta_bytes"], 5*volume.GIB)
+            self.assertEqual(receipt["fitrim_requested_bytes"], 70*volume.GIB)
+            trim.assert_called_once_with(image_id)
+
+    def test_trim_auto_skips_when_gap_small_or_host_has_headroom(self):
+        image_id = "sha256:" + "a" * 64
+        scratch = {"backend": "native", "image_path": str(self.root / "scratch.img"),
+                   "mountpoint": str(self.root / "Scratch"), "trim_admin_image_id": image_id}
+        for measurement in ((43*volume.GIB, 40*volume.GIB, 25*volume.GIB),
+                            (50*volume.GIB, 40*volume.GIB, 85*volume.GIB)):
+            with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+                 mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
+                 mock.patch.object(volume, "linux_validate_native_mount", return_value="uuid"), \
+                 mock.patch.object(volume, "linux_trim_measure", return_value=measurement), \
+                 mock.patch.object(volume, "linux_trim_native") as trim, \
+                 mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(volume.main(["trim-auto", "scratch", "--clean"]), 0)
+                trim.assert_not_called()
+
     def test_trim_dispatch_rejects_wrong_backend_and_arguments(self):
         image_id = "sha256:" + "a" * 64
         for args in (["trim", "other"], ["trim", "scratch"],
@@ -169,6 +212,42 @@ class LinuxScratchTest(VolumeTestBase):
             for suffix in (["--interval-seconds", "0"], ["--interval-seconds", "-1"],
                            ["--interval-seconds", "1.5"], ["--interval-seconds"], ["--unknown"]):
                 self.assertEqual(volume.main(["scheduler", "install", "scratch", *suffix]), 2)
+
+    def test_scheduler_upgrade_replaces_only_exact_previous_candidate(self):
+        import hashlib
+        import shutil
+        self.set_linux_image_config(2)
+        candidates = self.root / ".local/share/disk-magician/candidates"
+        previous = candidates / ("a" * 40) / "venv/lib/python3.12/site-packages/disk_magician"
+        current = candidates / ("b" * 40) / "venv/lib/python3.12/site-packages/disk_magician"
+        for runtime in (previous, current):
+            (runtime / "scripts").mkdir(parents=True)
+            (runtime / "systemd").mkdir()
+            (runtime / "disk_magician.sh").touch()
+            for suffix in ("service", "timer"):
+                shutil.copy(ROOT / "systemd" / f"diskm-scratch-reclaim.{suffix}.in", runtime / "systemd")
+        unit_name = "diskm-scratch-reclaim-" + hashlib.sha256(os.fsencode(self.config.resolve())).hexdigest()[:12]
+        service = self.root / ".config/systemd/user" / (unit_name + ".service")
+        with mock.patch.object(volume.Path, "home", return_value=self.root), \
+             mock.patch.object(volume, "linux_validate_mount"), \
+             mock.patch.object(volume, "linux_command"), \
+             mock.patch.object(volume.subprocess, "run", return_value=mock.Mock(returncode=3)):
+            with mock.patch.object(volume, "__file__", str(previous / "scripts/volume.py")):
+                self.assertEqual(volume.linux_scheduler_install_cmd("scratch"), 0)
+            old = service.read_bytes()
+            with mock.patch.object(volume, "__file__", str(current / "scripts/volume.py")):
+                with mock.patch.object(volume, "linux_command", side_effect=[RuntimeError("reload failed"), ""]):
+                    self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 75)
+                self.assertEqual(service.read_bytes(), old)
+                self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 0)
+                self.assertIn(str(current / "disk_magician.sh"), service.read_text())
+                backup = service.with_name(service.name + ".diskm-backup-" + hashlib.sha256(old).hexdigest()[:16])
+                self.assertEqual(backup.read_bytes(), old)
+                self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 0)
+                service.write_text("operator-owned drift")
+                self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 75)
+                self.assertEqual(service.read_text(), "operator-owned drift")
+            self.assertIn(str(previous / "disk_magician.sh"), old.decode())
 
     def test_scheduler_renders_isolated_units_and_preserves_collisions(self):
         import hashlib

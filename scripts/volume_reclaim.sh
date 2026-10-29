@@ -134,12 +134,24 @@ if [[ "$clean" == true ]]; then
  fi
  if (( BALLAST_RESTORE_FAILURES > 0 )); then TOP_REASON=ballast-restore-failed; echo kept:ballast-restore-failed; fi
 fi
+trim_failed=0
+trim_done=0
+if [[ "$clean" == true ]]; then
+ trim_output="$("$diskm" volume trim-auto scratch --clean 2>&1)" || trim_failed=1
+ if (( trim_failed )); then
+  TOP_REASON=host-trim-unavailable
+  echo "degraded:host-trim-unavailable:$trim_output" >&2
+ else
+  if python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if isinstance(d,dict) and d.get("status")=="trimmed" else 1)' <<<"$trim_output" 2>/dev/null; then trim_done=1; fi
+  printf '%s\n' "$trim_output"
+ fi
+fi
 outcome=success_noop
 reason=dry-run
 if [[ "$below_trigger" == true ]]; then reason=below-trigger; fi
 if [[ "$clean" == true ]]; then
  outcome=success; reason="$TOP_REASON"
- if (( measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$crossed_trigger" == true ]]; then outcome=partial; reason=trim-target-not-reached; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( now_used * 100 <= quota * 80 )); then outcome=success; else outcome=partial; fi
+ if (( trim_failed || measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$crossed_trigger" == true ]]; then outcome=partial; reason=trim-target-not-reached; elif [[ "$below_trigger" == true && "$trim_done" == 1 ]]; then outcome=success; reason=host-trimmed; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( now_used * 100 <= quota * 80 )); then outcome=success; else outcome=partial; fi
  if (( ! measurement_error )) && [[ "$below_trigger" != true ]] && ! python3 - "$AGED" "$REMOVED" "$TOP_REASON" "$used" "$now_used" "$quota" <<'PYREC'
 import json,os,sys,tempfile
 from datetime import datetime,timezone
@@ -166,5 +178,5 @@ if (( measurement_error )); then post="{\"allocated_bytes_after\":null,\"quota_b
 if ! python3 "$receipt" finish --job volume_reclaim --run-id "$run_id" --outcome "$outcome" --reason "$reason" --candidates "$candidates" --precondition "$precondition" --postcondition "$post" >/dev/null; then
  echo kept:receipt-finish-failed >&2; exit 1
 fi
-if [[ "$below_trigger" == true && "$outcome" == success_noop ]]; then echo "skipped:below-trigger:$pct"; fi
+if [[ "$below_trigger" == true && "$outcome" == success_noop && "$trim_done" == 0 ]]; then echo "skipped:below-trigger:$pct"; fi
 [[ "$outcome" != error ]]
