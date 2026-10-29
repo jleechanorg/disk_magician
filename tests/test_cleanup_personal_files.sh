@@ -17,6 +17,7 @@ mkdir -p "$DOWNLOADS" "$SCREENSHOTS" "$DESKTOP" "$FAKE_BIN"
 
 cat >"$FAKE_BIN/lsof" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "${DISK_MAGICIAN_LSOF_CAP:-unset}" >> "${FAKE_CAP_LOG:?}"
 case "${FAKE_LSOF_MODE:-none}" in
   active) printf 'p123\nn%s\n' "${FAKE_LSOF_PATH:-}"; exit 0 ;;
   fail) exit 2 ;;
@@ -27,6 +28,8 @@ chmod +x "$FAKE_BIN/lsof"
 export HOME DISK_MAGICIAN_DOWNLOADS_ROOT="$DOWNLOADS"
 export DISK_MAGICIAN_SCREENSHOT_ROOT="$SCREENSHOTS" DISK_MAGICIAN_DESKTOP_ROOT="$DESKTOP"
 export DISK_MAGICIAN_DELETION_LOG="$LOG" DISK_MAGICIAN_LSOF_BIN="$FAKE_BIN/lsof"
+CAP_LOG="$TEST_ROOT/cap.log"
+export FAKE_CAP_LOG="$CAP_LOG"
 
 assert_exists() { [[ -e "$1" || -L "$1" ]] || { echo "missing: $1" >&2; exit 1; }; }
 assert_missing() { [[ ! -e "$1" && ! -L "$1" ]] || { echo "present: $1" >&2; exit 1; }; }
@@ -46,6 +49,12 @@ ln -s "$DOWNLOADS/big.iso" "$DOWNLOADS/link.iso"
 python3 -c 'import os,sys; open(sys.argv[1], "wb").close(); os.utime(sys.argv[1], (1577836800, 1577836800))' \
   "$SCREENSHOTS/old-screenshot.png"
 touch "$SCREENSHOTS/Screenshot-current.png"
+: >"$CAP_LOG"
+DISK_MAGICIAN_LSOF_CAP=0 FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run >/dev/null
+DISK_MAGICIAN_LSOF_CAP=malformed FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run >/dev/null
+DISK_MAGICIAN_LSOF_CAP=10 FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run >/dev/null
+grep -q '^5$' "$CAP_LOG"
+grep -q '^10$' "$CAP_LOG"
 DRY="$(FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run)"
 grep -q 'would remove large download' <<<"$DRY"
 assert_exists "$DOWNLOADS/big.iso"

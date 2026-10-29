@@ -43,7 +43,7 @@ file_mtime() {
 
 is_open() {
   local path="$1" result cap="${DISK_MAGICIAN_LSOF_CAP:-5}"
-  [[ "$cap" =~ ^[0-9]+([.][0-9]+)?$ ]] || cap=5
+  [[ "$cap" =~ ^[0-9]+([.][0-9]+)?$ && "$cap" =~ [1-9] ]] || cap=5
   result="$(DISK_MAGICIAN_LSOF_CAP="$cap" python3 "$SCRIPT_DIR/c14_probe.py" open-file "$path" 2>/dev/null || true)"
   case "$result" in
     no) return 1 ;;
