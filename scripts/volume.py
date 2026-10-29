@@ -1889,19 +1889,20 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
                 return 75
         unit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         for target, content, old_content in units:
+            if old_content is not None and (target.is_symlink() or not target.is_file()
+                    or target.stat().st_uid != os.geteuid() or target.read_text() != old_content):
+                raise RuntimeError("scheduler unit changed after preflight")
             if not target.exists():
                 with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
                     stream.write(content)
                     stream.flush()
                     os.fsync(stream.fileno())
             elif old_content != content:
-                if target.read_text() != old_content:
-                    return 75
                 previous_bytes = old_content.encode()
                 backup = target.with_name(target.name + ".diskm-backup-" + hashlib.sha256(previous_bytes).hexdigest()[:16])
                 if backup.exists():
                     if backup.is_symlink() or backup.read_bytes() != previous_bytes:
-                        return 75
+                        raise RuntimeError("scheduler backup identity changed")
                 else:
                     with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
                         stream.write(previous_bytes)

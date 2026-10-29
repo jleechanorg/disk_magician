@@ -241,6 +241,7 @@ class LinuxScratchTest(VolumeTestBase):
                 shutil.copy(ROOT / "systemd" / f"diskm-scratch-reclaim.{suffix}.in", runtime / "systemd")
         unit_name = "diskm-scratch-reclaim-" + hashlib.sha256(os.fsencode(self.config.resolve())).hexdigest()[:12]
         service = self.root / ".config/systemd/user" / (unit_name + ".service")
+        timer = service.with_suffix(".timer")
         with mock.patch.object(volume.Path, "home", return_value=self.root), \
              mock.patch.object(volume, "linux_validate_mount"), \
              mock.patch.object(volume, "linux_command"), \
@@ -252,6 +253,21 @@ class LinuxScratchTest(VolumeTestBase):
                 with mock.patch.object(volume, "linux_command", side_effect=[RuntimeError("reload failed"), ""]):
                     self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 75)
                 self.assertEqual(service.read_bytes(), old)
+                timer_before = timer.read_text()
+                atomic_write = volume.linux_atomic_bytes
+                changed = False
+                def concurrent_timer_edit(path, data, details):
+                    nonlocal changed
+                    atomic_write(path, data, details)
+                    if path == service and not changed:
+                        timer.write_text("concurrent timer edit")
+                        changed = True
+                with mock.patch.object(volume, "linux_atomic_bytes", side_effect=concurrent_timer_edit):
+                    self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 75)
+                self.assertTrue(changed)
+                self.assertEqual(service.read_bytes(), old)
+                self.assertEqual(timer.read_text(), "concurrent timer edit")
+                timer.write_text(timer_before)
                 self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 0)
                 self.assertIn(str(current / "disk_magician.sh"), service.read_text())
                 backup = service.with_name(service.name + ".diskm-backup-" + hashlib.sha256(old).hexdigest()[:16])
