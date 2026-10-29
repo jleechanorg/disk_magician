@@ -42,8 +42,9 @@ file_mtime() {
 }
 
 is_open() {
-  local result
-  result="$(DISK_MAGICIAN_LSOF_CAP=5 python3 "$SCRIPT_DIR/c14_probe.py" open-file "$path" 2>/dev/null || true)"
+  local path="$1" result cap="${DISK_MAGICIAN_LSOF_CAP:-5}"
+  [[ "$cap" =~ ^[0-9]+([.][0-9]+)?$ ]] || cap=5
+  result="$(DISK_MAGICIAN_LSOF_CAP="$cap" python3 "$SCRIPT_DIR/c14_probe.py" open-file "$path" 2>/dev/null || true)"
   case "$result" in
     no) return 1 ;;
     yes) log "Open-file holder found; preserving: $path" ;;
