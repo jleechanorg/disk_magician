@@ -49,12 +49,20 @@ ln -s "$DOWNLOADS/big.iso" "$DOWNLOADS/link.iso"
 python3 -c 'import os,sys; open(sys.argv[1], "wb").close(); os.utime(sys.argv[1], (1577836800, 1577836800))' \
   "$SCREENSHOTS/old-screenshot.png"
 touch "$SCREENSHOTS/Screenshot-current.png"
-: >"$CAP_LOG"
-DISK_MAGICIAN_LSOF_CAP=0 FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run >/dev/null
-DISK_MAGICIAN_LSOF_CAP=malformed FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run >/dev/null
-DISK_MAGICIAN_LSOF_CAP=10 FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run >/dev/null
-grep -q '^5$' "$CAP_LOG"
-grep -q '^10$' "$CAP_LOG"
+assert_cap() {
+  local requested="$1" expected="$2" observed
+  : >"$CAP_LOG"
+  DISK_MAGICIAN_LSOF_CAP="$requested" FAKE_LSOF_MODE=none \
+    bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run >/dev/null
+  observed="$(sort -u "$CAP_LOG")"
+  [[ -n "$observed" && "$observed" == "$expected" ]] || {
+    echo "unexpected effective cap for '$requested': '$observed'" >&2
+    exit 1
+  }
+}
+assert_cap 0 5
+assert_cap malformed 5
+assert_cap 10 10
 DRY="$(FAKE_LSOF_MODE=none bash "$REPO_ROOT/disk_magician.sh" cleanup-personal-files --dry-run)"
 grep -q 'would remove large download' <<<"$DRY"
 assert_exists "$DOWNLOADS/big.iso"
