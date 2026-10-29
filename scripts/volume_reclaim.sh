@@ -136,7 +136,7 @@ if [[ "$clean" == true ]]; then
 fi
 trim_failed=0
 trim_done=0
-if [[ "$clean" == true ]]; then
+if [[ "$clean" == true && "$(uname -s)" == Linux ]]; then
  trim_output="$("$diskm" volume trim-auto scratch --clean 2>&1)" || trim_failed=1
  if (( trim_failed )); then
   TOP_REASON=host-trim-unavailable

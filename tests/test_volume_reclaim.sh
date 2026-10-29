@@ -174,6 +174,7 @@ python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python
 [[ "$(grep -c '^ensure$' "$BALLAST_LOG")" == 1 ]]
 [[ -e "$TEST_ROOT/repo/evidence/oldest" ]]
 # Host trim runs on the same timer path even when guest usage is below 90%.
+if [[ "$(uname -s)" == Linux ]]; then
 : >"$T/trim.calls"; : >"$STATUS_CALLS_FILE"
 TEST_TRIM_CALLS_FILE="$T/trim.calls" TEST_TRIM_OUTPUT='{"status":"trimmed","host_free_delta_bytes":100}' TEST_USED=899 "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-trim.out"
 [[ "$(grep -c '^trim$' "$T/trim.calls")" == 1 ]]
@@ -182,6 +183,7 @@ python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python
 if TEST_TRIM_RC=75 TEST_TRIM_OUTPUT='missing pinned image' TEST_USED=899 "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/missing-image.out" 2>"$T/missing-image.err"; then exit 1; fi
 grep -q 'degraded:host-trim-unavailable:missing pinned image' "$T/missing-image.err"
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="error" and r["reason"]=="host-trim-unavailable"'
+fi
 # A below-trigger clean pass still repairs a missing reserve without trimming.
 : >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
 BALLAST_LOG="$BALLAST_LOG" TEST_USED=899 TEST_BALLAST_AVAILABLE_SEQUENCE="false true" TEST_STATUS_SEQUENCE="899 899" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/below-trigger-reserve-restored.out"

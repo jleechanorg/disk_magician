@@ -52,6 +52,19 @@ class VolumeTestBase(unittest.TestCase):
             else: os.environ[key] = value
 
 class LinuxScratchTest(VolumeTestBase):
+    def test_trim_auto_is_a_noop_for_macos_and_non_native_linux(self):
+        with mock.patch.object(volume.sys, "platform", "darwin"), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(volume.main(["trim-auto", "scratch", "--clean"]), 0)
+            self.assertEqual(output.getvalue().strip(), "skipped:non-linux-scratch")
+        with mock.patch.object(volume.sys, "platform", "linux"), \
+             mock.patch.object(volume, "cls", return_value=({}, {"backend": "fuse"})), \
+             mock.patch.object(volume, "linux_trim_native") as trim, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(volume.main(["trim-auto", "scratch", "--clean"]), 0)
+            self.assertEqual(output.getvalue().strip(), "skipped:non-native-scratch")
+            trim.assert_not_called()
+
     def test_trim_auto_missing_image_is_degraded_without_helper(self):
         scratch = {"backend": "native", "image_path": str(self.root / "scratch.img"),
                    "mountpoint": str(self.root / "Scratch")}
