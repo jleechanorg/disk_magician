@@ -347,3 +347,116 @@ with mock.patch.object(Path,'exists',lambda p:False if str(p)=='/tmp/.git' else 
             with self.subTest(category=category),mock.patch.dict(os.environ,{'DISK_MAGICIAN_SAFETY_FILE':str(safety)}):
                 with self.assertRaisesRegex(ValueError,'protected'):
                     self.module.initialize(self.root)
+
+    def test_schedule_render_only_has_explicit_root_and_twenty_minute_timer(self):
+        self.module.initialize(self.root)
+        binary=self.root.parent/'installed bin'/'diskm';binary.parent.mkdir()
+        binary.write_text('#!/usr/bin/python3\nfrom disk_magician.cli import main\nmain()\n');binary.chmod(0o700)
+        result=self.module.render_schedule(self.root,binary)
+        self.assertEqual(result['status'],'render-only')
+        self.assertIn('OnCalendar=*:0/20',result['timer'])
+        self.assertIn('Persistent=false',result['timer'])
+        self.assertIn('KillMode=control-group',result['service'])
+        self.assertIn('TimeoutStartSec=90',result['service'])
+        self.assertIn('disposable clean --root "'+str(self.root)+'" --execute',result['service'])
+        self.assertIn('"'+str(binary)+'"',result['service'])
+        self.assertFalse((self.root.parent/'.config/systemd').exists())
+
+    def test_schedule_rejects_non_cli_or_writable_launcher(self):
+        self.module.initialize(self.root)
+        binary=self.root.parent/'diskm';binary.write_text('#!/bin/sh\nexit 0\n');binary.chmod(0o700)
+        with self.assertRaisesRegex(ValueError,'CLI'):self.module.render_schedule(self.root,binary)
+        binary.write_text('from disk_magician.cli import main\n');binary.chmod(0o777)
+        with self.assertRaisesRegex(ValueError,'launcher'):self.module.render_schedule(self.root,binary)
+
+    def test_native_error_or_timeout_retains_intent_until_reconciled(self):
+        import subprocess
+        self.make_job(); original=self.module.subprocess.run
+        for failure in ('nonzero','timeout'):
+            def run(command,**kwargs):
+                if command[0]=='bash':return original(command,**kwargs)
+                if '--version' in command:return mock.Mock(returncode=0,stdout='systemd 255\n')
+                if failure=='timeout':raise subprocess.TimeoutExpired(command,30)
+                return mock.Mock(returncode=1,stderr='synthetic native error')
+            with self.subTest(failure=failure),mock.patch.object(self.module.subprocess,'run',side_effect=run):
+                result=self.module.clean(self.root,Path('/usr/bin/systemd-tmpfiles'),True)
+            self.assertEqual(result['status'],'incomplete')
+            self.assertEqual(self.module.read_json(self.root/'control/pending.json')['phase'],'pending')
+            self.assertEqual(self.module.reconcile(self.root)['status'],'unknown-attribution')
+
+    def test_systemd_quoting_escapes_expansion_and_control(self):
+        self.assertEqual(self.module.unit_quote('/tmp/a %b $c "d"'), '"/tmp/a %%b $$c \\"d\\""')
+        with self.assertRaises(ValueError):self.module.unit_quote('/tmp/new\nline')
+
+    def test_schedule_execute_never_installs(self):
+        self.module.initialize(self.root)
+        self.assertEqual(self.module.main(['schedule','--root',str(self.root),'--execute']),75)
+        self.assertFalse((self.root.parent/'.config/systemd').exists())
+
+    def test_rendered_units_pass_offline_native_parser_in_fixture_runtime(self):
+        import shutil
+        import subprocess
+        analyzer=shutil.which('systemd-analyze')
+        if not analyzer:self.skipTest('systemd-analyze unavailable')
+        self.module.initialize(self.root)
+        binary=self.root.parent/'installed bin'/'diskm';binary.parent.mkdir()
+        binary.write_text('#!/usr/bin/python3\nfrom disk_magician.cli import main\nmain()\n');binary.chmod(0o700)
+        rendered=self.module.render_schedule(self.root,binary)
+        files=[]
+        for kind in ('service','timer'):
+            path=self.root.parent/(rendered['unit']+'.'+kind);path.write_text(rendered[kind]);files.append(str(path))
+        home=self.root.parent/'home';home.mkdir(mode=0o700)
+        runtime=self.root.parent/'runtime';runtime.mkdir(mode=0o700)
+        env={'PATH':'/usr/bin:/bin','HOME':str(home),'XDG_RUNTIME_DIR':str(runtime),'XDG_CONFIG_HOME':str(home/'.config'),'XDG_STATE_HOME':str(home/'.local/state'),'SYSTEMD_LOG_TARGET':'console'}
+        result=subprocess.run([analyzer,'--user','--man=no','verify',*files],env=env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_schedule_binds_policy_in_fresh_service_environment(self):
+        import json, shlex
+        safety=self.root.parent/'custom-safety.json';safety.write_text('{}')
+        config=self.root.parent/'custom-config.json';config.write_text('{}')
+        binary=self.root.parent/'diskm';binary.write_text('from disk_magician.cli import main\n');binary.chmod(0o700)
+        with mock.patch.dict(os.environ,{'DISK_MAGICIAN_SAFETY_FILE':str(safety),'DISK_MAGICIAN_CONFIG':str(config)}):
+            self.module.initialize(self.root)
+            rendered=self.module.render_schedule(self.root,binary)
+        env={'PATH':'/usr/bin:/bin'}
+        for line in rendered['service'].splitlines():
+            if line.startswith('Environment='):
+                key,value=shlex.split(line.split('=',1)[1])[0].split('=',1);env[key]=value
+        self.assertEqual(env.get('DISK_MAGICIAN_SAFETY_FILE'),str(safety))
+        safety.write_text(json.dumps({'never_delete':[str(self.root)]}))
+        with mock.patch.dict(os.environ,env,clear=True):
+            with self.assertRaisesRegex(ValueError,'protected'):self.module.clean(self.root,Path('/usr/bin/systemd-tmpfiles'),False)
+        safety.unlink()
+        with mock.patch.dict(os.environ,env,clear=True):
+            with self.assertRaisesRegex(ValueError,'safety file unavailable'):self.module.canonical(self.root)
+
+    def test_schedule_rejects_unsafe_argv0_and_unknown_policy_expansion(self):
+        import json
+        self.module.initialize(self.root)
+        for name in ('a$b','a"b','a\\b','a%b','@NAMESPACE@'):
+            binary=self.root.parent/name;binary.write_text('from disk_magician.cli import main\n');binary.chmod(0o700)
+            with self.subTest(name=name),self.assertRaises(ValueError):self.module.render_schedule(self.root,binary)
+        binary=self.root.parent/'diskm';binary.write_text('from disk_magician.cli import main\n');binary.chmod(0o700)
+        safety=self.root.parent/'safety.json';safety.write_text(json.dumps({'never_delete':['$CUSTOM_PROTECTED/place']}))
+        with mock.patch.dict(os.environ,{'DISK_MAGICIAN_SAFETY_FILE':str(safety)}):
+            with self.assertRaisesRegex(ValueError,'expansion'):self.module.render_schedule(self.root,binary)
+
+    def test_initialization_fsync_failure_never_admits_namespace(self):
+        with mock.patch.object(self.module.os,'fsync',side_effect=OSError('fixture durability failure')):
+            with self.assertRaisesRegex(OSError,'durability'):self.module.initialize(self.root)
+        self.assertFalse((self.root/'control/identity.json').exists())
+        with self.assertRaises(Exception):self.module.clean(self.root,Path('/usr/bin/systemd-tmpfiles'),False)
+
+    def test_service_environment_preserves_protected_basename_override(self):
+        import shlex
+        self.module.initialize(self.root)
+        binary=self.root.parent/'diskm';binary.write_text('from disk_magician.cli import main\n');binary.chmod(0o700)
+        with mock.patch.dict(os.environ,{'DISK_MAGICIAN_PROTECTED_TMP_ROOTS':'reserved-job other-job','DISK_MAGICIAN_TMP_ROOT_OVERRIDE':str(self.root.parent)}):
+            rendered=self.module.render_schedule(self.root,binary)
+        env={'PATH':'/usr/bin:/bin'}
+        for line in rendered['service'].splitlines():
+            if line.startswith('Environment='):
+                key,value=shlex.split(line.split('=',1)[1])[0].split('=',1);env[key]=value
+        with mock.patch.dict(os.environ,env,clear=True):
+            with self.assertRaisesRegex(ValueError,'protected'):self.module.canonical(self.root.parent/'reserved-job')

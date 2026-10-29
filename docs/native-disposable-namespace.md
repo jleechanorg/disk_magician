@@ -18,9 +18,32 @@ diskm disposable run --root /absolute/private/disposable -- producer-command arg
 diskm disposable clean --root /absolute/private/disposable      # plan only
 diskm disposable clean --root /absolute/private/disposable --execute
 diskm disposable reconcile --root /absolute/private/disposable --execute
+diskm disposable schedule --root /absolute/private/disposable --diskm-bin /absolute/installed/bin/diskm
 ```
 
 The parent must already exist; init refuses to adopt **any existing root**.
+`schedule` renders JSON containing user service/timer text only. It requires an
+initialized, currently unprotected namespace and an explicit trusted installed
+shared CLI launcher; it records launcher SHA256 and namespace identity. It quotes
+paths and refuses unsupported executable characters (including `$`, `%`, quotes,
+backslashes and template markers), uses a20-minute OnCalendar timer,
+Persistent=false,90-second service timeout and KillMode=control-group. The native
+child retains admission across controller death; a killed/failed native attempt
+keeps pending intent until explicit reconciliation. `schedule --execute` refuses:
+this command cannot install, enable, start or operate a host service. Rendered
+units are source artifacts, **not evidence that periodic cleanup is scheduled**.
+An authorized operator must verify the reviewed installed launcher and apply the
+units separately. Launcher updates are outside the cooperative identity boundary.
+The service binds the winning absolute config/safety files, HOME, state directory
+and supported shared protection/sandbox overrides, including empty resets. Missing
+bound files fail closed; later holds in those files are read on each invocation.
+Safety path expansion supports HOME only; unknown environment variables fail
+closed instead of silently changing policy in a fresh service environment.
+Re-render units after an intentional policy-source/path change; the renderer
+does not silently switch existing units to newly selected fallback files.
+Initialization fsyncs control inodes and namespace/parent directory entries before
+publishing its identity admission record; a durability error prevents admission.
+
 No tmpfiles.d file, timer, service, sudo operation, host setting, or migration is
 installed. An existing authorized operator may later arrange invocations; source
 approval is not permission to activate them. Linux systemd-tmpfiles >=255 is
@@ -80,7 +103,8 @@ The native process is bounded to30seconds. A complete quiescent post-manifest,
 removed paths, remaining count, changes, native return code and diagnostics are
 persisted. `observed` means an audited observation, **not** that every old item
 was deleted; native exit0 can conceal individual cleanup failures. Timeout or
-nonzero returns `incomplete` and CLI75. Added entries or changed file/inode/type
+nonzero returns `incomplete` and CLI75 and retains pending intent until explicit
+reconciliation, even when the observed manifest is unchanged. Added entries or changed file/inode/type
 are anomalies: incomplete with pending intent retained for explicit reconciliation. Directory metadata changes are reported.
 
 **Native unlink bypasses C14's deletion core and normal deletion log by design.**

@@ -22,7 +22,7 @@ DIRFLAGS = os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW
 MAX_ENTRIES = 10000
 
 
-def protection_rules(root, config, config_path):
+def protection_rules(root, config, config_path, context=None):
     """Reuse shared sandbox/root resolution and cross-validated safety matcher.
 
     The reporting tool's permissive loader is deliberately NOT used: deletion
@@ -60,6 +60,8 @@ def protection_rules(root, config, config_path):
         for item in items:
             raw = item.get('path') if isinstance(item, dict) else item
             if not isinstance(raw, str) or not raw: raise ValueError('invalid safety path')
+            if any(variable not in ('HOME', '{HOME}') for variable in re.findall(r'\$(\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)', raw)):
+                raise ValueError('unsupported safety path environment expansion')
             # Shared Linux matching retains safety_lib's private/tmp aliases.
             raw = os.path.normpath(os.path.expandvars(os.path.expanduser(raw)))
             for alias in ('/private/tmp', '/private/var', '/private/etc'):
@@ -68,6 +70,7 @@ def protection_rules(root, config, config_path):
             rules[section].append((raw, 'shared safety rule'))
     rules['protected_tmp_roots'] = [(str(Path(p).resolve()), 'shared protected tmp root') for p in lines[1:]]
     assert_unprotected(root, rules)
+    if context is not None: context.update(safety_file=str(source.resolve()), document=document)
     return rules
 
 
@@ -202,7 +205,13 @@ def initialize(root):
     for sub in ('control', 'data', 'control/jobs', 'control/runs'):
         (root / sub).mkdir(mode=0o700)
     for sub in ('control/gate.lock', 'control/audit.jsonl'):
-        fd = os.open(root / sub, os.O_CREAT | os.O_EXCL | os.O_WRONLY | NOFOLLOW, 0o600); os.close(fd)
+        fd = os.open(root / sub, os.O_CREAT | os.O_EXCL | os.O_WRONLY | NOFOLLOW, 0o600)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+    for path in (root/'control/jobs', root/'control/runs', root/'control', root/'data', root, root.parent):
+        fd = os.open(path, DIRFLAGS)
+        try: os.fsync(fd)
+        finally: os.close(fd)
     record = {'contract': CONTRACT, 'uid': os.getuid(), 'root': identity(root.stat()),
               'control': identity((root / 'control').stat()), 'data': identity((root / 'data').stat()),
               'jobs': identity((root / 'control/jobs').stat()), 'runs': identity((root / 'control/runs').stat()), 'gate': identity((root / 'control/gate.lock').stat()),
@@ -363,7 +372,7 @@ def clean(root, binary, execute=False):
                            'status': 'observed' if rc == 0 and not added and not anomalies else 'incomplete', 'diagnostics': diagnostics}
             atomic_json(root / 'control/runs' / (run + '.after.json'), {'observation': observation, 'after': after})
             audit(root, observation)
-            if not added and not anomalies:
+            if rc == 0 and not added and not anomalies:
                 atomic_json(root / 'control/pending.json', {'phase': 'idle', 'last': run})
             return observation
         finally: os.close(data_fd)
@@ -382,11 +391,87 @@ def reconcile(root):
         return event
 
 
+def unit_quote(value):
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('unit argument contains a control character')
+    # systemd performs specifier and environment expansion even inside quotes.
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%').replace('$', '$$') + '"'
+
+
+def environment_quote(value):
+    # Environment= does not perform shell/environment expansion; only specifiers.
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError('unsupported environment control character')
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+
+
+def schedule_context(root):
+    """Bind authoritative policy sources, never caller-dependent fallback rules."""
+    import resolve_config
+    source = resolve_config.resolve()
+    if not source: raise ValueError('configuration unavailable')
+    source = str(Path(source).resolve())
+    metadata = {}
+    config = json.loads(Path(source).read_text())
+    protection_rules(root, config, source, metadata)
+    names = ('DISK_MAGICIAN_PROTECTED_TMP_ROOTS', 'DISK_MAGICIAN_TMP_ROOT_OVERRIDE',
+             'DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE', 'DISK_MAGICIAN_PRIVATE_TMP_CANDIDATES',
+             'DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE', 'DISK_MAGICIAN_TEST_CONTEXT',
+             'DISK_MAGICIAN_TEST_SANDBOX')
+    context = {name: os.environ.get(name, '') for name in names}
+    for name, value in context.items():
+        if not value or name in ('DISK_MAGICIAN_TEST_CONTEXT', 'DISK_MAGICIAN_PROTECTED_TMP_ROOTS'): continue
+        paths = value.split() if name == 'DISK_MAGICIAN_PROTECTED_TMP_ROOTS' else value.split(':')
+        if any(not Path(path).is_absolute() for path in paths):
+            raise ValueError('schedule requires absolute policy override paths')
+    context.update(HOME=str(Path.home()), DISK_MAGICIAN_CONFIG=source,
+                   DISK_MAGICIAN_SAFETY_FILE=metadata['safety_file'],
+                   DISK_MAGICIAN_STATE_DIR=str(Path(os.environ.get('DISK_MAGICIAN_STATE_DIR', Path.home()/'.disk_magician_state')).resolve()),
+                   BASH_ENV='', ENV='')
+    return context
+
+
+def render_schedule(root, binary):
+    """Return reviewable user-unit text only; never install/enable/start it."""
+    with gate(root, False) as (root, record, _):
+        require_idle(root)
+        if not binary or not Path(binary).is_absolute():
+            raise ValueError('explicit absolute installed diskm launcher required')
+        if not re.fullmatch(r'/[A-Za-z0-9_./ -]+', str(binary)):
+            raise ValueError('unsupported launcher characters')
+        binary = Path(binary).resolve()
+        if not re.fullmatch(r'/[A-Za-z0-9_./ -]+', str(binary)):
+            raise ValueError('unsupported resolved launcher characters')
+        fd = os.open(binary, os.O_RDONLY | NOFOLLOW)
+        with os.fdopen(fd, 'rb') as stream:
+            details = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(details.st_mode) or details.st_uid not in (0, os.getuid())
+                    or details.st_mode & 0o022 or not os.access(binary, os.X_OK)):
+                raise ValueError('unsafe installed launcher')
+            data = stream.read(128 * 1024 + 1)
+        if len(data) > 128 * 1024 or b'from disk_magician.cli import main' not in data:
+            raise ValueError('expected installed shared diskm CLI launcher')
+        name = 'diskm-disposable-' + hashlib.sha256(str(root).encode()).hexdigest()[:16]
+        templates = Path(__file__).resolve().parent.parent / 'systemd'
+        service = (templates / 'diskm-disposable-clean.service.in').read_text()
+        timer = (templates / 'diskm-disposable-clean.timer.in').read_text()
+        context = schedule_context(root)
+        replacements = {'DISKM_BIN':unit_quote(str(binary)), 'NAMESPACE':unit_quote(str(root)),
+                        'POLICY_ENV':'\n'.join('Environment=' + environment_quote(k + '=' + v) for k,v in sorted(context.items()))}
+        service = re.sub(r'@(DISKM_BIN|NAMESPACE|POLICY_ENV)@', lambda match: replacements[match.group(1)], service)
+        timer = timer.replace('@UNIT_NAME@', name)
+        return {'status':'render-only', 'unit':name, 'service':service, 'timer':timer,
+                'namespace_identity':record, 'launcher_sha256':hashlib.sha256(data).hexdigest(),
+                'activation':'not installed or enabled; operator must verify reviewed launcher and explicitly install user units',
+                'policy':'native 3d in separate disposable namespace; not Scratch pressure relief'}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('init', 'run', 'clean', 'reconcile'))
+    parser.add_argument('action', choices=('init', 'run', 'clean', 'reconcile', 'schedule'))
     parser.add_argument('--root', required=True)
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--diskm-bin')
     parser.add_argument('--tmpfiles-bin', default='/usr/bin/systemd-tmpfiles')
     argv = list(sys.argv[1:] if argv is None else argv)
     command = []
@@ -395,7 +480,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.action == 'run': return producer(args.root, command)
-        if args.action == 'clean': result = clean(args.root, args.tmpfiles_bin, args.execute)
+        if args.action == 'schedule':
+            if args.execute: raise ValueError('schedule is render-only; --execute cannot install units')
+            result = render_schedule(args.root, args.diskm_bin)
+        elif args.action == 'clean': result = clean(args.root, args.tmpfiles_bin, args.execute)
         elif not args.execute: result = {'status': 'plan-only', 'action': args.action, 'root': str(canonical(args.root))}
         elif args.action == 'init': result = initialize(args.root)
         else: result = reconcile(args.root)

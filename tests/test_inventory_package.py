@@ -58,7 +58,7 @@ class InventoryPackageTests(unittest.TestCase):
             self.assertEqual(len(wheels), 1)
             with zipfile.ZipFile(wheels[0]) as wheel:
                 names = set(wheel.namelist())
-                for rel in ("safety.local.json.template", "scripts/native_disposable.py", "systemd/diskm-scratch-reclaim.service.in", "systemd/diskm-scratch-reclaim.timer.in",
+                for rel in ("systemd/diskm-disposable-clean.service.in", "systemd/diskm-disposable-clean.timer.in", "safety.local.json.template", "scripts/native_disposable.py", "systemd/diskm-scratch-reclaim.service.in", "systemd/diskm-scratch-reclaim.timer.in",
                             "scripts/volume_reclaim.sh", "scripts/scratch_pressure.py",
                             "launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template"):
                     self.assertEqual(wheel.read("disk_magician/" + rel), (REPO / rel).read_bytes(), rel)
