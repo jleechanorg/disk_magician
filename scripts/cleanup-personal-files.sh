@@ -42,23 +42,20 @@ file_mtime() {
 }
 
 is_open() {
-  local path="$1" output rc=0
-  if [[ -d /proc ]] && command -v timeout >/dev/null 2>&1; then
-    output="$(timeout -k 1 5 find /proc/[0-9]*/fd -maxdepth 1 -lname "$path" -print -quit 2>/dev/null)" || rc=$?
-    if [[ "$rc" -gt 1 ]]; then
-      log "Open-file check timed out or failed; preserving: $path"
-      return 0
-    fi
-    [[ -n "$output" ]] && { log "Open-file holder found; preserving: $path"; return 0; }
-    return 1
-  fi
-  log "Open-file check unavailable; preserving: $path"
+  local result
+  result="$(DISK_MAGICIAN_LSOF_CAP=5 python3 "$SCRIPT_DIR/c14_probe.py" open-file "$path" 2>/dev/null || true)"
+  case "$result" in
+    no) return 1 ;;
+    yes) log "Open-file holder found; preserving: $path" ;;
+    *) log "Open-file check failed or timed out; preserving: $path" ;;
+  esac
   return 0
 }
 
 protected_name() {
-  local base="${1##*/}"
-  [[ "$base" =~ (^|\.)\.env($|\.) || "$base" =~ (credentials|secret|token|password|private|\.pem$|\.key$|\.p12$|\.pfx$) ]]
+  local base="${1##*/}" base_lc
+  base_lc="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+  [[ "$base_lc" =~ (^|\.)\.env($|\.) || "$base_lc" =~ (credentials|secret|token|password|private|\.pem$|\.key$|\.p12$|\.pfx$) ]]
 }
 
 newest_screenshot=""
