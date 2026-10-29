@@ -66,6 +66,11 @@ def main():
     if auto_clean_env:
         env["DISK_MAGICIAN_AUTO_CLEAN"] = auto_clean_env
 
+    # Scheduled pressure reclaim owns signal forwarding, durable reserve recovery
+    # and its terminal receipt. Do not interpose a wrapper that can die first.
+    if args[:2] == ["volume", "reclaim"] and "--available-floor" in args:
+        os.execvpe("bash", ["bash", str(orchestrator), *args], env)
+
     # Run the shell orchestrator
     try:
         result = subprocess.run(
