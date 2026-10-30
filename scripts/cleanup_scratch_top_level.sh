@@ -178,18 +178,13 @@ verdict_and_maybe_remove() {
     echo "$verdict"
     return 0
   fi
-  if [[ "$DRY_RUN" == true ]]; then
-    rm -f "$inv" "$binding"
-    echo "would-remove:${override:-remove}"
-    return 0
-  fi
   if [[ -n "$override" ]]; then
     # C14 writes --inventory-out only after it approves, so an overridden content
     # keep has no inventory yet. Build it with the same canonical builder the
     # verdict uses. c14_probe.py inventory reports success on stdout ("ok"), not
     # through its exit status, so the output is what is checked.
     if [[ "$(python3 "$SCRIPT_DIR/c14_probe.py" inventory "$entry" "$inv" 2>/dev/null)" != ok ]]; then
-      lease_registry_mutation_lock_exit || true
+      [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
       rm -f "$inv" "$binding"
       echo kept:check-failed
       return 0
@@ -201,11 +196,20 @@ verdict_and_maybe_remove() {
     # would delete unpushed work.
     local repo_reason
     if ! repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
-      lease_registry_mutation_lock_exit || true
+      [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
       rm -f "$inv" "$binding"
       echo "${repo_reason:-kept:check-failed}"
       return 0
     fi
+  fi
+  # A preview must reach the same verdict --clean would reach, so the override's
+  # inventory and repository checks above run in both modes; only the removal
+  # itself is preview-only. Without this, a dry run with approval would advertise
+  # a would-remove for a secret-like tree that --clean actually keeps.
+  if [[ "$DRY_RUN" == true ]]; then
+    rm -f "$inv" "$binding"
+    echo "would-remove:${override:-remove}"
+    return 0
   fi
   out="$(python3 "$SCRIPT_DIR/quarantine_rename.py" remove "$entry" "$inv" "$binding" 2>/dev/null)" || out=kept:check-failed
   lease_registry_mutation_lock_exit || true

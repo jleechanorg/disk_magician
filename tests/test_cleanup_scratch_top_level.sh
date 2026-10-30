@@ -149,6 +149,14 @@ git -C "$SCRATCH_ROOT/secret-dirty-repo" add tracked.txt 2>/dev/null
 old_stamp "$SCRATCH_ROOT/secret-dirty-repo" 72
 out="$(run bash "$SCRIPT" --dry-run 2>&1)"
 check "the secret-like verdict is what C14 reports first" "kept:secret-like $SCRATCH_ROOT/secret-dirty-repo" "$out"
+# A preview must not advertise a removal that --clean would refuse: the override
+# path runs the repository provenance re-check in preview mode too.
+out_prev="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --dry-run 2>&1)"
+if printf '%s' "$out_prev" | grep -qF "would-remove:kept:secret-like $SCRATCH_ROOT/secret-dirty-repo"; then
+  bad "preview never advertises the dirty-repo removal" "$(printf '%s' "$out_prev" | tr '\n' ' ' | cut -c1-200)"
+else
+  ok "preview never advertises the dirty-repo removal"
+fi
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 [[ -d "$SCRATCH_ROOT/secret-dirty-repo" ]] && ok "unpushed work survives the secret-like override" || bad "unpushed work survives the secret-like override" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
 
