@@ -164,6 +164,48 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir=SCRATCH) as t
     assert partial_lock_bytes(quarantined) == {"pid": b"2147483647\n", "acquired_at": b""}
     print("PASS: packaged diskm dispatcher recovers the same exact partial-lock form")
 
+    # Reproduced 2026-10-30: the canonical writer died after creating pid and
+    # before writing it, leaving a lone EMPTY pid and no acquired_at. Neither
+    # recovery path accepted that shape, so every lease write and every C14
+    # removal failed with kept:lease-busy for the life of the lock.
+    def make_pid_only_lock(target_state: Path, content: bytes = b"") -> Path:
+        lock = make_lock(target_state)
+        (lock / "pid").write_bytes(content)
+        os.chmod(lock / "pid", 0o644)
+        return lock
+
+    pid_only_state = Path(temp) / "pid-only-state"
+    pid_only_state.mkdir()
+    os.chmod(pid_only_state, 0o755)
+    lock = make_pid_only_lock(pid_only_state)
+    os.utime(lock, (old, old))
+    result = run(pid_only_state, 0, "--registry")
+    receipt = json.loads(result.stdout)
+    quarantined = Path(receipt["quarantined"])
+    assert receipt["shape"] == "partial_pid_only_empty"
+    assert (quarantined / "pid").read_bytes() == b""
+    assert not (quarantined / "acquired_at").exists()
+    print("PASS: old empty-pid-only registry lock is quarantined with a receipt")
+
+    fresh_pid_only_state = Path(temp) / "fresh-pid-only-state"
+    fresh_pid_only_state.mkdir()
+    os.chmod(fresh_pid_only_state, 0o755)
+    make_pid_only_lock(fresh_pid_only_state)
+    result = run(fresh_pid_only_state, 1, "--registry")
+    assert "too recent" in result.stderr
+    assert (fresh_pid_only_state / "worktree_leases" / ".owner-mutation.reuse-lock").is_dir()
+    print("PASS: fresh empty-pid-only lock remains fail-closed")
+
+    filled_pid_only_state = Path(temp) / "filled-pid-only-state"
+    filled_pid_only_state.mkdir()
+    os.chmod(filled_pid_only_state, 0o755)
+    lock = make_pid_only_lock(filled_pid_only_state, b"2147483647\n")
+    os.utime(lock, (old, old))
+    result = run(filled_pid_only_state, 1, "--registry")
+    assert "not empty" in result.stderr
+    assert (lock / "pid").read_bytes() == b"2147483647\n"
+    print("PASS: non-empty pid-only lock is refused and preserved")
+
     lock = make_partial_lock(state, os.getpid())
     os.utime(lock, (old, old))
     expected_bytes = partial_lock_bytes(lock)
@@ -268,7 +310,10 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir=SCRATCH) as t
     (lock / "pid").write_text("123\n")
     old = time.time() - 7200
     os.utime(lock, (old, old))
-    assert "unexpected metadata entries" in run(state, 1, "--registry").stderr and lock.is_dir()
+    # A lone pid with content is not a writer shape; the refusal now names that
+    # shape instead of the generic "unexpected metadata entries", and the lock
+    # is still preserved.
+    assert "pid-only metadata is not empty" in run(state, 1, "--registry").stderr and lock.is_dir()
     shutil.rmtree(lock)
     print("PASS: nonempty lock remains fail-closed")
 
