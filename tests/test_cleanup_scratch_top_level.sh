@@ -112,14 +112,18 @@ kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
 check "open file keeps the candidate" "kept:open-file" "$out"
 [[ -d "$SCRATCH_ROOT/open-file" ]] && ok "open-file dir preserved" || bad "open-file dir preserved"
 
-echo "Test 7: a content keep needs the approval flag, and only the two named classes are overridden"
+echo "Test 7: both override classes need the approval flag and are logged"
 make_tree content-keep 72 '.env.example' >/dev/null
+make_tree secret-keep 73 '.env' >/dev/null
 out="$(run bash "$SCRIPT" --dry-run 2>&1)"
-check "content keep is reported as kept without approval" "kept:unproven-content" "$out"
-[[ -d "$SCRATCH_ROOT/content-keep" ]] && ok "unapproved content-keep dir preserved" || bad "unapproved content-keep dir preserved"
+check "unproven-content is reported for this candidate" "kept:unproven-content $SCRATCH_ROOT/content-keep" "$out"
+check "secret-like is reported for this candidate" "kept:secret-like $SCRATCH_ROOT/secret-keep" "$out"
+[[ -d "$SCRATCH_ROOT/content-keep" && -d "$SCRATCH_ROOT/secret-keep" ]] && ok "both unapproved content keeps preserved" || bad "both unapproved content keeps preserved"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 [[ ! -e "$SCRATCH_ROOT/content-keep" ]] && ok "approved override removes the unproven-content tree" || bad "approved override removes the unproven-content tree" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
-check "the override is recorded in the deletion log" "scratch-prune:kept:unproven-content" "$(cat "$LOG" 2>/dev/null)"
+[[ ! -e "$SCRATCH_ROOT/secret-keep" ]] && ok "approved override removes the secret-like tree" || bad "approved override removes the secret-like tree" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
+check "the unproven-content override is logged" "scratch-prune:kept:unproven-content" "$(cat "$LOG" 2>/dev/null)"
+check "the secret-like override is logged" "scratch-prune:kept:secret-like" "$(cat "$LOG" 2>/dev/null)"
 
 echo "Test 8: other content keeps are never overridden"
 make_tree dirty-repo 72 >/dev/null
@@ -129,7 +133,24 @@ git -C "$SCRATCH_ROOT/dirty-repo" add tracked.txt 2>/dev/null
 old_stamp "$SCRATCH_ROOT/dirty-repo" 72
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 [[ -d "$SCRATCH_ROOT/dirty-repo" ]] && ok "a non-listed keep survives the approval flag" || bad "a non-listed keep survives the approval flag"
-check "the kept reason is reported" "kept:" "$out"
+check "the dirty-repo candidate keeps with its own reason" "kept:dirty $SCRATCH_ROOT/dirty-repo" "$out"
+if grep -qF "$SCRATCH_ROOT/dirty-repo" "$LOG" 2>/dev/null; then
+  bad "no deletion-log row for the dirty repo"
+else
+  ok "no deletion-log row for the dirty repo"
+fi
+
+echo "Test 8b: a secret-like tree that is also a dirty repository is never overridden"
+mkdir -p "$SCRATCH_ROOT/secret-dirty-repo"
+git -C "$SCRATCH_ROOT/secret-dirty-repo" init -q 2>/dev/null
+printf 'placeholder\n' > "$SCRATCH_ROOT/secret-dirty-repo/.env"
+printf 'change\n' > "$SCRATCH_ROOT/secret-dirty-repo/tracked.txt"
+git -C "$SCRATCH_ROOT/secret-dirty-repo" add tracked.txt 2>/dev/null
+old_stamp "$SCRATCH_ROOT/secret-dirty-repo" 72
+out="$(run bash "$SCRIPT" --dry-run 2>&1)"
+check "the secret-like verdict is what C14 reports first" "kept:secret-like $SCRATCH_ROOT/secret-dirty-repo" "$out"
+out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
+[[ -d "$SCRATCH_ROOT/secret-dirty-repo" ]] && ok "unpushed work survives the secret-like override" || bad "unpushed work survives the secret-like override" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
 
 echo "Test 9: the per-run cap is honoured"
 mkdir -p "$T/fakebin"

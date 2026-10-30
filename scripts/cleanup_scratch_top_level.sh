@@ -186,12 +186,24 @@ verdict_and_maybe_remove() {
   if [[ -n "$override" ]]; then
     # C14 writes --inventory-out only after it approves, so an overridden content
     # keep has no inventory yet. Build it with the same canonical builder the
-    # verdict uses; quarantine_rename.py remove then re-verifies every entry's
-    # identity before unlinking and fails closed on any mismatch.
-    if ! python3 "$SCRIPT_DIR/c14_probe.py" inventory "$entry" "$inv" >/dev/null 2>&1; then
+    # verdict uses. c14_probe.py inventory reports success on stdout ("ok"), not
+    # through its exit status, so the output is what is checked.
+    if [[ "$(python3 "$SCRIPT_DIR/c14_probe.py" inventory "$entry" "$inv" 2>/dev/null)" != ok ]]; then
       lease_registry_mutation_lock_exit || true
       rm -f "$inv" "$binding"
       echo kept:check-failed
+      return 0
+    fi
+    # The secrets probe short-circuits BEFORE c14_repos_ok inside the verdict, so
+    # a tree that is both secret-like and a dirty/unpushed repository returns
+    # kept:secret-like without ever having its repositories checked. An override
+    # must therefore re-run the repository provenance gate explicitly, or it
+    # would delete unpushed work.
+    local repo_reason
+    if ! repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
+      lease_registry_mutation_lock_exit || true
+      rm -f "$inv" "$binding"
+      echo "${repo_reason:-kept:check-failed}"
       return 0
     fi
   fi
