@@ -39,6 +39,12 @@ budget_pct="${VOLUME_RECLAIM_BUDGET_PCT:-90}"
 [[ "$budget_pct" =~ ^[0-9]+$ ]] || budget_pct=90
 (( budget_pct < 10 )) && budget_pct=10
 (( budget_pct > 90 )) && budget_pct=90
+# Stop rate: deletion continues until usage drops to this pct of quota. Default 80
+# preserves the tested contract; lower it only as an explicit operator action.
+target_pct="${VOLUME_RECLAIM_TARGET_PCT:-80}"
+[[ "$target_pct" =~ ^[0-9]+$ ]] || target_pct=80
+(( target_pct < 10 )) && target_pct=10
+(( target_pct > 90 )) && target_pct=90
 if (( pct < budget_pct )); then
  below_trigger=true
  TOP_REASON="below-trigger"
@@ -99,7 +105,7 @@ while IFS=$'\t' read -r newest entry; do
  read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; break; }
  [[ "$now_quota" -eq "$quota" ]] || { TOP_REASON=quota-changed; measurement_error=1; break; }
  AFTER_PCT=$((now_used * 100 / now_quota))
- (( now_used * 100 > now_quota * 80 )) || break
+ (( now_used * 100 > now_quota * target_pct )) || break
 done < <(
  # Age floor: previously a hard 48 h, which matched nothing (only 0.084 GiB of the
  # volume was older than 48 h on 2026-10-29) so the walk never produced a candidate.
@@ -122,7 +128,13 @@ done < <(
   else
    continue
   fi
-  newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)" || continue
+  # Prefer --strict (no symlinks in the tree); fall back to the best-effort walk for
+  # trees that contain symlinks, which is most moved-/tmp scratch. The fallback reads
+  # file mtimes only (find without -L never traverses a link), so a symlink cannot
+  # drag the age bound outside the entry. Strict alone rejected every large orphan:
+  # relocated-tmp (32 GiB) and test-loc-review (6 GiB) both returned rc=1.
+  newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)" \
+    || newest="$(scratch_budget_content_mtime "$entry" 2>/dev/null)" || continue
   [[ "$newest" =~ ^[0-9]+$ ]] || continue
   (( $(date +%s) - newest > floor_min * 60 )) || continue
   printf '%s\t%s\n' "$newest" "$entry"
