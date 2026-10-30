@@ -954,8 +954,20 @@ def newest_mtime(inv_file):
 
 SECRET_RE = re.compile(r"^(?:\.env.*|.*\.(?:pem|key|p12|pfx)(?:\.map)?|id_(?:rsa|ed25519|ecdsa|dsa).*|\.npmrc|\.netrc|.*credential(?!services)(?-i:s|S(?![a-z])).*|secrets.*)$", re.I)
 _TEMPLATE = (".example", ".template", ".sample", ".dist", ".default")
+# A template marker can appear BEFORE the secret-looking suffix, e.g.
+# test-credentials-template.env or config_template.secrets.yaml. Such a file is a
+# template by intent and carries no secret material.
+_TEMPLATE_MARKERS = ("-template", "_template", ".template", "-example", "_example",
+                     "-sample", "_sample", "-dist", "_dist", "-default", "_default")
+# A stem that is exactly one of these stays secret-like for every extension.
+_SECRET_EXACT = {"credentials", "credential", "secrets", "secret"}
 _DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "third-party"}
 _SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cpp", "m", "mm", "swift", "go", "rs", "java", "kt", "rb", "php", "cs"}
+# Code/document extensions used ONLY by the compound-identifier rule below. They are
+# deliberately NOT added to _SRC_EXTS, because _SRC_EXTS also grants dependency-dir
+# exemption and the name table forbids that for e.g. node_modules/pkg/credentials.sh
+# and no pyc/pyo exemption outside a dependency dir.
+_CODE_EXTS = _SRC_EXTS | {"sh", "bash", "zsh", "md", "rst", "html", "htm", "css", "svg"}
 _NATIVE = (".h", ".hpp", ".pyc", ".so", ".a", ".dylib")
 
 _CA_BUNDLES = ("cacert.pem", "ca-bundle.pem", "ca-certificates.pem")
@@ -976,7 +988,7 @@ def exempt_name(path):
     .npmrc, .netrc are exempt only as templates. Everything else stays secret-like."""
     parts = path.split("/")
     n = parts[-1].lower()
-    if n.endswith(_TEMPLATE):
+    if n.endswith(_TEMPLATE) or any(m in n for m in _TEMPLATE_MARKERS):
         return True
     if _never(n):
         # A vendored public CA bundle is dependency material, not a secret. Every other
@@ -984,6 +996,15 @@ def exempt_name(path):
         # under node_modules/venv/site-packages.
         return bool(_DEP_DIRS & {c.lower() for c in parts[:-1]}) and _public_ca_bundle(n)
     if not SECRET_RE.fullmatch(parts[-1]):
+        return True
+    # Source code is not secret material — but only when the secret word is part of a
+    # longer identifier. A stem that IS the secret word (credentials.py, secrets.rb,
+    # node_modules/pkg/credentials.sh, secrets.md) stays secret-like, which is what
+    # tests/secret_name_table.tsv asserts for 23 rows. A compound name such as
+    # mvp_site/openrouter_credentials.py is code, and inside a git repo it never reaches
+    # this gate at all (that scan lists only ignored/untracked files), so without this a
+    # non-repo scratch copy of a checkout is unremovable.
+    if "." in n and n.rpartition(".")[2] in _CODE_EXTS and n.split(".")[0] not in _SECRET_EXACT:
         return True
     comps = {c.lower() for c in parts[:-1]}
     dep = bool(_DEP_DIRS & comps)
