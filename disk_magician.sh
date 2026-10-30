@@ -66,6 +66,8 @@ Commands:
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
+  scratch-prune          Reclaim top-level Scratch-volume artifacts behind the C14 lease/live-cwd/
+                         open-file gates (--clean needs SCRATCH_TOP_LEVEL_APPROVED=1).
   cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.
   cleanup-antigravity-brain Prune old Antigravity brain dirs, idle worktrees, .backup leftovers.
   cleanup-claude-state   Run the guarded Claude state maintenance helper.
@@ -576,6 +578,9 @@ case "$CMD" in
     ;;
   cleanup_tmp|cleanup-tmp)
     "$SCRIPT_DIR/scripts/cleanup_tmp.sh" "$@"
+    ;;
+  scratch_prune|scratch-prune)
+    "$SCRIPT_DIR/scripts/cleanup_scratch_top_level.sh" "$@"
     ;;
   cleanup_apfs_snapshots|cleanup-apfs-snapshots)
     "$SCRIPT_DIR/scripts/cleanup_apfs_snapshots.sh" "$@"
