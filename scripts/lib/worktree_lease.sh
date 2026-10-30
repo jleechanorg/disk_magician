@@ -523,13 +523,24 @@ lease_reuse_lock_recover() {
 
 # One trap scope covers acquisition and synchronous protected work. Signals are
 # deferred until children finish; command substitutions cannot clean parent locks.
+#
+# Restoring a handler re-activates it. In a nested substitution (BASH_SUBSHELL>=2)
+# the saved string came from an ancestor that is still running, so re-activating it
+# runs the caller's EXIT action twice: once in the substitution and once in its real
+# owner. Reproduced 2026-10-30 (disk_magician-p39b): cleanup_tmp finished its own
+# cleanup_tmp receipt inside `$(scratch_budget_quarantine_remove ...)`, then its real
+# finish failed with "no active matching run found" and the pass exited 1. Depth 1
+# keeps a caller's own fork-local handlers working (see
+# test_lease_recover_lock.py caller-subshell-traps); only the duplicated EXIT action
+# is suppressed deeper, where its owner still exists to run it exactly once.
 _lease_scope_restore_traps() {
-    local signal saved
+    local signal saved depth="${BASH_SUBSHELL:-0}"
     for signal in HUP INT TERM EXIT; do
         case "$signal" in
             HUP) saved="$_lease_scope_hup" ;; INT) saved="$_lease_scope_int" ;;
             TERM) saved="$_lease_scope_term" ;; EXIT) saved="$_lease_scope_exit" ;;
         esac
+        if [[ "$signal" == EXIT && "$depth" =~ ^[0-9]+$ ]] && (( depth > 1 )); then trap - EXIT; continue; fi
         if [[ -n "$saved" ]]; then eval "$saved"; else trap - "$signal"; fi
     done
 }
@@ -560,10 +571,13 @@ _lease_scope_cleanup() {
 _lease_scope_status() { return "$1"; }
 
 _lease_scope_on_exit() {
-    local rc="$1" action
+    local rc="$1" action depth="${BASH_SUBSHELL:-0}"
     _lease_scope_is_owner || return "$rc"
     _lease_scope_cleanup
     _lease_scope_restore_traps
+    # The caller's EXIT action belongs to the shell that installed it; running it
+    # from a subshell would duplicate work that shell still owns.
+    if [[ "$depth" =~ ^[0-9]+$ ]] && (( depth > 0 )); then return "$rc"; fi
     if [[ -n "$_lease_scope_exit" ]]; then
         eval "set -- ${_lease_scope_exit#trap -- }"
         action="$1"
