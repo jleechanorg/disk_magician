@@ -425,11 +425,25 @@ python3 "$REPO_ROOT/scripts/c14_probe.py" archive-receipt "$T8_SOURCE" "$T8_ENTR
 mv "$T8_SOURCE" "$T8_ENTRY"
 set_old_mtime "$T8_ENTRY"
 make_find_shim "$TMP_ROOT/t8-bin" "$T8_PRIVATE_TMP" "$T8_TMP"
+# This cursor test exercises archive cleanup, not an unprovisioned real
+# Scratch volume. Model the independent pressure step as a verified healthy
+# no-op, while requiring the exact policy args and a fresh correlated receipt.
+cat > "$T8_BIN/volume-timeout" <<'VOLUME_FIXTURE'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 8 && "$1" == --signal=TERM && "$2" == --kill-after=2s && "$3" == *s && "$4" == */disk_magician.sh && "$5 $6 $7 $8" == 'volume reclaim --available-floor --clean' ]] || exit 99
+printf '%s\n' "$5 $6 $7 $8" >> "$T8_VOLUME_LOG"
+run_id="$(python3 "$T8_RECEIPT_HELPER" begin --job volume_reclaim --trigger "$DISK_MAGICIAN_TRIGGER" --precondition '{"policy":"available-floor","available_bytes":53687091200}')"
+python3 "$T8_RECEIPT_HELPER" finish --job volume_reclaim --run-id "$run_id" --outcome success_noop --reason available-floor --trigger "$DISK_MAGICIAN_TRIGGER" --candidates '{"aged_scanned":0,"removed":0,"ballast_restore_failures":0,"top_kept_reason":"available-floor"}' --postcondition '{"available_bytes":53687091200,"available_floor_bytes":53687091200,"target_reached":true}' >/dev/null
+printf 'skipped:available-floor:53687091200\n'
+VOLUME_FIXTURE
+chmod +x "$T8_BIN/volume-timeout"
 T8_OUT="$TMP_ROOT/t8-first.out"
 if run_capture "$T8_OUT" env -i HOME="$TMP_ROOT/t8-home" PATH="$TMP_ROOT/t8-bin:/usr/bin:/bin" \
   TMPDIR="$TEST_FIXTURE_ROOT" LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T8_ARCHIVE" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T8_PRIVATE_TMP" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T8_TMP" \
+  DISK_MAGICIAN_VOLUME_TIMEOUT_BIN="$T8_BIN/volume-timeout" T8_VOLUME_LOG="$TMP_ROOT/t8-volume.log" T8_RECEIPT_HELPER="$REPO_ROOT/scripts/job_receipt.py" \
   bash "$REPO_ROOT/scripts/tmp_scratch_sweep.sh" --clean --deadline-at 0 --cursor "$T8_CURSOR"; then T8_RC=0; else T8_RC=$?; fi
 assert_rc "Test 8: expired deadline exits cleanly" 0 "$T8_RC"
 assert_exists "Test 8: deferred archive remains" "$T8_ENTRY/payload.bin"
@@ -460,6 +474,7 @@ if run_capture "$T8_OUT" env -i HOME="$TMP_ROOT/t8-home" PATH="$TMP_ROOT/t8-bin:
   TMPDIR="$TEST_FIXTURE_ROOT" LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T8_ARCHIVE" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_CURSOR_DEBUG=1 DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T8_PRIVATE_TMP" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T8_TMP" \
+  DISK_MAGICIAN_VOLUME_TIMEOUT_BIN="$T8_BIN/volume-timeout" T8_VOLUME_LOG="$TMP_ROOT/t8-volume.log" T8_RECEIPT_HELPER="$REPO_ROOT/scripts/job_receipt.py" \
   bash "$REPO_ROOT/scripts/tmp_scratch_sweep.sh" --clean --deadline-at "$T8_DEADLINE" --cursor "$T8_CURSOR"; then T8_RC=0; else T8_RC=$?; fi
 if [[ "$T8_RC" -ne 0 ]]; then sed 's/^/        | /' "$T8_OUT"; fi
 assert_rc "Test 8: resume exits cleanly" 0 "$T8_RC"
@@ -479,6 +494,43 @@ import json,sys
 v=json.load(open(sys.argv[1])); raise SystemExit(0 if v["next_index"]==1 else 1)
 PY
 then record_pass "Test 8: cursor advances after unit completion"; else record_fail "Test 8: cursor advances after unit completion" "cursor index did not advance"; fi
+
+if [[ "$(grep -c '^volume reclaim --available-floor --clean$' "$TMP_ROOT/t8-volume.log")" == 2 ]]; then
+  record_pass "Test 8: both wrapper calls retain pressure-gated volume policy"
+else
+  record_fail "Test 8: both wrapper calls retain pressure-gated volume policy" "missing exact policy invocation"
+fi
+
+# Separate real pressure-dispatch regression: unavailable mount must remain
+# an error, never be hidden by the healthy-noop fixture used above.
+T8_UNAVAILABLE_ROOT="$TMP_ROOT/t8-unavailable-volume"
+mkdir -p "$T8_UNAVAILABLE_ROOT"
+printf 'preserve\n' > "$T8_UNAVAILABLE_ROOT/sentinel"
+cat > "$T8_BIN/unavailable-volume" <<'UNAVAILABLE_FIXTURE'
+#!/usr/bin/env bash
+case "$*" in
+ 'volume ballast recover scratch') exit 0 ;;
+ 'volume path scratch --for-reclaim') printf '%s\n' "$T8_UNAVAILABLE_ROOT" ;;
+ "volume verify-mount $T8_UNAVAILABLE_ROOT") exit 75 ;;
+ *) exit 99 ;;
+esac
+UNAVAILABLE_FIXTURE
+chmod +x "$T8_BIN/unavailable-volume"
+T8_OUT="$TMP_ROOT/t8-unavailable.out"
+if run_capture "$T8_OUT" env -i HOME="$TMP_ROOT/t8-unavailable-home" PATH="$T8_BIN:/usr/bin:/bin" \
+  TMPDIR="$TEST_FIXTURE_ROOT" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+  DISK_MAGICIAN_DISKM_BIN="$T8_BIN/unavailable-volume" T8_UNAVAILABLE_ROOT="$T8_UNAVAILABLE_ROOT" \
+  bash "$REPO_ROOT/disk_magician.sh" volume reclaim --available-floor --clean; then T8_RC=0; else T8_RC=$?; fi
+assert_rc "Test 8: unavailable pressure mount fails closed" 75 "$T8_RC"
+assert_exists "Test 8: unavailable mount sentinel is preserved" "$T8_UNAVAILABLE_ROOT/sentinel"
+if python3 - "$TMP_ROOT/t8-unavailable-home/.disk_magician_state/receipts/volume_reclaim.json" <<'PYUNAVAILABLE'
+import json,sys
+receipt=json.load(open(sys.argv[1]))
+assert not receipt['active']
+assert receipt['last_terminal']['outcome']=='error'
+assert receipt['last_terminal']['reason']=='unavailable'
+PYUNAVAILABLE
+then record_pass "Test 8: unavailable pressure mount has terminal error receipt"; else record_fail "Test 8: unavailable pressure mount has terminal error receipt" "incorrect pressure failure receipt"; fi
 
 echo "Test 9: --large --clean refuses to archive secret-like or non-purgeable repo candidates (bead disk_magician-archive-same-volume-regrowth-03bn)"
 T9_PRIVATE_TMP="$TMP_ROOT/t9-private-tmp"

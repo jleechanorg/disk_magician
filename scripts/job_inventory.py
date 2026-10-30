@@ -265,6 +265,8 @@ def _owners(label: str, args: list[Any]) -> tuple[str, str]:
         receipt = "main_sweeper.sh"
     elif label == "com.jleechanorg.disk-magician-pressure-sweep" or "pressure_sweep.sh" in joined or "pressure-sweep" in args:
         receipt = "pressure_sweep.sh"
+    elif label == "com.jleechanorg.disk-magician-scratch-pressure" or ("volume" in args and "reclaim" in args):
+        receipt = "volume_reclaim.sh"
     elif label == "com.jleechanorg.disk-magician-tmp-scratch" or "tmp_scratch_sweep.sh" in joined or "tmp-scratch-sweep" in args:
         receipt = "tmp_scratch_sweep.sh"
     else:
