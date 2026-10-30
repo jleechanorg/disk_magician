@@ -540,7 +540,7 @@ _lease_scope_restore_traps() {
             HUP) saved="$_lease_scope_hup" ;; INT) saved="$_lease_scope_int" ;;
             TERM) saved="$_lease_scope_term" ;; EXIT) saved="$_lease_scope_exit" ;;
         esac
-        if [[ "$signal" == EXIT && "$depth" =~ ^[0-9]+$ ]] && (( depth > 1 )); then trap - EXIT; continue; fi
+        if [[ "$signal" == EXIT ]] && (( ! ${_lease_scope_exit_owned:-1} )); then continue; fi
         if [[ -n "$saved" ]]; then eval "$saved"; else trap - "$signal"; fi
     done
 }
@@ -598,6 +598,13 @@ _lease_lock_scope() {
     local _lease_scope_pid="${BASHPID:-}"
     [[ -n "$_lease_scope_pid" ]] || _lease_scope_pid="$(exec /bin/sh -c 'echo "$PPID"')" || return 1
     local _lease_scope_hup _lease_scope_int _lease_scope_term _lease_scope_exit
+    # A subshell shows its ancestor's EXIT trap string but does not own it: bash
+    # reports the string and will not run it. Installing it back would hand the
+    # ancestor's handler to this subshell's exit. Leaving EXIT untouched keeps an
+    # inherited handler inactive and a handler this subshell installed for itself
+    # active, which is what both contracts need.
+    local _lease_scope_exit_owned=1
+    if [[ "${BASH_SUBSHELL:-0}" =~ ^[0-9]+$ ]] && (( BASH_SUBSHELL > 0 )); then _lease_scope_exit_owned=0; fi
     local _lease_scope_signals="" _lease_scope_rc=0 _lease_scope_signal _lease_scope_target
     local -a _lease_scope_paths=() _lease_scope_ids=() _lease_scope_stamps=() _lease_scope_complete=()
     # First trap mutation discards Bash's inactive inherited trap strings.
@@ -620,7 +627,7 @@ _lease_lock_scope() {
         # shellcheck disable=SC2064 # bind the signal name; defer the assignment
         trap "_lease_scope_signals+=' $_lease_scope_signal'" "$_lease_scope_signal"
     done
-    trap '_lease_scope_on_exit $?' EXIT
+    (( _lease_scope_exit_owned )) && trap '_lease_scope_on_exit $?' EXIT
     # A bare caller under set -e must still reach cleanup on protected failure.
     if "$@"; then _lease_scope_rc=0; else _lease_scope_rc=$?; fi
     [[ -z "$_lease_scope_signals" ]] || _lease_scope_rc=1
