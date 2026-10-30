@@ -958,8 +958,16 @@ _DEP_DIRS = {"node_modules", "venv", ".venv", "site-packages", "pods", "third-pa
 _SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cpp", "m", "mm", "swift", "go", "rs", "java", "kt", "rb", "php", "cs"}
 _NATIVE = (".h", ".hpp", ".pyc", ".so", ".a", ".dylib")
 
+_CA_BUNDLES = ("cacert.pem", "ca-bundle.pem", "ca-certificates.pem")
+
 def _never(n):
     return n.startswith((".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")) or n.endswith((".pem", ".key", ".p12", ".pfx")) or n in (".npmrc", ".netrc")
+
+def _public_ca_bundle(n):
+    """Public trust-store bundle shipped by vendored tooling (e.g. pip's vendored certifi).
+    Never private key material: only these exact well-known public CA filenames qualify, so a
+    deploy.pem or any *.key/.p12/.pfx stays secret-like wherever it lives."""
+    return n in _CA_BUNDLES
 
 def exempt_name(path):
     """Single owner of the secret-name exemption (relative path; used by every secret gate).
@@ -971,7 +979,10 @@ def exempt_name(path):
     if n.endswith(_TEMPLATE):
         return True
     if _never(n):
-        return False
+        # A vendored public CA bundle is dependency material, not a secret. Every other
+        # never-exempt name stays secret-like regardless of directory, including a .pem
+        # under node_modules/venv/site-packages.
+        return bool(_DEP_DIRS & {c.lower() for c in parts[:-1]}) and _public_ca_bundle(n)
     if not SECRET_RE.fullmatch(parts[-1]):
         return True
     comps = {c.lower() for c in parts[:-1]}
