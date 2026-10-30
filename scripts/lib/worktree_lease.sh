@@ -733,6 +733,34 @@ lease_registry_mutation_lock_exit() {
     lease_reuse_lock_release "$(lease_dir)/.owner-mutation"
 }
 
+# lease_registration_failure_reason — one-line evidence for why a lease write
+# could not take the registry mutation lock, or empty when that lock was not the
+# blocker. A long-running sweeper can hold the lock for minutes, and the plain
+# "lease write failed" message hid both the holder and the 3600 s recovery window
+# (disk_magician-p39b; reproduced 2026-10-30: the installed cleanup_dev_caches.sh
+# held it for >5 min while worktree-new reported only "lease write failed").
+# Read-only: stale-lock recovery stays with lease_reuse_lock_recover.
+LEASE_REGISTRATION_FAILURE=""
+lease_registration_failure_reason() {
+    local lock pid stamp now age ttl remaining alive
+    lock="$(lease_dir)/.owner-mutation.reuse-lock"
+    [[ -d "$lock" && ! -L "$lock" ]] || return 0
+    pid="$(cat "$lock/pid" 2>/dev/null || true)"
+    stamp="$(cat "$lock/acquired_at" 2>/dev/null || true)"
+    now="$(date +%s 2>/dev/null || echo 0)"
+    ttl="${LEASE_REUSE_LOCK_TTL_SEC:-3600}"
+    age="unknown"; remaining="unknown"; alive="unknown"
+    if [[ "$stamp" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then
+        age=$(( now - stamp ))
+        remaining=$(( ttl - age ))
+    fi
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        if _reuse_lock_dead_pid "$pid"; then alive=false; else alive=true; fi
+    fi
+    printf 'registry-lock-busy holder_pid=%s holder_alive=%s held_s=%s ttl_remaining_s=%s\n' \
+        "${pid:-unknown}" "$alive" "$age" "$remaining"
+}
+
 # lease_restore_reuse_claim <lease_file> — restore the exact saved lease only
 # while this file still carries our pending claim.
 lease_restore_reuse_claim() { _lease_lock_scope release _lease_restore_reuse_claim "$@"; }
@@ -786,7 +814,10 @@ __lease_emit_json() {
     local lease="$1" wt="$2" repo="$3" branch="$4" creator="$5" pending="$6"
     local pid="$7" ep="$8" comm="$9" admin_id="${10}" admin_birth="${11}" ttl="${12}"
     local lock_mode="${21:-}"
-    lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
+    lease_mutation_lock_enter "$lease" "$lock_mode" || {
+        LEASE_REGISTRATION_FAILURE="$(lease_registration_failure_reason)"
+        return 1
+    }
     python3 - "$lease" "$wt" "$repo" "$branch" "$creator" "$pending" \
         "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${@:13}" <<'PY'
 import json, os, sys, tempfile

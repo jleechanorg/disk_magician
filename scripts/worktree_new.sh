@@ -611,7 +611,7 @@ wtn_main() {
     # (stdout must stay exactly the path).
     if declare -F lease_write >/dev/null 2>&1; then
         lease_write "$path" "$repo" "$branch" "worktree-new" >/dev/null 2>&1 ||
-            echo "worktree-new: lease write failed: $path" >&2
+            echo "worktree-new: lease write failed: $path${LEASE_REGISTRATION_FAILURE:+ ($LEASE_REGISTRATION_FAILURE)}" >&2
     fi
 }
 
