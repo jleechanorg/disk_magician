@@ -32,7 +32,20 @@ run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICI
 [[ -n "$run_id" ]] || { echo kept:receipt-begin-failed; exit 1; }
 below_trigger=false
 crossed_trigger=false
-if (( used * 100 < quota * 90 )); then
+# Trigger on a size budget rather than a 90%-of-quota trip. The old gate could not fire
+# until 180 GiB of a 200 GiB quota, which on 2026-10-29 meant 0 deletions while the host
+# sat at 97%. Budget is env-tunable and clamped; 70% of 200 GiB = 140 GiB.
+budget_pct="${VOLUME_RECLAIM_BUDGET_PCT:-90}"
+[[ "$budget_pct" =~ ^[0-9]+$ ]] || budget_pct=90
+(( budget_pct < 10 )) && budget_pct=10
+(( budget_pct > 90 )) && budget_pct=90
+# Stop rate: deletion continues until usage drops to this pct of quota. Default 80
+# preserves the tested contract; lower it only as an explicit operator action.
+target_pct="${VOLUME_RECLAIM_TARGET_PCT:-80}"
+[[ "$target_pct" =~ ^[0-9]+$ ]] || target_pct=80
+(( target_pct < 10 )) && target_pct=10
+(( target_pct > 90 )) && target_pct=90
+if (( pct < budget_pct )); then
  below_trigger=true
  TOP_REASON="below-trigger"
 fi
@@ -92,16 +105,40 @@ while IFS=$'\t' read -r newest entry; do
  read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; break; }
  [[ "$now_quota" -eq "$quota" ]] || { TOP_REASON=quota-changed; measurement_error=1; break; }
  AFTER_PCT=$((now_used * 100 / now_quota))
- (( now_used * 100 > now_quota * 80 )) || break
+ (( now_used * 100 > now_quota * target_pct )) || break
 done < <(
+ # Age floor: previously a hard 48 h, which matched nothing (only 0.084 GiB of the
+ # volume was older than 48 h on 2026-10-29) so the walk never produced a candidate.
+ # Default 2 h, clamped to [60, 43200] minutes.
+ floor_min="${VOLUME_RECLAIM_FLOOR_MINUTES:-2880}"
+ [[ "$floor_min" =~ ^[0-9]+$ ]] || floor_min=2880
+ (( floor_min < 60 )) && floor_min=60
+ (( floor_min > 43200 )) && floor_min=43200
+ # Candidate shape: the original depth-3 '<id>/(evidence|build)/<id>' set caps any fix
+ # at 24.82 GiB of a 141 GiB volume. Top-level allocations become eligible only when
+ # explicitly enabled, because they include live producer roots (e.g. a 20 GiB
+ # checkouts dir); preview first, then opt in.
+ include_top="${VOLUME_RECLAIM_INCLUDE_TOPLEVEL:-0}"
  while IFS= read -r -d '' entry; do
   rel="${entry#"$root"/}"
-  [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]] || continue
-  newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)" || continue
+  if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then
+   :
+  elif [[ "$include_top" == 1 && "$rel" =~ ^[^./][^/]*$ ]]; then
+   :
+  else
+   continue
+  fi
+  # Prefer --strict (no symlinks in the tree); fall back to the best-effort walk for
+  # trees that contain symlinks, which is most moved-/tmp scratch. The fallback reads
+  # file mtimes only (find without -L never traverses a link), so a symlink cannot
+  # drag the age bound outside the entry. Strict alone rejected every large orphan:
+  # relocated-tmp (32 GiB) and test-loc-review (6 GiB) both returned rc=1.
+  newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)" \
+    || newest="$(scratch_budget_content_mtime "$entry" 2>/dev/null)" || continue
   [[ "$newest" =~ ^[0-9]+$ ]] || continue
-  (( $(date +%s) - newest > 172800 )) || continue
+  (( $(date +%s) - newest > floor_min * 60 )) || continue
   printf '%s\t%s\n' "$newest" "$entry"
- done < <(find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null) | sort -n -k1,1
+ done < <(find "$root" -mindepth 1 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null) | sort -n -k1,1
 )
 fi
 # Every clean pass ends by running the idempotent reserve ensure. It physically
