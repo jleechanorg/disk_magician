@@ -224,6 +224,9 @@ def config(config_path: str | Path | None = None) -> dict[str, Any]:
     encryption = volumes.get("encryption")
     if encryption != "none" and not (encryption == "apfs-passphrase" and sys.platform == "darwin"):
         raise ValueError("unsupported v1 encryption mode")
+    fuse2fs_fakeroot = volumes.get("fuse2fs_fakeroot", False)
+    if not isinstance(fuse2fs_fakeroot, bool):
+        raise ValueError("fuse2fs_fakeroot must be a boolean")
 
     scratch = classes["scratch"]
     if not isinstance(scratch, dict):
@@ -1074,7 +1077,10 @@ def linux_mount_cmd(name: str, foreground: bool = False) -> int:
         if underlay.st_uid != os.geteuid() or not stat.S_ISDIR(underlay.st_mode):
             return 75
         os.fchmod(mount_fd, 0o700)
-        args = ["fuse2fs", str(image), str(mountpoint), "-o", "noatime"]
+        mount_options = ["noatime"]
+        if settings.get("fuse2fs_fakeroot", False):
+            mount_options.append("fakeroot")
+        args = ["fuse2fs", str(image), str(mountpoint), "-o", ",".join(mount_options)]
         if foreground:
             args.append("-f")
         command, env = linux_command_env(args)
