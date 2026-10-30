@@ -55,7 +55,20 @@ run() { # run with a clean env so ambient settings cannot leak in
 }
 mkdir -p "$T/home"
 
+# Each test gets its own Scratch root: the cleaner rescans every candidate on
+# each run, so sharing one root makes the suite quadratic and risks the runner's
+# per-suite time cap under concurrency.
+ROOT_SEQ=0
+use_root() {
+  ROOT_SEQ=$(( ROOT_SEQ + 1 ))
+  SANDBOX="$T/sandbox/r${ROOT_SEQ}"
+  SCRATCH_ROOT="$SANDBOX/scratch"
+  mkdir -p "$SCRATCH_ROOT"
+}
+use_root
+
 echo "Test 1: dry-run lists candidates and deletes nothing"
+use_root
 make_tree plain-old >/dev/null
 out="$(run bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
 [[ "$rc" == 0 ]] && ok "dry-run exits 0" || bad "dry-run exits 0" "rc=$rc"
@@ -85,6 +98,7 @@ check "deletion log records the removal" "plain-old" "$(cat "$LOG" 2>/dev/null)"
 check "deletion log names the cleaner" "scratch-prune" "$(cat "$LOG" 2>/dev/null)"
 
 echo "Test 4: the 48 h floor is enforced and cannot be lowered"
+use_root
 make_tree young-dir 4 >/dev/null
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 check "young dir kept" "kept:recent-activity" "$out"
@@ -93,6 +107,7 @@ out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --min-hours 2
 [[ -d "$SCRATCH_ROOT/young-dir" ]] && ok "--min-hours 2 is clamped up to 48 h" || bad "--min-hours 2 is clamped up to 48 h"
 
 echo "Test 5: a live owner lease keeps the dir even with approval"
+use_root
 make_tree live-lease 72 >/dev/null
 sleep 300 & lease_pid=$!
 env DISK_MAGICIAN_STATE_DIR="$STATE" bash -c '
@@ -104,6 +119,7 @@ check "live lease keeps the candidate" "kept:live-owner" "$out"
 [[ -d "$SCRATCH_ROOT/live-lease" ]] && ok "live-lease dir preserved" || bad "live-lease dir preserved"
 
 echo "Test 6: an open file keeps the dir even with approval"
+use_root
 make_tree open-file 72 >/dev/null
 ( exec 3<"$SCRATCH_ROOT/open-file/payload.bin"; sleep 60 ) & holder=$!
 sleep 1
@@ -113,6 +129,7 @@ check "open file keeps the candidate" "kept:open-file" "$out"
 [[ -d "$SCRATCH_ROOT/open-file" ]] && ok "open-file dir preserved" || bad "open-file dir preserved"
 
 echo "Test 7: both override classes need the approval flag and are logged"
+use_root
 make_tree content-keep 72 '.env.example' >/dev/null
 make_tree secret-keep 73 '.env' >/dev/null
 out="$(run bash "$SCRIPT" --dry-run 2>&1)"
@@ -126,6 +143,7 @@ check "the unproven-content override is logged" "scratch-prune:kept:unproven-con
 check "the secret-like override is logged" "scratch-prune:kept:secret-like" "$(cat "$LOG" 2>/dev/null)"
 
 echo "Test 8: other content keeps are never overridden"
+use_root
 make_tree dirty-repo 72 >/dev/null
 git -C "$SCRATCH_ROOT/dirty-repo" init -q 2>/dev/null
 printf 'change\n' > "$SCRATCH_ROOT/dirty-repo/tracked.txt"
@@ -141,6 +159,7 @@ else
 fi
 
 echo "Test 8b: a secret-like tree that is also a dirty repository is never overridden"
+use_root
 mkdir -p "$SCRATCH_ROOT/secret-dirty-repo"
 git -C "$SCRATCH_ROOT/secret-dirty-repo" init -q 2>/dev/null
 printf 'placeholder\n' > "$SCRATCH_ROOT/secret-dirty-repo/.env"
@@ -161,6 +180,7 @@ out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 [[ -d "$SCRATCH_ROOT/secret-dirty-repo" ]] && ok "unpushed work survives the secret-like override" || bad "unpushed work survives the secret-like override" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
 
 echo "Test 9: the per-run cap is honoured"
+use_root
 mkdir -p "$T/fakebin"
 cat > "$T/fakebin/du" <<'EOF'
 #!/usr/bin/env bash
@@ -185,16 +205,19 @@ removed_cap=0; kept_cap=0
   bad "exactly one 2 GiB candidate fits a 3 GiB cap" "removed=$removed_cap kept=$kept_cap"
 
 echo "Test 10: a synthetic root outside the test sandbox is refused"
+use_root
 out="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" TMPDIR="$T" \
   DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="$SCRATCH_ROOT" bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "root override outside the sandbox is refused" || bad "root override outside the sandbox is refused" "rc=$rc"
 check "refusal explains the sandbox requirement" "test sandbox" "$out"
 
 echo "Test 11: root '/' is refused"
+use_root
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE=/ bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "root '/' refused" || bad "root '/' refused" "rc=$rc"
 
 echo "Test 12: a symlinked candidate is never followed"
+use_root
 make_tree link-target 72 >/dev/null
 ln -s "$SCRATCH_ROOT/link-target" "$SCRATCH_ROOT/link-candidate"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
