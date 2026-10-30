@@ -1079,8 +1079,13 @@ _process_repo_local_worktrees() {
                 [[ "$age_days" =~ ^(0|[1-9][0-9]*)$ ]] || age_days='?'
                 age_label="${age_days}d"
             fi
-            size_kb_val=$(size_kb "$abs_path")
-            size_fmt=$(fmt_kb "$size_kb_val")
+            # _lease_lock_scope runs its callee inside `if "$@"; then`, which
+            # suspends `set -e` for the whole call tree, so a failing size probe
+            # does not abort on its own. size_kb inherits du's status through
+            # `set -o pipefail`; propagate it explicitly or the pass reports
+            # success with an unmeasurable row (test T8).
+            size_kb_val=$(size_kb "$abs_path") || return $?
+            size_fmt=$(fmt_kb "$size_kb_val") || return $?
         fi
         branch_label="${branch:-detached}"
         wrh_reason=""
@@ -1234,7 +1239,7 @@ _process_repo_local_worktrees() {
         esac
     done <<<"$porcelain"
     if [[ "$ACT_STOP" == 0 ]]; then
-        flush_block
+        flush_block || return $?
     else
         # A cooperative deadline stop is a normal partial pass, not an error.
         return 0
