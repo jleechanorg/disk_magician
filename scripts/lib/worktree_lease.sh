@@ -555,7 +555,7 @@ _lease_scope_is_internal_trap() {
 _lease_scope_is_owner() {
     local pid="${BASHPID:-}"
     [[ -n "${_lease_scope_owner:-}" ]] || return 1
-    [[ -n "$pid" ]] || pid="$(exec sh -c 'echo "$PPID"')" || return 1
+    [[ -n "$pid" ]] || pid="$(exec /bin/sh -c 'echo "$PPID"')" || return 1
     [[ "$pid" == "${_lease_scope_pid:-}" ]]
 }
 
@@ -596,7 +596,7 @@ _lease_lock_scope() {
     [[ -z "${_lease_scope_owner:-}" ]] || _lease_scope_inherited=1
     local _lease_scope_owner="${BASHPID:-$$}:$BASH_SUBSHELL"
     local _lease_scope_pid="${BASHPID:-}"
-    [[ -n "$_lease_scope_pid" ]] || _lease_scope_pid="$(exec sh -c 'echo "$PPID"')" || return 1
+    [[ -n "$_lease_scope_pid" ]] || _lease_scope_pid="$(exec /bin/sh -c 'echo "$PPID"')" || return 1
     local _lease_scope_hup _lease_scope_int _lease_scope_term _lease_scope_exit
     local _lease_scope_signals="" _lease_scope_rc=0 _lease_scope_signal _lease_scope_target
     local -a _lease_scope_paths=() _lease_scope_ids=() _lease_scope_stamps=() _lease_scope_complete=()
@@ -631,7 +631,7 @@ _lease_lock_scope() {
     fi
     _lease_scope_owner=""
     _lease_scope_target="${BASHPID:-}"
-    [[ -n "$_lease_scope_target" ]] || _lease_scope_target="$(exec sh -c 'echo "$PPID"')"
+    [[ -n "$_lease_scope_target" ]] || _lease_scope_target="$(exec /bin/sh -c 'echo "$PPID"')"
     for _lease_scope_signal in $_lease_scope_signals; do kill -s "$_lease_scope_signal" "$_lease_scope_target"; done
     return "$_lease_scope_rc"
 }
