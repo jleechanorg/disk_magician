@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset BASH_ENV || true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d /tmp/dm-volume-reclaim.XXXXXX)"
 if [[ "$(uname -s)" == Darwin ]]; then
