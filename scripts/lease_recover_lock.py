@@ -144,6 +144,16 @@ def lock_snapshot(lock_fd: int) -> dict:
     names = sorted(os.listdir(lock_fd))
     if not names:
         return {"shape": "empty", "members": {}}
+    if names == ["pid"]:
+        # The canonical writer creates pid and writes it before creating
+        # acquired_at, so a lone EMPTY pid is the same interruption class as an
+        # empty lock: nothing identifies a holder and no timestamp exists yet.
+        # A non-empty lone pid is not a writer shape and stays refused.
+        info, content = read_metadata(lock_fd, "pid")
+        if content:
+            raise ValueError("registry lock pid-only metadata is not empty")
+        return {"shape": "partial_pid_only_empty",
+                "members": {"pid": {"identity": stat_identity(info), "bytes": content}}}
     if names != ["acquired_at", "pid"]:
         raise ValueError("registry lock has unexpected metadata entries")
     members = {}

@@ -457,6 +457,7 @@ WORKTREES_REMOVED=0
 ENTRIES_REMOVED=0
 TOTAL_KB=0
 
+task_scratch_run() {
 for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
   [[ -d "$root" ]] || continue
   while IFS= read -r -d '' dir; do
@@ -670,3 +671,5 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
 done
 
 log "$(dry_prefix)Done. Containers removed: ${CONTAINERS_REMOVED}  Containers kept: ${CONTAINERS_KEPT}  Worktrees removed: ${WORKTREES_REMOVED}  Entries removed: ${ENTRIES_REMOVED}  Total freed: ${TOTAL_KB} KB (~$(( TOTAL_KB / 1024 )) MB)"
+}
+_lease_lock_scope release task_scratch_run

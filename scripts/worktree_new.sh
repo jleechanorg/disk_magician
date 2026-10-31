@@ -372,7 +372,8 @@ wtn_reuse_unlock() {
 }
 
 
-wtn_reuse() {
+wtn_reuse() { _lease_lock_scope release _wtn_reuse "$@"; }
+_wtn_reuse() {
     local repo="$1" branch="$2" base="$3" base_tip file candidate old tip lease_hash lease_repo owner state verdict remote_tip admin_id admin_birth checkout_dev checkout_ino
     wtn_branch_exists "$repo" "$branch" && return 1
     wtn_remote_branch_exists "$repo" "$branch" && return 1
@@ -610,7 +611,7 @@ wtn_main() {
     # (stdout must stay exactly the path).
     if declare -F lease_write >/dev/null 2>&1; then
         lease_write "$path" "$repo" "$branch" "worktree-new" >/dev/null 2>&1 ||
-            echo "worktree-new: lease write failed: $path" >&2
+            echo "worktree-new: lease write failed: $path${LEASE_REGISTRATION_FAILURE:+ ($LEASE_REGISTRATION_FAILURE)}" >&2
     fi
 }
 
