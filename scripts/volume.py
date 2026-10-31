@@ -236,6 +236,10 @@ def config(config_path: str | Path | None = None) -> dict[str, Any]:
     require_positive(scratch.get("quota_gb"), "scratch quota")
     if scratch.get("backend", "fuse") not in {"fuse", "native"}:
         raise ValueError("unsupported Linux Scratch backend")
+    if "trigger_pct" in scratch:
+        require_positive(scratch["trigger_pct"], "scratch trigger percent")
+    if "target_pct" in scratch:
+        require_positive(scratch["target_pct"], "scratch target percent")
     return volumes
 
 
@@ -1885,7 +1889,8 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
                 return 75
         if production:
             usage = shutil.disk_usage(scratch["mountpoint"])
-            if (usage.total - usage.free) * 100 >= scratch["quota_gb"] * GIB * 90 or not ballast_ok(scratch["mountpoint"]):
+            trigger_pct = scratch.get("trigger_pct", 70)
+            if (usage.total - usage.free) * 100 >= scratch["quota_gb"] * GIB * trigger_pct or not ballast_ok(scratch["mountpoint"]):
                 return 75
         unit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         for target, content, old_content in units:

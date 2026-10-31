@@ -120,7 +120,7 @@ echo '{"state_repo_path": "'$HOME'/.disk_magician_backup"}' > ~/.config/disk-mag
 - 🗑️ **Temporary & Cache Purge**: Safely removes stale git clones, debug logs, and build/package manager caches older than a configurable threshold.
 - 🧰 **Large Cleanup Sweep**: `clean-all` can preview or apply large tmp, Docker, Ollama, and Xcode cleanup with explicit gates for destructive paths.
 - 📦 **Automated Snapshot Backups**: Self-configures a local and remote backup repository (`disk_backup`) and registers launchd/cron schedules to push snapshot JSON updates every 30 minutes.
-- 🛡️ **Optional Quota-Bounded Scratch Volume**: Partition and provision a dedicated, quota-bounded Scratch volume (`/Volumes/diskm-scratch` on macOS APFS, `~/Scratch` on Linux ext4) via `diskm setup --scratch [--quota-gb 200]`. Isolates disposable build artifacts, test scratch, and evidence with automatic trimming (90% → 80%) while protecting a 64 MiB emergency ballast and 48-hour recency.
+- 🛡️ **Optional Quota-Bounded Scratch Volume**: Partition and provision a dedicated, quota-bounded Scratch volume (`/Volumes/diskm-scratch` on macOS APFS, `~/Scratch` on Linux ext4) via `diskm setup --scratch [--quota-gb 200]`. Isolates disposable build artifacts, test scratch, and evidence with automatic trimming (70% → 50%) while protecting a 64 MiB emergency ballast and 48-hour recency.
 
 ---
 

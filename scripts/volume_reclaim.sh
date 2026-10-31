@@ -22,6 +22,29 @@ if [[ $rc -ne 0 || ! -d "$root" ]]; then echo skipped:unavailable; exit 0; fi
 before="$(status_json)" || { echo skipped:measurement-unavailable; exit 0; }
 read -r used quota < <(usage_pair "$before" 2>/dev/null) || { echo skipped:measurement-unavailable; exit 0; }
 pct=$((used * 100 / quota))
+trigger_pct="${DISK_MAGICIAN_SCRATCH_TRIGGER_PCT:-}"
+target_pct="${DISK_MAGICIAN_SCRATCH_TARGET_PCT:-}"
+if [[ -z "$trigger_pct" || -z "$target_pct" ]]; then
+ read -r cfg_trig cfg_targ < <(python3 -c '
+import json, os, sys
+try:
+    import resolve_config
+    cfg_path = os.environ.get("DISK_MAGICIAN_CONFIG") or resolve_config.resolve()
+    doc = json.loads(open(cfg_path).read())
+    scratch = doc.get("volumes", {}).get("classes", {}).get("scratch", {})
+    trig = scratch.get("trigger_pct", 70)
+    targ = scratch.get("target_pct", 50)
+    print(trig, targ)
+except Exception:
+    print(70, 50)
+' 2>/dev/null || echo "70 50")
+ trigger_pct="${trigger_pct:-$cfg_trig}"
+ target_pct="${target_pct:-$cfg_targ}"
+fi
+if ! [[ "$trigger_pct" =~ ^[0-9]+$ && "$target_pct" =~ ^[0-9]+$ ]] || (( trigger_pct <= 0 || target_pct <= 0 || target_pct >= trigger_pct || trigger_pct > 100 )); then
+ trigger_pct=70
+ target_pct=50
+fi
 reserve_before="$(reserve_available "$before" 2>/dev/null)" || reserve_before=0
 reserve_before_json=false
 [[ "$reserve_before" == 1 ]] && reserve_before_json=true
@@ -32,7 +55,7 @@ run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICI
 [[ -n "$run_id" ]] || { echo kept:receipt-begin-failed; exit 1; }
 below_trigger=false
 crossed_trigger=false
-if (( used * 100 < quota * 90 )); then
+if (( used * 100 < quota * trigger_pct )); then
  below_trigger=true
  TOP_REASON="below-trigger"
 fi
@@ -92,7 +115,7 @@ while IFS=$'\t' read -r newest entry; do
  read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; break; }
  [[ "$now_quota" -eq "$quota" ]] || { TOP_REASON=quota-changed; measurement_error=1; break; }
  AFTER_PCT=$((now_used * 100 / now_quota))
- (( now_used * 100 > now_quota * 80 )) || break
+ (( now_used * 100 > now_quota * target_pct )) || break
 done < <(
  while IFS= read -r -d '' entry; do
   rel="${entry#"$root"/}"
@@ -125,12 +148,12 @@ if [[ "$clean" == true ]]; then
  if (( ! measurement_error )); then AFTER_PCT=$((now_used * 100 / now_quota)); fi
  # Usage can cross the trigger during reserve maintenance; the final high-water
  # measurement, not the first, decides whether below-trigger is truthful.
- if (( ! measurement_error )) && [[ "$below_trigger" == true ]] && (( now_used * 100 >= quota * 90 )); then
+ if (( ! measurement_error )) && [[ "$below_trigger" == true ]] && (( now_used * 100 >= quota * trigger_pct )); then
   crossed_trigger=true; TOP_REASON=trim-target-not-reached
-  echo "trim_target_not_reached before_bytes=$used after_bytes=$now_used quota_bytes=$quota target_pct=80"
+  echo "trim_target_not_reached before_bytes=$used after_bytes=$now_used quota_bytes=$quota target_pct=$target_pct"
  fi
- if (( ! measurement_error && now_used * 100 > quota * 80 )) && [[ "$below_trigger" != true ]]; then
-  echo "trim_target_not_reached before_bytes=$used after_bytes=$now_used quota_bytes=$quota target_pct=80"
+ if (( ! measurement_error && now_used * 100 > quota * target_pct )) && [[ "$below_trigger" != true ]]; then
+  echo "trim_target_not_reached before_bytes=$used after_bytes=$now_used quota_bytes=$quota target_pct=$target_pct"
  fi
  if (( BALLAST_RESTORE_FAILURES > 0 )); then TOP_REASON=ballast-restore-failed; echo kept:ballast-restore-failed; fi
 fi
@@ -151,8 +174,8 @@ reason=dry-run
 if [[ "$below_trigger" == true ]]; then reason=below-trigger; fi
 if [[ "$clean" == true ]]; then
  outcome=success; reason="$TOP_REASON"
- if (( trim_failed || measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$crossed_trigger" == true ]]; then outcome=partial; reason=trim-target-not-reached; elif [[ "$below_trigger" == true && "$trim_done" == 1 ]]; then outcome=success; reason=host-trimmed; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( now_used * 100 <= quota * 80 )); then outcome=success; else outcome=partial; fi
- if (( ! measurement_error )) && [[ "$below_trigger" != true ]] && ! python3 - "$AGED" "$REMOVED" "$TOP_REASON" "$used" "$now_used" "$quota" <<'PYREC'
+ if (( trim_failed || measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$crossed_trigger" == true ]]; then outcome=partial; reason=trim-target-not-reached; elif [[ "$below_trigger" == true && "$trim_done" == 1 ]]; then outcome=success; reason=host-trimmed; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( now_used * 100 <= quota * target_pct )); then outcome=success; else outcome=partial; fi
+ if (( ! measurement_error )) && [[ "$below_trigger" != true ]] && ! python3 - "$AGED" "$REMOVED" "$TOP_REASON" "$used" "$now_used" "$quota" "$target_pct" <<'PYREC'
 import json,os,sys,tempfile
 from datetime import datetime,timezone
 from pathlib import Path
@@ -163,8 +186,8 @@ try:
  if not isinstance(data,dict) or not isinstance(data.get("runs",[]),list): raise ValueError("invalid history")
 except Exception as e:
  print(f"reclaim_runs.json unreadable; preserving: {e}",file=sys.stderr); raise SystemExit(1)
-before,after,quota=map(int,sys.argv[4:7])
-data.setdefault("runs",[]).append({"at":datetime.now(timezone.utc).isoformat(),"quota_used_before_pct":before*100//quota,"quota_used_after_pct":after*100//quota,"allocated_bytes_before":before,"allocated_bytes_after":after,"quota_bytes":quota,"aged_scanned":int(sys.argv[1]),"removed":int(sys.argv[2]),"target_pct":80,"target_reached":after*100<=quota*80,"top_kept_reason":sys.argv[3]})
+before,after,quota,targ_pct=map(int,sys.argv[4:8])
+data.setdefault("runs",[]).append({"at":datetime.now(timezone.utc).isoformat(),"quota_used_before_pct":before*100//quota,"quota_used_after_pct":after*100//quota,"allocated_bytes_before":before,"allocated_bytes_after":after,"quota_bytes":quota,"aged_scanned":int(sys.argv[1]),"removed":int(sys.argv[2]),"target_pct":targ_pct,"target_reached":after*100<=quota*targ_pct,"top_kept_reason":sys.argv[3]})
 data["runs"]=data["runs"][-2:]
 fd,tmp=tempfile.mkstemp(dir=state,prefix=".reclaim_runs.",suffix=".tmp")
 with os.fdopen(fd,"w") as f:
@@ -174,7 +197,7 @@ PYREC
  then outcome=error; reason=history-write-failed; fi
 fi
 candidates="{\"aged_scanned\":$AGED,\"removed\":$REMOVED,\"ballast_restore_failures\":$BALLAST_RESTORE_FAILURES,\"top_kept_reason\":\"$TOP_REASON\"}"
-if (( measurement_error )); then post="{\"allocated_bytes_after\":null,\"quota_bytes\":$quota,\"target_reached\":null,\"reserve_available_before\":$reserve_before_json,\"reserve_available_after\":null}"; else post="{\"allocated_bytes_after\":$now_used,\"quota_bytes\":$quota,\"target_reached\":$(( now_used * 100 <= quota * 80 )),\"reserve_available_before\":$reserve_before_json,\"reserve_available_after\":$reserve_after_json}"; fi
+if (( measurement_error )); then post="{\"allocated_bytes_after\":null,\"quota_bytes\":$quota,\"target_reached\":null,\"reserve_available_before\":$reserve_before_json,\"reserve_available_after\":null}"; else post="{\"allocated_bytes_after\":$now_used,\"quota_bytes\":$quota,\"target_reached\":$(( now_used * 100 <= quota * target_pct )),\"reserve_available_before\":$reserve_before_json,\"reserve_available_after\":$reserve_after_json}"; fi
 if ! python3 "$receipt" finish --job volume_reclaim --run-id "$run_id" --outcome "$outcome" --reason "$reason" --candidates "$candidates" --precondition "$precondition" --postcondition "$post" >/dev/null; then
  echo kept:receipt-finish-failed >&2; exit 1
 fi
