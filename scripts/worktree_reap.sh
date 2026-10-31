@@ -323,7 +323,8 @@ verdict_for() {
     fi
     printf '%s\n' "$verdict"
 }
-process_lease() {
+process_lease() { _lease_lock_scope release _process_lease "$@"; }
+_process_lease() {
     local file="$1" real owner repo branch since quiet verdict reuse_state
     [[ -e "$file" ]] || return 0
     expired && return 1

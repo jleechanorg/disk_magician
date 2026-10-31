@@ -5,9 +5,12 @@
 #     ACT_DEFERRED_COUNT increments, removed_count does not)
 #   - an early checkpoint error still closes the begun govern receipt (EXIT path)
 set -euo pipefail
+export PATH="/usr/bin:/bin:$PATH"
+export BASH_ENV=/dev/null
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d /tmp/cw-c14-deadline.XXXXXX)" || exit 1
-[[ "$TMP" == /tmp/cw-c14-deadline.* && -d "$TMP" && ! -L "$TMP" ]] || exit 1
+SCRATCH_ROOT="${CLAUDE_CODE_TMPDIR:-${DISKM_SCRATCH:-/tmp}}"
+TMP="$(mktemp -d "$SCRATCH_ROOT/cw-c14-deadline.XXXXXX")" || exit 1
+[[ "$TMP" == "$SCRATCH_ROOT"/cw-c14-deadline.* && -d "$TMP" && ! -L "$TMP" ]] || exit 1
 trap 'chmod -R u+rwX "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 HOME_DIR="$TMP/home"
 REPO="$TMP/repo"
@@ -47,7 +50,7 @@ far_deadline="$(python3 -c 'import time; print(time.monotonic()+120)')"
 cursor="$TMP/state/cursor.json"
 HOME="$HOME_DIR" DISK_MAGICIAN_STATE_DIR="$TMP/state" WORKTREE_APPROVED=1 \
   /bin/bash "$SCRIPTS/cleanup_worktrees.sh" --repos "$REPO" --clean \
-  --deadline-at "$far_deadline" --cursor "$cursor" > "$TMP/out" 2>&1
+  --deadline-at "$far_deadline" --cursor "$cursor" > "$TMP/out" 2>&1 || { cat "$TMP/out" >&2; exit 1; }
 
 grep -q -- '--deadline-at' "$C14_LOG"
 echo 'PASS deadline forwarded into the C14 call'
@@ -77,6 +80,15 @@ echo 'PASS receipt counts exactly one deferred unit and zero removals'
 
 # Early checkpoint error: the candidate hook makes the cursor directory
 # unwritable so act_candidate_done fails mid-pass, after begin().
+git -C "$REPO" worktree add -b wt-two "$WORKTREES/wt-two" HEAD >/dev/null
+python3 - "$WORKTREES/wt-two" <<'PY'
+import os, sys, time
+old = time.time() - 8 * 86400
+for base, dirs, files in os.walk(sys.argv[1]):
+    for name in files + dirs:
+        os.utime(os.path.join(base, name), (old, old))
+os.utime(sys.argv[1], (old, old))
+PY
 STATE_ERR="$TMP/state-error"
 cursor_err="$STATE_ERR/cursor.json"
 ro_hook="$TMP/ro-hook.sh"
@@ -93,6 +105,9 @@ HOME="$HOME_DIR" DISK_MAGICIAN_STATE_DIR="$STATE_ERR" DISK_MAGICIAN_UNIT_BUDGET_
 chmod 700 "$STATE_ERR"
 test "$rc" -ne 0
 echo 'PASS early checkpoint error fails the run'
+grep -Fq 'wt-one' "$TMP/out-err"
+! grep -Fq 'wt-two' "$TMP/out-err"
+echo 'PASS checkpoint error stops before the next worktree candidate'
 err_receipt="$(HOME="$HOME_DIR" DISK_MAGICIAN_STATE_DIR="$STATE_ERR" python3 "$SCRIPTS/job_receipt.py" read --job cleanup_worktrees --last)"
 python3 - "$err_receipt" <<'PY'
 import json, sys

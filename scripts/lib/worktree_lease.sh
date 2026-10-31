@@ -171,7 +171,8 @@ lease_resolve_runner_worker() {
 }
 
 # Ensure a CI owner without replacing any existing lease or owners.
-lease_ensure_ci_owner() {
+lease_ensure_ci_owner() { _lease_lock_scope release _lease_ensure_ci_owner "$@"; }
+_lease_ensure_ci_owner() {
     local wt="$1" pid="$2" start="$3" comm="$4" lease admin_id admin_birth ttl rc
     [[ "$pid" =~ ^[1-9][0-9]*$ && "$start" =~ ^-?[0-9]+$ && "$comm" == Runner.Worker ]] || return 2
     lease="$(lease_path_for "$wt")"
@@ -296,7 +297,8 @@ lease_write() {
 
 # lease_owner_add <worktree_path> <pid> <start_epoch> <comm> adds a concrete
 # process incarnation without replacing existing owners.
-lease_owner_add() {
+lease_owner_add() { _lease_lock_scope release _lease_owner_add "$@"; }
+_lease_owner_add() {
     local wt="$1" pid="$2" start="$3" comm="$4" lease
     [[ "$pid" =~ ^[1-9][0-9]*$ && "$start" =~ ^-?[0-9]+$ && -n "$comm" ]] || return 2
     lease="$(lease_path_for "$wt")"
@@ -358,7 +360,8 @@ PY
 # by the guard. rc 1 (nothing written) if the target path already exists, or
 # if a lease already exists for a worktree that still exists on disk.
 # Replaces a lease whose recorded path no longer exists.
-lease_write_pending() {
+lease_write_pending() { _lease_lock_scope release _lease_write_pending "$@"; }
+_lease_write_pending() {
     local target="$1" tsv="$2"
     local pid ep comm lease existing_path
     lease="$(lease_path_for "$target")"
@@ -385,27 +388,14 @@ lease_write_pending() {
 #   <repo> <path> <admin_id> <admin_birth> <checkout_dev> <checkout_ino>
 # Atomically converts the exact observed lease to a pending reuse claim. The
 # previous lease is retained for rollback; an abandoned claim is never reaped.
-lease_claim_reuse() {
+lease_claim_reuse() { _lease_lock_scope release _lease_claim_reuse "$@"; }
+_lease_claim_reuse() {
     local rc=0 lock_mode="${12:-}"
-    if [[ "$lock_mode" == --lock-held ]]; then
-        lease_mutation_lock_enter "$1" "$lock_mode" || return 1
-    else
-        lease_registry_mutation_lock_enter || return 1
-    fi
+    lease_mutation_lock_enter "$1" "$lock_mode" || return 1
     python3 - "$1" "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "$lock_mode" <<'PY' || rc=$?
-import hashlib, json, os, sys, tempfile, time
+import hashlib, json, os, sys, tempfile
 path, expected, branch, tip, owner_tsv, repo, worktree, admin_id, admin_birth, checkout_dev, checkout_ino = sys.argv[1:12]
-lock = path + ".reuse-lock"
-lock_held = sys.argv[12] == "--lock-held"
-if lock_held:
-    if not os.path.isdir(lock): sys.exit(1)
-else:
-    try: os.mkdir(lock)
-    except OSError: sys.exit(1)
 try:
-    if not lock_held:
-        with open(os.path.join(lock, "pid"), "w") as f: f.write(str(os.getpid()))
-        with open(os.path.join(lock, "acquired_at"), "w") as f: f.write(str(int(time.time())))
     with open(path, "rb") as f: raw = f.read()
     if hashlib.sha256(raw).hexdigest() != expected: sys.exit(1)
     old = json.loads(raw)
@@ -441,15 +431,10 @@ try:
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp): os.unlink(tmp)
-finally:
-    if not lock_held:
-        for name in ("pid", "acquired_at"):
-            try: os.unlink(os.path.join(lock, name))
-            except FileNotFoundError: pass
-        try: os.rmdir(lock)
-        except OSError: pass
+except Exception:
+    sys.exit(1)
 PY
-    [[ "$lock_mode" == --lock-held ]] || lease_registry_mutation_lock_exit || rc=$?
+    lease_mutation_lock_exit "$1" "$lock_mode" || rc=$?
     return "$rc"
 }
 
@@ -536,16 +521,191 @@ lease_reuse_lock_recover() {
     return 1
 }
 
-lease_reuse_lock_acquire() {
-    local lease="$1" lock="$1.reuse-lock"
-    if ! mkdir "$lock" 2>/dev/null; then
-        lease_reuse_lock_recover "$lease" || return 1
-        mkdir "$lock" 2>/dev/null || return 1
+# One trap scope covers acquisition and synchronous protected work. Signals are
+# deferred until children finish; command substitutions cannot clean parent locks.
+#
+# Restoring a handler re-activates it. In a nested substitution (BASH_SUBSHELL>=2)
+# the saved string came from an ancestor that is still running, so re-activating it
+# runs the caller's EXIT action twice: once in the substitution and once in its real
+# owner. Reproduced 2026-10-30 (disk_magician-p39b): cleanup_tmp finished its own
+# cleanup_tmp receipt inside `$(scratch_budget_quarantine_remove ...)`, then its real
+# finish failed with "no active matching run found" and the pass exited 1. Depth 1
+# keeps a caller's own fork-local handlers working (see
+# test_lease_recover_lock.py caller-subshell-traps); only the duplicated EXIT action
+# is suppressed deeper, where its owner still exists to run it exactly once.
+_lease_scope_restore_traps() {
+    local signal saved depth="${BASH_SUBSHELL:-0}"
+    for signal in HUP INT TERM EXIT; do
+        case "$signal" in
+            HUP) saved="$_lease_scope_hup" ;; INT) saved="$_lease_scope_int" ;;
+            TERM) saved="$_lease_scope_term" ;; EXIT) saved="$_lease_scope_exit" ;;
+        esac
+        if [[ "$signal" == EXIT ]] && (( ! ${_lease_scope_exit_owned:-1} )); then continue; fi
+        if [[ -n "$saved" ]]; then eval "$saved"; else trap - "$signal"; fi
+    done
+}
+
+_lease_scope_is_internal_trap() {
+    local saved="$1" expected="$2"
+    [[ -n "$saved" ]] || return 1
+    eval "set -- ${saved#trap -- }"
+    [[ "$1" == "$expected" ]]
+}
+
+_lease_scope_is_owner() {
+    local pid="${BASHPID:-}"
+    [[ -n "${_lease_scope_owner:-}" ]] || return 1
+    [[ -n "$pid" ]] || pid="$(exec /bin/sh -c 'echo "$PPID"')" || return 1
+    [[ "$pid" == "${_lease_scope_pid:-}" ]]
+}
+
+_lease_scope_cleanup() {
+    _lease_scope_is_owner || return 0
+    local i
+    for ((i=${#_lease_scope_paths[@]}-1; i>=0; i--)); do
+        [[ -n "${_lease_scope_paths[i]}" ]] || continue
+        lease_reuse_lock_release "${_lease_scope_paths[i]}" || true
+    done
+}
+
+_lease_scope_status() { return "$1"; }
+
+_lease_scope_on_exit() {
+    local rc="$1" action depth="${BASH_SUBSHELL:-0}"
+    _lease_scope_is_owner || return "$rc"
+    _lease_scope_cleanup
+    _lease_scope_restore_traps
+    # The caller's EXIT action belongs to the shell that installed it; running it
+    # from a subshell would duplicate work that shell still owns.
+    if [[ "$depth" =~ ^[0-9]+$ ]] && (( depth > 0 )); then return "$rc"; fi
+    if [[ -n "$_lease_scope_exit" ]]; then
+        eval "set -- ${_lease_scope_exit#trap -- }"
+        action="$1"
+        # Give the caller EXIT action the original status, including nonzero.
+        if _lease_scope_status "$rc"; then eval "$action"; else eval "$action"; fi
     fi
-    echo "$$" > "$lock/pid" 2>/dev/null || true
-    date +%s > "$lock/acquired_at" 2>/dev/null || true
+    return "$rc"
+}
+
+_lease_lock_scope() {
+    local _lease_scope_policy="$1"; shift
+    if _lease_scope_is_owner; then
+        if "$@"; then return 0; else return $?; fi
+    fi
+    local _lease_scope_inherited=0
+    [[ -z "${_lease_scope_owner:-}" ]] || _lease_scope_inherited=1
+    local _lease_scope_owner="${BASHPID:-$$}:$BASH_SUBSHELL"
+    local _lease_scope_pid="${BASHPID:-}"
+    [[ -n "$_lease_scope_pid" ]] || _lease_scope_pid="$(exec /bin/sh -c 'echo "$PPID"')" || return 1
+    local _lease_scope_hup _lease_scope_int _lease_scope_term _lease_scope_exit
+    # A subshell shows its ancestor's EXIT trap string but does not own it: bash
+    # reports the string and will not run it. Installing it back would hand the
+    # ancestor's handler to this subshell's exit. Leaving EXIT untouched keeps an
+    # inherited handler inactive and a handler this subshell installed for itself
+    # active, which is what both contracts need.
+    local _lease_scope_exit_owned=1
+    if [[ "${BASH_SUBSHELL:-0}" =~ ^[0-9]+$ ]] && (( BASH_SUBSHELL > 0 )); then _lease_scope_exit_owned=0; fi
+    local _lease_scope_signals="" _lease_scope_rc=0 _lease_scope_signal _lease_scope_target
+    local -a _lease_scope_paths=() _lease_scope_ids=() _lease_scope_stamps=() _lease_scope_complete=()
+    # First trap mutation discards Bash's inactive inherited trap strings.
+    # SIGKILL cannot be trapped; resetting it changes no signal disposition.
+    trap - KILL
+    _lease_scope_hup="$(trap -p HUP)"; _lease_scope_int="$(trap -p INT)"
+    _lease_scope_term="$(trap -p TERM)"; _lease_scope_exit="$(trap -p EXIT)"
+    if (( _lease_scope_inherited )); then
+        if _lease_scope_is_internal_trap "$_lease_scope_hup" "_lease_scope_signals+=' HUP'"; then _lease_scope_hup=""; fi
+        if _lease_scope_is_internal_trap "$_lease_scope_int" "_lease_scope_signals+=' INT'"; then _lease_scope_int=""; fi
+        if _lease_scope_is_internal_trap "$_lease_scope_term" "_lease_scope_signals+=' TERM'"; then _lease_scope_term=""; fi
+        if _lease_scope_is_internal_trap "$_lease_scope_exit" '_lease_scope_on_exit $?'; then _lease_scope_exit=""; fi
+    fi
+    for _lease_scope_signal in HUP INT TERM; do
+        case "$_lease_scope_signal" in
+            HUP) _lease_scope_target="$_lease_scope_hup" ;; INT) _lease_scope_target="$_lease_scope_int" ;;
+            TERM) _lease_scope_target="$_lease_scope_term" ;;
+        esac
+        case "$_lease_scope_target" in "trap -- '' $_lease_scope_signal"|"trap -- '' SIG$_lease_scope_signal") continue ;; esac
+        # shellcheck disable=SC2064 # bind the signal name; defer the assignment
+        trap "_lease_scope_signals+=' $_lease_scope_signal'" "$_lease_scope_signal"
+    done
+    (( _lease_scope_exit_owned )) && trap '_lease_scope_on_exit $?' EXIT
+    # A bare caller under set -e must still reach cleanup on protected failure.
+    if "$@"; then _lease_scope_rc=0; else _lease_scope_rc=$?; fi
+    [[ -z "$_lease_scope_signals" ]] || _lease_scope_rc=1
+    if [[ "$_lease_scope_policy" != keep || "$_lease_scope_rc" != 0 ]]; then _lease_scope_cleanup; fi
+    _lease_scope_restore_traps
+    if [[ -n "$_lease_scope_signals" && "$_lease_scope_policy" == keep ]]; then
+        _lease_scope_cleanup; _lease_scope_rc=1
+    fi
+    _lease_scope_owner=""
+    _lease_scope_target="${BASHPID:-}"
+    [[ -n "$_lease_scope_target" ]] || _lease_scope_target="$(exec /bin/sh -c 'echo "$PPID"')"
+    for _lease_scope_signal in $_lease_scope_signals; do kill -s "$_lease_scope_signal" "$_lease_scope_target"; done
+    return "$_lease_scope_rc"
+}
+
+lease_reuse_lock_acquire() {
+    _lease_lock_scope keep _lease_reuse_lock_acquire "$@"
+}
+_lease_reuse_lock_acquire() {
+    local lease="$1" lock="$1.reuse-lock" attempt identity slot stamp
+    for attempt in 0 1; do
+        if mkdir "$lock" 2>/dev/null; then break; fi
+        [[ -z "$_lease_scope_signals" && "$attempt" == 0 ]] || return 1
+        lease_reuse_lock_recover "$lease" || return 1
+    done
+    identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(str(s.st_dev)+":"+str(s.st_ino))' "$lock")" || return 1
+    slot=${#_lease_scope_paths[@]}
+    _lease_scope_paths[slot]="$lease"; _lease_scope_ids[slot]="$identity"; _lease_scope_stamps[slot]=""; _lease_scope_complete[slot]=0
+    [[ -z "$_lease_scope_signals" ]] || return 1
+    printf '%s\n' "$_lease_scope_pid" > "$lock/pid" 2>/dev/null || return 1
+    stamp="$(date +%s 2>/dev/null)" || return 1
+    [[ "$stamp" =~ ^[0-9]+$ && -z "$_lease_scope_signals" ]] || return 1
+    _lease_scope_stamps[slot]="$stamp"
+    printf '%s\n' "$stamp" > "$lock/acquired_at" 2>/dev/null || return 1
+    _lease_scope_complete[slot]=1
+    [[ -z "$_lease_scope_signals" ]]
 }
 lease_reuse_lock_release() {
+    local i
+    if _lease_scope_is_owner; then
+        for ((i=${#_lease_scope_paths[@]}-1; i>=0; i--)); do
+            [[ "${_lease_scope_paths[i]}" == "$1" ]] || continue
+            python3 - "$1.reuse-lock" "${_lease_scope_ids[i]}" "$_lease_scope_pid" "${_lease_scope_stamps[i]}" "${_lease_scope_complete[i]}" <<'PYUNLOCK' || return 1
+import os, stat, sys
+path, identity, pid, stamp, complete = sys.argv[1:]
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except FileNotFoundError:
+    sys.exit(0)
+try:
+    st = os.fstat(fd)
+    if f"{st.st_dev}:{st.st_ino}" != identity: sys.exit(1)
+    entries = set(os.listdir(fd))
+    if entries - {"pid", "acquired_at"}: sys.exit(1)
+    if complete == "1" and entries != {"pid", "acquired_at"}: sys.exit(1)
+    for name in os.listdir(fd):
+        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not stat.S_ISREG(st.st_mode): sys.exit(1)
+        item = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        with os.fdopen(item) as f:
+            expected = pid if name == "pid" else stamp
+            allowed = (expected,) if complete == "1" else ("", expected)
+            if f.read().strip() not in allowed: sys.exit(1)
+    for name in ("pid", "acquired_at"):
+        try: os.unlink(name, dir_fd=fd)
+        except FileNotFoundError: pass
+    st = os.lstat(path)
+    if f"{st.st_dev}:{st.st_ino}" != identity: sys.exit(1)
+    os.rmdir(path)
+finally:
+    os.close(fd)
+PYUNLOCK
+            _lease_scope_paths[i]=""
+            return 0
+        done
+        return 1 # borrowed --lock-held locks belong to the enclosing scope
+    fi
+    [[ -z "${_lease_scope_owner:-}" ]] || return 1
     rm -f "$1.reuse-lock/pid" "$1.reuse-lock/acquired_at" 2>/dev/null
     rmdir "$1.reuse-lock" 2>/dev/null
 }
@@ -580,9 +740,38 @@ lease_registry_mutation_lock_exit() {
     lease_reuse_lock_release "$(lease_dir)/.owner-mutation"
 }
 
+# lease_registration_failure_reason — one-line evidence for why a lease write
+# could not take the registry mutation lock, or empty when that lock was not the
+# blocker. A long-running sweeper can hold the lock for minutes, and the plain
+# "lease write failed" message hid both the holder and the 3600 s recovery window
+# (disk_magician-p39b; reproduced 2026-10-30: the installed cleanup_dev_caches.sh
+# held it for >5 min while worktree-new reported only "lease write failed").
+# Read-only: stale-lock recovery stays with lease_reuse_lock_recover.
+LEASE_REGISTRATION_FAILURE=""
+lease_registration_failure_reason() {
+    local lock pid stamp now age ttl remaining alive
+    lock="$(lease_dir)/.owner-mutation.reuse-lock"
+    [[ -d "$lock" && ! -L "$lock" ]] || return 0
+    pid="$(cat "$lock/pid" 2>/dev/null || true)"
+    stamp="$(cat "$lock/acquired_at" 2>/dev/null || true)"
+    now="$(date +%s 2>/dev/null || echo 0)"
+    ttl="${LEASE_REUSE_LOCK_TTL_SEC:-3600}"
+    age="unknown"; remaining="unknown"; alive="unknown"
+    if [[ "$stamp" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]]; then
+        age=$(( now - stamp ))
+        remaining=$(( ttl - age ))
+    fi
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        if _reuse_lock_dead_pid "$pid"; then alive=false; else alive=true; fi
+    fi
+    printf 'registry-lock-busy holder_pid=%s holder_alive=%s held_s=%s ttl_remaining_s=%s\n' \
+        "${pid:-unknown}" "$alive" "$age" "$remaining"
+}
+
 # lease_restore_reuse_claim <lease_file> — restore the exact saved lease only
 # while this file still carries our pending claim.
-lease_restore_reuse_claim() {
+lease_restore_reuse_claim() { _lease_lock_scope release _lease_restore_reuse_claim "$@"; }
+_lease_restore_reuse_claim() {
     local lease="$1" lock_mode="${2:-}"
     lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" <<'PY'
@@ -604,7 +793,8 @@ PY
 
 # lease_mark_reuse_incomplete <lease_file> — preserve old branch/tip and block
 # future claims when recovery could not restore the candidate safely.
-lease_mark_reuse_incomplete() {
+lease_mark_reuse_incomplete() { _lease_lock_scope release _lease_mark_reuse_incomplete "$@"; }
+_lease_mark_reuse_incomplete() {
     local lease="$1" lock_mode="${2:-}"
     lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" <<'PY'
@@ -626,11 +816,15 @@ PY
 
 # _lease_emit_json <lease_file> ... — shared writer. owner fields "-" produce
 # owner: null. Atomic: temp file in the same dir, then os.replace.
-_lease_emit_json() {
+_lease_emit_json() { _lease_lock_scope release __lease_emit_json "$@"; }
+__lease_emit_json() {
     local lease="$1" wt="$2" repo="$3" branch="$4" creator="$5" pending="$6"
     local pid="$7" ep="$8" comm="$9" admin_id="${10}" admin_birth="${11}" ttl="${12}"
     local lock_mode="${21:-}"
-    lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
+    lease_mutation_lock_enter "$lease" "$lock_mode" || {
+        LEASE_REGISTRATION_FAILURE="$(lease_registration_failure_reason)"
+        return 1
+    }
     python3 - "$lease" "$wt" "$repo" "$branch" "$creator" "$pending" \
         "$pid" "$ep" "$comm" "$admin_id" "$admin_birth" "$ttl" "${@:13}" <<'PY'
 import json, os, sys, tempfile
@@ -818,7 +1012,8 @@ PYLEASESTATE
 # rc 1 "no lease" when unleased; rc 1 "not lease owner" when the caller's
 # resolved owner does not match the lease owner (pid plus start epoch), when
 # the lease has no owner, or when the caller has no resolvable owner.
-lease_release() {
+lease_release() { _lease_lock_scope release _lease_release "$@"; }
+_lease_release() {
     local wt="$1" lease tsv pid ep
     lease="$(lease_path_for "$wt")"
     [[ -f "$lease" ]] || { echo "no lease" >&2; return 1; }
@@ -891,7 +1086,8 @@ lease_release_owner_session() {
 
 # _lease_session_release scan|commit <lease> <session> <pid> <epoch> — scan prints
 # one matching owner; commit releases only that owner under the mutation lock.
-_lease_session_release() {
+_lease_session_release() { _lease_lock_scope release __lease_session_release "$@"; }
+__lease_session_release() {
     local mode="$1" p="$2"
     if [[ "$mode" == commit ]]; then lease_mutation_lock_enter "$p" || return 1; fi
     python3 - "$@" <<'PYLEASESESSION'
@@ -940,7 +1136,8 @@ PYLEASESESSION
 }
 
 # lease_set_verdict <lease_file> <verdict> — record the reaper's last verdict.
-lease_set_verdict() {
+lease_set_verdict() { _lease_lock_scope release _lease_set_verdict "$@"; }
+_lease_set_verdict() {
     local lease="$1" verdict="$2" lock_mode="${3:-}" rc
     lease_mutation_lock_enter "$lease" "$lock_mode" || return 1
     python3 - "$lease" "$verdict" <<'PY'
@@ -1003,7 +1200,8 @@ PY
 # ownerless scratch adoption leases written by birth-audit. Never touches
 # worktree/clone/evidence leases, pending leases, owned leases, non-birth-audit
 # leases, symlinks, or hash-mismatched files (fail closed on any ambiguity).
-lease_prune_birth_audit_scratch() {
+lease_prune_birth_audit_scratch() { _lease_lock_scope release _lease_prune_birth_audit_scratch "$@"; }
+_lease_prune_birth_audit_scratch() {
     local ld fp
     ld="$(lease_dir)"
     [[ -d "$ld" && ! -L "$ld" ]] || return 0
@@ -1085,7 +1283,8 @@ lease_add_owner() {
 
 # lease_release_owner_pid <worktree_path> --owner-pid <pid> releases only the
 # lease entry for the exact live process incarnation.
-lease_release_owner_pid() {
+lease_release_owner_pid() { _lease_lock_scope release _lease_release_owner_pid "$@"; }
+_lease_release_owner_pid() {
     local wt="$1" flag="${2:-}" pid="${3:-}" start confirm lease
     [[ $# -eq 3 && "$flag" == --owner-pid && "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
     start="$(_lease_ps_lstart_epoch "$pid")" || { echo "owner identity unavailable: pid=$pid" >&2; return 1; }
