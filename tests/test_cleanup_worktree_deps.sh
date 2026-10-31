@@ -3,7 +3,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SCRIPT_DIR/../scripts/cleanup_worktree_deps.sh"
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d "${TMPDIR:-/tmp}/test-cleanup-wt-deps.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
 ok() { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
@@ -164,7 +164,7 @@ run_clean() {
 
 # 1. live producer lease, no cwd inside the worktree
 fresh_cache_worktree lease-live
-sleep 300 &
+( trap - EXIT; exec /bin/sleep 300 ) &
 live_pid=$!
 env DISK_MAGICIAN_STATE_DIR="$STATE" bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_write "$2" "$2" "" mxhz-fixture --owner-pid "$3" >/dev/null' _ "$REPO" "$T/rootsLease/lease-live" "$live_pid"
 OUT_LEASE="$(run_clean "$T/rootsLease")"
@@ -187,9 +187,9 @@ OUT_NONE="$(run_clean "$T/rootsLease")"
 
 # 4. an exactly-dead owner is provable and does not block
 fresh_cache_worktree lease-dead
-sleep 30 &
+/bin/sh -c 'exit 0' &
 dead_pid=$!
-kill "$dead_pid" 2>/dev/null || true; wait "$dead_pid" 2>/dev/null || true
+wait "$dead_pid" 2>/dev/null || true
 python3 - "$(lease_path "$T/rootsLease/lease-dead")" "$T/rootsLease/lease-dead" "$dead_pid" <<'PY'
 import json, os, sys, time
 lease, wt, pid = sys.argv[1], sys.argv[2], int(sys.argv[3])
