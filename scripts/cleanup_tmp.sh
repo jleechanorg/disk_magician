@@ -460,7 +460,7 @@ path_size_kb() {
   local tbin out rc=0 total
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
   if [[ -n "$tbin" ]]; then
-    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" du -sk "$1" 2>/dev/null)" || rc=$?
+    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" du -sk -x "$1" 2>/dev/null)" || rc=$?
     if (( rc == 124 || rc == 137 )); then
       log "du exceeded ${PROBE_TIMEOUT_SEC}s, size unknown (preserving): $1"
       echo -1
@@ -473,7 +473,7 @@ path_size_kb() {
     fi
   else
     warn_unbounded_probes_once
-    out="$(du -sk "$1" 2>/dev/null)" || rc=$?
+    out="$(du -sk -x "$1" 2>/dev/null)" || rc=$?
   fi
   total="$(awk '$1 ~ /^[0-9]+$/ {f=$1; n=1} END{if (n) print f}' <<<"$out")"
   if [[ -z "$total" ]] && (( rc != 0 )); then
@@ -557,6 +557,11 @@ scan_protected_root_children() {
   fi
   while IFS= read -r -d '' child; do
     base="$(basename "$child")"
+    if is_different_filesystem "$child" "$root"; then
+      log "Skipping mountpoint or foreign filesystem: $child"
+      cleanup_tmp_count_candidate_result "kept:mountpoint"
+      continue
+    fi
     if is_protected_root_child "$base"; then
       log "Skipping protected child of a protected root: $child"
       continue
@@ -583,7 +588,7 @@ scan_protected_root_children() {
     fi
     if [[ "$aged_mode" == true ]]; then
       local special_entries special_rc=0
-      special_entries="$(/usr/bin/find "$child" ! \( -type d -o -type f \) -print -quit 2>/dev/null)" || special_rc=$?
+      special_entries="$(/usr/bin/find "$child" -xdev ! \( -type d -o -type f \) -print -quit 2>/dev/null)" || special_rc=$?
       if (( special_rc != 0 )) || [[ -n "$special_entries" ]]; then
         log "Skipping aged protected-root child with symlink, special, or unreadable entries: $child"
         continue
@@ -603,7 +608,7 @@ scan_protected_root_children() {
     fi
     ARCHIVED_KB=$(( ARCHIVED_KB + kb ))
     DIRS_ARCHIVED=$(( DIRS_ARCHIVED + 1 ))
-  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+  done < <(find "$root" -xdev -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 }
 
 # is_protected_tmp_path <path> — true for a configured protected root and
@@ -673,15 +678,15 @@ has_recent_activity() {
   for pass in under root; do
     if [[ "$pass" == under ]]; then
       if [[ -n "$tbin" ]]; then
-        "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+        "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -xdev -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
       else
-        /usr/bin/find "$dir" -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+        /usr/bin/find "$dir" -xdev -mindepth 1 "${recent_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
       fi
     elif [[ ! -s "$hit_file" ]] && (( rc == 0 )); then
       if [[ -n "$tbin" ]]; then
-        "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -maxdepth 0 "${root_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+        "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" /usr/bin/find "$dir" -xdev -maxdepth 0 "${root_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
       else
-        /usr/bin/find "$dir" -maxdepth 0 "${root_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
+        /usr/bin/find "$dir" -xdev -maxdepth 0 "${root_expr[@]}" -print -quit >"$hit_file" 2>/dev/null || rc=$?
       fi
     fi
   done
@@ -704,7 +709,7 @@ has_recent_activity() {
 has_active_marker() {
   local dir="$1" hit_file
   hit_file="$(mktemp -t disk-magician-marker.XXXXXX)"
-  /usr/bin/find "$dir" -name .in-use -print 2>/dev/null | head -n 1 >"$hit_file" || true
+  /usr/bin/find "$dir" -xdev -name .in-use -print 2>/dev/null | head -n 1 >"$hit_file" || true
   if [[ -s "$hit_file" ]]; then
     rm -f "$hit_file"
     return 0
@@ -979,7 +984,7 @@ has_open_files() {
 # reclaimed.
 archive_classify() {  # <path>: sets _ARCH_CANON/_ARCH_RETENTION; rc 1 on refusal (logged)
   local path="$1" c14_verdict="" secret_out="" secret_rc=0 repo_verdict=""
-  secret_out="$(/usr/bin/find "$path" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+  secret_out="$(/usr/bin/find "$path" -xdev \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
     -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
     -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) ! \( -name '*.pyc' \( -path '*/node_modules/*' -o -path '*/site-packages/*' -o -path '*/venv/*' -o -path '*/.venv/*' \) \) \
     -print -quit 2>/dev/null)" || secret_rc=$?
@@ -1240,11 +1245,11 @@ purge_aged_archives() {
   # directories whose children carry depth-3 origin receipts below.
   while IFS= read -r -d '' d; do
     if [[ ! -e "$d.c14-origin.json" && ! -L "$d.c14-origin.json" ]] &&
-       [[ -n "$(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type f -name '*.c14-origin.json' -print -quit 2>/dev/null || true)" ]]; then
+       [[ -n "$(/usr/bin/find "$d" -xdev -mindepth 1 -maxdepth 1 -type f -name '*.c14-origin.json' -print -quit 2>/dev/null || true)" ]]; then
       continue
     fi
     purge_archive_entry "$d" "$mins" "$retention_hours" "$active_hours" "$max_hours"
-  done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null || true)
+  done < <(/usr/bin/find "$ARCHIVE_ROOT" -xdev -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null || true)
   # Descended container children live at "$ARCHIVE_ROOT/<ts>/<container>/<unit>"
   # and are discovered by their origin receipts, never by blindly walking and
   # deleting container bytes. Each receipt names exactly one candidate unit;
@@ -1259,7 +1264,7 @@ purge_aged_archives() {
     d="${d%.c14-origin.json}"
     [[ -d "$d" && ! -L "$d" ]] || continue
     purge_archive_entry "$d" "$mins" "$retention_hours" "$active_hours" "$max_hours"
-  done < <(/usr/bin/find "$ARCHIVE_ROOT" -mindepth 3 -maxdepth 3 -type f -name '*.c14-origin.json' -print0 2>/dev/null || true)
+  done < <(/usr/bin/find "$ARCHIVE_ROOT" -xdev -mindepth 3 -maxdepth 3 -type f -name '*.c14-origin.json' -print0 2>/dev/null || true)
 }
 
 log "$(dry_prefix)cleanup_tmp.sh starting"
@@ -1278,6 +1283,11 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
 
   # 1. Any directory containing a .git folder and older than GIT_CLONE_MIN
   while IFS= read -r -d '' subdir; do
+    if is_different_filesystem "$subdir" "$tmp_dir"; then
+      log "Skipping mountpoint or foreign filesystem: $subdir"
+      cleanup_tmp_count_candidate_result "kept:mountpoint"
+      continue
+    fi
     [[ -d "$subdir/.git" ]] || continue
     if is_protected_tmp_path "$subdir"; then
       log "Skipping protected root (in PROTECTED_TMP_ROOTS): $subdir"
@@ -1301,11 +1311,16 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
     fi
-  done < <(find "$tmp_dir" -mindepth 1 -maxdepth 2 -type d \
+  done < <(find "$tmp_dir" -xdev -mindepth 1 -maxdepth 2 -type d \
               -mmin "+${GIT_CLONE_MIN}" -print0 2>/dev/null || true)
 
   # 2. agent_prompt_*.txt files older than AGENT_PROMPT_MIN
   while IFS= read -r -d '' f; do
+    if is_different_filesystem "$f" "$tmp_dir"; then
+      log "Skipping mountpoint or foreign filesystem: $f"
+      cleanup_tmp_count_candidate_result "kept:mountpoint"
+      continue
+    fi
     files_completed=0
     local_kb=$(path_size_kb "$f")
     if (( local_kb < 0 )); then
@@ -1334,12 +1349,17 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       TOTAL_KB=$(( TOTAL_KB + local_kb ))
       FILES_DELETED=$(( FILES_DELETED + 1 ))
     fi
-  done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type f \
+  done < <(find "$tmp_dir" -xdev -mindepth 1 -maxdepth 1 -type f \
               -name "agent_prompt_*.txt" \
               -mmin "+${AGENT_PROMPT_MIN}" -print0 2>/dev/null || true)
 
   # 3. cli_validation_gemini_* dirs older than CLI_VALIDATION_MIN
   while IFS= read -r -d '' d; do
+    if is_different_filesystem "$d" "$tmp_dir"; then
+      log "Skipping mountpoint or foreign filesystem: $d"
+      cleanup_tmp_count_candidate_result "kept:mountpoint"
+      continue
+    fi
     if is_protected_tmp_path "$d"; then
       log "Skipping protected root (in PROTECTED_TMP_ROOTS): $d"
       continue
@@ -1350,7 +1370,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
     fi
-  done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d \
+  done < <(find "$tmp_dir" -xdev -mindepth 1 -maxdepth 1 -type d \
               -name "cli_validation_gemini_*" \
               -mmin "+${CLI_VALIDATION_MIN}" -print0 2>/dev/null || true)
 
@@ -1362,6 +1382,11 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
   #      - confirm the parent repo is NOT currently checked out to this worktree
   #      - honor the worktree-pointer mtime + min-size filters
   while IFS= read -r -d '' subdir; do
+    if is_different_filesystem "$subdir" "$tmp_dir"; then
+      log "Skipping mountpoint or foreign filesystem: $subdir"
+      cleanup_tmp_count_candidate_result "kept:mountpoint"
+      continue
+    fi
     # .git must be a regular file (worktree pointer), not a directory
     [[ -f "$subdir/.git" ]] || continue
     if is_protected_tmp_path "$subdir"; then
@@ -1442,7 +1467,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       TOTAL_KB=$(( TOTAL_KB + kb ))
       DIRS_DELETED=$(( DIRS_DELETED + 1 ))
     fi
-  done < <(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d \
+  done < <(find "$tmp_dir" -xdev -mindepth 1 -maxdepth 1 -type d \
               -mmin "+${WORKTREE_POINTER_MIN}" -print0 2>/dev/null || true)
 done
 
@@ -1458,7 +1483,7 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
     log "Skipping OpenCode dylibs: lsof is unavailable, cannot prove files are closed"
   else
     dylib_candidate_file=$(mktemp -t disk-magician-opencode-dylibs.XXXXXX)
-    find "$USER_TMP" -mindepth 1 -maxdepth 1 -type f \
+    find "$USER_TMP" -xdev -mindepth 1 -maxdepth 1 -type f \
       -name '.*.dylib' -print0 2>/dev/null > "$dylib_candidate_file" || true
 
     open_dylibs=""
@@ -1523,7 +1548,7 @@ is_scratch_container() {
   for root in "${SCRATCH_CONTAINER_ROOTS[@]}"; do
     [[ "$base" == "$root" ]] || continue
     [[ -e "$d/.git" || -L "$d/.git" ]] && return 1
-    hit="$(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)"
+    hit="$(/usr/bin/find "$d" -xdev -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)"
     [[ -n "$hit" ]]
     return
   done
@@ -1545,10 +1570,10 @@ container_child_has_protected_repository() {
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
   if [[ -n "$tbin" ]]; then
     "$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" \
-      /usr/bin/find "$child" -name .git -prune -print0 >"$marker_file" 2>/dev/null || rc=$?
+      /usr/bin/find "$child" -xdev -name .git -prune -print0 >"$marker_file" 2>/dev/null || rc=$?
   else
     warn_unbounded_probes_once
-    /usr/bin/find "$child" -name .git -prune -print0 >"$marker_file" 2>/dev/null || rc=$?
+    /usr/bin/find "$child" -xdev -name .git -prune -print0 >"$marker_file" 2>/dev/null || rc=$?
   fi
   if (( rc != 0 )); then
     rm -f "$marker_file"
@@ -1580,6 +1605,12 @@ large_consider_entry() {
   local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0
   local scratch_container=false
   base="$(basename "$d")"
+
+  if is_different_filesystem "$d" "${PRIVATE_TMP_ROOT:-}"; then
+    log "Skipping mountpoint or foreign filesystem: $d"
+    cleanup_tmp_count_candidate_result "kept:mountpoint"
+    return 0
+  fi
 
   case "$base" in
     com.apple.*|system-*|PowerlogHelperd*|systemd-private-*|snap-private-tmp|.X11-unix|.XIM-unix|.ICE-unix|.Test-unix|.font-unix) return 0 ;;
@@ -1655,7 +1686,7 @@ large_consider_entry() {
     log "Descending into scratch container (children evaluated individually): $d"
     while IFS= read -r -d '' child; do
       large_consider_entry "$child" 1 "$min_kb" "$active_hours" "$aged_mode"
-    done < <(/usr/bin/find "$d" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+    done < <(/usr/bin/find "$d" -xdev -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
     return 0
   fi
   if has_recent_activity "$d" "$active_hours" "$aged_mode"; then
@@ -1679,7 +1710,7 @@ large_consider_entry() {
 
   if [[ "$aged_mode" == true ]]; then
     local special_entries special_rc=0
-    special_entries="$(/usr/bin/find "$d" ! \( -type d -o -type f \) -print -quit 2>/dev/null)" || special_rc=$?
+    special_entries="$(/usr/bin/find "$d" -xdev ! \( -type d -o -type f \) -print -quit 2>/dev/null)" || special_rc=$?
     if (( special_rc != 0 )) || [[ -n "$special_entries" ]]; then
       log "Skipping aged tmp dir with symlink, special, or unreadable entries: $d"
       return 0
@@ -1711,13 +1742,18 @@ elif [[ "$INCLUDE_LARGE" == true || "$INCLUDE_AGED" == true ]]; then
     log "Scanning $PRIVATE_TMP_ROOT for large top-level dirs >= ${LARGE_TMP_MIN_KB} KB (active-use window: ${LARGE_TMP_ACTIVE_HOURS}h, protected roots: ${PROTECTED_TMP_ROOTS[*]}, scratch containers: ${SCRATCH_CONTAINER_ROOTS[*]}) ..."
   fi
   while IFS= read -r -d '' d; do
+    if is_different_filesystem "$d" "$PRIVATE_TMP_ROOT"; then
+      log "Skipping mountpoint or foreign filesystem: $d"
+      cleanup_tmp_count_candidate_result "kept:mountpoint"
+      continue
+    fi
     if [[ "$INCLUDE_AGED" == true ]]; then
       large_consider_entry "$d" 0 0 "$AGED_TMP_ACTIVE_HOURS" true
     fi
     if [[ "$INCLUDE_LARGE" == true ]]; then
       large_consider_entry "$d" 0
     fi
-  done < <(find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+  done < <(find "$PRIVATE_TMP_ROOT" -xdev -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 fi
 
 
@@ -1728,6 +1764,11 @@ if [[ "$INCLUDE_AGED" == true && -n "$PRIVATE_TMP_ROOT" ]]; then
     aged_file_age_args=( -mmin "+${aged_file_minutes}" )
   fi
   while IFS= read -r -d '' f; do
+    if is_different_filesystem "$f" "$PRIVATE_TMP_ROOT"; then
+      log "Skipping mountpoint or foreign filesystem: $f"
+      cleanup_tmp_count_candidate_result "kept:mountpoint"
+      continue
+    fi
     [[ -f "$f" && ! -L "$f" ]] || continue
     aged_file_kb=$(path_size_kb "$f")
     if (( aged_file_kb < 0 )); then
@@ -1752,7 +1793,7 @@ if [[ "$INCLUDE_AGED" == true && -n "$PRIVATE_TMP_ROOT" ]]; then
     else
       log "Preserving aged agent prompt (C14 $result): $f"
     fi
-  done < <(/usr/bin/find "$PRIVATE_TMP_ROOT" -mindepth 1 -maxdepth 1 -type f -name 'agent_prompt_*.txt' "${aged_file_age_args[@]}" -print0 2>/dev/null || true)
+  done < <(/usr/bin/find "$PRIVATE_TMP_ROOT" -xdev -mindepth 1 -maxdepth 1 -type f -name 'agent_prompt_*.txt' "${aged_file_age_args[@]}" -print0 2>/dev/null || true)
 fi
 
 # Both modes reconcile their own archive entries. --aged uses its enforced
