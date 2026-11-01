@@ -26,6 +26,8 @@ source "$SCRIPT_DIR/lib/worktree_recency.sh"
 source "$SCRIPT_DIR/lib/lsof_linux.sh"
 # shellcheck source=scripts/lib/ao_worktree_config.sh
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh"
+# shellcheck source=scripts/lib/worktree_lease.sh
+source "$SCRIPT_DIR/lib/worktree_lease.sh"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
@@ -126,6 +128,27 @@ is_live() {
   return 1
 }
 
+# lease_blocks_strip <worktree> — fail closed on any producer lease that is not
+# provably gone. Only a released lease, an exactly-dead owner, or no lease at all
+# permits stripping; an unreadable lease, a live or TTL-expired-but-alive owner,
+# and a failed liveness probe all keep the dependencies. The caller holds the
+# registry mutation lock, so no producer can register a lease concurrently.
+lease_blocks_strip() {
+  local wt="$1" lease state
+  lease="$(lease_path_for "$wt")"
+  [[ -e "$lease" || -L "$lease" ]] || return 1
+  state="$(lease_owner_state "$lease" 2>/dev/null)" || state="unreadable"
+  case "$state" in
+    dead|released|none) return 1 ;;
+    '')
+      echo "  LEASE-KEEP $wt (unreadable)"
+      return 0 ;;
+    *)
+      echo "  LEASE-KEEP $wt ($state)"
+      return 0 ;;
+  esac
+}
+
 stripped_paths="|"
 strip_dir() {
   local wt="$1" dir="$2" kb
@@ -203,6 +226,18 @@ for root in "${ROOTS[@]}"; do
     fi
     if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then continue; fi
     if is_live "$wt"; then continue; fi
+    # A producer can hold a lease on a worktree without keeping a cwd inside it,
+    # so recency and live-cwd are not enough (disk_magician-mxhz). Take the lease
+    # registry lock first: a producer cannot register a lease while this shell
+    # decides and strips, and an unavailable lock keeps the worktree.
+    if ! lease_registry_mutation_lock_enter; then
+      echo "  LEASE-KEEP $wt (registry-lock-busy)"
+      continue
+    fi
+    if lease_blocks_strip "$wt"; then
+      lease_registry_mutation_lock_exit || true
+      continue
+    fi
     [[ -n "$nested_dirs" ]] || nested_dirs="$(nested_cache_dirs "$wt")"
     strip_dir "$wt" "$wt/node_modules"
     for pkg_nm in "$wt"/packages/*/node_modules; do
@@ -214,6 +249,7 @@ for root in "${ROOTS[@]}"; do
     while IFS= read -r nested; do
       [[ -n "$nested" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"
     done <<< "$nested_dirs"
+    lease_registry_mutation_lock_exit || true
   done
 done
 
