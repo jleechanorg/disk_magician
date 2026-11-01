@@ -29,6 +29,8 @@ export FAKE_DISKUTIL_STATE="$T/diskutil.json"
 export FAKE_DISKUTIL_CALLS="$T/diskutil.calls"
 export FAKE_DISKUTIL_MOUNTPOINT="$TEST_ROOT"
 export DISK_MAGICIAN_DELETION_LOG="$T/deletions.log"
+export DISK_MAGICIAN_SCRATCH_TRIGGER_PCT=90
+export DISK_MAGICIAN_SCRATCH_TARGET_PCT=80
 python3 -c 'import json,os,sys; cfg={"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","encryption_acknowledged_at":"2026-10-25T00:00:00Z","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":os.environ["TEST_ROOT"]}}}}; json.dump(cfg,open(sys.argv[1],"w")); state={"container":{"ref":"disk3","uuid":"CONTAINER-UUID","ceiling":1000*2**30,"free":100*2**30},"volumes":[{"uuid":"DATA-UUID","name":"Data","ref":"disk3s1","device":"disk3s1","used":100*2**30,"quota":0,"roles":["Data"],"mountpoint":"/System/Volumes/Data"},{"uuid":"SYSTEM-UUID","name":"System","ref":"disk3s5","device":"disk3s5","used":10*2**30,"quota":0,"roles":["System"],"mountpoint":"/"},{"uuid":"VM-UUID","name":"VM","ref":"disk3s6","device":"disk3s6","used":10*2**30,"quota":0,"roles":["VM"],"mountpoint":"/System/Volumes/VM"}]}; json.dump(state,open(os.environ["FAKE_DISKUTIL_STATE"],"w"))' "$DISK_MAGICIAN_CONFIG"
 # This reclaim fixture uses a temporary mount; the real Darwin mountpoint
 # guard has its own volume.py test and must stay active in production.
@@ -316,6 +318,31 @@ python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python
 : >"$BALLAST_LOG"; : >"$STATUS_CALLS_FILE"
 TEST_STATUS_SEQUENCE="890 890" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/stable-89.out"
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success_noop" and r["reason"]=="below-trigger" and r["postcondition"]["allocated_bytes_after"]==890'
+
+# Verify new default thresholds: trigger 70% and target 50%
+unset DISK_MAGICIAN_SCRATCH_TRIGGER_PCT
+unset DISK_MAGICIAN_SCRATCH_TARGET_PCT
+mkdir -p "$TEST_ROOT/repo_defaults/evidence/oldest" "$TEST_ROOT/repo_defaults/build/younger"
+printf x >"$TEST_ROOT/repo_defaults/evidence/oldest/content"
+printf x >"$TEST_ROOT/repo_defaults/build/younger/content"
+python3 -c 'import os,sys,time; from pathlib import Path; now=time.time(); roots=[Path(sys.argv[1]),Path(sys.argv[2])]; ages=[72,60]; [[os.utime(p,(now-h*3600,now-h*3600)) for p in [root,*root.rglob("*")]] for root,h in zip(roots,ages)]' "$TEST_ROOT/repo_defaults/evidence/oldest" "$TEST_ROOT/repo_defaults/build/younger"
+
+# Below trigger (699/1000 = 69% < 70%) reports skipped:below-trigger:69
+TEST_USED=699 "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:below-trigger:69'
+
+# At or above trigger (700/1000 = 70%), clean pass trims down to 500 (target 50%)
+: >"$STATUS_CALLS_FILE"; : >"$DISK_MAGICIAN_DELETION_LOG"
+TEST_STATUS_SEQUENCE="700 600 500 500" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/default-70-50.out"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==2 and r["postcondition"]["allocated_bytes_after"]==500 and r["postcondition"]["target_reached"]'
+
+# Unmet target at 50% reports target_pct=50
+mkdir -p "$TEST_ROOT/repo_defaults/evidence/oldest"
+printf x >"$TEST_ROOT/repo_defaults/evidence/oldest/content"
+python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p,(t,t)) for p in [root,*root.rglob("*")]]' "$TEST_ROOT/repo_defaults/evidence/oldest"
+DISK_MAGICIAN_SAFETY_FILE="$T/protected.json" TEST_STATUS_SEQUENCE="700 700 700 700" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/default-target-not-reached.out"
+grep -q 'trim_target_not_reached before_bytes=700 after_bytes=700 quota_bytes=1000 target_pct=50' "$T/default-target-not-reached.out"
+
+echo 'volume_reclaim: default 70% trigger down to 50% target threshold verified'
 
 echo 'volume_reclaim: real C14 whole-artifact removal and stop threshold, typed ENOSPC wrapper, and reserve restoration passed'
 TEST_ROOT="$T/unavailable" "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:unavailable'

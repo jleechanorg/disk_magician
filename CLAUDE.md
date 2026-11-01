@@ -40,7 +40,7 @@ Users and operators setting up a workstation or CI host are encouraged to
 optionally partition/provision a dedicated Scratch volume via
 `diskm setup --scratch [--quota-gb 200]` (or interactively during `diskm setup`).
 This isolates disposable agent and CI artifacts so they cannot exhaust host free
-space. Scratch volumes are automatically trimmed from 90% down to 80% usage
+space. Scratch volumes are automatically trimmed from 70% down to 50% usage
 while strictly preserving a 64 MiB `.diskm-ballast` emergency reserve and
 48-hour recency, live-PID, and active-lease protections.
 
