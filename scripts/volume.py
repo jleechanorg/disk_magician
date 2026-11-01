@@ -253,6 +253,7 @@ def cls(name: str, config_path: str | Path | None = None) -> tuple[dict[str, Any
 def fit_result(
     container: Container | None = None,
     settings: dict[str, Any] | None = None,
+    active: bool = False,
 ) -> dict[str, Any]:
     container = container or load_container()
     settings = config() if settings is None else settings
@@ -288,12 +289,23 @@ def fit_result(
         all_allocations += used
         if volume is not vm_volume and volume is not scratch_volume:
             other_allocations += used
-    scratch_reservation = max(scratch_used, quota_bytes)
-    required = other_allocations + vm_reserve + scratch_reservation + alarm_floor
-    max_quota = max(0, (ceiling - other_allocations - vm_reserve - alarm_floor) // GIB)
+    if active:
+        scratch_reservation = scratch_used
+        required = other_allocations + vm_reserve + scratch_reservation + alarm_floor
+        fits = (
+            scratch_volume is not None
+            and required <= ceiling
+            and (other_allocations + vm_used + quota_bytes <= ceiling)
+        )
+        max_quota = max(0, (ceiling - other_allocations - vm_used) // GIB)
+    else:
+        scratch_reservation = max(scratch_used, quota_bytes)
+        required = other_allocations + vm_reserve + scratch_reservation + alarm_floor
+        fits = required <= ceiling
+        max_quota = max(0, (ceiling - other_allocations - vm_reserve - alarm_floor) // GIB)
     return {
-        "ok": required <= ceiling,
-        "fits": required <= ceiling,
+        "ok": fits,
+        "fits": fits,
         "required_bytes": required,
         "ceiling_bytes": ceiling,
         "data_used_bytes": data_used,
@@ -2918,8 +2930,24 @@ def status(snapshot: bool = False) -> int:
         elif isinstance(entry, dict) and entry_state not in {"active", "retired"}:
             fatal = True
             alarms.append("volume_registry_invalid:scratch")
+        is_mounted_active = False
+        if isinstance(entry, dict) and entry_state == "active":
+            encrypted_mode = settings.get("encryption") == "apfs-passphrase"
+            try:
+                vol = validate_entry(
+                    container, settings, entry,
+                    allow_locked=encrypted_mode, allow_unexpected_mount=encrypted_mode,
+                )
+                configured_scratch_mp = settings.get("classes", {}).get("scratch", {}).get("mountpoint")
+                is_mounted_active = (
+                    bool(vol.mountpoint)
+                    and (not configured_scratch_mp or vol.mountpoint == configured_scratch_mp)
+                    and not vol.locked
+                )
+            except Exception:
+                is_mounted_active = False
         try:
-            capacity_fit = fit_result(container)
+            capacity_fit = fit_result(container, settings, active=is_mounted_active)
         except Exception:
             fatal = True
             alarms.append("scratch_capacity_measurement_unavailable")

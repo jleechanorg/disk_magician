@@ -1235,7 +1235,7 @@ class StatusAndBallastTest(VolumeTestBase):
     def test_status_alarms_when_live_capacity_fit_fails(self):
         self.make_fit()
         data = json.loads(self.state.read_text())
-        next(row for row in data["volumes"] if row["name"] == "Data")["used"] = 899 * 2**30
+        next(row for row in data["volumes"] if row["name"] == "Data")["used"] = 950 * 2**30
         self.state.write_text(json.dumps(data))
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -1243,6 +1243,134 @@ class StatusAndBallastTest(VolumeTestBase):
         result = json.loads(output.getvalue())
         self.assertIn("scratch_capacity_unavailable", result["alarms"])
         self.assertFalse(result["capacity_fit"]["fits"])
+
+    def test_status_mounted_active_scratch_with_200g_quota_on_926g_container_fits(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["classes"]["scratch"]["quota_gb"] = 200
+        self.config.write_text(json.dumps(config))
+
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 926 * 2**30
+        data["container"]["free"] = (926 - 669 - 4) * 2**30
+        next(row for row in data["volumes"] if row["name"] == "Data")["used"] = 654 * 2**30
+        next(row for row in data["volumes"] if row["name"] == "System")["used"] = 15 * 2**30
+        next(row for row in data["volumes"] if row["name"] == "VM")["used"] = 4 * 2**30
+
+        scratch_mp = str(self.mp)
+        self.mp.mkdir(parents=True, exist_ok=True)
+        data["volumes"].append({
+            "uuid": "SCRATCH-UUID",
+            "name": "diskm-scratch",
+            "ref": "disk3s9",
+            "device": "disk3s9",
+            "used": 100 * 2**30,
+            "quota": 200 * 2**30,
+            "roles": [],
+            "mountpoint": scratch_mp,
+        })
+        self.state.write_text(json.dumps(data))
+        volume.write_ballast(scratch_mp)
+
+        registry_path, _ = volume.registry_paths()
+        registry_path.write_text(json.dumps({
+            "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+            "volumes": {
+                "scratch": {
+                    "class": "scratch",
+                    "name": "diskm-scratch",
+                    "container_uuid": "CONTAINER-UUID",
+                    "uuid": "SCRATCH-UUID",
+                    "mountpoint": scratch_mp,
+                    "quota_bytes": 200 * 2**30,
+                    "state": "active",
+                    "created_at": "2026-10-30T00:00:00Z",
+                }
+            }
+        }))
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = volume.status(snapshot=True)
+        result = json.loads(output.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertTrue(result["capacity_fit"]["fits"])
+        self.assertNotIn("scratch_capacity_unavailable", result["alarms"])
+        self.assertEqual(result["capacity_fit"]["quota_bytes"], 200 * 2**30)
+
+    def test_status_unmounted_provisioning_scratch_alarms_capacity_unavailable(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["classes"]["scratch"]["quota_gb"] = 200
+        self.config.write_text(json.dumps(config))
+
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 926 * 2**30
+        data["container"]["free"] = (926 - 669 - 4) * 2**30
+        next(row for row in data["volumes"] if row["name"] == "Data")["used"] = 654 * 2**30
+        next(row for row in data["volumes"] if row["name"] == "System")["used"] = 15 * 2**30
+        next(row for row in data["volumes"] if row["name"] == "VM")["used"] = 4 * 2**30
+        self.state.write_text(json.dumps(data))
+
+        fit = volume.fit_result()
+        self.assertFalse(fit["fits"])
+        self.assertEqual(fit["max_quota_gb_that_fits"], 197)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            volume.status(snapshot=True)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["capacity_fit"]["fits"])
+        self.assertIn("scratch_capacity_unavailable", result["alarms"])
+
+    def test_status_mounted_scratch_on_genuinely_overcommitted_container_alarms(self):
+        config = json.loads(self.config.read_text())
+        config["volumes"]["classes"]["scratch"]["quota_gb"] = 200
+        self.config.write_text(json.dumps(config))
+
+        data = json.loads(self.state.read_text())
+        data["container"]["ceiling"] = 926 * 2**30
+        next(row for row in data["volumes"] if row["name"] == "Data")["used"] = 735 * 2**30
+        next(row for row in data["volumes"] if row["name"] == "System")["used"] = 15 * 2**30
+        next(row for row in data["volumes"] if row["name"] == "VM")["used"] = 4 * 2**30
+
+        scratch_mp = str(self.mp)
+        self.mp.mkdir(parents=True, exist_ok=True)
+        data["volumes"].append({
+            "uuid": "SCRATCH-UUID",
+            "name": "diskm-scratch",
+            "ref": "disk3s9",
+            "device": "disk3s9",
+            "used": 10 * 2**30,
+            "quota": 200 * 2**30,
+            "roles": [],
+            "mountpoint": scratch_mp,
+        })
+        self.state.write_text(json.dumps(data))
+        volume.write_ballast(scratch_mp)
+
+        registry_path, _ = volume.registry_paths()
+        registry_path.write_text(json.dumps({
+            "schema_version": volume.REGISTRY_SCHEMA_VERSION,
+            "volumes": {
+                "scratch": {
+                    "class": "scratch",
+                    "name": "diskm-scratch",
+                    "container_uuid": "CONTAINER-UUID",
+                    "uuid": "SCRATCH-UUID",
+                    "mountpoint": scratch_mp,
+                    "quota_bytes": 200 * 2**30,
+                    "state": "active",
+                    "created_at": "2026-10-30T00:00:00Z",
+                }
+            }
+        }))
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = volume.status(snapshot=True)
+        result = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertFalse(result["capacity_fit"]["fits"])
+        self.assertIn("scratch_capacity_unavailable", result["alarms"])
 
     def test_status_degrades_when_active_scratch_ballast_is_missing_below_high_water(self):
         self.make_fit()
