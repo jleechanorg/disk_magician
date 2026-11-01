@@ -262,6 +262,41 @@ check "continues and executes later category post_job_docker_prune" grep -qF "po
 check "summary reports 1 category failed" grep -q "1 of 14 categories FAILED:" "$OUT5"
 check "summary lists Colima failed category" grep -q -- "- Colima VM disk (Docker prune + fstrim) (exit 1)" "$OUT5"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 6: High-yield categories (scratch-prune, slim-worktrees, hermes vacuum,
+#         code_sign_clone, evict_fileprovider) run in dry-run and enforce gates
+# ─────────────────────────────────────────────────────────────────────────────
+echo "Test 6: high-yield categories wired into disk_audit.sh clean"
+for extra_script in cleanup_scratch_top_level.sh vacuum_hermes_state.sh slim_worktree_checkouts.sh cleanup_code_sign_clones.sh evict_fileprovider.sh; do
+  cat > "$FIXTURE_DIR/scripts/$extra_script" <<EOF
+#!/bin/bash
+echo "$extra_script \$*" >> "$INVOCATIONS_LOG"
+echo "stub $extra_script \$*"
+exit 0
+EOF
+  chmod +x "$FIXTURE_DIR/scripts/$extra_script"
+done
+
+: > "$INVOCATIONS_LOG"
+OUT6_DRY="$TMP_DIR/audit_clean_extra_dry.log"
+PATH="$FIXTURE_DIR/bin:/usr/bin:/bin" HOME="$FIXTURE_DIR/home" \
+  /bin/bash "$FIXTURE_DIR/scripts/disk_audit.sh" clean --dry-run --live --no-history >"$OUT6_DRY" 2>&1 || true
+check "dry-run invokes cleanup_scratch_top_level.sh" grep -qF "cleanup_scratch_top_level.sh --dry-run" "$INVOCATIONS_LOG"
+check "dry-run invokes vacuum_hermes_state.sh" grep -qF "vacuum_hermes_state.sh --dry-run" "$INVOCATIONS_LOG"
+check "dry-run invokes slim_worktree_checkouts.sh" grep -qF "slim_worktree_checkouts.sh --dry-run" "$INVOCATIONS_LOG"
+check "dry-run invokes cleanup_code_sign_clones.sh" grep -qF "cleanup_code_sign_clones.sh --dry-run" "$INVOCATIONS_LOG"
+check "dry-run invokes evict_fileprovider.sh" grep -qF "evict_fileprovider.sh --dry-run" "$INVOCATIONS_LOG"
+
+: > "$INVOCATIONS_LOG"
+OUT6_UNAPPROVED="$TMP_DIR/audit_clean_extra_unapproved.log"
+PATH="$FIXTURE_DIR/bin:/usr/bin:/bin" HOME="$FIXTURE_DIR/home" \
+  /bin/bash "$FIXTURE_DIR/scripts/disk_audit.sh" clean --live --no-history >"$OUT6_UNAPPROVED" 2>&1 || true
+check "unapproved clean invokes safe cleanup_scratch_top_level.sh" grep -qF "cleanup_scratch_top_level.sh --clean" "$INVOCATIONS_LOG"
+check "unapproved clean invokes safe vacuum_hermes_state.sh" grep -qF "vacuum_hermes_state.sh --clean" "$INVOCATIONS_LOG"
+check "unapproved clean skips slim_worktree_checkouts.sh" grep -q "Slim worktrees: skipped (requires WORKTREE_APPROVED=1)" "$OUT6_UNAPPROVED"
+check "unapproved clean skips cleanup_code_sign_clones.sh" grep -q "code_sign_clone bundles: skipped (requires CODE_SIGN_CLONES_APPROVED=1)" "$OUT6_UNAPPROVED"
+check "unapproved clean skips evict_fileprovider.sh" grep -q "Cloud FileProvider cache eviction: skipped (requires FILEPROVIDER_EVICT_APPROVED=1)" "$OUT6_UNAPPROVED"
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]]
