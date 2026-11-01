@@ -422,6 +422,19 @@ mkwt lgitdir && ad="$(admin lgitdir)" && mv "$ad/gitdir" "$TMPROOT/lgitdir-gitdi
 assert_eq "$(wt lgitdir)" kept:admin-unknown "allowlisted gitdir as a symlink"
 mkwt cfgwt && printf '[core]\n\tsparseCheckout = true\n' >"$(admin cfgwt)/config.worktree"
 assert_eq "$(wt cfgwt)" kept:admin-unknown "changed config.worktree"
+mkwt cfgwtnote && printf '[core]\n\tsparseCheckout = true\n\thooksPath = /tmp/evil\n' >"$(admin cfgwtnote)/config.worktree"
+assert_eq "$(wt cfgwtnote)" kept:admin-unknown "config.worktree carrying a hook path, no sparse pattern file"
+# A real `git sparse-checkout set` writes the [core] sparseCheckout keys into
+# config.worktree AND the per-worktree info/sparse-checkout pattern file. That
+# pair is the sparse artifact slim-worktrees leaves behind and must stay
+# removable (PR #300); the content alone is not proof of it.
+mkwt cfgspr && git -C "$TMPROOT/wts/cfgspr" sparse-checkout set --no-cone '/*' 2>/dev/null \
+    && assert_eq "$(wt cfgspr)" ok "genuine sparse-checkout worktree stays removable (PR #300)" \
+    || bad "cfgspr setup"
+mkwt cfgsprforged && git -C "$TMPROOT/wts/cfgsprforged" sparse-checkout set --no-cone '/*' 2>/dev/null \
+    && rm "$(admin cfgsprforged)/info/sparse-checkout" \
+    && assert_eq "$(wt cfgsprforged)" kept:admin-unknown "sparse-shaped config.worktree without its pattern file" \
+    || bad "cfgsprforged setup"
 mkwt cfgempty && : >"$(admin cfgempty)/config.worktree"
 assert_eq "$(wt cfgempty)" ok "empty config.worktree"
 mkwt emsg && git -C "$TMPROOT/wts/emsg" commit -q --allow-empty -m "pushed message" && git -C "$TMPROOT/wts/emsg" push -q 2>/dev/null
