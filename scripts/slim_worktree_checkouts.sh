@@ -106,7 +106,11 @@ is_ao_owned() {
     while read -r _kind d; do
       [[ -n "$d" ]] || continue
       d="${d/#\~/$HOME}"; d="${d//\$HOME/$HOME}"; d="${d%/}"
-      [[ "$wt" == "$d" || "$wt" == "$d"/* || "$real_wt" == "$d" || "$real_wt" == "$d"/* ]] && return 0
+      if [[ "$_kind" == "C" ]]; then
+        [[ "${wt%/*}" == "$d" || "${real_wt%/*}" == "$d" ]] && return 0
+      else
+        [[ "$wt" == "$d" || "$wt" == "$d"/* || "$real_wt" == "$d" || "$real_wt" == "$d"/* ]] && return 0
+      fi
     done < <(ao_worktree_dirs "$cfg" 2>/dev/null)
   fi
   return 1

@@ -6,6 +6,9 @@
 # non-empty third arg, only the leaf component is considered).
 ignored_entry_rebuildable() {
     local rest="${2%/}" comp
+    case "$rest" in
+        .husky/_|.husky/_/*|*/.husky/_|*/.husky/_/*|.beads/redirect) return 0 ;;
+    esac
     # Allowed when ANY path component is a known rebuildable dir/file, so
     # nested cache contents (.ruff_cache/0.16.1, venv/.../CACHEDIR.TAG) pass.
     while [[ -n "$rest" ]]; do
@@ -19,7 +22,7 @@ ignored_entry_rebuildable() {
                 return 0 ;;
             # File-oriented patterns are rebuildable only when the matched
             # path is not a directory containing user data.
-            *.pyc|.DS_Store|.coverage|*.tsbuildinfo|*.egg-info|.testmondata)
+            *.pyc|.DS_Store|.coverage|*.tsbuildinfo|*.egg-info|.testmondata|.xcode.env.local)
                 [[ ! -d "$1/$rest" ]] && return 0
                 ;;
         esac
@@ -76,6 +79,22 @@ _wi_nonsecret_scan() {
     return 0
 }
 
+# _wi_has_flagged_index_entries <wt> <ls_files_v_output>: rc 0 when any entry has
+# assume-unchanged ([a-z]) or a skip-worktree (S) flag that could hide local
+# edits on disk. Sparse-checkout exclusions written by slim-worktrees set S on
+# paths removed from the working tree while info/sparse-checkout is present;
+# those absent paths cannot hold uncaptured local edits.
+_wi_has_flagged_index_entries() {
+    local wt="$1" flags="$2" sp rc=0
+    grep -q '^[a-z]' <<<"$flags" && return 0
+    grep -q '^S' <<<"$flags" || return 1
+    sp="$(git -C "$wt" rev-parse --path-format=absolute --git-path info/sparse-checkout 2>/dev/null)" || return 0
+    [[ -s "$sp" ]] || return 0
+    python3 -I -c 'import os,sys; wt=sys.argv[1]; sys.exit(0 if any(l.startswith("S ") and (l[2:3]==chr(34) or os.path.lexists(os.path.join(wt, l[2:].splitlines()[0]))) for l in sys.stdin) else 1)' "$wt" <<<"$flags" 2>/dev/null || rc=$?
+    [[ "$rc" -eq 1 ]] && return 1
+    return 0
+}
+
 # has_hidden_state <wt>: rc 0 when state `git status` cannot see exists
 # (assume-unchanged/skip-worktree entries, ignored secret-like files) or a
 # probe fails/times out (fail closed).
@@ -92,7 +111,7 @@ has_hidden_state() {
         return $?
     fi
     flags="$(git -C "$1" ls-files -v 2>/dev/null)" || return 0
-    grep -q '^[a-zS]' <<<"$flags" && return 0
+    _wi_has_flagged_index_entries "$1" "$flags" && return 0
     # shellcheck disable=SC2086
     out="$($t git -C "$1" ls-files -o -i --exclude-standard -- \
         ':(icase).env*' ':(icase)*/.env*' ':(icase)*.pem' ':(icase)*.key' \
