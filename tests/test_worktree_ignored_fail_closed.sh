@@ -16,7 +16,7 @@ mkdir -p "$TMP/wt"
 for e in .beads/issues.db .br_recovery/x logs/run.txt .tmp/notes.md .superpowers/s.md .dark-factory/state .codex-worktrees/a/b debug.log; do
   ignored_entry_rebuildable "$TMP/wt" "$e" && bad "$e treated as rebuildable" || ok "$e is user data"
 done
-for e in node_modules/x/index.js __pycache__/a.pyc .pytest_cache/v; do
+for e in node_modules/x/index.js __pycache__/a.pyc .pytest_cache/v .husky/_ .husky/_/husky.sh ios/.xcode.env.local .beads/redirect; do
   ignored_entry_rebuildable "$TMP/wt" "$e" && ok "$e rebuildable" || bad "$e not rebuildable"
 done
 
@@ -51,6 +51,14 @@ hh hidden __pycache__/openrouter_credentials.cpython-312.pyc "venv/"
 r="$(mktemp -d "$TMP/hh.XXXXXX")"; git init -q "$r"; printf 'a' >"$r/f"; git -C "$r" add f
 git -C "$r" -c user.name=t -c user.email=t@e commit -qm i; git -C "$r" update-index --skip-worktree f
 has_hidden_state "$r" && ok "skip-worktree -> hidden" || bad "skip-worktree not hidden"
+mkdir -p "$r/.git/info"; printf '/*\n' >"$r/.git/info/sparse-checkout"
+has_hidden_state "$r" && ok "present skip-worktree file with info/sparse-checkout -> hidden" || bad "present skip-worktree file with info/sparse-checkout -> clean"
+r_sp="$(mktemp -d "$TMP/hh.XXXXXX")"; git init -q "$r_sp"; mkdir -p "$r_sp/docs"; printf 'd' >"$r_sp/docs/a.md"; printf 'k' >"$r_sp/keep.txt"
+git -C "$r_sp" add docs/a.md keep.txt; git -C "$r_sp" -c user.name=t -c user.email=t@e commit -qm i
+git -C "$r_sp" sparse-checkout set --no-cone '/*' '!/docs/'
+has_hidden_state "$r_sp" && bad "sparse-checkout absent docs/ -> hidden" || ok "sparse-checkout absent docs/ -> clean"
+git -C "$r_sp" update-index --assume-unchanged keep.txt
+has_hidden_state "$r_sp" && ok "sparse-checkout + assume-unchanged file -> hidden" || bad "sparse-checkout + assume-unchanged file -> clean"
 has_hidden_state "$TMP/not-a-repo-xyz" && ok "probe failure -> hidden" || bad "probe failure not hidden"
 
 echo "== c14_probe secrets(): only source/template names exempt =="

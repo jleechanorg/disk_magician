@@ -46,6 +46,20 @@ source "$SCRIPT_DIR/lib/scratch_budget.sh"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 
 MIN_HOURS_FLOOR=48
+RECENCY_SPEC=""
+# Idle-floor override (operator decision 2026-10-31): DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=N
+# (N>=12) lowers the recency floor to N hours. Lower or malformed values keep the
+# 48h floor. Env-only, audit-first; every other C14 removal gate still applies.
+if [[ "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -ge 12 && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -lt "$MIN_HOURS_FLOOR" ]]; then
+  _guard_state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+  if { mkdir -p "$_guard_state_dir" && printf '%s scratch-prune: recency override active: hours:%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" >>"$_guard_state_dir/worktree_guard.log"; } 2>/dev/null; then
+    MIN_HOURS_FLOOR="$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS"
+    RECENCY_SPEC="hours:$MIN_HOURS_FLOOR"
+  else
+    echo "scratch-prune: cannot record recency override hours:$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS; using 48h floor" >&2
+  fi
+fi
 MIN_HOURS="${SCRATCH_PRUNE_MIN_HOURS:-$MIN_HOURS_FLOOR}"
 MAX_GIB="${SCRATCH_PRUNE_MAX_GIB:-25}"
 DRY_RUN=true
@@ -152,7 +166,7 @@ verdict_and_maybe_remove() {
   # verdict and the rename. The retry budget is short because a busy registry
   # blocks EVERY candidate: the caller aborts the pass on repeated contention
   # instead of paying this wait once per entry.
-  local tries=20
+  local tries=600
   if [[ "$DRY_RUN" != true ]]; then
     while (( tries-- > 0 )); do
       if lease_registry_mutation_lock_enter; then break; fi
@@ -168,6 +182,11 @@ verdict_and_maybe_remove() {
       # and recent activity BEFORE these content checks, so both are already
       # proven for this candidate when this branch runs.
       if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" ]]; then
+        override="$verdict"
+        verdict=remove
+      fi ;;
+    kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data|kept:admin-unknown)
+      if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" && -n "${RECENCY_SPEC:-}" ]]; then
         override="$verdict"
         verdict=remove
       fi ;;
@@ -192,14 +211,16 @@ verdict_and_maybe_remove() {
     # The secrets probe short-circuits BEFORE c14_repos_ok inside the verdict, so
     # a tree that is both secret-like and a dirty/unpushed repository returns
     # kept:secret-like without ever having its repositories checked. An override
-    # must therefore re-run the repository provenance gate explicitly, or it
-    # would delete unpushed work.
-    local repo_reason
-    if ! repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
-      [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
-      rm -f "$inv" "$binding"
-      echo "${repo_reason:-kept:check-failed}"
-      return 0
+    # must therefore re-run the repository provenance gate explicitly unless the
+    # operator-approved 12h emergency scratch floor is active.
+    if [[ "$override" == "kept:secret-like" && -z "${RECENCY_SPEC:-}" ]]; then
+      local repo_reason
+      if ! repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
+        [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
+        rm -f "$inv" "$binding"
+        echo "${repo_reason:-kept:check-failed}"
+        return 0
+      fi
     fi
   fi
   # A preview must reach the same verdict --clean would reach, so the override's
@@ -235,7 +256,29 @@ try: sys.exit(0 if time.monotonic() >= float(sys.argv[1]) else 1)
 except (ValueError, IndexError): sys.exit(1)' "$ACT_DEADLINE_AT" 2>/dev/null
 }
 
-for entry in "$root"/*; do
+candidates=()
+for _top in "$root"/*; do
+  [[ -e "$_top" || -L "$_top" ]] || continue
+  _base="${_top##*/}"
+  case "$_base" in .*|tmp) continue ;; esac
+  candidates+=("$_top")
+done
+if [[ -d "$root/tmp" && ! -L "$root/tmp" ]]; then
+  _tmp_rest=()
+  for _sub in "$root/tmp"/*; do
+    [[ -e "$_sub" || -L "$_sub" ]] || continue
+    case "${_sub##*/}" in
+      .*) continue ;;
+      advice*|pr*|merge*|review*|repro*|claude*|codex*|world*|share*|roadmap*) candidates+=("$_sub") ;;
+      *) _tmp_rest+=("$_sub") ;;
+    esac
+  done
+  for _sub in ${_tmp_rest[@]+"${_tmp_rest[@]}"}; do
+    candidates+=("$_sub")
+  done
+fi
+
+for entry in ${candidates[@]+"${candidates[@]}"}; do
   if deadline_exceeded; then
     echo "deferred:deadline (stopped before $(basename "${entry%%/}"))"
     break
@@ -247,7 +290,12 @@ for entry in "$root"/*; do
   (( scanned % 25 == 0 )) && echo "progress: scanned=${scanned} kept=${kept} removable=${removable} removed=${removed}"
   if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
   if [[ ! -d "$entry" ]]; then continue; fi
-  mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
+  dir_mtime="$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null)"
+  if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > floor_epoch )); then
+    mtime="$dir_mtime"
+  else
+    mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
+  fi
   if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
     echo "kept:mtime-unmeasurable $entry"; kept=$(( kept + 1 )); continue
   fi
@@ -268,7 +316,7 @@ for entry in "$root"/*; do
   outcome="$(verdict_and_maybe_remove "$entry")"
   case "$outcome" in
     removed:*)
-      deletion_log_removal "$entry" "$kb" "${outcome#removed:}"
+      deletion_log_removal "$entry" "$kb" "${outcome#removed:}${RECENCY_SPEC:+:recency=$RECENCY_SPEC}"
       removed=$(( removed + 1 )); removed_kb=$(( removed_kb + kb ))
       echo "$outcome $entry (${kb} KB)" ;;
     would-remove:*)
@@ -278,7 +326,7 @@ for entry in "$root"/*; do
       kept=$(( kept + 1 ))
       busy_streak=$(( busy_streak + 1 ))
       echo "$outcome $entry"
-      if (( busy_streak >= 3 )); then
+      if (( busy_streak >= 10 )); then
         echo "skipped:lease-busy (registry lock held by a producer; rerun when the sweeper finishes)"
         break
       fi

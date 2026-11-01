@@ -18,6 +18,33 @@ dispatch. Migrate legacy direct-script schedules with behavior and safety
 checks; their current existence is not permission to add more. Build, package,
 and isolated test harnesses may call internal files directly.
 
+## Fast-Path Execution Protocol — `<10s` Zero-`du` Triage -> Parallel `flash` Cleanup (hard)
+
+When the user invokes `/diskm`, asks why disk space is low, or requests a disk cleanup, **start working within 10 seconds** without launching a 15-minute `diskm audit` whole-disk `du` walk first:
+
+1. **Step 1 (`<10s` Zero-`du` Triage — run in parallel in a single turn)**:
+   - `df -h /System/Volumes/Data /Volumes/diskm-scratch /System/Volumes/VM` (macOS) or `df -h / ~/Scratch` (Linux)
+   - `diskm check-launchd-fleet` (macOS fleet liveness)
+   - `diskm reclaim-ledger --read-existing` (instant pre-computed per-host reclaim ledger; never `--stdout` first)
+   - `diskm history growth-top10 --days 7` (instant 7-day floor + top-10 growing buckets from git-backed snapshot history)
+2. **Step 2 (Immediate Parallel `flash` Subagent Cleanup)**:
+   - Do **not** run all 22 categories serially in one foreground shell when reclaiming large space (`100–300+ GiB`), and do **not** start with `cleanup_dev_caches.sh` (which walks `~/Library/Caches` while holding `.owner-mutation.reuse-lock`).
+   - Instead, dispatch **parallel `flash` subagents** across non-contending high-yield lanes:
+     - **Lane A (Scratch Volume, 20–150+ GiB)**: `diskm scratch-prune --clean` (`scripts/cleanup_scratch_top_level.sh --clean`)
+     - **Lane B (Worktree Slimming -> Deps -> Dormant Worktrees, 30–180+ GiB)**:
+       1. `WORKTREE_APPROVED=1 diskm slim-worktrees --clean` (`scripts/slim_worktree_checkouts.sh --clean`)
+       2. `WORKTREE_APPROVED=1 diskm cleanup-worktree-deps --clean` (`scripts/cleanup_worktree_deps.sh --clean`)
+       3. `WORKTREE_APPROVED=1 diskm cleanup-worktrees --clean` (`scripts/cleanup_worktrees.sh --clean`; shard across `--repos` when >200 worktrees)
+       4. `WORKTREE_APPROVED=1 diskm cleanup-worktree-venvs --clean`
+     - **Lane C (Containers, Browser Clones & Cloud Caches, 20–80+ GiB)**:
+       - `diskm cleanup-colima --clean`, `diskm cleanup-xcode --clean`, `diskm prune-aside-sessions --clean`
+       - `CODE_SIGN_CLONES_APPROVED=1 diskm cleanup-code-sign-clones --clean`
+       - `FILEPROVIDER_EVICT_APPROVED=1 diskm evict-fileprovider --clean`
+     - **Lane D (Agent State & SQLite Vacuum, 5–20 GiB)**:
+       - `diskm vacuum-hermes-state --clean`, `diskm cleanup-codex-db --clean`, `diskm cleanup-antigravity-brain --clean`, `diskm cleanup-tmp --clean`
+3. **Step 3 (Zero-Reclaim / Silent-Preservation Diagnostic Rule)**:
+   - Never report *"canonical stack is exhausted"* when free space is still below target. If a cleaner exits `0` with `0 B` reclaimed, inspect the skip breakdown (`kept:lease-busy`, `ao-owned-or-unknown`, `kept:admin-unknown`, `kept:recent-activity`, `dirty-or-untracked`) and verify `~/.disk_magician_state/worktree_leases/.owner-mutation.reuse-lock` is not wedged before concluding nothing is reclaimable.
+
 ## Agent Scratch placement (Mac and Linux) — optional quota-bounded Scratch volume
 
 Single source of truth: `.agents/skills/scratch-space/SKILL.md` (`~/.claude/skills/scratch-space/SKILL.md`).
@@ -205,27 +232,27 @@ free-space alert, an investigation), do this **without being asked**, then act:
 
 ## 6-tier routine cleanup stack — unified safe maintenance
 
-When cleaning or recommending disk cleanups on this workstation, execute the canonical 6-tier stack via `./disk_magician.sh clean` (or `--routine`). Do not guess, write ad-hoc scripts, or require user steering to identify the primary high-yield cleanup targets:
+When cleaning or recommending disk cleanups on this workstation, execute the canonical 6-tier stack via `./disk_magician.sh clean` (or `--routine`), or fan out the tiers in parallel across `flash` subagents for large reclaims. Do not guess, write ad-hoc scripts, or require user steering to identify the primary high-yield cleanup targets:
 
-1. **Tier 1: Developer Caches & Temp (Safe, 3–15 GiB)**:
-   - Scripts: `cleanup_dev_caches.sh`, `cleanup_tmp.sh`, `cleanup_pr_scratch.sh`, `cleanup_llm_inspector.sh`
-   - Targets: compiler, npm, cargo, test caches, and `/private/tmp` ephemera older than retention.
+1. **Tier 1: Scratch Volume, Developer Caches & Temp (Safe, 10–150+ GiB)**:
+   - Scripts: `cleanup_scratch_top_level.sh` (`scratch-prune`), `cleanup_tmp.sh`, `cleanup_pr_scratch.sh`, `cleanup_llm_inspector.sh`, `cleanup_dev_caches.sh`
+   - Targets: top-level and `tmp/` Scratch entries older than 48h floor (preserving `.diskm-ballast`, live PIDs, and active leases), `/private/tmp` ephemera, and compiler/npm/cargo/test caches (`cleanup_dev_caches.sh` runs last so its `~/Library/Caches` walk does not hold `.owner-mutation.reuse-lock` ahead of fast cleaners).
 2. **Tier 2: Xcode & Simulator Caches (Safe, 10–50+ GiB)**:
    - Script: `cleanup_xcode.sh`
    - Targets: rebuildable `~/Library/Developer/Xcode/DerivedData` and CoreSimulator temp/caches.
 3. **Tier 3: Container VM & Docker Disk Reclaim (Safe, 20–80+ GiB)**:
    - Script: `cleanup_colima.sh`
    - Targets: Colima VM Docker prune (unused images/containers) + in-VM `fstrim -av` to shrink the host sparse disk (`~/.colima/_lima`).
-4. **Tier 4: Browser Sessions & Assets (Safe, 10–30+ GiB)**:
-   - Script: `prune_aside_sessions.sh`
-   - Targets: stale Aside browser sessions (`~/.aside/u/*/sessions/` >7d/14d) and static asset hardlink deduplication across retained sessions.
-5. **Tier 5: Agent State Compaction & Rotated Logs (Safe, 5–20 GiB)**:
-   - Scripts: `cleanup_antigravity_brain.sh`, `cleanup_codex_db.sh`, `cleanup_supervisor_logs.sh`, `cleanup_uv_cache.sh`
-   - Targets: losslessly compacts completed Antigravity task logs and transcripts (>=7d), vacuums ~/.codex SQLite databases, prunes stale rotated supervisor logs, prunes orphaned uv-tool build wheels.
-6. **Tier 6: Worktrees & Worktree Venvs (Safety-Gated, 20–100+ GiB)**:
-   - Scripts: `cleanup_worktree_venvs.sh`, `cleanup_worktrees.sh` (or `prune-worktrees`)
-   - Targets: strips `.venv`/`venv` from dormant git worktrees (>=7d inactivity) and prunes merged/stale worktrees (>=7d inactivity).
-   - **GATING**: Strictly enforces the **7-day recency floor** (`worktree_age_days >= 7`). Requires `WORKTREE_APPROVED=1` in environment to execute `--clean`.
+4. **Tier 4: Browser Sessions, Code-Sign Clones & Cloud Caches (Safe / Gated, 10–60+ GiB)**:
+   - Scripts: `prune_aside_sessions.sh`, `cleanup_code_sign_clones.sh` (requires `CODE_SIGN_CLONES_APPROVED=1`), `evict_fileprovider.sh` (requires `FILEPROVIDER_EVICT_APPROVED=1`)
+   - Targets: stale Aside browser sessions (`~/.aside/u/*/sessions/` >7d/14d) with static asset hardlink deduplication, dead macOS `code_sign_clone` bundles in `/private/var/folders/.../X`, and evictable local CloudStorage FileProvider caches (`~/Library/CloudStorage/*`).
+5. **Tier 5: Agent State Compaction, SQLite Vacuum & Rotated Logs (Safe, 5–20 GiB)**:
+   - Scripts: `cleanup_antigravity_brain.sh`, `cleanup_codex_db.sh`, `vacuum_hermes_state.sh`, `cleanup_codex_documents.sh`, `cleanup_supervisor_logs.sh`, `cleanup_uv_cache.sh`
+   - Targets: losslessly compacts completed Antigravity task logs and transcripts (>=7d), vacuums `~/.codex` and `~/.hermes/state.db` SQLite databases, prunes dormant Codex task documents (>=7d), prunes stale rotated supervisor logs, and prunes orphaned uv-tool build wheels.
+6. **Tier 6: Worktree Slimming, Dependency Stripping, Dormant Worktrees & Venvs (Safety-Gated, 30–180+ GiB)**:
+   - Scripts (run in order): `slim_worktree_checkouts.sh` (`slim-worktrees`), `cleanup_worktree_deps.sh` (`cleanup-worktree-deps`), `cleanup_worktrees.sh` (`cleanup-worktrees`), `cleanup_worktree_venvs.sh` (`cleanup-worktree-venvs`), `cleanup_claude_state.sh`
+   - Targets: converts dormant worktrees (>=7d) to sparse root-only checkouts (`slim-worktrees`), strips rebuildable `node_modules`/`target`/`.mypy_cache` (>=3d), removes merged/pushed/detached-on-origin dormant worktrees (>=3d), and strips `.venv`/`venv` (>=7d).
+   - **GATING**: Requires `WORKTREE_APPROVED=1` in environment to execute `--clean`. Strictly enforces recency, live-cwd, C14 lease, hidden-state, and AO ownership (`C` container vs `P` project `worktreeDir`) gates.
 
 ## Cross-repo authority: dir switching is ALWAYS allowed from this repo
 

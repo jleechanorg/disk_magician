@@ -34,7 +34,7 @@ MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
-  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/wc-wt" "$HOME/projects_other")
+  ROOTS=("$HOME/projects" "$HOME/.worktrees" "$HOME/project_worldaiclaw" "$HOME/project_worldai_frontend" "$HOME/wc-wt" "$HOME/projects_other")
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -60,17 +60,26 @@ floor=$((10#$floor))
 MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
 [[ "$MIN_AGE_DAYS" -lt "$floor" ]] && MIN_AGE_DAYS="$floor"
 
+FLOOR_HOURS=""
+if [[ "${DISK_MAGICIAN_WORKTREE_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS" -ge 12 ]]; then
+  if { mkdir -p "${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}" && printf '%s cleanup-worktree-deps: recency override active: hours:%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS" >>"${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}/worktree_guard.log"; } 2>/dev/null; then
+    FLOOR_HOURS="$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS"
+  fi
+fi
+
 AUTO_APPROVE_AGE_DAYS="${DISK_MAGICIAN_AUTO_APPROVE_AGE_DAYS:-90}"
 [[ "$AUTO_APPROVE_AGE_DAYS" =~ ^[0-9]+$ ]] || AUTO_APPROVE_AGE_DAYS=90
 AUTO_APPROVE_AGE_DAYS=$((10#$AUTO_APPROVE_AGE_DAYS))
 [[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
 
 if [[ "$DRY_RUN" == true ]]; then
-  echo "=== WORKTREE DEPS CLEANUP (DRY-RUN) — floor ${MIN_AGE_DAYS}d ==="
+  echo "=== WORKTREE DEPS CLEANUP (DRY-RUN) — floor ${FLOOR_HOURS:+${FLOOR_HOURS}h}${FLOOR_HOURS:-${MIN_AGE_DAYS}d} ==="
 else
-  echo "=== WORKTREE DEPS CLEANUP — floor ${MIN_AGE_DAYS}d ==="
+  echo "=== WORKTREE DEPS CLEANUP — floor ${FLOOR_HOURS:+${FLOOR_HOURS}h}${FLOOR_HOURS:-${MIN_AGE_DAYS}d} ==="
   if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
     echo "Refusing to delete: set WORKTREE_APPROVED=1 (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)."
+    FLOOR_HOURS=""
     [[ "$MIN_AGE_DAYS" -lt "$AUTO_APPROVE_AGE_DAYS" ]] && MIN_AGE_DAYS="$AUTO_APPROVE_AGE_DAYS"
   fi
 fi
@@ -160,7 +169,7 @@ strip_dir() {
     echo "  SAFETY-SKIP $dir ($_reason)"
     return 0
   fi
-  kb="$(du -sk "$dir" 2>/dev/null | awk '{print $1}')"
+  kb="$(du -sk "$dir" 2>/dev/null | awk '{print $1}' || true)"
   [[ "$kb" =~ ^[0-9]+$ ]] || return 0
   if [[ "$DRY_RUN" == true ]]; then
     echo "  WOULD-STRIP ${kb}KB $dir"
@@ -192,24 +201,35 @@ is_build_output_dir() {
   case "$name" in
     target) [[ -f "$parent/Cargo.toml" ]] ;;
     node_modules) [[ -f "$parent/package.json" ]] ;;
+    __pycache__|.pytest_cache|.ruff_cache) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# Every target/ and node_modules/ below <wt>, at any depth. find does not follow
-# symlinks and -type d rejects a symlinked leaf, so a linked parent is never
-# traversed. Matched dirs are pruned, never descended into.
+# Every target/, node_modules/, __pycache__, .pytest_cache, and .ruff_cache
+# below <wt>, at any depth. find does not follow symlinks and -type d rejects a
+# symlinked leaf, so a linked parent is never traversed. Matched dirs are
+# pruned, never descended into.
 nested_cache_dirs() {
-  find "$1" \( -name .git -o -name venv -o -name .venv -o -name __pycache__ \
-    -o -name .pytest_cache -o -name .ruff_cache \) -prune -o \
-    -type d \( -name node_modules -o -name target \) -prune -print 2>/dev/null
+  find "$1" \( -name .git -o -name venv -o -name .venv \) -prune -o \
+    -type d \( -name node_modules -o -name target -o -name __pycache__ \
+    -o -name .pytest_cache -o -name .ruff_cache \) -prune -print 2>/dev/null || true
+}
+
+is_wt_active() {
+  local wt="$1"
+  if [[ -n "${FLOOR_HOURS:-}" ]]; then
+    worktree_is_recently_active_minutes "$wt" "$(( FLOOR_HOURS * 60 ))" "$now"
+  else
+    worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"
+  fi
 }
 
 for root in "${ROOTS[@]}"; do
   while [[ "$root" == */ && "$root" != / ]]; do root="${root%/}"; done
   [[ -d "$root" && ! -L "$root" ]] || continue
   real_root="$(cd "$root" 2>/dev/null && pwd -P)" || continue
-  for wt in "$root"/* "$root"/*/*; do
+  for wt in "$root"/* "$root"/*/* "$root"/*/.claude/worktrees/*; do
     [[ -f "$wt/.git" && ! -L "$wt" ]] || continue
     # Resolve only the configured root's aliases; no descendant may redirect us.
     real_wt="$(cd "$wt" 2>/dev/null && pwd -P)" || continue
@@ -218,13 +238,13 @@ for root in "${ROOTS[@]}"; do
     # Nested build caches are only discoverable by walking; skip that walk when
     # root caches already make this worktree a candidate. Only nested caches can
     # make a worktree with no root caches a candidate at all.
-    if [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" ]] || has_pkg_node_modules "$wt"; then
+    if [[ -e "$wt/node_modules" || -e "$wt/target" || -e "$wt/.mypy_cache" || -e "$wt/.pytest_cache" || -e "$wt/.ruff_cache" || -e "$wt/__pycache__" ]] || has_pkg_node_modules "$wt"; then
       nested_dirs=""
     else
       nested_dirs="$(nested_cache_dirs "$wt")"
       [[ -n "$nested_dirs" ]] || continue
     fi
-    if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then continue; fi
+    if is_wt_active "$wt"; then continue; fi
     if is_live "$wt"; then continue; fi
     # A producer can hold a lease on a worktree without keeping a cwd inside it,
     # so recency and live-cwd are not enough (disk_magician-mxhz). Take the lease
@@ -242,12 +262,19 @@ for root in "${ROOTS[@]}"; do
     strip_dir "$wt" "$wt/node_modules"
     for pkg_nm in "$wt"/packages/*/node_modules; do
       # A real node_modules leaf may still escape through a symlinked ancestor.
-      [[ ! -L "$wt/packages" && ! -L "${pkg_nm%/node_modules}" && -f "${pkg_nm%/node_modules}/package.json" ]] && strip_dir "$wt" "$pkg_nm"
+      if [[ ! -L "$wt/packages" && ! -L "${pkg_nm%/node_modules}" && -f "${pkg_nm%/node_modules}/package.json" ]]; then
+        strip_dir "$wt" "$pkg_nm"
+      fi
     done
-    [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target"
+    [[ -f "$wt/Cargo.toml" ]] && strip_dir "$wt" "$wt/target" || true
     strip_dir "$wt" "$wt/.mypy_cache"
+    if is_build_output_dir "$wt/.pytest_cache"; then strip_dir "$wt" "$wt/.pytest_cache"; fi
+    if is_build_output_dir "$wt/.ruff_cache"; then strip_dir "$wt" "$wt/.ruff_cache"; fi
+    if is_build_output_dir "$wt/__pycache__"; then strip_dir "$wt" "$wt/__pycache__"; fi
     while IFS= read -r nested; do
-      [[ -n "$nested" ]] && is_build_output_dir "$nested" && strip_dir "$wt" "$nested"
+      if [[ -n "$nested" ]] && is_build_output_dir "$nested"; then
+        strip_dir "$wt" "$nested"
+      fi
     done <<< "$nested_dirs"
     lease_registry_mutation_lock_exit || true
   done

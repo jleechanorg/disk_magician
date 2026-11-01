@@ -648,22 +648,36 @@ lease_reuse_lock_acquire() {
 }
 _lease_reuse_lock_acquire() {
     local lease="$1" lock="$1.reuse-lock" attempt identity slot stamp
+    [[ -z "$_lease_scope_signals" ]] || return 1
     for attempt in 0 1; do
         if mkdir "$lock" 2>/dev/null; then break; fi
         [[ -z "$_lease_scope_signals" && "$attempt" == 0 ]] || return 1
         lease_reuse_lock_recover "$lease" || return 1
     done
-    identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(str(s.st_dev)+":"+str(s.st_ino))' "$lock")" || return 1
+    identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(str(s.st_dev)+":"+str(s.st_ino))' "$lock")" || { rmdir "$lock" 2>/dev/null || true; return 1; }
     slot=${#_lease_scope_paths[@]}
     _lease_scope_paths[slot]="$lease"; _lease_scope_ids[slot]="$identity"; _lease_scope_stamps[slot]=""; _lease_scope_complete[slot]=0
-    [[ -z "$_lease_scope_signals" ]] || return 1
-    printf '%s\n' "$_lease_scope_pid" > "$lock/pid" 2>/dev/null || return 1
-    stamp="$(date +%s 2>/dev/null)" || return 1
-    [[ "$stamp" =~ ^[0-9]+$ && -z "$_lease_scope_signals" ]] || return 1
+    if [[ -n "$_lease_scope_signals" ]] || ! printf '%s\n' "$_lease_scope_pid" > "$lock/pid" 2>/dev/null; then
+        rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true
+        rmdir "$lock" 2>/dev/null || true
+        _lease_scope_paths[slot]=""
+        return 1
+    fi
+    stamp="$(date +%s 2>/dev/null)" || stamp=""
+    if [[ ! "$stamp" =~ ^[0-9]+$ || -n "$_lease_scope_signals" ]] || ! printf '%s\n' "$stamp" > "$lock/acquired_at" 2>/dev/null; then
+        rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true
+        rmdir "$lock" 2>/dev/null || true
+        _lease_scope_paths[slot]=""
+        return 1
+    fi
     _lease_scope_stamps[slot]="$stamp"
-    printf '%s\n' "$stamp" > "$lock/acquired_at" 2>/dev/null || return 1
     _lease_scope_complete[slot]=1
-    [[ -z "$_lease_scope_signals" ]]
+    if [[ -n "$_lease_scope_signals" ]]; then
+        rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true
+        rmdir "$lock" 2>/dev/null || true
+        _lease_scope_paths[slot]=""
+        return 1
+    fi
 }
 lease_reuse_lock_release() {
     local i

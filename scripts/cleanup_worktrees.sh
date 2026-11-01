@@ -524,16 +524,25 @@ worktree_head_reachable_from_main() {
 # of a tip origin advertises RIGHT NOW (ls-remote heads + PR heads; never the
 # stale remote-tracking refs). Used for detached worktrees. Fail closed.
 worktree_head_on_live_origin() {
-    local repo="$1" head_sha="$2" t="" refs sha _r
+    local repo="$1" head_sha="$2" t="" refs have unp cache_file=""
     [[ -n "$head_sha" ]] || return 1
-    command -v timeout >/dev/null 2>&1 && t="timeout 30s"
-    # shellcheck disable=SC2086
-    refs="$(env -u GH_TOKEN -u GITHUB_TOKEN $t git -C "$repo" ls-remote origin 'refs/heads/*' 'refs/pull/*/head' 2>/dev/null)" || return 1
-    while read -r sha _r; do
-        [[ -n "$sha" ]] || continue
-        git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null || continue
-        git -C "$repo" merge-base --is-ancestor "$head_sha" "$sha" 2>/dev/null && return 0
-    done <<<"$refs"
+    if [[ -n "${RUN_TMP:-}" && -d "${RUN_TMP:-}" ]]; then
+        cache_file="$RUN_TMP/lsremote_all_$(printf '%s' "$repo" | cksum | awk '{print $1"_"$2}')"
+    fi
+    if [[ -n "$cache_file" && -f "$cache_file" ]]; then
+        refs="$(cat "$cache_file")"
+    else
+        command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+        # shellcheck disable=SC2086
+        refs="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ls-remote origin 'refs/heads/*' 'refs/pull/*/head' </dev/null 2>/dev/null)" || return 1
+        [[ -n "$cache_file" ]] && printf '%s\n' "$refs" >"$cache_file"
+    fi
+    [[ -n "$refs" ]] || return 1
+    grep -q "^${head_sha}[[:space:]]" <<<"$refs" && return 0
+    have="$(cut -f1 <<<"$refs" | GIT_NO_LAZY_FETCH=1 git -C "$repo" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
+    [[ -n "$have" ]] || return 1
+    unp="$(git -C "$repo" rev-list --stdin -n1 < <(printf '%s\n%s\n' "$head_sha" "$have") 2>/dev/null)" || return 1
+    [[ -z "$unp" ]] && return 0
     return 1
 }
 
@@ -700,7 +709,11 @@ antigravity_ao_owned() {
         [[ -n "$dir" ]] || continue
         dir="$(expand_path "$dir")"
         real="$(cd "$dir" 2>/dev/null && pwd -P || printf '%s' "$dir")"
-        [[ "$candidate" == "$dir" || "$candidate" == "$dir"/* || "$candidate" == "$real" || "$candidate" == "$real"/* ]] && return 0
+        if [[ "$kind" == C ]]; then
+            [[ "${candidate%/*}" == "$dir" || "${candidate%/*}" == "$real" ]] && return 0
+        else
+            [[ "$candidate" == "$dir" || "$candidate" == "$dir"/* || "$candidate" == "$real" || "$candidate" == "$real"/* ]] && return 0
+        fi
     done <<<"$AO_CONFIG_LINES"
     return 1
 }
@@ -1007,6 +1020,9 @@ _process_repo_local_worktrees() {
             match=true
             std_real="$(cd "$abs_path" 2>/dev/null && pwd -P || printf '%s' "$abs_path")"
         fi
+        if [[ "$MANUAL_DISCARD" == true ]] && grep -qxF -- "$abs_path" <<<"$MANUAL_TARGETS"; then
+            match=true
+        fi
 
         if [[ "$match" == false ]]; then
             wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
@@ -1158,10 +1174,14 @@ _process_repo_local_worktrees() {
                 # Same C14 -> WRH route as worktree_reap: the REAL verdict
                 # writes the single original receipt, and WRH consumes exactly
                 # that receipt. No fresh inventory may reauthorize removal.
-                local cw_c14_inv cw_c14_verdict cw_removed=0
+                local cw_c14_inv cw_c14_verdict cw_removed=0 cw_lock_tries=600 cw_lock_ok=0
                 cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
                 if [[ -n "$cw_c14_inv" ]]; then
-                    if ! lease_registry_mutation_lock_enter; then
+                    while (( cw_lock_tries-- > 0 )); do
+                        if lease_registry_mutation_lock_enter; then cw_lock_ok=1; break; fi
+                        sleep 0.1 2>/dev/null || sleep 1
+                    done
+                    if (( cw_lock_ok == 0 )); then
                         cw_c14_verdict=kept:lease-busy
                     else
                     # T3 context: this is the sanctioned cleanup_worktrees.sh
