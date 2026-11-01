@@ -30,6 +30,7 @@ fi
 PATTERNS=(
   "disk_magician.sh"
   "config.json.template"
+  "safety.local.json.template"
   "config/*.txt"
   "scripts/*.sh"
   "scripts/*.py"
