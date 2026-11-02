@@ -3221,13 +3221,9 @@ def audit_tmp(path: str | Path | None = None) -> dict[str, Any]:
 def pressure_signals():
     """Keep scheduler TERM/HUP/INT inside our owned receipt/recovery lifecycle."""
     state = {"signal": 0, "process": None}
-    def forward(signum, _frame):
+    def record(signum, _frame):
         state["signal"] = signum
-        process = state["process"]
-        if process is not None and process.poll() is None:
-            try: os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError: pass
-    previous = {sig: signal.signal(sig, forward) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    previous = {sig: signal.signal(sig, record) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     try: yield state
     finally:
         for sig, handler in previous.items(): signal.signal(sig, handler)
@@ -3238,13 +3234,20 @@ def pressure_process(arguments, state, env=None, recovery=False):
         return subprocess.CompletedProcess(arguments, 128 + state["signal"])
     process = subprocess.Popen(arguments, env=env, start_new_session=True)
     state["process"] = process
+    forwarded = False
     try:
-        # Close the signal-before-Popen handoff race. Recovery is separately
-        # bounded and remains allowed after the initial cancellation.
-        if state["signal"] and not recovery:
-            try: os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError: pass
-        return subprocess.CompletedProcess(arguments, process.wait())
+        while True:
+            # Signal handlers may run inside waitpid while its lock is held.
+            # Inspect and signal the child only from this owning loop.
+            if state["signal"] and not recovery and not forwarded:
+                if process.poll() is None:
+                    try: os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError: pass
+                forwarded = True
+            try:
+                return subprocess.CompletedProcess(arguments, process.wait(timeout=.1))
+            except subprocess.TimeoutExpired:
+                continue
     finally:
         state["process"] = None
 

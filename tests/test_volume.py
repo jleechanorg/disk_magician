@@ -1480,6 +1480,49 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertEqual(receipt["last_terminal"]["outcome"], "timeout")
         self.assertEqual(receipt["last_terminal"]["postcondition"]["ballast_recovery_rc"], 0)
 
+    def test_scheduler_signal_defers_forwarding_until_process_wait_unblocks(self):
+        import signal
+
+        class WaitingProcess:
+            pid = 4242
+
+            def __init__(self):
+                self.in_wait = False
+                self.wait_calls = 0
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    self.in_wait = True
+                    try:
+                        handler = signal.getsignal(signal.SIGTERM)
+                        handler(signal.SIGTERM, None)
+                    finally:
+                        self.in_wait = False
+                    raise volume.subprocess.TimeoutExpired("fake-child", timeout)
+                return 128 + signal.SIGTERM
+
+        process = WaitingProcess()
+        forwarded = []
+
+        def killpg(pid, signum):
+            if process.in_wait:
+                raise PermissionError("waitpid lock is held")
+            forwarded.append((pid, signum))
+
+        with volume.pressure_signals() as signals:
+            with mock.patch.object(volume.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(volume.os, "killpg", side_effect=killpg):
+                result = volume.pressure_process(["fake-child"], signals)
+
+        self.assertEqual(signals["signal"], signal.SIGTERM)
+        self.assertEqual(result.returncode, 128 + signal.SIGTERM)
+        self.assertEqual(forwarded, [(process.pid, signal.SIGTERM)])
+        self.assertFalse(process.in_wait)
+
     def test_pressure_timeout_hard_kill_still_recovers_and_finishes_receipt(self):
         import job_receipt
         timeout = volume.shutil.which("timeout") or volume.shutil.which("gtimeout")
