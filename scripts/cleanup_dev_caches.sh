@@ -199,7 +199,28 @@ done
 # before running C14 rebuildable removal.
 # Prioritize >=1 MiB entries in descending size order so large multi-GiB items are
 # reclaimed first without spending minutes probing hundreds of 4 KiB files.
-for _trash_root in "$HOME/.Trash" "$HOME/.local/share/Trash"; do
+# Per-volume trash ($mountpoint/.Trash-$UID) is a separate, easily-missed root: the
+# desktop creates it on a mounted volume, so garbage there is invisible to the two
+# global roots above. Measured on jeff-ubuntu 2026-11-02: ~/Scratch/.Trash-1000 held
+# 21.9 GB / 56 entries while the host sat at 98%. Enumerate the configured quota
+# volumes and add any .Trash-<uid> they contain, deduped by realpath so a volume that
+# is also a scratch root is not scanned twice. (bead disk_magician-ylu2)
+_trash_roots=("$HOME/.Trash" "$HOME/.local/share/Trash")
+_uid="$(id -u)"
+if declare -F scratch_roots_get_volumes >/dev/null 2>&1; then
+  while IFS= read -r _vol; do
+    [[ -n "$_vol" && -d "$_vol" && ! -L "$_vol" ]] || continue
+    _pvt="$_vol/.Trash-$_uid"
+    [[ -d "$_pvt" && ! -L "$_pvt" ]] && _trash_roots+=("$_pvt")
+  done < <(scratch_roots_get_volumes 2>/dev/null || true)
+fi
+_trash_seen=()
+for _trash_root in "${_trash_roots[@]}"; do
+  _rr="$(cd "$_trash_root" 2>/dev/null && pwd -P)" || continue
+  [[ -n "$_rr" ]] || continue
+  case " ${_trash_seen[*]-} " in *" $_rr "*) continue ;; esac
+  _trash_seen+=("$_rr")
+  _trash_root="$_rr"
   [[ -d "$_trash_root" && ! -L "$_trash_root" ]] || continue
   if [[ "$_trash_root" == "$HOME/.Trash" && "$DRY_RUN" != true ]] && command -v hdiutil >/dev/null 2>&1; then
     for _trash_dmg_mnt in "$_trash_root"/dm-volume-reclaim.*/diagnostic; do
