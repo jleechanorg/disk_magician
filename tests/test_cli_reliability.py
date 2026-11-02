@@ -17,12 +17,28 @@ DISPATCH = {
     "residual-drilldown": "residual_drilldown.sh",
     "pressure-sweep": "pressure_sweep.sh",
     "tmp-scratch-sweep": "tmp_scratch_sweep.sh",
+    "install-sweepers": "install_launchd_sweepers.sh",
     "cleanup-claude-state": "cleanup_claude_state.sh",
     "codex-vacuum": "cleanup_codex_db.sh",
 }
 
 
 class ReliabilityDispatchTests(unittest.TestCase):
+    def test_install_sweepers_help_is_read_only_for_root_and_package_dispatchers(self):
+        for tree in (ROOT, ROOT / "src" / "disk_magician"):
+            with self.subTest(tree=tree.name), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                state = home / "state"
+                result = subprocess.run(
+                    ["/bin/bash", str(tree / "disk_magician.sh"), "install-sweepers", "--help"],
+                    env=dict(os.environ, HOME=str(home), DISK_MAGICIAN_STATE_DIR=str(state)),
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Usage:", result.stdout)
+                self.assertFalse((home / "Library/LaunchAgents").exists())
+                self.assertFalse(state.exists())
+
     def test_root_frontier_install_command_dispatches_help_and_isolated_dry_run(self):
         for tree in (ROOT, ROOT / "src" / "disk_magician"):
             with self.subTest(tree=tree.name), tempfile.TemporaryDirectory() as directory:
