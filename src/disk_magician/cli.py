@@ -6,6 +6,10 @@ from pathlib import Path
 
 def _build_orchestrator_env(source_env=None, platform=None):
     env = dict(os.environ if source_env is None else source_env)
+    # Keep child Python tools on the same interpreter and monotonic clock as
+    # this CLI, including when the selected interpreter lives in a venv.
+    python_bin = str(Path(sys.executable).parent)
+    env["PATH"] = python_bin + os.pathsep + env.get("PATH", "")
     if (platform or sys.platform) == "darwin":
         env["BASH_COMPAT"] = "5.0"
     return env

@@ -106,14 +106,17 @@ class CliHeredocCompatTests(unittest.TestCase):
         self.assertEqual(result["length"], len(PAYLOAD.encode()))
         self.assertEqual(result["sha256"], hashlib.sha256(PAYLOAD.encode()).hexdigest())
 
-    def test_environment_builder_copies_and_only_overrides_darwin_child(self):
-        source = {"BASH_COMPAT": "4.4", "KEEP": "yes"}
+    def test_environment_builder_pins_child_python_and_only_overrides_darwin_compat(self):
+        source = {"BASH_COMPAT": "4.4", "KEEP": "yes", "PATH": "/bin:/usr/bin"}
         darwin = cli._build_orchestrator_env(source, "darwin")
         linux = cli._build_orchestrator_env(source, "linux")
+        python_bin = str(Path(sys.executable).parent)
+        expected_path = python_bin + os.pathsep + source["PATH"]
 
-        self.assertEqual(darwin, {"BASH_COMPAT": "5.0", "KEEP": "yes"})
-        self.assertEqual(linux, source)
+        self.assertEqual(darwin, {"BASH_COMPAT": "5.0", "KEEP": "yes", "PATH": expected_path})
+        self.assertEqual(linux, {**source, "PATH": expected_path})
         self.assertEqual(source["BASH_COMPAT"], "4.4")
+        self.assertEqual(source["PATH"], "/bin:/usr/bin")
         self.assertIsNot(darwin, source)
         self.assertIsNot(linux, source)
 
