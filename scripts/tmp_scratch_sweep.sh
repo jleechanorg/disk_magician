@@ -225,9 +225,13 @@ elif [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" || "$VOLUME_TIMEO
   VOLUME_RC=124
 else
   VOLUME_COMMAND_STARTED=true
+  volume_command=("$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}")
+  if [[ "$SWEEP_MODE" == full ]]; then
+    volume_command=("$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${VOLUME_TIMEOUT_SEC}s" "${volume_command[@]}")
+  fi
   run_bounded_capture VOLUME_OUTPUT env ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$VOLUME_CURSOR" \
     DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS="$VOLUME_TIMEOUT_SEC" \
-    "$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}" || VOLUME_RC=$?
+    "${volume_command[@]}" || VOLUME_RC=$?
 fi
 if (( SCHEDULER_SIGNAL == 0 && (VOLUME_RC == 124 || VOLUME_RC == 137 || VOLUME_RC == 143) )); then
   VOLUME_TIMEOUT_REASON="${VOLUME_OUTPUT:-volume reclaim exceeded bounded runtime}"

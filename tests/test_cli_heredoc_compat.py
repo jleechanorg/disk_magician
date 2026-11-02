@@ -106,19 +106,91 @@ class CliHeredocCompatTests(unittest.TestCase):
         self.assertEqual(result["length"], len(PAYLOAD.encode()))
         self.assertEqual(result["sha256"], hashlib.sha256(PAYLOAD.encode()).hexdigest())
 
-    def test_environment_builder_pins_child_python_and_only_overrides_darwin_compat(self):
-        source = {"BASH_COMPAT": "4.4", "KEEP": "yes", "PATH": "/bin:/usr/bin"}
-        darwin = cli._build_orchestrator_env(source, "darwin")
-        linux = cli._build_orchestrator_env(source, "linux")
-        python_bin = str(Path(sys.executable).parent)
-        expected_path = python_bin + os.pathsep + source["PATH"]
+    def test_environment_builder_uses_selected_python_without_shadowing_caller_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected_bin = root / "selected-bin"
+            caller_bin = root / "caller-bin"
+            selected_bin.mkdir()
+            caller_bin.mkdir()
+            selected_python = selected_bin / "python3"
+            selected_python.write_text("#!/bin/sh\nprintf 'selected-python\\n'\n")
+            selected_python.chmod(0o755)
+            selected_git = selected_bin / "git"
+            selected_git.write_text("#!/bin/sh\nprintf 'shadow-git\\n'\n")
+            selected_git.chmod(0o755)
+            caller_git = caller_bin / "git"
+            caller_git.write_text("#!/bin/sh\nprintf 'caller-git\\n'\n")
+            caller_git.chmod(0o755)
+            caller_path = str(caller_bin) + os.pathsep + os.defpath
+            source = {"BASH_COMPAT": "4.4", "KEEP": "yes", "PATH": caller_path}
 
-        self.assertEqual(darwin, {"BASH_COMPAT": "5.0", "KEEP": "yes", "PATH": expected_path})
-        self.assertEqual(linux, {**source, "PATH": expected_path})
-        self.assertEqual(source["BASH_COMPAT"], "4.4")
-        self.assertEqual(source["PATH"], "/bin:/usr/bin")
-        self.assertIsNot(darwin, source)
-        self.assertIsNot(linux, source)
+            with mock.patch.object(cli.sys, "executable", str(selected_python)):
+                darwin = cli._build_orchestrator_env(source, "darwin")
+                linux = cli._build_orchestrator_env(source, "linux")
+
+            self.assertEqual(darwin["BASH_COMPAT"], "5.0")
+            self.assertEqual(linux["BASH_COMPAT"], "4.4")
+            for environment in (darwin, linux):
+                self.assertEqual(environment["KEEP"], "yes")
+                python_result = subprocess.run(
+                    ["python3"], env=environment, capture_output=True, text=True,
+                    check=True, timeout=5,
+                )
+                git_result = subprocess.run(
+                    ["git"], env=environment, capture_output=True, text=True,
+                    check=True, timeout=5,
+                )
+                self.assertEqual(python_result.stdout, "selected-python\n")
+                self.assertEqual(git_result.stdout, "caller-git\n")
+
+            self.assertEqual(source["BASH_COMPAT"], "4.4")
+            self.assertEqual(source["PATH"], caller_path)
+            self.assertIsNot(darwin, source)
+            self.assertIsNot(linux, source)
+
+    def test_environment_builder_preserves_venv_python_context_without_pip(self):
+        import venv
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment_root = root / "venv"
+            venv.EnvBuilder(with_pip=False).create(environment_root)
+            selected_python = environment_root / "bin" / "python3"
+            caller_bin = root / "caller-bin"
+            caller_bin.mkdir()
+            caller_python = caller_bin / "python3"
+            caller_python.write_text("#!/bin/sh\nprintf 'caller-python\\n'\n")
+            caller_python.chmod(0o755)
+            source = {"PATH": str(caller_bin) + os.pathsep + os.defpath}
+
+            with mock.patch.object(cli.sys, "executable", str(selected_python)):
+                environment = cli._build_orchestrator_env(source, "linux")
+
+            completed = subprocess.run(
+                ["python3", "-c", "import sys; print(sys.prefix)"],
+                env=environment, capture_output=True, text=True,
+                check=True, timeout=10,
+            )
+
+        self.assertEqual(completed.stdout.strip(), str(environment_root))
+        self.assertEqual(source["PATH"], str(caller_bin) + os.pathsep + os.defpath)
+
+    def test_cli_refuses_missing_packaged_python_launcher_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module_path = Path(directory) / "disk_magician" / "cli.py"
+            module_path.parent.mkdir()
+            orchestrator = Path(directory) / "disk_magician.sh"
+            orchestrator.write_text("#!/bin/sh\nexit 0\n")
+
+            with mock.patch.object(cli, "__file__", str(module_path)), \
+                 mock.patch.object(cli.sys, "argv", ["disk-magician"]), \
+                 mock.patch.object(cli, "get_orchestrator_path", return_value=orchestrator), \
+                 mock.patch.object(cli.subprocess, "run") as dispatch:
+                with self.assertRaises(RuntimeError):
+                    cli.main()
+
+            dispatch.assert_not_called()
 
 
 if __name__ == "__main__":

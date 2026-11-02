@@ -6,9 +6,12 @@ from pathlib import Path
 
 def _build_orchestrator_env(source_env=None, platform=None):
     env = dict(os.environ if source_env is None else source_env)
-    # Keep child Python tools on the same interpreter and monotonic clock as
-    # this CLI, including when the selected interpreter lives in a venv.
-    python_bin = str(Path(sys.executable).parent)
+    # Pin only Python; preserve caller tool wrappers and virtualenv identity.
+    python_launcher = Path(__file__).parent / "python_bin" / "python3"
+    if not python_launcher.is_file() or not os.access(python_launcher, os.X_OK):
+        raise RuntimeError("Disk Magician Python launcher is unavailable")
+    python_bin = str(python_launcher.parent)
+    env["DISK_MAGICIAN_PYTHON_EXECUTABLE"] = sys.executable
     env["PATH"] = python_bin + os.pathsep + env.get("PATH", "")
     if (platform or sys.platform) == "darwin":
         env["BASH_COMPAT"] = "5.0"

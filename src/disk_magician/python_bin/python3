@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${DISK_MAGICIAN_PYTHON_EXECUTABLE:?missing CLI interpreter}" "$@"
