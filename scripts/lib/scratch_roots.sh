@@ -88,17 +88,19 @@ scratch_roots_get_unique() {
 
 # Mounted quota volumes are a separate C14 domain, never ordinary tmp roots.
 scratch_roots_get_volumes() {
-  local cfg="${1:-${DISK_MAGICIAN_CONFIG:-}}" root
+  local cfg="${1:-${DISK_MAGICIAN_CONFIG:-}}" class_filter="${2:-}" root
   if [[ -z "$cfg" ]]; then cfg="$(python3 "$(dirname "${BASH_SOURCE[0]}")/../resolve_config.py" 2>/dev/null)" || return 0; fi
   [[ -f "$cfg" ]] || return 0
   while IFS= read -r root; do
     [[ -n "$root" && -d "$root" ]] || continue
     (cd "$root" 2>/dev/null && pwd -P)
-  done < <(python3 - "$cfg" <<'PYVOLUMES'
+  done < <(python3 - "$cfg" "$class_filter" <<'PYVOLUMES'
 import json,sys
 try:
  d=json.load(open(sys.argv[1]))
- for c in (d.get("volumes",{}).get("classes",{}) or {}).values():
+ class_filter=sys.argv[2]
+ for name,c in (d.get("volumes",{}).get("classes",{}) or {}).items():
+  if class_filter and name != class_filter: continue
   p=c.get("mountpoint") if isinstance(c,dict) else None
   if isinstance(p,str) and p: print(p)
 except Exception: pass

@@ -5,17 +5,36 @@
 # --dry-run; unattended deletions of ~/.claude/state remain strictly forbidden),
 # failure-continuing between steps but propagating a nonzero exit if either step
 # failed, so an unattended launchd job doesn't silently look healthy when a
-# step is broken.
+# step is broken. The 20-minute --scratch-only mode runs safe registered-volume
+# scratch-prune first, then the separate available-floor volume reclaim pass.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 act_parse_deadline_args "$@" || exit 2
 # Bash 3.2 with nounset treats an empty array expansion as an unbound variable.
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
+SWEEP_MODE=full
+if [[ "${1:-}" == --scratch-only ]]; then
+  SWEEP_MODE=scratch-only
+  shift
+fi
 clean_flag="${1:---dry-run}"
 if [[ $# -gt 1 || ( "$clean_flag" != "--clean" && "$clean_flag" != "--dry-run" ) ]]; then
-  echo "Usage: $(basename "$0") [--clean|--dry-run] [--deadline-at MONOTONIC] [--cursor PATH]" >&2
+  echo "Usage: $(basename "$0") [--scratch-only] [--clean|--dry-run] [--deadline-at MONOTONIC] [--cursor PATH]" >&2
   exit 2
+fi
+if [[ "$SWEEP_MODE" == scratch-only && -z "$ACT_DEADLINE_AT" ]]; then
+  ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+900)')"
+fi
+if [[ "$SWEEP_MODE" == scratch-only && -z "$ACT_CURSOR" ]]; then
+  ACT_CURSOR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}/scratch-prune.cursor"
+  mkdir -p "$(dirname "$ACT_CURSOR")" || exit 1
+fi
+VOLUME_TIMEOUT_BIN="${DISK_MAGICIAN_VOLUME_TIMEOUT_BIN:-}"
+if [[ -z "$VOLUME_TIMEOUT_BIN" ]]; then
+  for candidate in "$(command -v timeout 2>/dev/null || true)" "$(command -v gtimeout 2>/dev/null || true)" /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then VOLUME_TIMEOUT_BIN="$candidate"; break; fi
+  done
 fi
 governor_args=()
 [[ -n "$ACT_DEADLINE_AT" ]] && governor_args+=(--deadline-at "$ACT_DEADLINE_AT")
@@ -55,7 +74,64 @@ run_cleanup_tmp() {
 rc=0
 tmp_rc=0
 TMP_LOCK_SKIPPED=false
-if [[ "$clean_flag" == "--clean" ]]; then
+SCRATCH_PRUNE_OUTPUT=""
+SCRATCH_PRUNE_RC=0
+SCRATCH_PRUNE_LOCK_SKIPPED=false
+SCRATCH_PRUNE_OUTCOME="not-run"
+SCRATCH_PRUNE_REMOVED=0
+SCRATCH_PRUNE_SCANNED=0
+if [[ "$SWEEP_MODE" == scratch-only ]]; then
+  SCRATCH_CURSOR="${ACT_CURSOR}.scratch-prune"
+  scratch_args=(scratch-prune)
+  if [[ "$clean_flag" == "--clean" ]]; then
+    scratch_args+=(--clean --available-floor)
+  else
+    scratch_args+=(--dry-run --available-floor)
+  fi
+  SCRATCH_TIMEOUT_SEC="$(python3 - "$ACT_DEADLINE_AT" <<'PY'
+import sys,time
+try: remaining=max(0.0,float(sys.argv[1])-time.monotonic())
+except (TypeError,ValueError): remaining=0.0
+print(f"{remaining+2.0:.3f}")
+PY
+)"
+  if [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" || "$SCRATCH_TIMEOUT_SEC" == 0 ]]; then
+    SCRATCH_PRUNE_OUTPUT="skipped:bounded-runtime-unavailable"
+    SCRATCH_PRUNE_RC=124
+  else
+    SCRATCH_PRUNE_OUTPUT="$(ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$SCRATCH_CURSOR" \
+      DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 \
+      DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= SCRATCH_TOP_LEVEL_APPROVED=0 \
+      "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${SCRATCH_TIMEOUT_SEC}s" \
+      "$SCRIPT_DIR/../disk_magician.sh" "${scratch_args[@]}" 2>&1)"
+    SCRATCH_PRUNE_RC=$?
+  fi
+  [[ -n "$SCRATCH_PRUNE_OUTPUT" ]] && printf '%s\n' "$SCRATCH_PRUNE_OUTPUT"
+  SCRATCH_PRUNE_SUMMARY="$(printf '%s\n' "$SCRATCH_PRUNE_OUTPUT" | awk '/^scanned=[0-9]+ / {line=$0} END {print line}')"
+  if [[ "$SCRATCH_PRUNE_SUMMARY" =~ scanned=([0-9]+).*removed=([0-9]+) ]]; then
+    SCRATCH_PRUNE_SCANNED="${BASH_REMATCH[1]}"
+    SCRATCH_PRUNE_REMOVED="${BASH_REMATCH[2]}"
+  fi
+  if grep -qE '^skipped:(unavailable|measurement-unavailable)' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+    SCRATCH_PRUNE_OUTCOME=error
+    rc=1
+  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] || grep -q '^skipped:lease-busy' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+    SCRATCH_PRUNE_LOCK_SKIPPED=true
+    SCRATCH_PRUNE_OUTCOME=skipped_lock
+  elif [[ "$SCRATCH_PRUNE_RC" == 124 || "$SCRATCH_PRUNE_RC" == 137 || "$SCRATCH_PRUNE_RC" == 143 ]]; then
+    SCRATCH_PRUNE_OUTCOME=timeout
+    rc=1
+  elif [[ "$SCRATCH_PRUNE_RC" -ne 0 ]]; then
+    SCRATCH_PRUNE_OUTCOME=error
+    rc=1
+  elif grep -qE '^(deferred:|skipped:measurement-unavailable)' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+    SCRATCH_PRUNE_OUTCOME=partial
+  elif grep -q '^skipped:available-floor' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+    SCRATCH_PRUNE_OUTCOME=success_noop
+  else
+    SCRATCH_PRUNE_OUTCOME=success
+  fi
+elif [[ "$clean_flag" == "--clean" ]]; then
   if [[ -n "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]]; then
     env LARGE_TMP_APPROVED=1 DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" --clean --aged ${governor_args[@]+"${governor_args[@]}"} || tmp_rc=$?
   else
@@ -79,12 +155,6 @@ fi
 # The installed hourly entry point also drives quota-volume C14 reclaim.
 volume_args=(volume reclaim --available-floor)
 [[ "$clean_flag" == "--clean" ]] && volume_args+=(--clean)
-VOLUME_TIMEOUT_BIN="${DISK_MAGICIAN_VOLUME_TIMEOUT_BIN:-}"
-if [[ -z "$VOLUME_TIMEOUT_BIN" ]]; then
-  for candidate in "$(command -v timeout 2>/dev/null || true)" "$(command -v gtimeout 2>/dev/null || true)" /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/timeout /usr/local/bin/gtimeout; do
-    if [[ -n "$candidate" && -x "$candidate" ]]; then VOLUME_TIMEOUT_BIN="$candidate"; break; fi
-  done
-fi
 VOLUME_TIMEOUT_SEC="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
 if [[ -n "$ACT_DEADLINE_AT" ]]; then
   VOLUME_TIMEOUT_SEC="$(python3 - "$ACT_DEADLINE_AT" <<'PY'
@@ -176,6 +246,18 @@ if [[ "$VOLUME_VALID" != true || "$VOLUME_OUTCOME" == error || "$VOLUME_OUTCOME"
 if [[ $rc -ne 0 ]]; then
   OUTCOME="error"
   REASON="one or more sweep steps failed"
+elif [[ "$SCRATCH_PRUNE_LOCK_SKIPPED" == true && "$VOLUME_REMOVED" =~ ^[0-9]+$ && "$VOLUME_REMOVED" -gt 0 ]]; then
+  OUTCOME="partial"
+  REASON="scratch-prune skipped on lease lock; volume reclaim removed ${VOLUME_REMOVED} artifacts"
+elif [[ "$SCRATCH_PRUNE_LOCK_SKIPPED" == true && ( "$VOLUME_REMOVED" == "null" || "$VOLUME_REMOVED" -eq 0 ) ]]; then
+  OUTCOME="skipped_lock"
+  REASON="scratch-prune skipped on lease lock"
+elif [[ "$SCRATCH_PRUNE_OUTCOME" == partial || "$SCRATCH_PRUNE_OUTCOME" == timeout ]]; then
+  OUTCOME="partial"
+  REASON="scratch-prune ended with ${SCRATCH_PRUNE_OUTCOME}; volume reclaim result is recorded separately"
+elif [[ "$SCRATCH_PRUNE_OUTCOME" == success_noop && "$VOLUME_OUTCOME" == skipped ]]; then
+  OUTCOME="success_noop"
+  REASON="available-floor held for both Scratch pruning and volume reclaim"
 elif [[ "$TMP_LOCK_SKIPPED" == true && "$VOLUME_REMOVED" =~ ^[0-9]+$ && "$VOLUME_REMOVED" -gt 0 ]]; then
   OUTCOME="partial"
   REASON="cleanup_tmp skipped on scratch lock; volume reclaim removed ${VOLUME_REMOVED} artifacts"
@@ -190,6 +272,13 @@ else
   REASON="clean sweep completed"
 fi
 
+if [[ "$SWEEP_MODE" == scratch-only ]]; then
+  scratch_deferred=0
+  scratch_interrupted=0
+  grep -q '^deferred:' <<<"$SCRATCH_PRUNE_OUTPUT" && scratch_deferred=1
+  [[ "$SCRATCH_PRUNE_OUTCOME" == timeout ]] && scratch_interrupted=1
+  CHILD_METRICS="{\"removed_count\":${SCRATCH_PRUNE_REMOVED},\"deferred_count\":${scratch_deferred},\"interrupted_count\":${scratch_interrupted},\"df_delta_bytes\":0}"
+else
 CHILD_RECEIPT="$(python3 "$RECEIPT_HELPER" read --job cleanup_tmp --last 2>/dev/null || true)"
 CHILD_METRICS="$(python3 - "$CHILD_RECEIPT" "$OLD_CHILD_ID" "$CHILD_TRIGGER" <<'PY'
 import json, sys
@@ -209,6 +298,7 @@ print(json.dumps({
 },separators=(",",":")))
 PY
 )"
+fi
 read -r REMOVED_COUNT DEFERRED_COUNT INTERRUPTED_COUNT CHILD_DELTA <<<"$(python3 - "$CHILD_METRICS" <<'PY'
 import json,sys
 try: x=json.loads(sys.argv[1])
@@ -227,7 +317,7 @@ if [[ -n "$FREE_BEFORE" && -n "$FREE_AFTER" ]]; then
   FREED_BYTES=$(( DF_DELTA > 0 ? DF_DELTA : 0 ))
   # A dry-run or lock-skipped sweep deletes nothing, so any positive df delta is
   # unrelated system activity and must never be reported as reclaimed bytes.
-  [[ "$clean_flag" == "--dry-run" || ( "$TMP_LOCK_SKIPPED" == true && "$VOLUME_REMOVED" != "null" && "$VOLUME_REMOVED" -eq 0 ) ]] && FREED_BYTES=0
+  [[ "$clean_flag" == "--dry-run" || ( ( "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true ) && "$VOLUME_REMOVED" != "null" && "$VOLUME_REMOVED" -eq 0 ) ]] && FREED_BYTES=0
 fi
 # Lock contention needs no child receipt, but wrapper df evidence is still required.
 if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && "$DF_DELTA" != null ]]; then
@@ -246,18 +336,21 @@ elif [[ $rc -eq 0 && ( "$INTERRUPTED_COUNT" -gt 0 || "$DEFERRED_COUNT" -gt 0 || 
   REASON="sweep completed with candidate deferrals, volume target unmet, or ballast restore failure"
 fi
 
-if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && ( "$VOLUME_REMOVED" == "null" || "$VOLUME_REMOVED" -eq 0 ) ]]; then
+if [[ ( "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true ) && $rc -eq 0 && ( "$VOLUME_REMOVED" == "null" || "$VOLUME_REMOVED" -eq 0 ) ]]; then
   SAFETY='{"status": "not_applicable", "reason": "scratch_lock_contention_no_mutation", "delegated": false}'
 elif [[ "$clean_flag" == "--dry-run" ]]; then
   SAFETY='{"status": "no_mutation", "reason": "dry-run sweep completed without deletions", "delegated": false}'
+elif [[ "$SWEEP_MODE" == scratch-only ]]; then
+  SAFETY='{"status": "delegated", "reason": "delegated to scheduled Scratch pruning and pressure-gated volume reclaim", "delegated": true}'
 else
   SAFETY='{"status": "delegated", "reason": "delegated to cleanup_tmp, cleanup_claude_state, and pressure-gated volume reclaim", "delegated": true}'
 fi
 LOCK_ARGS=()
-if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 ]]; then
+if [[ ( "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true ) && $rc -eq 0 ]]; then
   LOCK_ARGS=(--lock '{"held": true, "acquired": false, "reason": "scratch lock held"}')
 fi
-CANDIDATES="{\"count\":null,\"bytes\":null,\"removed_count\":${REMOVED_COUNT},\"deferred_count\":${DEFERRED_COUNT},\"interrupted_count\":${INTERRUPTED_COUNT},\"volume_aged_scanned\":${VOLUME_AGED},\"volume_removed\":${VOLUME_REMOVED},\"volume_target_reached\":${VOLUME_TARGET},\"volume_top_kept_reason\":${VOLUME_REASON_JSON},\"volume_ballast_restore_failures\":${VOLUME_BALLAST_FAILURES}}"
+SCRATCH_PRUNE_OUTCOME_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$SCRATCH_PRUNE_OUTCOME")"
+CANDIDATES="{\"count\":null,\"bytes\":null,\"removed_count\":${REMOVED_COUNT},\"deferred_count\":${DEFERRED_COUNT},\"interrupted_count\":${INTERRUPTED_COUNT},\"scratch_prune_scanned\":${SCRATCH_PRUNE_SCANNED},\"scratch_prune_removed\":${SCRATCH_PRUNE_REMOVED},\"scratch_prune_outcome\":${SCRATCH_PRUNE_OUTCOME_JSON},\"volume_aged_scanned\":${VOLUME_AGED},\"volume_removed\":${VOLUME_REMOVED},\"volume_target_reached\":${VOLUME_TARGET},\"volume_top_kept_reason\":${VOLUME_REASON_JSON},\"volume_ballast_restore_failures\":${VOLUME_BALLAST_FAILURES}}"
 POSTCONDITION="{\"free_bytes_before\":${FREE_BEFORE:-null},\"free_bytes_after\":${FREE_AFTER:-null},\"df_delta_bytes\":${DF_DELTA},\"freed_bytes\":${FREED_BYTES}}"
 
 if ! python3 "$RECEIPT_HELPER" finish --job tmp_scratch_sweep \

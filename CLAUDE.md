@@ -69,7 +69,7 @@ optionally partition/provision a dedicated Scratch volume via
 This isolates disposable agent and CI artifacts so they cannot exhaust host free
 space. Scratch volumes are automatically trimmed from 70% down to 50% usage
 while strictly preserving a 64 MiB `.diskm-ballast` emergency reserve and
-48-hour recency, live-PID, and active-lease protections.
+24-hour recency, live-PID, and active-lease protections for automatic Scratch pruning.
 
 Use the returned artifact directory rather than inventing paths under
 `/Volumes/diskm-scratch` or `~/Scratch`. A registered but unavailable, full or
@@ -236,7 +236,7 @@ When cleaning or recommending disk cleanups on this workstation, execute the can
 
 1. **Tier 1: Scratch Volume, Developer Caches & Temp (Safe, 10–150+ GiB)**:
    - Scripts: `cleanup_scratch_top_level.sh` (`scratch-prune`), `cleanup_tmp.sh`, `cleanup_pr_scratch.sh`, `cleanup_llm_inspector.sh`, `cleanup_dev_caches.sh`
-   - Targets: top-level and `tmp/` Scratch entries older than 48h floor (preserving `.diskm-ballast`, live PIDs, and active leases), `/private/tmp` ephemera, and compiler/npm/cargo/test caches (`cleanup_dev_caches.sh` runs last so its `~/Library/Caches` walk does not hold `.owner-mutation.reuse-lock` ahead of fast cleaners).
+- Targets: C14-recognized top-level and managed Scratch entries older than the 24h default floor (preserving `.diskm-ballast`, live PIDs, active leases, secrets, and dirty/unpushed repositories), `/private/tmp` ephemera, and compiler/npm/cargo/test caches (`cleanup_dev_caches.sh` runs last so its `~/Library/Caches` walk does not hold `.owner-mutation.reuse-lock` ahead of fast cleaners).
 2. **Tier 2: Xcode & Simulator Caches (Safe, 10–50+ GiB)**:
    - Script: `cleanup_xcode.sh`
    - Targets: rebuildable `~/Library/Developer/Xcode/DerivedData` and CoreSimulator temp/caches.

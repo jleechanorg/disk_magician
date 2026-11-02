@@ -3,6 +3,9 @@ set -euo pipefail
 unset BASH_ENV || true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d /tmp/dm-volume-reclaim.XXXXXX)"
+TEST_HOME="$T/home"
+mkdir -m 700 -p "$TEST_HOME"
+export HOME="$TEST_HOME"
 if [[ "$(uname -s)" == Darwin ]]; then
   # C14 diagnostics must live on a different device from the fake volume.
   # A small task-owned HFS+ image supplies that boundary on macOS, where
@@ -43,8 +46,8 @@ printf x > "$TEST_ROOT/repo/evidence/oldest/content"
 printf x > "$TEST_ROOT/repo/build/younger/content"
 printf x > "$TEST_ROOT/repo/evidence/fresh/content"
 python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p, (t,t)) for p in [root, *root.rglob("*")]]' "$TEST_ROOT/repo/evidence/oldest"
-python3 -c 'import os,sys,time; os.utime(sys.argv[1], (time.time()-60*3600,)*2)' "$TEST_ROOT/repo/build/younger/content"
-python3 -c 'import os,sys,time; os.utime(sys.argv[1], (time.time()-47*3600,)*2)' "$TEST_ROOT/repo/evidence/fresh/content"
+python3 -c 'import os,sys,time; os.utime(sys.argv[1], (time.time()-25*3600,)*2)' "$TEST_ROOT/repo/build/younger/content"
+python3 -c 'import os,sys,time; os.utime(sys.argv[1], (time.time()-23*3600,)*2)' "$TEST_ROOT/repo/evidence/fresh/content"
 cat > "$DISK_MAGICIAN_DISKM_BIN" <<'MOCK'
 #!/usr/bin/env bash
 case "$*" in
@@ -91,6 +94,7 @@ case "$*" in
 esac
 MOCK
 chmod +x "$DISK_MAGICIAN_DISKM_BIN"
+if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" != slow-discovery ]]; then
 OUT="$("$ROOT/scripts/volume_reclaim.sh")"
 [[ "$OUT" == *"evidence/oldest"* && "$OUT" == *"build/younger"* ]]
 [[ "$OUT" != *"evidence/fresh"* ]]
@@ -169,6 +173,79 @@ import json,sys
 cursor=json.load(open(sys.argv[1])); assert cursor["next_index"]==0 and cursor["items"]==[sys.argv[2]]
 PY
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="deadline-before-unit"'
+fi
+# A later candidate's mtime probe must not make the earlier eligible candidate
+# wait behind eager `find | mtime | sort` collection. The fake clock advances
+# only after the second date probe, without a wall-clock sleep.
+# Preserve the fixture's original registered mount identity while isolating its
+# candidate tree and restarting the fake usage sequence.
+mv "$TEST_ROOT/repo" "$T/repo-before-discovery"
+mkdir -p "$TEST_ROOT/repo/evidence/first" "$TEST_ROOT/repo/evidence/second"
+printf x >"$TEST_ROOT/repo/evidence/first/content"; printf x >"$TEST_ROOT/repo/evidence/second/content"
+python3 -c 'import os,sys,time; from pathlib import Path; root=Path(sys.argv[1]); [os.utime(p,(time.time()-h*3600,)*2) for p,h in [(root/"first",72),(root/"first/content",72),(root/"second",60),(root/"second/content",60)]]' "$TEST_ROOT/repo/evidence"
+SLOW_BIN="$T/slow-discovery-bin"; mkdir -p "$SLOW_BIN"
+DISCOVERY_MARKER="$T/later-candidate-discovered"
+REAL_PYTHON3="$(command -v python3)"
+REAL_STAT="$(command -v stat)"
+cat >"$SLOW_BIN/stat" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [[ "$arg" == */repo/evidence/second/content ]] && : >"$DISCOVERY_MARKER"
+done
+exec "$REAL_STAT" "$@"
+SH
+cat >"$SLOW_BIN/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ -e "$DISCOVERY_MARKER" ]]; then
+  now="$("$REAL_PYTHON3" -c 'import time; print(int(time.monotonic())+1000)')"
+else
+  now="$("$REAL_PYTHON3" -c 'import time; print(int(time.monotonic()))')"
+fi
+if [[ "${1:-}" == -c && "${2:-}" == *'time.monotonic()'* ]]; then
+  deadline="${3:-0}"
+  if [[ "$2" == *'time.monotonic() >= float(sys.argv[1])'* ]]; then
+    (( now >= deadline )) && exit 0 || exit 1
+  fi
+fi
+if [[ "${1:-}" == - ]]; then
+  code="$(cat)"
+  if [[ "$code" == *'time.monotonic()'* ]]; then
+    deadline="${2:-0}"; budget="${3:-0}"
+    (( now + budget <= deadline )) && exit 0 || exit 1
+  fi
+  printf '%s\n' "$code" | "$REAL_PYTHON3" - "${@:2}"
+  exit "$?"
+fi
+exec "$REAL_PYTHON3" "$@"
+SH
+chmod +x "$SLOW_BIN/stat" "$SLOW_BIN/python3"
+: >"$STATUS_CALLS_FILE"
+ACT_CURSOR="$T/discovery.cursor" ACT_DEADLINE_AT="$(python3 -c 'import time; print(int(time.monotonic())+120)')" \
+DISCOVERY_MARKER="$DISCOVERY_MARKER" REAL_PYTHON3="$REAL_PYTHON3" REAL_STAT="$REAL_STAT" PATH="$SLOW_BIN:$PATH" \
+TEST_STATUS_SEQUENCE="900 850 850" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/slow-discovery.out"
+if [[ ! -e "$TEST_ROOT/repo/evidence/first" && -e "$TEST_ROOT/repo/evidence/second" ]]; then
+  echo "PASS: first eligible artifact is handled before later discovery expires the deadline"
+else
+  echo "FAIL: first eligible artifact is starved by later discovery"
+  cat "$T/slow-discovery.out"
+  exit 1
+fi
+if python3 - "$T/discovery.cursor" "$TEST_ROOT/repo/evidence/second" <<'PY'
+import json,sys
+cursor=json.load(open(sys.argv[1])); assert cursor["next_index"] == 1
+assert cursor["items"][cursor["next_index"]] == sys.argv[2]
+PY
+then echo "PASS: cursor resumes exactly at the later candidate"; else echo "FAIL: cursor did not point to the later candidate"; exit 1; fi
+: >"$STATUS_CALLS_FILE"
+DISCOVERY_MARKER="$T/no-later-marker" REAL_PYTHON3="$REAL_PYTHON3" TEST_STATUS_SEQUENCE="900 750 750" ACT_CURSOR="$T/discovery.cursor" \
+ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+60)')" \
+"$ROOT/scripts/volume_reclaim.sh" --clean >"$T/slow-discovery-resume.out"
+[[ ! -e "$TEST_ROOT/repo/evidence/second" ]] || { echo "FAIL: resumed candidate was not removed"; cat "$T/slow-discovery-resume.out"; exit 1; }
+echo "PASS: next run resumes and removes the pending candidate"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==1'
+if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == slow-discovery ]]; then exit 0; fi
+mv "$TEST_ROOT/repo" "$T/repo-after-discovery"
+mv "$T/repo-before-discovery" "$TEST_ROOT/repo"
 # C14 ENOSPC must be typed through the real cleanup wrapper before ballast release.
 BALLAST_LOG="$T/ballast.log"
 export BALLAST_LOG
@@ -354,7 +431,7 @@ echo 'volume_reclaim: default 70% trigger down to 50% target threshold verified'
 
 echo 'volume_reclaim: real C14 whole-artifact removal and stop threshold, typed ENOSPC wrapper, and reserve restoration passed'
 TEST_ROOT="$T/unavailable" "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:unavailable'
-echo 'volume_reclaim: dry-run boundary, no-aged terminal receipt, 48h filter, oldest-first, and unavailable path passed'
+echo 'volume_reclaim: dry-run boundary, no-aged terminal receipt, 24h filter, oldest-first, and unavailable path passed'
 
 # Scheduled free-space mode reaches the SAME real C14 protection guard even
 # when quota usage is low, and never invokes reserve/trim for a protected pass.

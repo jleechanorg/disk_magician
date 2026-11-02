@@ -15,7 +15,7 @@
 #   2. candidates are direct children only: never the root, never a symlink, and
 #      never a dot entry;
 #   3. newest content mtime must be at least SCRATCH_PRUNE_MIN_HOURS old
-#      (48 h floor; a larger value is honoured, a smaller one is clamped up);
+#      (24 h floor; a larger value is honoured, a smaller one is clamped up);
 #   4. safety_gate (never_delete / protected_live_paths / needs_decision);
 #   5. webhook-free C14 verdict under the shared lease-registry lock. C14 proves
 #      no live owner lease, no live cwd, no open file and no recent activity
@@ -45,19 +45,25 @@ source "$SCRIPT_DIR/lib/scratch_budget.sh"
 # shellcheck source=scripts/lib/actuator_deadline.sh
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 
-MIN_HOURS_FLOOR=48
+ORIG_ARGS=("$@")
+act_parse_deadline_args "$@" || exit 2
+if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
+
+MIN_HOURS_FLOOR=24
+SCRATCH_AUTOMATIC="${DISK_MAGICIAN_SCRATCH_AUTOMATIC:-0}"
+AVAILABLE_FLOOR=false
 RECENCY_SPEC=""
 # Idle-floor override (operator decision 2026-10-31): DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=N
-# (N>=12) lowers the recency floor to N hours. Lower or malformed values keep the
-# 48h floor. Env-only, audit-first; every other C14 removal gate still applies.
-if [[ "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -ge 12 && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -lt "$MIN_HOURS_FLOOR" ]]; then
+# (N>=12) lowers the manual operator floor. Automatic mode always uses at least 24h
+# and does not activate the content/repository override tied to this floor.
+if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -ge 12 && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -lt "$MIN_HOURS_FLOOR" ]]; then
   _guard_state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
   if { mkdir -p "$_guard_state_dir" && printf '%s scratch-prune: recency override active: hours:%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" >>"$_guard_state_dir/worktree_guard.log"; } 2>/dev/null; then
     MIN_HOURS_FLOOR="$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS"
     RECENCY_SPEC="hours:$MIN_HOURS_FLOOR"
   else
-    echo "scratch-prune: cannot record recency override hours:$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS; using 48h floor" >&2
+      echo "scratch-prune: cannot record recency override hours:$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS; using 24h floor" >&2
   fi
 fi
 MIN_HOURS="${SCRATCH_PRUNE_MIN_HOURS:-$MIN_HOURS_FLOOR}"
@@ -66,29 +72,30 @@ DRY_RUN=true
 
 usage() {
   cat <<'USAGE'
-Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--min-hours N] [--max-gib N]
+Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--deadline-at T] [--cursor PATH] [--min-hours N] [--max-gib N]
 
   --dry-run       Preview candidates and their C14 verdicts (default).
   --clean         Actually remove eligible candidates. Requires
-                  SCRATCH_TOP_LEVEL_APPROVED=1.
-  --min-hours N   Recency floor in hours (default 48; values below 48 are
-                  clamped up to 48).
+                  SCRATCH_TOP_LEVEL_APPROVED=1, or the C14-only
+                  DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 mode on the registered volume.
+  --available-floor  Stop at 50 GiB available and recheck before each removal.
+  --min-hours N   Recency floor in hours (default 24; values below 24 are
+                  clamped up to 24).
   --max-gib N     Per-run removal cap in GiB (default 25; 0 means no cap).
 
-Removes only direct children of the registered Scratch volume root that C14
-would remove, plus the two content classes kept:secret-like and
-kept:unproven-content when SCRATCH_TOP_LEVEL_APPROVED=1 is set.
+Automatic mode removes only C14-recognized ephemeral Scratch artifacts. It never
+overrides C14 secret, unknown-content, lease, live-cwd, open-file, dirty, or
+unpushed keeps.
 USAGE
 }
 
 # The lock supervisor re-executes this script, so it must receive the caller's
 # original argv: the parse loop below consumes the flags.
-ORIG_ARGS=("$@")
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) DRY_RUN=false; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --available-floor) AVAILABLE_FLOOR=true; shift ;;
     --min-hours) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MIN_HOURS="$2"; shift 2 ;;
     --max-gib) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MAX_GIB="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -96,7 +103,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# The recency floor may rise but never fall below the 48 h default: a caller
+# The recency floor may rise but never fall below the 24 h default: a caller
 # cannot make this cleaner more aggressive than its documented contract.
 [[ "$MIN_HOURS" =~ ^[0-9]+$ ]] || MIN_HOURS="$MIN_HOURS_FLOOR"
 MIN_HOURS=$((10#$MIN_HOURS))
@@ -105,7 +112,11 @@ MIN_HOURS=$((10#$MIN_HOURS))
 MAX_GIB=$((10#$MAX_GIB))
 MAX_KB=$(( MAX_GIB * 1024 * 1024 ))
 
-if [[ "$DRY_RUN" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" != "1" ]]; then
+if [[ "$DRY_RUN" != true && "$SCRATCH_AUTOMATIC" == 1 && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == 1 ]]; then
+  echo "Refusing automatic mode with SCRATCH_TOP_LEVEL_APPROVED=1; automatic mode never overrides C14 keeps." >&2
+  exit 2
+fi
+if [[ "$DRY_RUN" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" != "1" && "$SCRATCH_AUTOMATIC" != 1 ]]; then
   echo "Refusing to delete: set SCRATCH_TOP_LEVEL_APPROVED=1 after reviewing the dry-run output." >&2
   exit 2
 fi
@@ -119,6 +130,7 @@ if [[ -n "${DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE:-}" ]]; then
     exit 2
   fi
   root="$DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE"
+  root_registered=false
   if [[ -z "$root" || "$root" == "/" || ! -d "$root" || -L "$root" ]]; then
     echo "Refusing unsafe scratch root: '${root}'" >&2
     exit 2
@@ -128,12 +140,22 @@ else
   root="$("$diskm" volume path scratch --for-reclaim 2>/dev/null)" || { echo skipped:unavailable; exit 0; }
   [[ -n "$root" ]] || { echo skipped:unavailable; exit 0; }
   "$diskm" volume verify-mount "$root" >/dev/null 2>&1 || { echo skipped:unavailable; exit 0; }
+  root_registered=true
 fi
 if [[ -z "$root" || "$root" == "/" || ! -d "$root" || -L "$root" ]]; then
   echo "Refusing unsafe scratch root: '${root}'" >&2
   exit 2
 fi
-root="${root%/}"
+root="$(cd "$root" 2>/dev/null && pwd -P)" || { echo "Refusing unresolvable scratch root." >&2; exit 2; }
+[[ -n "$root" && "$root" != "/" ]] || { echo "Refusing unsafe scratch root: '${root}'" >&2; exit 2; }
+if [[ "$SCRATCH_AUTOMATIC" == 1 && "$root_registered" != true ]]; then
+  echo "Refusing automatic cleanup outside the verified registered Scratch mount." >&2
+  exit 2
+fi
+if [[ "$AVAILABLE_FLOOR" == true && "$root_registered" != true ]]; then
+  echo "Refusing --available-floor without a verified registered Scratch mount." >&2
+  exit 2
+fi
 
 if [[ "$DRY_RUN" != true ]]; then
   # Serialize with volume reclaim and the tmp sweeps; the supervisor execs this
@@ -142,6 +164,37 @@ if [[ "$DRY_RUN" != true ]]; then
     scratch_lock_acquire scratch_prune "${ORIG_ARGS[@]}" || exit $?
   else
     scratch_lock_acquire scratch_prune || exit $?
+  fi
+fi
+
+ACT_CURSOR_SOURCE="scratch_prune:v1:$root"
+CURSOR_ERROR=0
+if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true && -n "$ACT_CURSOR" ]]; then
+  act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" >/dev/null || { CURSOR_ERROR=1; echo kept:cursor-invalid; }
+  if (( ! CURSOR_ERROR )); then
+    act_cursor_reset_once "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" || { CURSOR_ERROR=1; echo kept:cursor-reset-failed; }
+  fi
+fi
+
+scratch_available_bytes() {
+  local status rc pair used quota quota_free fs_free
+  "$diskm" volume verify-mount "$root" >/dev/null 2>&1 || return 75
+  status="$("$diskm" volume status --json --snapshot 2>/dev/null)"; rc=$?
+  (( rc == 0 || rc == 1 )) || return 75
+  pair="$(python3 -c 'import json,sys; d=json.load(sys.stdin); r=next(x for x in d["volumes"] if x.get("class")=="scratch"); u=r.get("allocated_bytes"); q=r.get("quota_bytes"); assert type(u) is int and type(q) is int and q>0; print(u,q)' <<<"$status" 2>/dev/null)" || return 75
+  read -r used quota <<<"$pair"
+  [[ "$used" =~ ^[0-9]+$ && "$quota" =~ ^[0-9]+$ ]] || return 75
+  fs_free="$(python3 "$SCRIPT_DIR/scratch_pressure.py" "$root" 2>/dev/null)" || return 75
+  [[ "$fs_free" =~ ^[0-9]+$ ]] || return 75
+  quota_free=$(( quota - used )); (( quota_free < 0 )) && quota_free=0
+  (( fs_free < quota_free )) && printf '%s\n' "$fs_free" || printf '%s\n' "$quota_free"
+}
+
+if [[ "$AVAILABLE_FLOOR" == true ]]; then
+  scratch_available="$(scratch_available_bytes)" || { echo skipped:measurement-unavailable; exit 75; }
+  if (( scratch_available >= 50 * 1024 * 1024 * 1024 )); then
+    echo "skipped:available-floor:$scratch_available"
+    exit 0
   fi
 fi
 
@@ -278,9 +331,20 @@ if [[ -d "$root/tmp" && ! -L "$root/tmp" ]]; then
   done
 fi
 
-for entry in ${candidates[@]+"${candidates[@]}"}; do
+if (( ! CURSOR_ERROR )); then
+while IFS= read -r -d '' entry; do
+  if [[ "$SCRATCH_AUTOMATIC" == 1 ]] && ! c14_ephemeral_retention "$entry" >/dev/null 2>&1; then
+    echo "kept:unproven-content $entry"
+    kept=$(( kept + 1 ))
+    continue
+  fi
   if deadline_exceeded; then
-    echo "deferred:deadline (stopped before $(basename "${entry%%/}"))"
+    if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
+      outcome="$(scratch_budget_quarantine_remove "$entry")"
+      echo "$outcome $entry"
+    else
+      echo "deferred:deadline (stopped before $(basename "${entry%%/}"))"
+    fi
     break
   fi
   [[ -e "$entry" || -L "$entry" ]] || continue
@@ -313,10 +377,33 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
     capped=1
     continue
   fi
-  outcome="$(verdict_and_maybe_remove "$entry")"
+  automatic_logged=false
+  if [[ "$SCRATCH_AUTOMATIC" == 1 ]]; then
+    if [[ "$DRY_RUN" != true ]]; then
+      if [[ "$AVAILABLE_FLOOR" == true ]]; then
+        scratch_available="$(scratch_available_bytes)" || { echo skipped:measurement-unavailable; exit 75; }
+        if (( scratch_available >= 50 * 1024 * 1024 * 1024 )); then
+          echo "skipped:available-floor:$scratch_available"
+          break
+        fi
+      fi
+      outcome="$(scratch_budget_quarantine_remove "$entry")"
+      automatic_logged=true
+    else
+      preview_args=(--kind ephemeral)
+      [[ -n "$ACT_DEADLINE_AT" ]] && preview_args+=(--deadline-at "$ACT_DEADLINE_AT")
+      auto_verdict="$(artifact_removal_verdict "$entry" "${preview_args[@]}")"
+      case "$auto_verdict" in
+        remove) outcome=would-remove:remove ;;
+        *) outcome="$auto_verdict" ;;
+      esac
+    fi
+  else
+    outcome="$(verdict_and_maybe_remove "$entry")"
+  fi
   case "$outcome" in
     removed:*)
-      deletion_log_removal "$entry" "$kb" "${outcome#removed:}${RECENCY_SPEC:+:recency=$RECENCY_SPEC}"
+      [[ "$automatic_logged" == true ]] || deletion_log_removal "$entry" "$kb" "${outcome#removed:}${RECENCY_SPEC:+:recency=$RECENCY_SPEC}"
       removed=$(( removed + 1 )); removed_kb=$(( removed_kb + kb ))
       echo "$outcome $entry (${kb} KB)" ;;
     would-remove:*)
@@ -326,6 +413,10 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
       kept=$(( kept + 1 ))
       busy_streak=$(( busy_streak + 1 ))
       echo "$outcome $entry"
+      if [[ "$SCRATCH_AUTOMATIC" == 1 ]]; then
+        echo "skipped:lease-busy (registry lock held by a producer; rerun when the sweeper finishes)"
+        break
+      fi
       if (( busy_streak >= 10 )); then
         echo "skipped:lease-busy (registry lock held by a producer; rerun when the sweeper finishes)"
         break
@@ -336,8 +427,17 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
       kept=$(( kept + 1 ))
       echo "$outcome $entry" ;;
   esac
+  case "$outcome" in
+    deferred:deadline-before-unit|kept:cursor-*) break ;;
+  esac
   busy_streak=0
-done
+done < <(
+  for candidate in ${candidates[@]+"${candidates[@]}"}; do printf '%s\0' "$candidate"; done
+  if [[ "$root_registered" == true ]]; then
+    find "$root" -mindepth 3 -maxdepth 3 -type d ! -path '*/.*' -print0 2>/dev/null
+  fi
+)
+fi
 
 echo "=== Summary ==="
 echo "scanned=${scanned} kept=${kept} removable=${removable} removed=${removed} planned_mb=$(( (planned_kb + removed_kb) / 1024 ))"
