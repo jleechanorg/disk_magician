@@ -301,9 +301,31 @@ def sqlite_backup_matches(primary, dbx_path, st_p, st_d):
         return False
     if st_p.st_size < int(st_d.st_size * 0.9):
         return False
+    # A matching 16-byte header only proves both files are SQLite, not that they hold
+    # the same data: two unrelated databases of similar size would pass and the
+    # unuploaded backup below would then be deleted. Require content equivalence -
+    # compare page counts from the header and then the bytes themselves.
     try:
         with open(primary, "rb") as fp, open(dbx_path, "rb") as fd:
-            return fp.read(16) == b"SQLite format 3\x00" and fd.read(16) == b"SQLite format 3\x00"
+            hp = fp.read(100)
+            hd = fd.read(100)
+            if len(hp) < 100 or len(hd) < 100:
+                return False
+            if hp[:16] != b"SQLite format 3\x00" or hd[:16] != b"SQLite format 3\x00":
+                return False
+            # Bytes 28..32 and 92..96 are the change counter and version-valid-for;
+            # either differing means the files are not the same database state.
+            if hp[24:28] != hd[24:28] or hp[92:96] != hd[92:96]:
+                return False
+            fp.seek(0)
+            fd.seek(0)
+            while True:
+                bp = fp.read(1024 * 1024)
+                bd = fd.read(1024 * 1024)
+                if bp != bd:
+                    return False
+                if not bp:
+                    return True
     except Exception:
         return False
 

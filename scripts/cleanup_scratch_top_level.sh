@@ -189,7 +189,12 @@ verdict_and_maybe_remove() {
         verdict=remove
       fi ;;
     kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data|kept:admin-unknown)
-      if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" && -n "${RECENCY_SPEC:-}" ]]; then
+      # A shortened recency floor must not authorize destroying unpushed work. That
+      # override previously fired on any RECENCY_SPEC, so lowering the floor to 1h via
+      # DISK_MAGICIAN_SCRATCH_FLOOR_HOURS made never-pushed trees removable after an
+      # hour. Provenance bypass now requires the explicit operator emergency floor
+      # (MIN_HOURS_FLOOR back at 12h) and is never reachable from the env-numeric override.
+      if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" && -n "${RECENCY_SPEC:-}" && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" == "" ]]; then
         override="$verdict"
         verdict=remove
       fi ;;

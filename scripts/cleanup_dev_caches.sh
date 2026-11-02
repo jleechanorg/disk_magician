@@ -220,9 +220,13 @@ for _trash_root in "$HOME/.Trash" "$HOME/.local/share/Trash"; do
           if [[ "$_scan_dir" == "$_trash_root" && -d "$_trash_root/files" ]]; then
             case "${_trash_entry##*/}" in files|info|expunged) continue ;; esac
           fi
-          c14_remove "$_trash_entry" --kind rebuildable || true
-          if [[ "$_trash_root" == "$HOME/.local/share/Trash" ]]; then
-            rm -f "$_trash_root/info/${_trash_entry##*/}.trashinfo" 2>/dev/null || true
+          # Remove restore metadata ONLY when the guarded removal actually succeeded.
+          # Deleting .trashinfo for a file c14_remove refused leaves the file in Trash
+          # with no restore path - lost metadata, unreclaimed space.
+          if c14_remove "$_trash_entry" --kind rebuildable && [[ ! -e "$_trash_entry" ]]; then
+            if [[ "$_trash_root" == "$HOME/.local/share/Trash" ]]; then
+              rm -f "$_trash_root/info/${_trash_entry##*/}.trashinfo" 2>/dev/null || true
+            fi
           fi
         done < <(du -sk "$_scan_dir"/* "$_scan_dir"/.[!.]* 2>/dev/null | sort -rn | awk '$1 >= 1024 {sub(/^[0-9]+[[:space:]]+/, ""); print}')
       done
