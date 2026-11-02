@@ -308,7 +308,7 @@ class LinuxScratchTest(VolumeTestBase):
             service = (units / (unit_name + ".service")).read_text()
             self.assertIn("OnBootSec=5s\nOnUnitActiveSec=20s\nAccuracySec=1s", timer)
             self.assertNotIn("Persistent", timer)
-            self.assertIn("volume reclaim --available-floor --clean", service)
+            self.assertIn("tmp-scratch-sweep --scratch-only --clean", service)
             self.assertIn("Restart=no", service)
             self.assertIn(str(self.config), service)
             self.assertIn(str(self.state_dir), service)

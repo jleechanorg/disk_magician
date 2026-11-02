@@ -40,9 +40,9 @@ class ScratchPressureTests(unittest.TestCase):
         path = ROOT / 'launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template'
         plist = plistlib.loads(path.read_bytes())
         self.assertEqual(plist['StartInterval'], 1200)
-        self.assertEqual(plist['ProgramArguments'][1:], ['volume', 'reclaim', '--available-floor', '--clean'])
+        self.assertEqual(plist['ProgramArguments'][1:], ['tmp-scratch-sweep', '--scratch-only', '--clean'])
         service = (ROOT / 'systemd/diskm-scratch-reclaim.service.in').read_text()
-        self.assertIn('volume reclaim --available-floor --clean', service)
+        self.assertIn('tmp-scratch-sweep --scratch-only --clean', service)
         self.assertIn('OnCalendar=*:0/20', (ROOT / 'scripts/volume.py').read_text())
         legacy = plistlib.loads((ROOT / 'launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template').read_bytes())
         self.assertEqual(legacy['StartInterval'], 3600)
