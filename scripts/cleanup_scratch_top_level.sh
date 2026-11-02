@@ -48,9 +48,10 @@ source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 MIN_HOURS_FLOOR=48
 RECENCY_SPEC=""
 # Idle-floor override (operator decision 2026-10-31): DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=N
-# (N>=12) lowers the recency floor to N hours. Lower or malformed values keep the
-# 48h floor. Env-only, audit-first; every other C14 removal gate still applies.
-if [[ "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -ge 12 && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -lt "$MIN_HOURS_FLOOR" ]]; then
+# (N>=1) lowers the recency floor to N hours (1h for 99% emergency scratch reclaim, 4h matches C14 ephemeral clone floor).
+# Lower or malformed values keep the 48h floor. Env-only, audit-first; every other
+# C14 removal gate still applies.
+if [[ "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{0,3}$ && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -ge 1 && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -lt "$MIN_HOURS_FLOOR" ]]; then
   _guard_state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
   if { mkdir -p "$_guard_state_dir" && printf '%s scratch-prune: recency override active: hours:%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" >>"$_guard_state_dir/worktree_guard.log"; } 2>/dev/null; then
@@ -85,10 +86,12 @@ USAGE
 # original argv: the parse loop below consumes the flags.
 ORIG_ARGS=("$@")
 
+LOCK_HELD=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) DRY_RUN=false; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --lock-held) LOCK_HELD=true; shift ;;
     --min-hours) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MIN_HOURS="$2"; shift 2 ;;
     --max-gib) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MAX_GIB="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -135,7 +138,7 @@ if [[ -z "$root" || "$root" == "/" || ! -d "$root" || -L "$root" ]]; then
 fi
 root="${root%/}"
 
-if [[ "$DRY_RUN" != true ]]; then
+if [[ "$DRY_RUN" != true && "$LOCK_HELD" != true ]]; then
   # Serialize with volume reclaim and the tmp sweeps; the supervisor execs this
   # script again, so pass the original argv (never the consumed one).
   if (( ${#ORIG_ARGS[@]} )); then
@@ -197,12 +200,8 @@ verdict_and_maybe_remove() {
     echo "$verdict"
     return 0
   fi
-  if [[ -n "$override" ]]; then
-    # C14 writes --inventory-out only after it approves, so an overridden content
-    # keep has no inventory yet. Build it with the same canonical builder the
-    # verdict uses. c14_probe.py inventory reports success on stdout ("ok"), not
-    # through its exit status, so the output is what is checked.
-    if [[ "$(python3 "$SCRIPT_DIR/c14_probe.py" inventory "$entry" "$inv" 2>/dev/null)" != ok ]]; then
+  if [[ -n "$override" || ! -s "$inv" ]]; then
+    if [[ ! -s "$inv" ]] && [[ "$(python3 "$SCRIPT_DIR/c14_probe.py" inventory "$entry" "$inv" 2>/dev/null)" != ok ]]; then
       [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
       rm -f "$inv" "$binding"
       echo kept:check-failed
@@ -260,7 +259,28 @@ candidates=()
 for _top in "$root"/*; do
   [[ -e "$_top" || -L "$_top" ]] || continue
   _base="${_top##*/}"
-  case "$_base" in .*|tmp) continue ;; esac
+  case "$_base" in
+    .*|tmp) continue ;;
+    evidence|worldai_frontend|worldarchitect.ai|worldai_claw|disk_magician|mirrors|relocated-tmp|advice-11070)
+      if [[ -d "$_top" && ! -L "$_top" ]]; then
+        for _sub in "$_top"/*; do
+          [[ -e "$_sub" || -L "$_sub" ]] || continue
+          case "${_sub##*/}" in
+            .*) continue ;;
+            build|evidence|r10)
+              if [[ -d "$_sub" && ! -L "$_sub" ]]; then
+                for _grand in "$_sub"/*; do
+                  [[ -e "$_grand" || -L "$_grand" ]] || continue
+                  case "${_grand##*/}" in .*) continue ;; esac
+                  candidates+=("$_grand")
+                done
+              fi ;;
+            *) candidates+=("$_sub") ;;
+          esac
+        done
+        continue
+      fi ;;
+  esac
   candidates+=("$_top")
 done
 if [[ -d "$root/tmp" && ! -L "$root/tmp" ]]; then
@@ -308,6 +328,10 @@ for entry in ${candidates[@]+"${candidates[@]}"}; do
   fi
   kb="$(deletion_size_kb "$entry" 2>/dev/null)" || kb=0
   [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
+  if [[ "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 && kb < 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} )); then
+    kept=$(( kept + 1 ))
+    continue
+  fi
   if (( MAX_KB > 0 && planned_kb + removed_kb + kb > MAX_KB )); then
     echo "capped:max-gib $entry ($(( kb / 1024 )) MB) — rerun with --max-gib to raise"
     capped=1

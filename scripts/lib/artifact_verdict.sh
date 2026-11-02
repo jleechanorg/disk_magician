@@ -48,6 +48,29 @@ c14_discover_repos() {
     [[ -n "$done" ]]
 }
 
+# _c14_has_broken_git_link_or_alternates <repo>: rc 0 when <repo> has a .git file
+# pointing to a missing gitdir or an objects/info/alternates file referencing a
+# missing object store (e.g. a --reference clone whose donor clone was deleted).
+_c14_has_broken_git_link_or_alternates() (
+    local r=$1 gd line
+    if [[ -f "$r/.git" && ! -L "$r/.git" ]]; then
+        line="$(sed -n 's/^gitdir:[[:space:]]*//p' "$r/.git" 2>/dev/null | head -n 1)"
+        if [[ -n "$line" ]]; then
+            [[ "$line" == /* ]] || line="$r/$line"
+            [[ ! -d "$line" ]] && return 0
+        fi
+    fi
+    for gd in "$r/.git" "$(git -C "$r" rev-parse --git-dir 2>/dev/null)"; do
+        [[ -n "$gd" && -f "$gd/objects/info/alternates" ]] || continue
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            [[ "$line" == /* ]] || line="$gd/objects/$line"
+            [[ ! -d "$line" ]] && return 0
+        done <"$gd/objects/info/alternates"
+    done
+    return 1
+)
+
 # c14_repo_content_ok <repo> [--overlay-manifest <receipt>]: print `ok` (rc 0) or `kept:<reason>` (rc 1).
 # Git env dropped; git must resolve <repo> itself, not an ancestor (broken .git).
 c14_repo_content_ok() (
@@ -64,9 +87,13 @@ c14_repo_content_ok() (
         true) [[ "$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" == "$r" ]] && { echo ok; return 0; } ;;
         false) [[ "$(git -C "$r" rev-parse --show-toplevel 2>/dev/null)" == "$r" ]] ;;
         *) false ;;
-    esac || { echo kept:check-failed; return 1; }
+    esac || {
+        _c14_has_broken_git_link_or_alternates "$r" && { echo kept:git-unbaselined; return 1; }
+        echo kept:check-failed; return 1
+    }
     if ! st="$(git -C "$r" status --porcelain=v1 --untracked-files=all --ignore-submodules=none 2>/dev/null)" ||
         ! flags="$(git -C "$r" ls-files -v 2>/dev/null)"; then
+        _c14_has_broken_git_link_or_alternates "$r" && { echo kept:git-unbaselined; return 1; }
         echo kept:check-failed; return 1
     fi
     # Tracked or submodule changes, untracked files, or hidden index flags.
@@ -228,8 +255,9 @@ c14_archive_origin() (
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
+    local h w g t ptmp utmp re='^((\.cache/(uv|pre-commit|worldai|pip|ms-playwright|claude-cli-nodejs|go-build)|\.npm/_cacache|\.cargo/registry/cache|\.local/share/opencode/(repos|log|tool-output|snapshot)|\.local/share/Trash/(files|info|expunged)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|\.Trash|claude-codex-usage/src-tauri/target|ez-gh-actions-workdir/ez-gh-actions/target|\.worktrees/worldarchitect\.ai/zr-base-venv-dup-[0-9]+|worldarchitect-main-origin/venv|conductor/workspaces/worldarchitect\.ai/[^/]+/venv|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/]|(claude-codex-usage/src-tauri/target|ez-gh-actions-workdir/ez-gh-actions/target|\.worktrees/worldarchitect\.ai/zr-base-venv-dup-[0-9]+|worldarchitect-main-origin/venv|conductor/workspaces/worldarchitect\.ai/[^/]+/venv)$)' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]] && return 0
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
             g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" &&
@@ -244,7 +272,16 @@ _av_rebuildable() (
         worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
-    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]] && return 0
+    ptmp="$(scratch_roots_get_private_tmp 2>/dev/null || echo /private/tmp)"
+    ptmp="$(cd "$ptmp" 2>/dev/null && pwd -P)" || ptmp=""
+    if [[ -n "$ptmp" && ( "$1" == "$ptmp"/worldai-ios-compilation-cache || "$1" == "$ptmp"/worldai-ios-compilation-cache/* || "$1" == "$ptmp"/jest_dx || "$1" == "$ptmp"/jest_dx/* ) ]]; then
+        return 0
+    fi
+    utmp="$(scratch_roots_get_user_tmp 2>/dev/null || true)"
+    [[ -n "$utmp" ]] && utmp="$(cd "$utmp" 2>/dev/null && pwd -P)" || utmp=""
+    if [[ -n "$utmp" && ( "$1" == "$utmp"/jest_dx || "$1" == "$utmp"/jest_dx/* ) ]]; then
+        return 0
+    fi
     local app_root="${DISK_MAGICIAN_XCODE_APP_ROOT:-/Applications}"
     app_root="$(cd "$app_root" 2>/dev/null && pwd -P)" && [[ -n "$app_root" && "$1" == "$app_root"/Xcode*.app ]] && return 0
     return 1
@@ -298,8 +335,8 @@ _av_sparkle_update_staging() (
     for child in "$p"/*; do
         [[ -e "$child" ]] || continue
         if [[ -f "$child" ]]; then
-            # Sparkle's own downloaded update archive; anything else is payload.
-            [[ "${child##*/}" == *.zip && ! -L "$child" ]] || return 1
+            # Sparkle's own downloaded update archive or delta patch; anything else is payload.
+            [[ ( "${child##*/}" == *.zip || "${child##*/}" == *.delta ) && ! -L "$child" ]] || return 1
             continue
         fi
         [[ -d "$child" && ! -L "$child" ]] || return 1
@@ -454,6 +491,9 @@ _av_lease_scope() {
     stops+="$(cd "$HOME" 2>/dev/null && pwd -P)"$'\n'
     printf '%s\0' "$1"
     while [[ -n "$a" && "$stops" != *$'\n'"$a"$'\n'* ]]; do printf '%s\0' "$a"; a=${a%/*}; done
+    if [[ "${C14_SCRATCH_PRUNE_OVERRIDE:-0}" == "1" || ( "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" && "${DISK_MAGICIAN_TEST_CONTEXT:-0}" != "1" && "$1" == "$HOME/Scratch/"* ) || ( -n "${PR_SCRATCH_APPROVED_ITEM:-}" && "${DISK_MAGICIAN_TEST_CONTEXT:-0}" != "1" && "$1" == "$PR_SCRATCH_APPROVED_ITEM" ) ]]; then
+        return 0
+    fi
     if [[ -d "$1" ]]; then
         if [[ -n "${2:-}" ]]; then C14_ROOT="$1" python3 "$_AV_DIR/../c14_probe.py" repos "$2" || return 1
         else c14_discover_repos "$1" || return 1; fi
@@ -632,9 +672,18 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ "$st" == no ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; }
     newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return 0; }
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
-    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv" "$kind")"
-    if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
-    if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
+    if [[ "${C14_SCRATCH_PRUNE_OVERRIDE:-0}" == "1" || ( "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" && "${DISK_MAGICIAN_TEST_CONTEXT:-0}" != "1" && "$p" == "$HOME/Scratch/"* ) || ( -n "${PR_SCRATCH_APPROVED_ITEM:-}" && "${DISK_MAGICIAN_TEST_CONTEXT:-0}" != "1" && "$p" == "$PR_SCRATCH_APPROVED_ITEM" ) ]]; then
+        if [[ -n "$inventory_out" ]]; then cp "$inv" "$inventory_out" || { echo kept:check-failed; return 0; }; fi
+        echo remove
+        return 0
+    fi
+    local _av_home_real
+    _av_home_real="$(cd "$HOME" 2>/dev/null && pwd -P)" || _av_home_real=""
+    if [[ "$kind" != rebuildable || -z "$_av_home_real" || ( "$p" != "$_av_home_real/.Trash/"* && "$p" != "$_av_home_real/.local/share/Trash/"* ) ]]; then
+        st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv" "$kind")"
+        if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
+        if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
+    fi
     case "$kind" in
         ephemeral) ret="$(c14_archive_origin "$p" "$inv")"
             if [[ "$ret" == none ]]; then

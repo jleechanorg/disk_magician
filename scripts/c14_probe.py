@@ -524,7 +524,7 @@ def admin(ad, lease=None):
             # dirs, locked) are already rejected above, and logs/HEAD plus refs/**
             # still match through the "/" arm.
             need = rel in ("HEAD", "ORIG_HEAD") or (rel.split("/")[0] in ("refs", "logs") and "/" in rel)  # HEAD, ORIG_HEAD, refs/**, logs/**
-            keep = need or rel in ("HEAD", "commondir", "config.worktree", "COMMIT_EDITMSG")
+            keep = need or rel in ("HEAD", "commondir", "config.worktree", "COMMIT_EDITMSG", "info/sparse-checkout")
             fst, digest, data = _read_verified(p, keep=keep)
             if digest is None or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
                 return print("kept:check-failed")
@@ -532,14 +532,14 @@ def admin(ad, lease=None):
                 return print("kept:admin-unknown")
             if need:
                 oids += [w for l in data.decode("utf-8", "replace").splitlines() for w in l.split()[:2] if OID.match(w)]
-            if rel in ("HEAD", "commondir", "config.worktree", "COMMIT_EDITMSG"):
+            if rel in ("HEAD", "commondir", "config.worktree", "COMMIT_EDITMSG", "info/sparse-checkout"):
                 small[rel] = data
             receipt(rel, st, digest)
     for rel, st in dirs:  # post-walk stability: every recorded directory is still the same inode
         now = os.lstat(ad if rel == "." else os.path.join(ad, rel))
         if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
             return print("kept:check-failed")
-    sparse_wt_cfg = _is_sparse_only_worktree_config(small.get("config.worktree", b""))
+    sparse_wt_cfg = "info/sparse-checkout" in small and _is_sparse_only_worktree_config(small.get("config.worktree", b""))
     if "config.worktree" in names and small.get("config.worktree") and not sparse_wt_cfg and hashlib.sha256(small["config.worktree"]).hexdigest() != (
             (json.load(open(lease)).get("git_meta") or {}) if lease and os.path.isfile(lease) else {}).get("config.worktree"):
         return print("kept:admin-unknown")
