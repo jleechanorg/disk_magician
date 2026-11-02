@@ -139,6 +139,7 @@ consolidated_redundant_labels=(
 
 if [[ "$CONSOLIDATE" == true ]]; then
   SELECTED=(
+    "com.jleechanorg.disk-magician-scratch-pressure.plist.template"
     "com.jleechanorg.disk-magician-main-sweeper.plist.template"
     "com.jleechanorg.disk-magician-worktree-reap.plist.template"
     "com.jleechanorg.disk-magician-govern.plist.template"

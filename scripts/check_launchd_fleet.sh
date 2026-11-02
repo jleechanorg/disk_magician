@@ -41,6 +41,7 @@ KNOWN_LABELS=(
   com.jleechanorg.disk-magician-observer
   com.jleechanorg.disk-magician-pressure-sweep
   com.jleechanorg.disk-magician-tmp-scratch
+  com.jleechanorg.disk-magician-scratch-pressure
   com.jleechanorg.disk-magician-worktree-hygiene
   com.jleechanorg.disk-magician-worktree-reap
   com.disk-magician.claude-state

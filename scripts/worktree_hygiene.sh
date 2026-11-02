@@ -559,11 +559,24 @@ preserve_wip_blocker() {
     fi
     # Edits to skip-worktree (S) or assume-unchanged (lowercase tag) entries
     # are invisible to both `git add -A` and `git status`, so they would be
-    # lost on removal: refuse. Fail closed if the listing fails.
-    local flagged frc=0
-    flagged="$(git -C "$wt" ls-files -v 2>/dev/null | awk '!f && /^(S|[a-z]) /{print substr($0,3); f=1}')" || frc=$?
+    # lost on removal: refuse. Sparse-checkout exclusions whose paths are absent
+    # from disk have no local file to lose. Fail closed if the listing fails.
+    local flagged frc=0 fflags fsp
+    fflags="$(git -C "$wt" ls-files -v 2>/dev/null)" || frc=$?
     if [[ "$frc" -ne 0 ]]; then
         echo "index-flag-scan-failed"; return 0
+    fi
+    fsp="$(git -C "$wt" rev-parse --path-format=absolute --git-path info/sparse-checkout 2>/dev/null)" || { echo "index-flag-scan-failed"; return 0; }
+    if [[ -s "$fsp" ]]; then
+        flagged="$(python3 -I -c 'import os,sys
+wt=sys.argv[1]
+for l in sys.stdin:
+    p=l[2:].splitlines()[0] if len(l)>2 else ""
+    if len(l)>2 and l[1]==" " and (l[0].islower() or (l[0]=="S" and (p[:1]==chr(34) or os.path.lexists(os.path.join(wt, p))))):
+        print(p); break
+' "$wt" <<<"$fflags" 2>/dev/null)" || { echo "index-flag-scan-failed"; return 0; }
+    else
+        flagged="$(awk '!f && /^(S|[a-z]) /{print substr($0,3); f=1}' <<<"$fflags")"
     fi
     if [[ -n "$flagged" ]]; then
         echo "index-flagged:$flagged"; return 0

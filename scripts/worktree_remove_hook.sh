@@ -248,7 +248,8 @@ wrh_remove_now() {
     return 0
 }
 
-wrh_main() {
+wrh_main() { _lease_lock_scope release _wrh_main "$@"; }
+_wrh_main() {
     local p main real verdict inv wrh_c14_verdict min_idle
     p="$(python3 -c '
 import json, sys

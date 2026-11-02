@@ -102,22 +102,35 @@ printf 'appended-live-bytes\n' >>"$P_CLAUDE/proj1/pending_prefix.jsonl"
 head -c 65536 /dev/urandom >"$P_CODEX/2026/10/20/pending_mismatch.jsonl"
 head -c 65536 /dev/urandom >"$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_mismatch.jsonl"
 head -c 65536 /dev/urandom >"$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_orphan.jsonl"
+
+has_zstd=false
+expected_dups=3
+if command -v zstd >/dev/null 2>&1; then
+  has_zstd=true
+  head -c 65536 /dev/urandom >"$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_zstd.jsonl"
+  zstd -q "$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_zstd.jsonl" -o "$P_CODEX/2026/10/20/pending_zstd.jsonl.zst"
+  expected_dups=$((expected_dups + 1))
+fi
+
 for f in "$DBX_CONV"/codex_conversations/sessions/2026/10/20/*.jsonl "$DBX_CONV"/claude_conversations/projects/proj1/*.jsonl; do
   touch -t 202601010000 "$f"
 done
 rm -f "$DISK_MAGICIAN_DELETION_LOG"
 out="$(DM_FILEPROVIDER_LOCAL_CODEX_DIRS="$P_CODEX" DM_FILEPROVIDER_LOCAL_CLAUDE_DIR="$P_CLAUDE" \
   bash "$ROOT/scripts/evict_fileprovider.sh" --root "$DBX_CONV" --prune-unuploaded-local-duplicates 2>&1)"
-grep -q 'would prune unuploaded duplicate (verified in local primary): 3 files' <<<"$out" && ok "dry-run counts 3 verified unuploaded duplicates (including .gz primary)" || bad "dup dry-run: $out"
+grep -q "would prune unuploaded duplicate (verified in local primary): $expected_dups files" <<<"$out" && ok "dry-run counts $expected_dups verified unuploaded duplicates (including .gz/.zst primary)" || bad "dup dry-run: $out"
 [[ -f "$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_exact.jsonl" ]] && ok "dry-run keeps verified duplicate untouched" || bad "dup dry-run deleted file"
 
 out="$(FILEPROVIDER_EVICT_APPROVED=1 DM_FILEPROVIDER_LOCAL_CODEX_DIRS="$P_CODEX" DM_FILEPROVIDER_LOCAL_CLAUDE_DIR="$P_CLAUDE" \
   bash "$ROOT/scripts/evict_fileprovider.sh" --root "$DBX_CONV" --prune-unuploaded-local-duplicates --clean 2>&1)"
 [[ ! -e "$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_exact.jsonl" && ! -e "$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_gzipped.jsonl" && ! -e "$DBX_CONV/claude_conversations/projects/proj1/pending_prefix.jsonl" ]] && ok "clean prunes exact, .gz-backed, and prefix-identical unuploaded duplicates" || bad "dup clean did not prune: $out"
+if [[ "$has_zstd" == true ]]; then
+  [[ ! -e "$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_zstd.jsonl" && -f "$P_CODEX/2026/10/20/pending_zstd.jsonl.zst" ]] && ok "clean prunes .zst-backed unuploaded duplicates" || bad "zstd dup not pruned: $out"
+fi
 [[ -f "$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_mismatch.jsonl" && -f "$DBX_CONV/codex_conversations/sessions/2026/10/20/pending_orphan.jsonl" ]] && ok "clean preserves mismatched and orphan unuploaded files" || bad "dup clean deleted non-duplicate"
 [[ -f "$P_CODEX/2026/10/20/pending_exact.jsonl" && -f "$P_CODEX/2026/10/20/pending_gzipped.jsonl.gz" && -f "$P_CLAUDE/proj1/pending_prefix.jsonl" && "$(blocks "$P_CODEX/2026/10/20/pending_exact.jsonl")" -gt 0 ]] && ok "local primary files remain intact" || bad "local primary damaged"
 n_dup="$(awk -F'\t' '$2=="evict_fileprovider.sh" && $3=="prune_unuploaded_duplicate"' "$DISK_MAGICIAN_DELETION_LOG" | wc -l | tr -d ' ')"
-[[ "$n_dup" == 3 ]] && ok "pruned duplicates logged to deletion log" || bad "dup deletion log count=$n_dup"
+[[ "$n_dup" == "$expected_dups" ]] && ok "pruned duplicates logged to deletion log ($n_dup)" || bad "dup deletion log count=$n_dup, expected=$expected_dups"
 
 echo "evict_fileprovider: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

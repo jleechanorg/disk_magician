@@ -571,11 +571,6 @@ if [[ "$MODE" == "clean" ]]; then
     
     section "Executing Safe Cleanups"
 
-    # Run Cache Cleanup (Tier 1: Developer Caches)
-    if [[ -f "$SCRIPT_DIR/cleanup_dev_caches.sh" ]]; then
-        run_category "Dev caches" "$SCRIPT_DIR/cleanup_dev_caches.sh" $clean_arg
-    fi
-
     # Run Temp Cleanup (Tier 1: Ephemeral Temp)
     if [[ -f "$SCRIPT_DIR/cleanup_tmp.sh" ]]; then
         run_category "Temp files" "$SCRIPT_DIR/cleanup_tmp.sh" $clean_arg
@@ -584,6 +579,11 @@ if [[ "$MODE" == "clean" ]]; then
     # Run PR Scratch & Analyzer Cleanup (Tier 1: Scratch)
     if [[ -f "$SCRIPT_DIR/cleanup_pr_scratch.sh" ]]; then
         run_category "PR scratch & analyzers" "$SCRIPT_DIR/cleanup_pr_scratch.sh" $clean_arg
+    fi
+
+    # Top-level Scratch volume & tmp/ prune (>=48h floor, live-PID + lease + ballast gated)
+    if [[ -f "$SCRIPT_DIR/cleanup_scratch_top_level.sh" ]]; then
+        run_category "Scratch top-level & tmp (>=48h)" "$SCRIPT_DIR/cleanup_scratch_top_level.sh" $clean_arg
     fi
 
     # Rebuildable Xcode DerivedData & simulator caches (Tier 2: Xcode, bead disk_magician-wgo)
@@ -601,6 +601,24 @@ if [[ "$MODE" == "clean" ]]; then
         run_category "Aside browser sessions" "$SCRIPT_DIR/prune_aside_sessions.sh" $clean_arg
     fi
 
+    # Dead macOS code_sign_clone browser bundles in var/folders/.../X (Tier 4: Browser Clones)
+    if [[ -f "$SCRIPT_DIR/cleanup_code_sign_clones.sh" ]]; then
+        if [[ "$DRY_RUN" == false && "${CODE_SIGN_CLONES_APPROVED:-0}" != "1" ]]; then
+            echo "  code_sign_clone bundles: skipped (requires CODE_SIGN_CLONES_APPROVED=1)"
+        else
+            run_category "code_sign_clone bundles" "$SCRIPT_DIR/cleanup_code_sign_clones.sh" $clean_arg
+        fi
+    fi
+
+    # Cloud FileProvider local cache eviction (Tier 4: Cloud Storage Caches)
+    if [[ -f "$SCRIPT_DIR/evict_fileprovider.sh" ]]; then
+        if [[ "$DRY_RUN" == false && "${FILEPROVIDER_EVICT_APPROVED:-0}" != "1" ]]; then
+            echo "  Cloud FileProvider cache eviction: skipped (requires FILEPROVIDER_EVICT_APPROVED=1)"
+        else
+            run_category "Cloud FileProvider cache eviction" "$SCRIPT_DIR/evict_fileprovider.sh" $clean_arg
+        fi
+    fi
+
     # Antigravity brain session log compaction (Tier 5: Agent State, bead disk_magician-wgo)
     if [[ -f "$SCRIPT_DIR/cleanup_antigravity_brain.sh" ]]; then
         run_category "Antigravity brain compaction" "$SCRIPT_DIR/cleanup_antigravity_brain.sh" $clean_arg
@@ -609,6 +627,11 @@ if [[ "$MODE" == "clean" ]]; then
     # Codex SQLite vacuum (Tier 5: Agent State Compaction)
     if [[ -f "$SCRIPT_DIR/cleanup_codex_db.sh" ]]; then
         run_category "Codex SQLite vacuum" "$SCRIPT_DIR/cleanup_codex_db.sh" $clean_arg
+    fi
+
+    # Hermes SQLite vacuum (Tier 5: Agent State Compaction)
+    if [[ -f "$SCRIPT_DIR/vacuum_hermes_state.sh" ]]; then
+        run_category "Hermes SQLite vacuum" "$SCRIPT_DIR/vacuum_hermes_state.sh" $clean_arg
     fi
 
     # Codex task documents (Tier 5: ~/Documents/Codex per-task clones, C14-gated and
@@ -635,6 +658,15 @@ if [[ "$MODE" == "clean" ]]; then
             run_category "Post-job docker prune" "$SCRIPT_DIR/post_job_docker_prune.sh" --dry-run
         else
             run_category "Post-job docker prune" "$SCRIPT_DIR/post_job_docker_prune.sh"
+        fi
+    fi
+
+    # Slim dormant git worktree checkouts (>=7d dormant) before worktree removal
+    if [[ -f "$SCRIPT_DIR/slim_worktree_checkouts.sh" ]]; then
+        if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+            echo "  Slim worktrees: skipped (requires WORKTREE_APPROVED=1)"
+        else
+            run_category "Slim dormant worktrees (>=7d)" "$SCRIPT_DIR/slim_worktree_checkouts.sh" $clean_arg
         fi
     fi
 
@@ -676,6 +708,13 @@ if [[ "$MODE" == "clean" ]]; then
     # Run LLM Inspector Cleanup
     if [[ -f "$SCRIPT_DIR/cleanup_llm_inspector.sh" ]]; then
         run_category "LLM inspector" "$SCRIPT_DIR/cleanup_llm_inspector.sh" $clean_arg
+    fi
+
+    # Run Cache Cleanup (Tier 1: Developer Caches — runs after fast/high-yield
+    # worktree/scratch/sqlite cleaners so its ~/Library/Caches walk does not
+    # hold .owner-mutation.reuse-lock ahead of them)
+    if [[ -f "$SCRIPT_DIR/cleanup_dev_caches.sh" ]]; then
+        run_category "Dev caches" "$SCRIPT_DIR/cleanup_dev_caches.sh" $clean_arg
     fi
 
     # Broad agent artifacts include app chats/worktrees; keep opt-in.

@@ -191,6 +191,137 @@ _scratch_budget_snapshot_has_prefix() {
   grep -Fq "$path" "$snapshot_file" 2>/dev/null
 }
 
+# is_different_filesystem <candidate> [parent_root]
+# Returns 0 (true) if candidate is a mountpoint, contains a mountpoint,
+# or resides on a different filesystem device than parent_root.
+# Returns 1 (false) if candidate is verified to be on the same filesystem.
+#
+# Prevents traversal and deletion from wedging on hung/dead FUSE mounts
+# (e.g. fuse.rclone, sshfs under /tmp on Linux) or crossing into remote/foreign
+# filesystems. On Linux, /proc/self/mountinfo is checked FIRST without
+# touching candidate via stat/find/du.
+is_different_filesystem() {
+  local candidate="${1:-}"
+  local parent="${2:-}"
+  [[ -z "$candidate" ]] && return 1
+
+  local cand_clean="${candidate%/}"
+  [[ -z "$cand_clean" ]] && return 1
+
+  # Step 1: Check Linux /proc/self/mountinfo or /proc/mounts (or test fixture override)
+  local mount_file="${DISK_MAGICIAN_MOUNTINFO_FILE:-${DISK_MAGICIAN_TEST_MOUNTINFO:-}}"
+  if [[ -z "$mount_file" ]]; then
+    if [[ -f /proc/self/mountinfo ]]; then
+      mount_file="/proc/self/mountinfo"
+    elif [[ -f /proc/mounts ]]; then
+      mount_file="/proc/mounts"
+    fi
+  fi
+
+  if [[ -n "$mount_file" && -f "$mount_file" ]]; then
+    local cand_alias=""
+    if [[ "$cand_clean" == /private/* ]]; then
+      cand_alias="${cand_clean#/private}"
+    else
+      cand_alias="/private$cand_clean"
+    fi
+
+    if awk -v c1="$cand_clean" -v c2="$cand_alias" '
+      BEGIN {
+        c1_slash = c1 "/";
+        c2_slash = (c2 != "" ? c2 "/" : "");
+        found = 0;
+      }
+      {
+        mp = ($1 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+:[0-9]+$/) ? $5 : $2;
+        gsub(/\\040/, " ", mp);
+        if (mp == c1 || index(mp, c1_slash) == 1) {
+          found = 1;
+          exit 0;
+        }
+        if (c2 != "" && (mp == c2 || index(mp, c2_slash) == 1)) {
+          found = 1;
+          exit 0;
+        }
+      }
+      END {
+        exit (found ? 0 : 1);
+      }
+    ' "$mount_file" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  # Step 2: Device ID (st_dev) check using stat with bounded timeout
+  [[ -z "$parent" ]] && parent="$(dirname "$cand_clean")"
+  [[ -d "$parent" ]] || return 1
+
+  local dev_parent=""
+  if [[ -n "${_PARENT_DEV_CACHE_DIR:-}" && "${_PARENT_DEV_CACHE_DIR:-}" == "$parent" && -n "${_PARENT_DEV_CACHE_VAL:-}" ]]; then
+    dev_parent="$_PARENT_DEV_CACHE_VAL"
+  else
+    if [[ "$(uname -s)" == Darwin ]]; then
+      dev_parent="$(stat -f "%d" "$parent" 2>/dev/null || true)"
+    else
+      dev_parent="$(stat -c "%d" "$parent" 2>/dev/null || true)"
+    fi
+    if [[ "$dev_parent" =~ ^[0-9]+$ ]]; then
+      _PARENT_DEV_CACHE_DIR="$parent"
+      _PARENT_DEV_CACHE_VAL="$dev_parent"
+    fi
+  fi
+  [[ "$dev_parent" =~ ^[0-9]+$ ]] || return 1
+
+  local tbin timeout_sec="${DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS:-5}"
+  if ! [[ "$timeout_sec" =~ ^[1-9][0-9]*$ ]] || (( timeout_sec > 10 )); then
+    timeout_sec=5
+  fi
+  if declare -F resolve_timeout_bin >/dev/null 2>&1; then
+    tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
+  else
+    tbin="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+  fi
+
+  local dev_cand="" rc=0
+  if [[ -n "$tbin" ]]; then
+    if [[ "$(uname -s)" == Darwin ]]; then
+      dev_cand="$("$tbin" --kill-after=2s "${timeout_sec}s" stat -f "%d" "$cand_clean" 2>/dev/null)" || rc=$?
+    else
+      dev_cand="$("$tbin" --kill-after=2s "${timeout_sec}s" stat -c "%d" "$cand_clean" 2>/dev/null)" || rc=$?
+    fi
+  else
+    if [[ "$(uname -s)" == Darwin ]]; then
+      dev_cand="$(stat -f "%d" "$cand_clean" 2>/dev/null)" || rc=$?
+    else
+      dev_cand="$(stat -c "%d" "$cand_clean" 2>/dev/null)" || rc=$?
+    fi
+  fi
+
+  if (( rc == 124 || rc == 137 )); then
+    # Timed out during stat probe (e.g. dead FUSE mount) -> fail closed
+    return 0
+  fi
+
+  if (( rc != 0 )) || ! [[ "$dev_cand" =~ ^[0-9]+$ ]]; then
+    # If the candidate doesn't exist, it's not a mountpoint/different fs
+    if [[ ! -e "$cand_clean" && ! -L "$cand_clean" ]]; then
+      return 1
+    fi
+    # Unreadable or error on existing path -> fail closed
+    return 0
+  fi
+
+  if [[ "$dev_cand" != "$dev_parent" ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+is_mountpoint_or_foreign_fs() {
+  is_different_filesystem "$@"
+}
+
 # scratch_budget_content_mtime <path> — newest content mtime under <path> in
 # epoch seconds, or EMPTY STRING if it cannot be determined (stat/find
 # failure, unreadable subtree). Uses the same batched `find -exec stat +`
@@ -207,10 +338,10 @@ scratch_budget_content_mtime() {
   local path="$1" epoch strict="${2:-}" links stat_format
   if [[ "$strict" == --strict ]]; then
     [[ -d "$path" && ! -L "$path" ]] || return 1
-    links="$(find "$path" -type l -print -quit 2>/dev/null)" || return 1
+    links="$(find "$path" -xdev -type l -print -quit 2>/dev/null)" || return 1
     [[ -z "$links" ]] || return 1
     local files item stamp newest=0
-    files="$(find "$path" -type f -print 2>/dev/null)" || return 1
+    files="$(find "$path" -xdev -type f -print 2>/dev/null)" || return 1
     [[ -n "$files" ]] || return 1
     if [[ "$(uname -s)" == Darwin ]]; then stat_format='%m'; else stat_format='%Y'; fi
     while IFS= read -r item; do
@@ -239,10 +370,10 @@ scratch_budget_content_mtime() {
     return
   fi
   if [[ "$(uname -s)" == Darwin ]]; then
-    epoch="$(find "$path" -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
+    epoch="$(find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
         | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
   else
-    epoch="$(find "$path" -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
+    epoch="$(find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
         | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
   fi
   if [[ -z "$epoch" ]]; then
@@ -255,7 +386,7 @@ scratch_budget_content_mtime() {
 # checks unpushed work. A failed traversal cannot prove this is disposable.
 _scratch_budget_contains_git() {
   local found
-  if ! found="$(find "$1" -name .git -prune -print -quit 2>/dev/null)"; then
+  if ! found="$(find "$1" -xdev -name .git -prune -print -quit 2>/dev/null)"; then
     return 0
   fi
   [[ -n "$found" ]]
@@ -298,6 +429,10 @@ scratch_budget_evict_root() {
     case "$base" in
       com.apple.*|system-*|PowerlogHelperd*|TemporaryItems|_disk_magician_archive*) continue ;;
     esac
+    if is_different_filesystem "$item" "$root"; then
+      log "scratch_budget: skipping mountpoint or foreign filesystem: $item"
+      continue
+    fi
     if is_protected_root "$base" || is_protected_tmp_path "$item"; then
       log "scratch_budget: skipping protected root: $item"
       continue
@@ -326,7 +461,7 @@ scratch_budget_evict_root() {
       continue
     fi
     printf '%s\t%s\t%s\n' "$mtime" "$kb" "$item" >>"$candidates_file"
-  done < <(find "$root" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
+  done < <(find "$root" -xdev -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
 
   if (( total_kb <= budget_kb )); then
     log "scratch_budget: $root total ${total_kb} KB <= budget ${budget_kb} KB — nothing to evict."

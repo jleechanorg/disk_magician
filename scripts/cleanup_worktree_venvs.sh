@@ -65,6 +65,7 @@ if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
 else
   ROOTS=("$HOME/projects")
   [[ -d "$HOME/project_worldaiclaw" ]] && ROOTS+=("$HOME/project_worldaiclaw")
+  [[ -d "$HOME/project_worldai_frontend" ]] && ROOTS+=("$HOME/project_worldai_frontend")
   [[ -d "$HOME/wc-wt" ]] && ROOTS+=("$HOME/wc-wt")
   [[ -d "$STANDARD_WORKTREE_ROOT" ]] && ROOTS+=("$STANDARD_WORKTREE_ROOT")
 fi
@@ -174,6 +175,14 @@ else
   MIN_AGE_DAYS="$staleness_floor"
 fi
 [[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
+
+FLOOR_HOURS=""
+if [[ "${DISK_MAGICIAN_WORKTREE_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS" -ge 12 ]]; then
+  if { mkdir -p "$STATE_DIR" && printf '%s cleanup-worktree-venvs: recency override active: hours:%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS" >>"$STATE_DIR/worktree_guard.log"; } 2>/dev/null; then
+    FLOOR_HOURS="$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS"
+  fi
+fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -632,7 +641,12 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       log "  skip (could not stat parent): $venv_path"
       continue
     fi
-    if (( age_days < MIN_AGE_DAYS )); then
+    if [[ -n "${FLOOR_HOURS:-}" && "$UNAPPROVED_CLEAN" == false ]]; then
+      if worktree_is_recently_active_minutes "$parent" "$(( FLOOR_HOURS * 60 ))"; then
+        SKIPPED_TOO_YOUNG=$(( SKIPPED_TOO_YOUNG + 1 ))
+        continue
+      fi
+    elif (( age_days < MIN_AGE_DAYS )); then
       SKIPPED_TOO_YOUNG=$(( SKIPPED_TOO_YOUNG + 1 ))
       continue
     fi

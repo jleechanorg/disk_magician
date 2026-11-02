@@ -70,7 +70,7 @@ c14_repo_content_ok() (
         echo kept:check-failed; return 1
     fi
     # Tracked or submodule changes, untracked files, or hidden index flags.
-    if [[ -n "$st" && "$mode" != --overlay-manifest ]] || grep -q '^[a-zS]' <<<"$flags"; then
+    if [[ -n "$st" && "$mode" != --overlay-manifest ]] || _wi_has_flagged_index_entries "$r" "$flags"; then
         echo kept:dirty; return 1
     fi
     has_hidden_state "$r" && { echo kept:secret-like; return 1; }

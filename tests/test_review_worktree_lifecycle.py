@@ -13,7 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WorktreeReviewTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="review_worktree_")
+        scratch = os.environ.get("CLAUDE_CODE_TMPDIR") or os.environ.get("DISKM_SCRATCH") or os.environ.get("RUNNER_TEMP")
+        if not scratch or not Path(scratch).is_dir():
+            raise RuntimeError("configured Scratch or RUNNER_TEMP directory required")
+        self.temp = tempfile.TemporaryDirectory(prefix="review_worktree_", dir=scratch)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.home = self.root / "home"
@@ -186,6 +189,7 @@ EOF
         self.make_repo()
         source = (ROOT / "scripts/cleanup_worktrees.sh").read_text()
         function = source[source.index("process_repo_local_worktrees() {"):source.index("# Standard root (spec D6)")]
+        function = "source " + repr(str(ROOT / "scripts/lib/worktree_lease.sh")) + "\n" + function
         result = self.run_cmd("bash", "-euc", function + '\nACT_STOP=1\nprocess_repo_local_worktrees "$1"\necho STOPPED_OK\n',
                               "_", str(self.repo), check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

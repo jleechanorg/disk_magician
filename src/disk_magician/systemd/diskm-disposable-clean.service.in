@@ -1,0 +1,12 @@
+[Unit]
+Description=Disk Magician dedicated disposable namespace (native 3-day policy)
+
+[Service]
+Type=oneshot
+@POLICY_ENV@
+ExecStart=@DISKM_BIN@ disposable clean --root @NAMESPACE@ --execute
+TimeoutStartSec=90
+KillMode=control-group
+Restart=no
+UMask=0077
+NoNewPrivileges=yes

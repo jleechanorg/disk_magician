@@ -67,7 +67,7 @@ chmod +x "$MOCK_BIN/tmp_scratch_sweep.sh"
 cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK'
 #!/bin/bash
 echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-} deadline=${ACT_DEADLINE_AT:-} cursor=${ACT_CURSOR:-}" >> "${INVOCATION_LOG:?}"
-if [[ "$*" == "volume ballast ensure scratch" ]]; then exit "${VOLUME_MOCK_ENSURE_RC:-0}"; fi
+if [[ "$*" == "volume ballast recover scratch" ]]; then exit "${VOLUME_MOCK_ENSURE_RC:-0}"; fi
 [[ "${VOLUME_MOCK_SLEEP:-0}" == 0 ]] || sleep "$VOLUME_MOCK_SLEEP"
 if [[ "${VOLUME_MOCK_MODE:-receipt}" == skip ]]; then
   echo "${VOLUME_MOCK_SKIP:-skipped:below-trigger:80}"
@@ -182,7 +182,7 @@ assert_receipt_field "clean receipt outcome success" "$STATE_DIR/receipts/tmp_sc
 assert_receipt_field "clean receipt safety delegated" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
 
 echo "Test 7a: scheduler routes volume reclaim and folds its trigger-bound metrics"
-assert_contains "scheduler invokes volume reclaim" "disk_magician volume reclaim --clean trigger=tmp_scratch_sweep:" "$(cat "$INVOCATION_LOG")"
+assert_contains "scheduler invokes volume reclaim" "disk_magician volume reclaim --available-floor --clean trigger=tmp_scratch_sweep:" "$(cat "$INVOCATION_LOG")"
 assert_receipt_field "parent receipt includes volume artifacts removed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "2"
 assert_receipt_field "parent receipt includes volume safety reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('volume_top_kept_reason')" "lease_active"
 
@@ -323,7 +323,7 @@ INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_E
 assert_receipt_field "lock plus volume mutation records partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
 assert_receipt_field "lock plus volume mutation preserves removal metric" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "2"
 assert_receipt_field "lock plus volume mutation is delegated safety" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
-assert_receipt_field "lock plus volume mutation avoids no-mutation reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('reason')" "delegated to cleanup_tmp, cleanup_claude_state, and quota volume reclaim"
+assert_receipt_field "lock plus volume mutation avoids no-mutation reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('reason')" "delegated to cleanup_tmp, cleanup_claude_state, and pressure-gated volume reclaim"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Disk Magician dedicated disposable namespace schedule
+
+[Timer]
+Unit=@UNIT_NAME@.service
+OnCalendar=*:0/20
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

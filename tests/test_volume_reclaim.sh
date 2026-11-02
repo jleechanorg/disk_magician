@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset BASH_ENV || true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d /tmp/dm-volume-reclaim.XXXXXX)"
 if [[ "$(uname -s)" == Darwin ]]; then
@@ -29,6 +30,8 @@ export FAKE_DISKUTIL_STATE="$T/diskutil.json"
 export FAKE_DISKUTIL_CALLS="$T/diskutil.calls"
 export FAKE_DISKUTIL_MOUNTPOINT="$TEST_ROOT"
 export DISK_MAGICIAN_DELETION_LOG="$T/deletions.log"
+export DISK_MAGICIAN_SCRATCH_TRIGGER_PCT=90
+export DISK_MAGICIAN_SCRATCH_TARGET_PCT=80
 python3 -c 'import json,os,sys; cfg={"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","encryption_acknowledged_at":"2026-10-25T00:00:00Z","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":os.environ["TEST_ROOT"]}}}}; json.dump(cfg,open(sys.argv[1],"w")); state={"container":{"ref":"disk3","uuid":"CONTAINER-UUID","ceiling":1000*2**30,"free":100*2**30},"volumes":[{"uuid":"DATA-UUID","name":"Data","ref":"disk3s1","device":"disk3s1","used":100*2**30,"quota":0,"roles":["Data"],"mountpoint":"/System/Volumes/Data"},{"uuid":"SYSTEM-UUID","name":"System","ref":"disk3s5","device":"disk3s5","used":10*2**30,"quota":0,"roles":["System"],"mountpoint":"/"},{"uuid":"VM-UUID","name":"VM","ref":"disk3s6","device":"disk3s6","used":10*2**30,"quota":0,"roles":["VM"],"mountpoint":"/System/Volumes/VM"}]}; json.dump(state,open(os.environ["FAKE_DISKUTIL_STATE"],"w"))' "$DISK_MAGICIAN_CONFIG"
 # This reclaim fixture uses a temporary mount; the real Darwin mountpoint
 # guard has its own volume.py test and must stay active in production.
@@ -68,6 +71,13 @@ case "$*" in
     [[ -z "${TEST_TRIM_CALLS_FILE:-}" ]] || printf 'trim\n' >>"$TEST_TRIM_CALLS_FILE"
     printf '%s\n' "${TEST_TRIM_OUTPUT:-skipped:non-native-scratch}"
     exit "${TEST_TRIM_RC:-0}" ;;
+  'volume ballast recover scratch')
+    if [[ -n "${TEST_RECOVER_COUNT:-}" ]]; then
+      n=0; [[ ! -f "$TEST_RECOVER_COUNT" ]] || n="$(cat "$TEST_RECOVER_COUNT")"
+      n=$((n+1)); echo "$n" > "$TEST_RECOVER_COUNT"
+      (( n > 1 )) && exit 0
+    fi
+    exit "${TEST_RECOVER_RC:-0}" ;;
   'volume ballast release scratch') printf 'release\n' >> "$BALLAST_LOG"; exit "${TEST_RELEASE_RC:-0}" ;;
   'volume ballast ensure scratch')
     printf 'ensure\n' >> "$BALLAST_LOG"
@@ -121,7 +131,7 @@ python3 -c 'import os,sys,time; from pathlib import Path; root=Path(sys.argv[1])
 : >"$STATUS_CALLS_FILE"
 TEST_STATUS_SEQUENCE="900 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-real-remove.out"
 [[ ! -e "$TEST_ROOT/repo/evidence/oldest" && -f "$TEST_ROOT/repo/build/younger/content" ]]
-[[ ! -s "$T/c14-real-remove.out" ]]
+[[ ! -s "$T/c14-real-remove.out" || "$(cat "$T/c14-real-remove.out")" == skipped:non-native-scratch ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["candidates"]["removed"]==1'
 # Two oldest-first removals are required: the first leaves usage above 80%,
 # and only the second reaches the target.
@@ -317,6 +327,110 @@ python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python
 TEST_STATUS_SEQUENCE="890 890" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/stable-89.out"
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success_noop" and r["reason"]=="below-trigger" and r["postcondition"]["allocated_bytes_after"]==890'
 
+# Verify new default thresholds: trigger 70% and target 50%
+unset DISK_MAGICIAN_SCRATCH_TRIGGER_PCT
+unset DISK_MAGICIAN_SCRATCH_TARGET_PCT
+mkdir -p "$TEST_ROOT/repo_defaults/evidence/oldest" "$TEST_ROOT/repo_defaults/build/younger"
+printf x >"$TEST_ROOT/repo_defaults/evidence/oldest/content"
+printf x >"$TEST_ROOT/repo_defaults/build/younger/content"
+python3 -c 'import os,sys,time; from pathlib import Path; now=time.time(); roots=[Path(sys.argv[1]),Path(sys.argv[2])]; ages=[72,60]; [[os.utime(p,(now-h*3600,now-h*3600)) for p in [root,*root.rglob("*")]] for root,h in zip(roots,ages)]' "$TEST_ROOT/repo_defaults/evidence/oldest" "$TEST_ROOT/repo_defaults/build/younger"
+
+# Below trigger (699/1000 = 69% < 70%) reports skipped:below-trigger:69
+TEST_USED=699 "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:below-trigger:69'
+
+# At or above trigger (700/1000 = 70%), clean pass trims down to 500 (target 50%)
+: >"$STATUS_CALLS_FILE"; : >"$DISK_MAGICIAN_DELETION_LOG"
+TEST_STATUS_SEQUENCE="700 600 500 500" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/default-70-50.out"
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==2 and r["postcondition"]["allocated_bytes_after"]==500 and r["postcondition"]["target_reached"]'
+
+# Unmet target at 50% reports target_pct=50
+mkdir -p "$TEST_ROOT/repo_defaults/evidence/oldest"
+printf x >"$TEST_ROOT/repo_defaults/evidence/oldest/content"
+python3 -c 'import os,sys,time; from pathlib import Path; t=time.time()-72*3600; root=Path(sys.argv[1]); [os.utime(p,(t,t)) for p in [root,*root.rglob("*")]]' "$TEST_ROOT/repo_defaults/evidence/oldest"
+DISK_MAGICIAN_SAFETY_FILE="$T/protected.json" TEST_STATUS_SEQUENCE="700 700 700 700" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/default-target-not-reached.out"
+grep -q 'trim_target_not_reached before_bytes=700 after_bytes=700 quota_bytes=1000 target_pct=50' "$T/default-target-not-reached.out"
+
+echo 'volume_reclaim: default 70% trigger down to 50% target threshold verified'
+
 echo 'volume_reclaim: real C14 whole-artifact removal and stop threshold, typed ENOSPC wrapper, and reserve restoration passed'
 TEST_ROOT="$T/unavailable" "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:unavailable'
 echo 'volume_reclaim: dry-run boundary, no-aged terminal receipt, 48h filter, oldest-first, and unavailable path passed'
+
+# Scheduled free-space mode reaches the SAME real C14 protection guard even
+# when quota usage is low, and never invokes reserve/trim for a protected pass.
+mkdir -p "$TEST_ROOT/repo/evidence/pressure" "$T/pressure-bin"
+printf fixture > "$TEST_ROOT/repo/evidence/pressure/content"
+python3 - "$TEST_ROOT/repo/evidence/pressure" "$T/pressure-protected.json" <<'PYP'
+import json,os,sys,time
+from pathlib import Path
+root=Path(sys.argv[1]); old=time.time()-72*3600
+for path in [root,*root.rglob("*")]: os.utime(path,(old,old))
+json.dump({"protected_live_paths":[{"path":str(root),"reason":"pressure protected"}]},open(sys.argv[2],"w"))
+PYP
+REAL_PYTHON="$(command -v python3)"; export REAL_PYTHON
+cat > "$T/pressure-bin/python3" <<'PYP'
+#!/usr/bin/env bash
+if [[ "$1" == */scratch_pressure.py ]]; then echo 1; exit 0; fi
+exec "$REAL_PYTHON" "$@"
+PYP
+chmod +x "$T/pressure-bin/python3"
+: > "$BALLAST_LOG"; : > "$STATUS_CALLS_FILE"
+PATH="$T/pressure-bin:$PATH" DISK_MAGICIAN_SAFETY_FILE="$T/pressure-protected.json" TEST_USED=1 \
+ "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean > "$T/pressure-protected.out"
+grep -q 'kept:protected:' "$T/pressure-protected.out"
+[[ -f "$TEST_ROOT/repo/evidence/pressure/content" && ! -s "$BALLAST_LOG" ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial"; assert r["precondition"]["available_bytes_before"]==1; assert r["postcondition"]["available_bytes_after"]==1; assert not r["postcondition"]["target_reached"]'
+echo 'available-floor: real C14 protection retained; low quota did not suppress pressure pass'
+# The same pressure path must retain a live producer lease, not just a static
+# protected-path rule. This owner is the isolated test process itself.
+source "$ROOT/scripts/lib/worktree_lease.sh"
+LEASE_FILE="$(lease_path_for "$TEST_ROOT/repo/evidence/pressure/content")"
+mkdir -p "$(dirname "$LEASE_FILE")"
+OWNER_JSON="$(python3 -c 'import json,sys; print(json.dumps({"pid":int(sys.argv[1]),"start_epoch":int(sys.argv[2]),"comm":sys.argv[3]}))' "$$" "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)")"
+python3 - "$LEASE_FILE" "$TEST_ROOT/repo/evidence/pressure/content" "$OWNER_JSON" <<'PYP'
+import json,sys,time
+json.dump(dict(path=sys.argv[2],owner=json.loads(sys.argv[3]),pending=False,creator='test',kind='scratch',created_epoch=int(time.time()),ttl_hours=24,released_at=None),open(sys.argv[1],'w'))
+PYP
+PATH="$T/pressure-bin:$PATH" TEST_USED=1 "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean > "$T/pressure-live.out"
+grep -q 'kept:live-owner:' "$T/pressure-live.out"
+[[ -f "$TEST_ROOT/repo/evidence/pressure/content" && ! -s "$BALLAST_LOG" ]]
+echo 'available-floor: live producer lease retained by real C14 path'
+# Actual C14 removal stops between whole artifacts at recovered availability.
+mkdir -p "$TEST_ROOT/repo/evidence/pressure-first" "$TEST_ROOT/repo/evidence/pressure-second"
+python3 - "$TEST_ROOT/repo/evidence" <<'PYP'
+import os,sys,time
+from pathlib import Path
+for name,hours in [('pressure-first',130),('pressure-second',120)]:
+ root=Path(sys.argv[1])/name; (root/'content').write_text('fixture')
+ for path in [root,*root.rglob('*')]: os.utime(path,(time.time()-hours*3600,)*2)
+PYP
+cat > "$T/pressure-bin/python3" <<'PYP'
+#!/usr/bin/env bash
+if [[ "$1" == */scratch_pressure.py ]]; then
+ n=0; [[ ! -f "$PRESSURE_COUNT" ]] || n="$(cat "$PRESSURE_COUNT")"
+ n=$((n+1)); echo "$n" > "$PRESSURE_COUNT"
+ if (( n < 3 )); then echo 1; else echo 53687091200; fi
+ exit 0
+fi
+exec "$REAL_PYTHON" "$@"
+PYP
+PATH="$T/pressure-bin:$PATH" PRESSURE_COUNT="$T/pressure-count" TEST_USED=1 "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean > "$T/pressure-stop.out"
+[[ ! -e "$TEST_ROOT/repo/evidence/pressure-first" && -f "$TEST_ROOT/repo/evidence/pressure-second/content" ]]
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==1 and r["postcondition"]["target_reached"]'
+echo 'available-floor: real C14 whole-artifact removal stopped at exactly 50 GiB'
+
+# Valid pending recovery with insufficient reserve space must not deadlock C14.
+mkdir -p "$TEST_ROOT/repo/evidence/pending-recovery"
+printf fixture > "$TEST_ROOT/repo/evidence/pending-recovery/content"
+python3 - "$TEST_ROOT/repo/evidence/pending-recovery" <<'PYP'
+import os,sys,time
+from pathlib import Path
+root=Path(sys.argv[1])
+for path in [root,*root.rglob('*')]: os.utime(path,(time.time()-180*3600,)*2)
+PYP
+: > "$BALLAST_LOG"
+PATH="$T/pressure-bin:$PATH" PRESSURE_COUNT="$T/pending-pressure-count" TEST_USED=1 \
+ TEST_RECOVER_RC=76 TEST_RECOVER_COUNT="$T/recover-count" \
+ "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean > "$T/pending-recovery.out"
+[[ ! -e "$TEST_ROOT/repo/evidence/pending-recovery" && "$(cat "$T/recover-count")" == 2 && ! -s "$BALLAST_LOG" ]]
+echo 'available-floor: typed pending low-space recovery permits C14, then retries restoration without another release'

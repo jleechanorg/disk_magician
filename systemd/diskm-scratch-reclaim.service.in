@@ -8,5 +8,6 @@ Environment=DISK_MAGICIAN_CONFIG=@CONFIG_PATH@
 Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
 Environment=DISK_MAGICIAN_TRIGGER=timer
 Environment=DISK_MAGICIAN_DELETION_LOG=@DELETION_LOG@
-ExecStart=/usr/bin/bash @ORCHESTRATOR@ volume reclaim --clean
+ExecStart=/usr/bin/bash @ORCHESTRATOR@ volume reclaim --available-floor --clean
+TimeoutStartSec=350
 Restart=no

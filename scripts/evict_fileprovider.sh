@@ -135,56 +135,165 @@ fi
 : >"$WORK/dups_verified.txt"
 n_pruned=0; n_prune_failed=0
 if [[ "$PRUNE_UNUPLOADED_DUPS" == true && -s "$WORK/notready.txt" ]]; then
-  CODEX_DIRS="${DM_FILEPROVIDER_LOCAL_CODEX_DIRS:-$HOME/.codex/sessions:$HOME/.codex/sessions_archive}"
-  CLAUDE_DIR="${DM_FILEPROVIDER_LOCAL_CLAUDE_DIR:-$HOME/.claude/projects}"
-  python3 - "$WORK/notready.txt" "$ROOT" "$CODEX_DIRS" "$CLAUDE_DIR" >"$WORK/dups_verified.txt" <<'PY'
-import gzip, os, stat, sys
+  if [[ -n "${DM_FILEPROVIDER_LOCAL_CODEX_DIRS:-}" ]]; then
+    CODEX_DIRS="$DM_FILEPROVIDER_LOCAL_CODEX_DIRS"
+  else
+    CODEX_DIRS="$HOME/.codex/sessions:$HOME/.codex/sessions_archive:$HOME/.codex/archived_sessions:$HOME/.codex-recent/sessions:$HOME/.codex-astra/sessions:$HOME/.codexplus/sessions"
+  fi
+  if [[ -n "${DM_FILEPROVIDER_LOCAL_CLAUDE_DIRS:-}" ]]; then
+    CLAUDE_DIRS="$DM_FILEPROVIDER_LOCAL_CLAUDE_DIRS"
+  elif [[ -n "${DM_FILEPROVIDER_LOCAL_CLAUDE_DIR:-}" ]]; then
+    CLAUDE_DIRS="$DM_FILEPROVIDER_LOCAL_CLAUDE_DIR"
+  else
+    CLAUDE_DIRS="$HOME/.claude/projects:$HOME/.claude-wa/projects:$HOME/.claude-account2/projects"
+  fi
+  HERMES_DIRS="${DM_FILEPROVIDER_LOCAL_HERMES_DIRS:-$HOME/.hermes:$HOME/.hermes_prod}"
+  GEMINI_DIR="${DM_FILEPROVIDER_LOCAL_GEMINI_DIR:-$HOME/.gemini}"
+  python3 - "$WORK/notready.txt" "$ROOT" "$CODEX_DIRS" "$CLAUDE_DIRS" "$HERMES_DIRS" "$GEMINI_DIR" >"$WORK/dups_verified.txt" <<'PY'
+import gzip, os, stat, subprocess, sys
 
-notready_file, root, codex_dirs_raw, claude_dir = sys.argv[1:5]
+notready_file, root, codex_dirs_raw, claude_dirs_raw = sys.argv[1:5]
+hermes_dirs_raw = sys.argv[5] if len(sys.argv) > 5 else ""
+gemini_dir = sys.argv[6] if len(sys.argv) > 6 else ""
+
 codex_dirs = [d for d in codex_dirs_raw.split(":") if d]
+claude_dirs = [d for d in claude_dirs_raw.split(":") if d]
+hermes_dirs = [d for d in hermes_dirs_raw.split(":") if d]
 ELIGIBLE = {"SKIP:uploading", "SKIP:upload_error", "SKIP:not_uploaded"}
 CODEX_MARKERS = (
     "/conversation-backups/codex_conversations/sessions/",
     "/conversation-backups/codex_conversations/sessions_archive/",
+    "/conversation-backups/codex_conversations/archived_sessions/",
     "/codex_conversations/sessions/",
     "/codex_conversations/sessions_archive/",
+    "/codex_conversations/archived_sessions/",
 )
-CLAUDE_MARKERS = ("/conversation-backups/claude_conversations/projects/", "/claude_conversations/projects/")
+CLAUDE_MARKERS = (
+    "/conversation-backups/claude_conversations/projects/",
+    "/claude_conversations/projects/",
+)
 
 
 def find_primary(dbx_path):
     for m in CODEX_MARKERS:
         if m in dbx_path:
             rel = dbx_path.split(m, 1)[1]
+            cands = [rel]
+            if rel.endswith(".zst"):
+                cands.extend([rel[:-4], rel[:-4] + ".gz"])
+            elif rel.endswith(".gz"):
+                cands.extend([rel[:-3], rel[:-3] + ".zst"])
+            else:
+                cands.extend([rel + ".zst", rel + ".gz"])
             for d in codex_dirs:
-                for cand in (os.path.join(d, rel), os.path.join(d, rel + ".gz")):
+                for c in cands:
+                    cand = os.path.join(d, c)
                     if os.path.lexists(cand):
                         return cand
     for m in CLAUDE_MARKERS:
         if m in dbx_path:
             rel = dbx_path.split(m, 1)[1]
-            if claude_dir:
-                for cand in (os.path.join(claude_dir, rel), os.path.join(claude_dir, rel + ".gz")):
+            cands = [rel]
+            if rel.endswith(".gz"):
+                cands.append(rel[:-3])
+            else:
+                cands.append(rel + ".gz")
+            for d in claude_dirs:
+                for c in cands:
+                    cand = os.path.join(d, c)
                     if os.path.lexists(cand):
                         return cand
+
+    # Top-level codex files
+    if "/codex_conversations/" in dbx_path:
+        rel = dbx_path.split("/codex_conversations/", 1)[1]
+        if not rel.startswith(("sessions/", "sessions_archive/", "archived_sessions/")):
+            cand = os.path.join(os.path.expanduser("~/.codex"), rel)
+            if os.path.lexists(cand):
+                return cand
+
+    # Claude top-level files
+    if "/claude_conversations/" in dbx_path:
+        rel = dbx_path.split("/claude_conversations/", 1)[1]
+        if rel == "claude-wa-history.jsonl":
+            cand = os.path.expanduser("~/.claude-wa/history.jsonl")
+            if os.path.lexists(cand):
+                return cand
+        elif not rel.startswith("projects/"):
+            cand = os.path.join(os.path.expanduser("~/.claude"), rel)
+            if os.path.lexists(cand):
+                return cand
+
+    # Hermes conversations
+    if "/hermes_conversations/" in dbx_path:
+        rel = dbx_path.split("/hermes_conversations/", 1)[1]
+        parts = rel.split("/", 1)
+        if len(parts) == 2:
+            sub, rest = parts
+            for hd in hermes_dirs:
+                if os.path.basename(hd) == sub:
+                    cand = os.path.join(hd, rest)
+                    if os.path.lexists(cand):
+                        return cand
+        for hd in hermes_dirs:
+            cand = os.path.join(hd, rel)
+            if os.path.lexists(cand):
+                return cand
+
+    # Gemini conversations
+    if gemini_dir and "/gemini_conversations/" in dbx_path:
+        rel = dbx_path.split("/gemini_conversations/", 1)[1]
+        cand = os.path.join(gemini_dir, rel)
+        if os.path.lexists(cand):
+            return cand
+
     return None
 
 
-def prefix_matches(primary, dbx_path, size, is_gz=False):
+def open_stream(path, mode="rb", is_gz=False, is_zst=False):
+    if is_gz:
+        return gzip.open(path, mode), None
+    if is_zst:
+        proc = subprocess.Popen(["zstd", "-dc", path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        return proc.stdout, proc
+    return open(path, mode), None
+
+
+def prefix_matches(primary, dbx_path, size):
+    is_p_gz = primary.endswith(".gz") and not dbx_path.endswith(".gz")
+    is_p_zst = primary.endswith(".zst") and not dbx_path.endswith(".zst")
+    is_d_gz = dbx_path.endswith(".gz") and not primary.endswith(".gz")
+    is_d_zst = dbx_path.endswith(".zst") and not primary.endswith(".zst")
+
     rem = size
+    fp, proc_p = None, None
+    fd, proc_d = None, None
     try:
-        open_p = (lambda p: gzip.open(p, "rb")) if is_gz else (lambda p: open(p, "rb"))
-        with open_p(primary) as fp, open(dbx_path, "rb") as fd:
-            while rem > 0:
-                chunk = min(rem, 1048576)
-                bp = fp.read(chunk)
-                bd = fd.read(chunk)
-                if len(bd) != chunk or bp != bd:
-                    return False
-                rem -= chunk
+        fp, proc_p = open_stream(primary, "rb", is_gz=is_p_gz, is_zst=is_p_zst)
+        fd, proc_d = open_stream(dbx_path, "rb", is_gz=is_d_gz, is_zst=is_d_zst)
+        while rem > 0:
+            chunk = min(rem, 1048576)
+            bp = fp.read(chunk)
+            bd = fd.read(chunk)
+            if len(bd) != chunk or bp != bd:
+                return False
+            rem -= chunk
         return True
-    except (OSError, EOFError, zlib_error := Exception):
+    except Exception:
         return False
+    finally:
+        if fp:
+            try: fp.close()
+            except Exception: pass
+        if proc_p:
+            try: proc_p.stdout.close(); proc_p.wait()
+            except Exception: pass
+        if fd:
+            try: fd.close()
+            except Exception: pass
+        if proc_d:
+            try: proc_d.stdout.close(); proc_d.wait()
+            except Exception: pass
 
 
 with open(notready_file, encoding="utf-8", errors="replace") as f:
@@ -209,10 +318,10 @@ with open(notready_file, encoding="utf-8", errors="replace") as f:
             continue
         if st_p.st_blocks <= 0 or st_d.st_blocks <= 0 or st_d.st_size <= 0:
             continue
-        is_gz = primary.endswith(".gz") and not dbx_path.endswith(".gz")
-        if not is_gz and st_p.st_size < st_d.st_size:
+        is_p_comp = (primary.endswith(".gz") and not dbx_path.endswith(".gz")) or (primary.endswith(".zst") and not dbx_path.endswith(".zst"))
+        if not is_p_comp and st_p.st_size < st_d.st_size:
             continue
-        if not prefix_matches(primary, dbx_path, st_d.st_size, is_gz=is_gz):
+        if not prefix_matches(primary, dbx_path, st_d.st_size):
             continue
         print(f"{st_d.st_blocks}\t{st_d.st_size}\t{dbx_path}\t{primary}")
 PY

@@ -969,7 +969,7 @@
     "encryption": "none",
     "encryption_acknowledged_at": null,
     "classes": {
-      "scratch": {"name": "diskm-scratch", "quota_gb": 30, "mountpoint": "/Volumes/diskm-scratch"}
+      "scratch": {"name": "diskm-scratch", "quota_gb": 30, "mountpoint": "/Volumes/diskm-scratch", "trigger_pct": 70, "target_pct": 50}
     }
   },
   "budgets": {

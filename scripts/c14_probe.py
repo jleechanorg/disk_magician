@@ -435,11 +435,28 @@ REF, LOG = re.compile(HEX + rb"\n?"), re.compile(HEX + b" " + HEX + rb" [^\n]*> 
 
 def entry_ok(rel, st, data=None):  # git's own type and name; refs/logs files must parse from the verified bytes
     top, d, f = rel.split("/")[0], stat.S_ISDIR(st.st_mode), stat.S_ISREG(st.st_mode)
+    if rel == "info/sparse-checkout":
+        return f
     if top not in ("refs", "logs") or not f or "/" not in rel:
-        return d and top in ("refs", "logs") or f and top in ADMIN and "/" not in rel
+        return (d and top == "info" and "/" not in rel) or (d and top in ("refs", "logs")) or (f and top in ADMIN and "/" not in rel)
     if data is None:
         return False
     return bool(REF.fullmatch(data)) if top == "refs" else all(map(LOG.fullmatch, data.splitlines(True)))
+
+
+def _is_sparse_only_worktree_config(data):
+    if not data:
+        return False
+    for raw in data.decode("utf-8", "replace").splitlines():
+        s = raw.strip()
+        if not s or s.startswith(("#", ";")) or s.lower() in ("[core]", "[index]"):
+            continue
+        if "=" in s:
+            k, v = [p.strip().lower() for p in s.split("=", 1)]
+            if k in ("sparsecheckout", "sparsecheckoutcone", "sparse") and v in ("true", "false", "1", "0", "yes", "no"):
+                continue
+        return False
+    return True
 
 def _read_verified(p, keep=False):
     """lstat then fd-open; hash (and optionally keep) the same inode, verifying it did
@@ -506,7 +523,7 @@ def admin(ad, lease=None):
             # carry real work (MERGE_HEAD, CHERRY_PICK_HEAD, REVERT_HEAD, rebase
             # dirs, locked) are already rejected above, and logs/HEAD plus refs/**
             # still match through the "/" arm.
-            need = rel in ("HEAD", "ORIG_HEAD") or "/" in rel  # HEAD, ORIG_HEAD, refs/**, logs/**
+            need = rel in ("HEAD", "ORIG_HEAD") or (rel.split("/")[0] in ("refs", "logs") and "/" in rel)  # HEAD, ORIG_HEAD, refs/**, logs/**
             keep = need or rel in ("HEAD", "commondir", "config.worktree", "COMMIT_EDITMSG")
             fst, digest, data = _read_verified(p, keep=keep)
             if digest is None or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
@@ -522,7 +539,8 @@ def admin(ad, lease=None):
         now = os.lstat(ad if rel == "." else os.path.join(ad, rel))
         if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
             return print("kept:check-failed")
-    if "config.worktree" in names and small.get("config.worktree") and hashlib.sha256(small["config.worktree"]).hexdigest() != (
+    sparse_wt_cfg = _is_sparse_only_worktree_config(small.get("config.worktree", b""))
+    if "config.worktree" in names and small.get("config.worktree") and not sparse_wt_cfg and hashlib.sha256(small["config.worktree"]).hexdigest() != (
             (json.load(open(lease)).get("git_meta") or {}) if lease and os.path.isfile(lease) else {}).get("config.worktree"):
         return print("kept:admin-unknown")
     head = small.get("HEAD", b"").strip()
@@ -946,7 +964,10 @@ def repos(inv_file):
 def newest_mtime(inv_file):
     try:
         entries = json.load(open(inv_file, encoding="utf-8"))
-        mtimes = [e["mtime_ns"] // 1_000_000_000 for e in entries if type(e.get("mtime_ns")) is int]
+        non_dir = [e["mtime_ns"] // 1_000_000_000 for e in entries
+                   if type(e.get("mtime_ns")) is int and e.get("type") != "dir"
+                   and ".git" not in e.get("path", "").split("/")]
+        mtimes = non_dir or [e["mtime_ns"] // 1_000_000_000 for e in entries if type(e.get("mtime_ns")) is int]
         if not mtimes: raise ValueError("empty mtime inventory")
         print(max(mtimes))
     except Exception:

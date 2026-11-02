@@ -3,7 +3,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SCRIPT_DIR/../scripts/cleanup_worktree_deps.sh"
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d "${TMPDIR:-/tmp}/test-cleanup-wt-deps.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
 ok() { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
@@ -139,5 +139,81 @@ echo d > "$T/roots90/mid/node_modules/x/f"
 OUT90="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots90" bash "$SCRIPT" --clean 2>&1)"
 [[ ! -e "$T/roots90/ancient/node_modules" ]] && ok ">=90d worktree node_modules stripped without WORKTREE_APPROVED=1" || bad ">=90d worktree node_modules not stripped"
 [[ -d "$T/roots90/mid/node_modules" ]] && ok "<90d worktree node_modules preserved without WORKTREE_APPROVED=1" || bad "<90d worktree node_modules stripped without approval"
+
+# Producer-lease gate (disk_magician-mxhz): a worktree with a live producer lease
+# keeps its dependencies even when nothing has a cwd inside it.
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+STATE="$T/home/.disk_magician_state"
+mkdir -p "$STATE/worktree_leases"
+mkdir -p "$T/rootsLease"
+fresh_cache_worktree() {
+  local name="$1"
+  git -C "$T/base" worktree add -q -b "b-$name" "$T/rootsLease/$name"
+  mkdir -p "$T/rootsLease/$name/node_modules/x"
+  echo d > "$T/rootsLease/$name/node_modules/x/f"
+  /usr/bin/find "$T/rootsLease/$name" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
+}
+lease_path() {
+  env DISK_MAGICIAN_STATE_DIR="$STATE" bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_path_for "$2"' _ "$REPO" "$1"
+}
+run_clean() {
+  env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" \
+    DISK_MAGICIAN_STATE_DIR="$STATE" DISK_MAGICIAN_WORKTREE_ROOTS="$1" WORKTREE_APPROVED=1 \
+    bash "$SCRIPT" --clean 2>&1
+}
+
+# 1. live producer lease, no cwd inside the worktree
+fresh_cache_worktree lease-live
+( trap - EXIT; exec /bin/sleep 300 ) &
+live_pid=$!
+env DISK_MAGICIAN_STATE_DIR="$STATE" bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_write "$2" "$2" "" mxhz-fixture --owner-pid "$3" >/dev/null' _ "$REPO" "$T/rootsLease/lease-live" "$live_pid"
+OUT_LEASE="$(run_clean "$T/rootsLease")"
+kill "$live_pid" 2>/dev/null || true; wait "$live_pid" 2>/dev/null || true
+check "live producer lease keeps its dependencies" "LEASE-KEEP $T/rootsLease/lease-live (alive)" "$OUT_LEASE"
+[[ -f "$T/rootsLease/lease-live/node_modules/x/f" ]] && ok "live-lease node_modules content survived" || bad "live-lease node_modules content removed"
+
+# 2. unreadable lease registry fails closed
+fresh_cache_worktree lease-bad
+printf 'not json' > "$(lease_path "$T/rootsLease/lease-bad")"
+OUT_BAD="$(run_clean "$T/rootsLease")"
+check "unreadable lease registry is kept as unverifiable" "LEASE-KEEP $T/rootsLease/lease-bad (unreadable)" "$OUT_BAD"
+[[ -d "$T/rootsLease/lease-bad/node_modules" ]] && ok "unreadable-lease dependencies preserved" || bad "unreadable-lease dependencies removed"
+
+# 3. an unleased eligible tree is still reclaimed
+fresh_cache_worktree lease-none
+OUT_NONE="$(run_clean "$T/rootsLease")"
+[[ ! -e "$T/rootsLease/lease-none/node_modules" ]] && ok "unleased eligible tree is reclaimed" || bad "unleased eligible tree kept"
+[[ "$OUT_NONE" != *"LEASE-KEEP $T/rootsLease/lease-none"* ]] && ok "unleased tree reports no lease keep" || bad "unleased tree reported a lease keep"
+
+# 4. an exactly-dead owner is provable and does not block
+fresh_cache_worktree lease-dead
+/bin/sh -c 'exit 0' &
+dead_pid=$!
+wait "$dead_pid" 2>/dev/null || true
+python3 - "$(lease_path "$T/rootsLease/lease-dead")" "$T/rootsLease/lease-dead" "$dead_pid" <<'PY'
+import json, os, sys, time
+lease, wt, pid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+os.makedirs(os.path.dirname(lease), exist_ok=True)
+json.dump({"schema_version": 1, "path": wt, "owners": [{"pid": pid, "start_epoch": 0, "comm": "bash"}],
+           "created_epoch": int(time.time()), "ttl_hours": 24, "pending": False}, open(lease, "w"))
+print('wrote', lease)
+PY
+OUT_DEAD="$(run_clean "$T/rootsLease")"
+[[ ! -e "$T/rootsLease/lease-dead/node_modules" ]] && ok "dead-owner lease does not block reclaim" || bad "dead-owner lease blocked reclaim"
+
+# 5. a held registry lock keeps the worktree instead of racing a producer
+fresh_cache_worktree lease-busy
+mkdir -p "$STATE/worktree_leases/.owner-mutation.reuse-lock"
+printf '%s\n' "$$" > "$STATE/worktree_leases/.owner-mutation.reuse-lock/pid"
+date +%s > "$STATE/worktree_leases/.owner-mutation.reuse-lock/acquired_at"
+OUT_BUSY="$(run_clean "$T/rootsLease")"
+check "held registry lock keeps the worktree" "LEASE-KEEP $T/rootsLease/lease-busy (registry-lock-busy)" "$OUT_BUSY"
+[[ -d "$T/rootsLease/lease-busy/node_modules" ]] && ok "registry-lock-busy dependencies preserved" || bad "registry-lock-busy dependencies removed"
+
+rm -rf "${STATE:?}/worktree_leases/.owner-mutation.reuse-lock"
+
+# 6. dry-run never claims a lease keep for a reclaimable tree
+OUT_DRY="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_STATE_DIR="$STATE" DISK_MAGICIAN_WORKTREE_ROOTS="$T/rootsLease" bash "$SCRIPT" --dry-run 2>&1)"
+[[ "$OUT_DRY" != *"LEASE-KEEP $T/rootsLease/lease-none"* ]] && ok "dry-run reports lease keeps only for leased worktrees" || bad "dry-run flagged an unleased worktree"
 
 echo; echo "Results: $PASS passed, $FAIL failed"; [[ "$FAIL" -eq 0 ]]

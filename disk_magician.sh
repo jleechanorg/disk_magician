@@ -66,6 +66,8 @@ Commands:
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
+  scratch-prune          Reclaim top-level Scratch-volume artifacts behind the C14 lease/live-cwd/
+                         open-file gates (--clean needs SCRATCH_TOP_LEVEL_APPROVED=1).
   cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.
   cleanup-antigravity-brain Prune old Antigravity brain dirs, idle worktrees, .backup leftovers.
   cleanup-claude-state   Run the guarded Claude state maintenance helper.
@@ -98,6 +100,7 @@ Commands:
   layout-check           Audit worktree and evidence placement against standard layout.
   scratch-new            Admit, then create a leased scratch worktree or evidence dir.
   scratch-dir [subpath]  Resolve active scratch root or create/return a subdirectory.
+  disposable ...          Opt-in Linux native 3-day cleanup for a NEW separate disposable namespace.
   volume ...              Inspect/create/mount Scratch volumes; Linux native migration accepts explicit --admin-transport docker --admin-image-id sha256:<digest>; volume fsck scratch is a separately gated diagnostic.
   evidence-push          Sync local evidence dir to remote storage.
   admit                  Admission decision for a governed write (--class C --est-gb N [--probe]; --confirm ID).
@@ -447,6 +450,9 @@ case "$CMD" in
   tmp-scratch-sweep)
     exec bash "$SCRIPT_DIR/scripts/tmp_scratch_sweep.sh" "$@"
     ;;
+  disposable)
+    exec python3 "$SCRIPT_DIR/scripts/native_disposable.py" "$@"
+    ;;
   volume)
     exec python3 "$SCRIPT_DIR/scripts/volume.py" "$@"
     ;;
@@ -576,6 +582,9 @@ case "$CMD" in
     ;;
   cleanup_tmp|cleanup-tmp)
     "$SCRIPT_DIR/scripts/cleanup_tmp.sh" "$@"
+    ;;
+  scratch_prune|scratch-prune)
+    "$SCRIPT_DIR/scripts/cleanup_scratch_top_level.sh" "$@"
     ;;
   cleanup_apfs_snapshots|cleanup-apfs-snapshots)
     "$SCRIPT_DIR/scripts/cleanup_apfs_snapshots.sh" "$@"
