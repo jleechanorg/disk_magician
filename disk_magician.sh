@@ -29,7 +29,7 @@ Commands:
   install-cwd-scanner Install the passwordless root cwd scanner for Linux live-cwd gates (run via sudo).
   residual-drilldown Run the scheduled residual and uncovered-root checks.
   pressure-sweep Run the existing free-space-gated maintenance job.
-  tmp-scratch-sweep Run scheduled scratch maintenance (`--scratch-only` drives safe Scratch-prune plus quota reclaim).
+  tmp-scratch-sweep Run scheduled scratch maintenance (\`--scratch-only\` drives safe Scratch-prune plus quota reclaim).
   clean         Clean safe targets across 6-tier routine stack (caches, temp, Docker, Xcode, worktrees).
   routine       Alias for clean --routine (runs unified 6-tier routine stack).
   clean-all     Clean all targets interactively (Docker VMs, old sessions).

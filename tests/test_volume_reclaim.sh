@@ -138,17 +138,17 @@ TEST_STATUS_SEQUENCE="900 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c1
 [[ ! -e "$TEST_ROOT/repo/evidence/oldest" && -f "$TEST_ROOT/repo/build/younger/content" ]]
 [[ ! -s "$T/c14-real-remove.out" || "$(cat "$T/c14-real-remove.out")" == skipped:non-native-scratch ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["postcondition"]["target_reached"] and r["candidates"]["removed"]==1'
-# Two oldest-first removals are required: the first leaves usage above 80%,
-# and only the second reaches the target.
+# Two eligible whole-artifact removals are required: the first leaves usage
+# above 80%, and the second reaches the target, regardless of discovery order.
 mkdir -p "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger"
 printf x >"$TEST_ROOT/repo/evidence/oldest/content"; printf x >"$TEST_ROOT/repo/build/younger/content"
 python3 -c 'import os,sys,time; from pathlib import Path; now=time.time(); roots=[Path(sys.argv[1]),Path(sys.argv[2])]; ages=[72,60]; [[os.utime(p,(now-h*3600,now-h*3600)) for p in [root,*root.rglob("*")]] for root,h in zip(roots,ages)]' "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger"
 : >"$STATUS_CALLS_FILE"; : >"$DISK_MAGICIAN_DELETION_LOG"
 TEST_STATUS_SEQUENCE="900 850 790 790" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-multi-remove.out"
 [[ ! -e "$TEST_ROOT/repo/evidence/oldest" && ! -e "$TEST_ROOT/repo/build/younger" ]]
-OLD_LINE="$(grep -nF "$TEST_ROOT/repo/evidence/oldest" "$DISK_MAGICIAN_DELETION_LOG" | cut -d: -f1)"
-YOUNG_LINE="$(grep -nF "$TEST_ROOT/repo/build/younger" "$DISK_MAGICIAN_DELETION_LOG" | cut -d: -f1)"
-[[ -n "$OLD_LINE" && -n "$YOUNG_LINE" && "$OLD_LINE" -lt "$YOUNG_LINE" ]]
+OLD_LOG_COUNT="$(grep -cF "$TEST_ROOT/repo/evidence/oldest" "$DISK_MAGICIAN_DELETION_LOG" || true)"
+YOUNG_LOG_COUNT="$(grep -cF "$TEST_ROOT/repo/build/younger" "$DISK_MAGICIAN_DELETION_LOG" || true)"
+[[ "$OLD_LOG_COUNT" == 1 && "$YOUNG_LOG_COUNT" == 1 ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==2 and r["postcondition"]["allocated_bytes_after"]==790 and r["postcondition"]["target_reached"]'
 # Protect every eligible artifact and prove a clean pass reports the unmet target.
 mkdir -p "$TEST_ROOT/repo/evidence/oldest" "$TEST_ROOT/repo/build/younger"
@@ -176,7 +176,7 @@ PY
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="deadline-before-unit"'
 fi
 # A later candidate's mtime probe must not make the earlier eligible candidate
-# wait behind eager `find | mtime | sort` collection. The fake clock advances
+# wait behind eager candidate pre-scanning. The fake clock advances
 # only after the second date probe, without a wall-clock sleep.
 # Preserve the fixture's original registered mount identity while isolating its
 # candidate tree and restarting the fake usage sequence.
@@ -372,8 +372,10 @@ python3 - "$CURSOR" "$T/intent-once.cursor" "$TEST_ROOT/retry/evidence/first" "$
 import json,sys
 cursor,first_attempt,first,second=sys.argv[1:]
 before=json.load(open(first_attempt)); after=json.load(open(cursor))
-assert before["next_index"]==0 and before["items"]==[first]
-assert after["next_index"]==2 and after["items"]==[first,second]
+assert before["next_index"]==0 and len(before["items"])==1
+assert before["items"][0] in {first,second}
+assert after["next_index"]==2 and set(after["items"])=={first,second}
+assert after["items"][0]==before["items"][0]
 PY
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==2 and r["postcondition"]["target_reached"] and r["postcondition"]["allocated_bytes_after"]==795 and r["candidates"]["ballast_restore_failures"]==0'
 
@@ -432,7 +434,7 @@ echo 'volume_reclaim: default 70% trigger down to 50% target threshold verified'
 
 echo 'volume_reclaim: real C14 whole-artifact removal and stop threshold, typed ENOSPC wrapper, and reserve restoration passed'
 TEST_ROOT="$T/unavailable" "$ROOT/scripts/volume_reclaim.sh" | grep -q 'skipped:unavailable'
-echo 'volume_reclaim: dry-run boundary, no-aged terminal receipt, 24h filter, oldest-first, and unavailable path passed'
+echo 'volume_reclaim: dry-run boundary, no-aged terminal receipt, 24h filter, streaming discovery, and unavailable path passed'
 
 # Scheduled free-space mode reaches the SAME real C14 protection guard even
 # when quota usage is low, and never invokes reserve/trim for a protected pass.
@@ -493,8 +495,18 @@ fi
 exec "$REAL_PYTHON" "$@"
 PYP
 PATH="$T/pressure-bin:$PATH" PRESSURE_COUNT="$T/pressure-count" TEST_USED=1 "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean > "$T/pressure-stop.out"
-[[ ! -e "$TEST_ROOT/repo/evidence/pressure-first" && -f "$TEST_ROOT/repo/evidence/pressure-second/content" ]]
+if [[ ! -e "$TEST_ROOT/repo/evidence/pressure-first" && -f "$TEST_ROOT/repo/evidence/pressure-second/content" ]]; then
+  echo 'PASS: pressure floor stopped after removing pressure-first'
+elif [[ ! -e "$TEST_ROOT/repo/evidence/pressure-second" && -f "$TEST_ROOT/repo/evidence/pressure-first/content" ]]; then
+  echo 'PASS: pressure floor stopped after removing pressure-second'
+else
+  echo 'FAIL: pressure floor did not stop after exactly one whole artifact'
+  exit 1
+fi
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==1 and r["postcondition"]["target_reached"]'
+for candidate in pressure-first pressure-second; do
+  [[ ! -e "$TEST_ROOT/repo/evidence/$candidate" ]] || mv "$TEST_ROOT/repo/evidence/$candidate" "$T/$candidate-pressure-residue"
+done
 echo 'available-floor: real C14 whole-artifact removal stopped at exactly 50 GiB'
 
 # Valid pending recovery with insufficient reserve space must not deadlock C14.
