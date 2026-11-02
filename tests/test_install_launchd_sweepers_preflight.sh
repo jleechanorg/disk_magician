@@ -309,11 +309,15 @@ if [[ ! -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.worktree-venvs.plist" ]]
   echo "FAIL: worktree-venvs.plist not installed under --consolidate" >&2
   exit 1
 fi
-python3 - "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-scratch-pressure.plist" <<'PYVERIFY'
+python3 - "$CONSOLIDATE_LAUNCHAGENTS/com.jleechanorg.disk-magician-scratch-pressure.plist" \
+  "$CONSOLIDATE_HOME/.local/bin/diskm" <<'PYVERIFY'
 import plistlib,sys
 with open(sys.argv[1],"rb") as stream: value=plistlib.load(stream)
 assert value["StartInterval"] == 1200
-assert value["ProgramArguments"][-4:] == ["volume", "reclaim", "--available-floor", "--clean"]
+assert value["ProgramArguments"] == [
+    sys.argv[2],
+    "tmp-scratch-sweep", "--scratch-only", "--clean",
+]
 PYVERIFY
 if [[ -f "$CONSOLIDATE_LAUNCHAGENTS/com.disk-magician.colima-prune.plist" ]]; then
   echo "FAIL: redundant colima-prune.plist was not removed from LaunchAgents" >&2
