@@ -177,7 +177,7 @@ CURSOR="$T/scratch-prune.cursor"
 EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"
 [[ -d "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "expired deadline does not delete the pending candidate" || bad "expired deadline does not delete the pending candidate"
-if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" <<'PY'
+if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/worldai_frontend" <<'PY'
 import json,sys
 cursor=json.load(open(sys.argv[1])); assert cursor["schema"] == 1
 assert 0 <= cursor["next_index"] < len(cursor["items"])
@@ -268,9 +268,11 @@ echo "Test 5: a live owner lease keeps the dir even with approval"
 use_root
 make_tree live-lease 72 >/dev/null
 sleep 300 & lease_pid=$!
-env DISK_MAGICIAN_STATE_DIR="$STATE" bash -c '
+lease_file="$(env DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" bash -c '
 source "$1/scripts/lib/worktree_lease.sh"
-lease_write "$2" "$2" "" scratch-prune-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$SCRATCH_ROOT/live-lease" "$lease_pid"
+lease_write "$2" "$2" "" scratch-prune-test --owner-pid "$3" >/dev/null || exit
+lease_path_for "$2"' _ "$ROOT" "$SCRATCH_ROOT/live-lease" "$lease_pid")"
+[[ -s "$lease_file" ]] && ok "live-owner lease fixture was written to cleaner state" || bad "live-owner lease fixture was written to cleaner state" "$lease_file"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 kill "$lease_pid" 2>/dev/null || true; wait "$lease_pid" 2>/dev/null || true
 check "live lease keeps the candidate" "kept:live-owner" "$out"
