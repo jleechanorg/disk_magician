@@ -172,8 +172,8 @@ class CliHeredocCompatTests(unittest.TestCase):
                 env=environment, capture_output=True, text=True,
                 check=True, timeout=10,
             )
+            self.assertTrue(os.path.samefile(completed.stdout.strip(), environment_root))
 
-        self.assertEqual(completed.stdout.strip(), str(environment_root))
         self.assertEqual(source["PATH"], str(caller_bin) + os.pathsep + os.defpath)
 
     def test_cli_refuses_missing_packaged_python_launcher_before_dispatch(self):
