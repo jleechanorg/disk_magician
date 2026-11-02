@@ -109,7 +109,7 @@ PY
 }
 use_root
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
 echo "Test 1: dry-run lists candidates and deletes nothing"
 use_root
 make_tree plain-old >/dev/null
@@ -141,7 +141,7 @@ check "deletion log records the removal" "plain-old" "$(cat "$LOG" 2>/dev/null)"
 check "deletion log names the cleaner" "scratch-prune" "$(cat "$LOG" 2>/dev/null)"
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
 echo "Test 4: automatic mode uses a 24 h default and does not bypass C14 safety"
 use_root
 register_test_volume
@@ -168,6 +168,7 @@ out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUM
 [[ -e "$SCRATCH_ROOT/unknown-25h" ]] && ok "unknown direct children remain protected" || bad "unknown direct children remain protected"
 fi
 
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
 echo "Test 4b: a deadline deferral preserves the exact candidate cursor for the next scheduled pass"
 use_root
 register_test_volume
@@ -186,8 +187,77 @@ then ok "deadline deferral persists the exact resume item"; else bad "deadline d
 FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"
 [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "the next scheduled pass resumes and removes the eligible item" || bad "the next scheduled pass resumes and removes the eligible item" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+fi
 if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == cursor-contract ]]; then
   echo "test_cleanup_scratch_top_level (${SCRATCH_PRUNE_TEST_FILTER}): $PASS passed, $FAIL failed"
+  [[ "$FAIL" == 0 ]]
+  exit $?
+fi
+
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == unknown-deadline-contract ]]; then
+  echo "Test: an expired deadline stops before classifying unknown content and resumes safely"
+  use_root
+  register_test_volume
+  make_tree a-unknown-25h 25 >/dev/null
+  make_tree b-unknown-25h 25 >/dev/null
+  make_managed_tree resume-after-unknown-25h 25 >/dev/null
+  CURSOR="$T/unknown-deadline.cursor"
+  EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "expired automatic pass exits cleanly" || bad "expired automatic pass exits cleanly" "rc=$rc"
+  if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-25h"* ]]; then
+    ok "expired deadline is checked before unknown-content classification"
+  else
+    bad "expired deadline is checked before unknown-content classification" "unknown candidate was classified before deadline: $(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+  fi
+  [[ -e "$SCRATCH_ROOT/a-unknown-25h" && -e "$SCRATCH_ROOT/b-unknown-25h" && -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-25h" ]] && ok "expired pass preserves both unknowns and the recognized candidate" || bad "expired pass preserves both unknowns and the recognized candidate"
+  if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/a-unknown-25h" <<'PY'
+import json,sys
+cursor=json.load(open(sys.argv[1])); assert cursor["schema"] == 1
+assert cursor["next_index"] < len(cursor["items"])
+assert cursor["items"][cursor["next_index"]] == sys.argv[2]
+PY
+  then ok "expired pass stores the exact first pending candidate"; else bad "expired pass stores the exact first pending candidate"; fi
+  FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "resumed automatic pass exits cleanly" || bad "resumed automatic pass exits cleanly" "rc=$rc"
+  [[ -e "$SCRATCH_ROOT/a-unknown-25h" ]] && ok "resumed pass preserves the unknown candidate" || bad "resumed pass preserves the unknown candidate"
+  [[ -e "$SCRATCH_ROOT/b-unknown-25h" ]] && ok "resumed pass progresses past the second unknown candidate without deleting it" || bad "resumed pass progresses past the second unknown candidate without deleting it"
+  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-25h" ]] && ok "resumed pass reaches and removes the recognized artifact" || bad "resumed pass reaches and removes the recognized artifact" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+
+  echo "Test: a seeded resume cursor skips prior unknown work and continues after the pending unknown"
+  use_root
+  register_test_volume
+  make_tree a-unknown-25h 25 >/dev/null
+  make_tree b-unknown-25h 25 >/dev/null
+  make_managed_tree resume-after-seeded-unknown-25h 25 >/dev/null
+  CURSOR="$T/seeded-unknown-deadline.cursor"
+  CURSOR_SOURCE="scratch_prune:v1:$SCRATCH_ROOT"
+  python3 - "$CURSOR" "$CURSOR_SOURCE" "$SCRATCH_ROOT/a-unknown-25h" "$SCRATCH_ROOT/b-unknown-25h" <<'PY'
+import json,sys
+with open(sys.argv[1], "w") as f:
+    json.dump({"schema": 1, "source": sys.argv[2], "items": sys.argv[3:], "next_index": 1}, f)
+PY
+  EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "seeded expired pass exits cleanly" || bad "seeded expired pass exits cleanly" "rc=$rc"
+  if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-25h"* ]]; then
+    ok "seeded cursor does not reclassify the completed unknown candidate"
+  else
+    bad "seeded cursor does not reclassify the completed unknown candidate" "completed unknown was reclassified: $(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+  fi
+  if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/b-unknown-25h" <<'PY'
+import json,sys
+cursor=json.load(open(sys.argv[1])); assert cursor["next_index"] < len(cursor["items"])
+assert cursor["items"][cursor["next_index"]] == sys.argv[2]
+PY
+  then ok "seeded expired pass leaves the pending unknown at the cursor"; else bad "seeded expired pass leaves the pending unknown at the cursor"; fi
+  FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "seeded resumed pass exits cleanly" || bad "seeded resumed pass exits cleanly" "rc=$rc"
+  [[ -e "$SCRATCH_ROOT/a-unknown-25h" && -e "$SCRATCH_ROOT/b-unknown-25h" ]] && ok "seeded resumed pass preserves both unknown candidates" || bad "seeded resumed pass preserves both unknown candidates"
+  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-seeded-unknown-25h" ]] && ok "seeded resumed pass reaches the registered artifact" || bad "seeded resumed pass reaches the registered artifact" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+  echo "test_cleanup_scratch_top_level (unknown-deadline-contract): $PASS passed, $FAIL failed"
   [[ "$FAIL" == 0 ]]
   exit $?
 fi

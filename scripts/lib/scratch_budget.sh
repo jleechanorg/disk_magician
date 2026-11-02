@@ -55,6 +55,11 @@ source "$_SCRATCH_BUDGET_LIB/quarantine.sh"
 #   - an invalid/stale scope fails closed (no candidate is processed).
 scratch_budget_quarantine_remove() {
   local cursor_step="" cursor_index=0 cursor_item_index=0 cursor_items="[]" cursor_visit_complete=false result
+  local keep_unproven_content=false
+  if (($# > 1)); then
+    [[ "$#" == 2 && "$2" == --keep-unproven-content ]] || { echo 'kept:invalid-option'; return 0; }
+    keep_unproven_content=true
+  fi
   if [[ -n "${ACT_CURSOR:-}" && -n "${ACT_CURSOR_SOURCE:-}" ]]; then
     local _cursor_state _cursor_plan _cursor_rest
     _cursor_state="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || { echo 'kept:cursor-invalid'; return 0; }
@@ -106,9 +111,13 @@ print("ready\t" + str(i) + "\t" + str(idx) + "\t" + json.dumps(items, separators
       2) [[ "${CANDIDATE_INTERRUPTED_COUNT+x}" == x ]] && CANDIDATE_INTERRUPTED_COUNT=$((CANDIDATE_INTERRUPTED_COUNT + 1)); echo 'kept:invalid-deadline'; return 0 ;;
     esac
   fi
-  local args=(--kind ephemeral)
-  [[ -n "${ACT_DEADLINE_AT:-}" ]] && args+=(--deadline-at "$ACT_DEADLINE_AT")
-  result="$(quarantine_remove "$1" "${args[@]}")" || result=kept:check-failed
+  if [[ "$keep_unproven_content" == true ]]; then
+    result=kept:unproven-content
+  else
+    local args=(--kind ephemeral)
+    [[ -n "${ACT_DEADLINE_AT:-}" ]] && args+=(--deadline-at "$ACT_DEADLINE_AT")
+    result="$(quarantine_remove "$1" "${args[@]}")" || result=kept:check-failed
+  fi
   if [[ "${CANDIDATE_REMOVED_COUNT+x}" == x ]]; then
     case "$result" in
       removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;

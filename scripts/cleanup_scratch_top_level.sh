@@ -169,10 +169,29 @@ fi
 
 ACT_CURSOR_SOURCE="scratch_prune:v1:$root"
 CURSOR_ERROR=0
+CURSOR_RESUME_TARGET=""
 if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true && -n "$ACT_CURSOR" ]]; then
-  act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" >/dev/null || { CURSOR_ERROR=1; echo kept:cursor-invalid; }
+  _cursor_state="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || { CURSOR_ERROR=1; echo kept:cursor-invalid; }
   if (( ! CURSOR_ERROR )); then
     act_cursor_reset_once "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" || { CURSOR_ERROR=1; echo kept:cursor-reset-failed; }
+    if (( ! CURSOR_ERROR )); then
+      _cursor_state="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || { CURSOR_ERROR=1; echo kept:cursor-invalid; }
+    fi
+    if (( ! CURSOR_ERROR )); then
+      while IFS= read -r -d '' _cursor_pending; do CURSOR_RESUME_TARGET="$_cursor_pending"; break; done < <(
+        printf '%s' "$_cursor_state" | python3 -c 'import json,os,sys
+state=json.load(sys.stdin)
+for path in state["items"][state["next_index"]:]:
+    if os.path.lexists(path):
+        sys.stdout.buffer.write(path.encode()+bytes([0]))
+        break'
+      )
+      if [[ -z "$CURSOR_RESUME_TARGET" ]]; then
+        # All unfinished cursor entries disappeared since the previous pass.
+        # Treat that queue as complete and start a fresh pass in the same scope.
+        act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "[]" 0 || { CURSOR_ERROR=1; echo kept:cursor-reset-failed; }
+      fi
+    fi
   fi
 fi
 
@@ -333,10 +352,12 @@ fi
 
 if (( ! CURSOR_ERROR )); then
 while IFS= read -r -d '' entry; do
-  if [[ "$SCRATCH_AUTOMATIC" == 1 ]] && ! c14_ephemeral_retention "$entry" >/dev/null 2>&1; then
-    echo "kept:unproven-content $entry"
-    kept=$(( kept + 1 ))
-    continue
+  [[ -e "$entry" || -L "$entry" ]] || continue
+  base="${entry##*/}"
+  case "$base" in .*) continue ;; esac
+  if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true && -n "$CURSOR_RESUME_TARGET" ]]; then
+    [[ "$entry" == "$CURSOR_RESUME_TARGET" ]] || continue
+    CURSOR_RESUME_TARGET=""
   fi
   if deadline_exceeded; then
     if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
@@ -347,9 +368,18 @@ while IFS= read -r -d '' entry; do
     fi
     break
   fi
-  [[ -e "$entry" || -L "$entry" ]] || continue
-  base="${entry##*/}"
-  case "$base" in .*) continue ;; esac
+  if [[ "$SCRATCH_AUTOMATIC" == 1 ]] && ! c14_ephemeral_retention "$entry" >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" != true ]]; then
+      outcome="$(scratch_budget_quarantine_remove "$entry" --keep-unproven-content)"
+      echo "$outcome $entry"
+      kept=$(( kept + 1 ))
+      case "$outcome" in deferred:deadline-before-unit|kept:cursor-*) break ;; esac
+    else
+      echo "kept:unproven-content $entry"
+      kept=$(( kept + 1 ))
+    fi
+    continue
+  fi
   scanned=$(( scanned + 1 ))
   (( scanned % 25 == 0 )) && echo "progress: scanned=${scanned} kept=${kept} removable=${removable} removed=${removed}"
   if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
