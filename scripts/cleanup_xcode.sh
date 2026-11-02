@@ -199,12 +199,12 @@ clean_custom_derived_data() {
   ptmp="$(scratch_roots_get_private_tmp)"
   utmp="$(scratch_roots_get_user_tmp)"
   for cand in "$HOME"/dd_* "$HOME"/wf*_dd* "$HOME"/*_dd* "$HOME"/.dd_* \
-      ${ptmp:+"$ptmp"/*_dd* "$ptmp"/dd_* "$ptmp"/pr* "$ptmp"/pr*/dd \
+      ${ptmp:+"$ptmp"/*_dd* "$ptmp"/dd_* "$ptmp"/dd-* "$ptmp"/pr* "$ptmp"/pr*/dd \
       "$ptmp"/worldai-ios-* \
       "$ptmp"/worldai_frontend*/* "$ptmp"/worldai_frontend*/*/* \
       "$ptmp"/*-native*/* "$ptmp"/*-native*/build/* \
       "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
-      ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_*}; do
+      ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_* "$utmp"/dd-*}; do
     [[ -d "$cand" && ! -L "$cand" ]] || continue
     [[ "${cand##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ ]] && continue
     if _av_derived_data_shape "$cand"; then
