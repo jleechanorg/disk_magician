@@ -70,9 +70,11 @@ def main():
     if auto_clean_env:
         env["DISK_MAGICIAN_AUTO_CLEAN"] = auto_clean_env
 
-    # Scheduled pressure reclaim owns signal forwarding, durable reserve recovery
-    # and its terminal receipt. Do not interpose a wrapper that can die first.
+    # Scheduled cleanup owns signal forwarding, reserve recovery and receipts.
+    # Replace this CLI process so scheduler signals reach that owner directly.
     if args[:2] == ["volume", "reclaim"] and "--available-floor" in args:
+        os.execvpe("bash", ["bash", str(orchestrator), *args], env)
+    if args and args[0] == "tmp-scratch-sweep" and "--scratch-only" in args:
         os.execvpe("bash", ["bash", str(orchestrator), *args], env)
 
     # Run the shell orchestrator

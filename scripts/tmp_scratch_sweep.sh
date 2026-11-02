@@ -56,6 +56,52 @@ RECEIPT_RUN_ID=$(python3 "$RECEIPT_HELPER" begin --job tmp_scratch_sweep --trigg
   exit 1
 }
 
+SCHEDULER_SIGNAL=0
+SCHEDULER_SIGNAL_COUNT=0
+SCHEDULER_CHILD_PID=""
+record_scheduler_signal() {
+  SCHEDULER_SIGNAL="$1"
+  SCHEDULER_SIGNAL_COUNT=$((SCHEDULER_SIGNAL_COUNT + 1))
+  if [[ -n "$SCHEDULER_CHILD_PID" ]]; then
+    kill -TERM "$SCHEDULER_CHILD_PID" 2>/dev/null || true
+  fi
+}
+if [[ "$SWEEP_MODE" == scratch-only ]]; then
+  trap 'record_scheduler_signal 15' TERM
+  trap 'record_scheduler_signal 1' HUP
+  trap 'record_scheduler_signal 2' INT
+fi
+
+# Keep the phase owner reachable while waiting for its bounded work to finish.
+run_bounded_capture() {
+  local output_var="$1" output_file wait_rc=0 child_pid signal_count
+  shift
+  output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sweep-output.XXXXXX")" || return 125
+  if (( SCHEDULER_SIGNAL != 0 )); then
+    rm -f "$output_file"
+    printf -v "$output_var" '%s' ""
+    return $((128 + SCHEDULER_SIGNAL))
+  fi
+  "$@" >"$output_file" 2>&1 &
+  child_pid=$!
+  SCHEDULER_CHILD_PID="$child_pid"
+  # Close the signal-before-PID-publication race.
+  if (( SCHEDULER_SIGNAL != 0 )); then
+    kill -TERM "$child_pid" 2>/dev/null || true
+  fi
+  while :; do
+    # A trap interrupts wait; retry only when another signal was observed.
+    signal_count="$SCHEDULER_SIGNAL_COUNT"
+    wait_rc=0
+    wait "$child_pid" || wait_rc=$?
+    (( SCHEDULER_SIGNAL_COUNT == signal_count )) && break
+  done
+  SCHEDULER_CHILD_PID=""
+  printf -v "$output_var" '%s' "$(cat "$output_file")"
+  rm -f "$output_file"
+  return "$wait_rc"
+}
+
 CHILD_TRIGGER="tmp_scratch_sweep:${RECEIPT_RUN_ID}"
 # This run owns the shared C14 ledger; the nested cleanup_tmp receipt inherits
 # the path but a different owner, so it cannot double-count the same kept bytes.
@@ -99,12 +145,11 @@ PY
     SCRATCH_PRUNE_OUTPUT="skipped:bounded-runtime-unavailable"
     SCRATCH_PRUNE_RC=124
   else
-    SCRATCH_PRUNE_OUTPUT="$(ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$SCRATCH_CURSOR" \
+    run_bounded_capture SCRATCH_PRUNE_OUTPUT env ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$SCRATCH_CURSOR" \
       DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 \
       DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= SCRATCH_TOP_LEVEL_APPROVED=0 \
       "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${SCRATCH_TIMEOUT_SEC}s" \
-      "$SCRIPT_DIR/../disk_magician.sh" "${scratch_args[@]}" 2>&1)"
-    SCRATCH_PRUNE_RC=$?
+      "$SCRIPT_DIR/../disk_magician.sh" "${scratch_args[@]}" || SCRATCH_PRUNE_RC=$?
   fi
   [[ -n "$SCRATCH_PRUNE_OUTPUT" ]] && printf '%s\n' "$SCRATCH_PRUNE_OUTPUT"
   SCRATCH_PRUNE_SUMMARY="$(printf '%s\n' "$SCRATCH_PRUNE_OUTPUT" | awk '/^scanned=[0-9]+ / {line=$0} END {print line}')"
@@ -172,17 +217,19 @@ VOLUME_CURSOR=""
 VOLUME_OUTPUT=""
 VOLUME_RC=0
 VOLUME_COMMAND_STARTED=false
-if [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" || "$VOLUME_TIMEOUT_SEC" == 0 ]]; then
+if (( SCHEDULER_SIGNAL != 0 )); then
+  VOLUME_OUTPUT="skipped:scheduler-interrupted"
+  VOLUME_RC=0
+elif [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" || "$VOLUME_TIMEOUT_SEC" == 0 ]]; then
   VOLUME_OUTPUT="skipped:bounded-runtime-unavailable"
   VOLUME_RC=124
 else
   VOLUME_COMMAND_STARTED=true
-  VOLUME_OUTPUT="$(ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$VOLUME_CURSOR" DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" \
-    "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${VOLUME_TIMEOUT_SEC}s" \
-    "$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}" 2>&1)"
-  VOLUME_RC=$?
+  run_bounded_capture VOLUME_OUTPUT env ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$VOLUME_CURSOR" \
+    DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS="$VOLUME_TIMEOUT_SEC" \
+    "$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}" || VOLUME_RC=$?
 fi
-if (( VOLUME_RC == 124 || VOLUME_RC == 137 || VOLUME_RC == 143 )); then
+if (( SCHEDULER_SIGNAL == 0 && (VOLUME_RC == 124 || VOLUME_RC == 137 || VOLUME_RC == 143) )); then
   VOLUME_TIMEOUT_REASON="${VOLUME_OUTPUT:-volume reclaim exceeded bounded runtime}"
   VOLUME_OUTPUT="${VOLUME_OUTPUT:+$VOLUME_OUTPUT$'\n'}skipped:runtime-timeout"
   VOLUME_BALLAST_FAILURES=0
@@ -227,6 +274,8 @@ elif sys.argv[4].strip() == "skipped:measurement-unavailable":
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"measurement-unavailable"},separators=(",",":")))
 elif sys.argv[4].strip() == "skipped:unavailable" or sys.argv[4].strip().startswith("skipped:below-trigger:"):
  print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":sys.argv[4].strip(),"aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":None},separators=(",",":")))
+elif sys.argv[4].strip() == "skipped:scheduler-interrupted":
+ print(json.dumps({"valid":True,"outcome":"timeout","skip_reason":"scheduler-interrupted","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scheduler-interrupted"},separators=(",",":")))
 else:
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"bound-receipt-unavailable"},separators=(",",":")))
 PYV
@@ -334,6 +383,13 @@ elif [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_C
 elif [[ $rc -eq 0 && ( "$INTERRUPTED_COUNT" -gt 0 || "$DEFERRED_COUNT" -gt 0 || "$VOLUME_OUTCOME" == partial || "$VOLUME_TARGET" == False || "$VOLUME_TARGET" == false || "$VOLUME_BALLAST_FAILURES" != 0 ) ]]; then
   OUTCOME="partial"
   REASON="sweep completed with candidate deferrals, volume target unmet, or ballast restore failure"
+fi
+
+if (( SCHEDULER_SIGNAL != 0 )); then
+  OUTCOME="timeout"
+  REASON="scheduler-interrupted"
+  INTERRUPTED_COUNT=1
+  rc=$((128 + SCHEDULER_SIGNAL))
 fi
 
 if [[ ( "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true ) && $rc -eq 0 && ( "$VOLUME_REMOVED" == "null" || "$VOLUME_REMOVED" -eq 0 ) ]]; then

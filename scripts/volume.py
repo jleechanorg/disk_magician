@@ -3271,7 +3271,10 @@ def reclaim_cmd(clean: bool = False, available_floor: bool = False) -> int:
             print("scratch pressure: bounded runtime unavailable", file=sys.stderr)
             store.finish("volume_reclaim", run_id=run_id, outcome="error", reason="bounded-runtime-unavailable")
             return 75
-        arguments = [timeout, "--signal=TERM", "--kill-after=2s", "310s", *arguments]
+        timeout_seconds = os.environ.get("DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS", "310")
+        if not re.fullmatch(r"[1-9][0-9]*(?:\.[0-9]+)?", timeout_seconds):
+            timeout_seconds = "310"
+        arguments = [timeout, "--signal=TERM", "--kill-after=2s", f"{timeout_seconds}s", *arguments]
         def recover():
             # recover never allocates without a durable exact-volume release intent.
             return pressure_process([timeout, "--signal=TERM", "--kill-after=2s", "12s",

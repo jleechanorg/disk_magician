@@ -1552,6 +1552,9 @@ class StatusAndBallastTest(VolumeTestBase):
                 receipt = store.read("volume_reclaim")
                 self.assertEqual(receipt["active"], [])
                 self.assertEqual(receipt["last_terminal"]["reason"], "scheduler-interrupted")
+                sweep_receipt = store.read("tmp_scratch_sweep")
+                self.assertEqual(sweep_receipt["active"], [])
+                self.assertEqual(sweep_receipt["last_terminal"]["reason"], "scheduler-interrupted")
                 # On Linux this is the actual fake-diskutil recovery dispatcher;
                 # Darwin's separate production mountpoint guard refuses temp roots.
                 if os.uname().sysname != "Darwin":
