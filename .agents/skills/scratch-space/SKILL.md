@@ -22,7 +22,7 @@ All temporary, disposable build, test scratch, and evidence paths resolve dynami
    EVIDENCE_DIR="$(diskm scratch-new <repo-path> <purpose> --kind evidence)"
    ```
    - Pass `--owner-pid <PID>` when allocating for a long-lived background process.
-   - `diskm scratch-new` enforces volume health, admission control, 48-hour recency, and active-lease protection.
+   - `diskm scratch-new` enforces volume health, admission control, 24-hour recency, and active-lease protection.
 
 2. **Ad-Hoc Helper Files, PR Bodies, Frame Dumps, Server Logs & Ephemeral Scripts**
    ```bash

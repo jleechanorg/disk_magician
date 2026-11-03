@@ -49,6 +49,7 @@ EOF
   check "$(basename "$tree"): cleanup-supervisor-logs forwards exit status" '[[ "$rc" -eq 23 ]]'
   help="$(HOME="$WORK/home" bash "$fixture/disk_magician.sh" --help 2>&1 || true)"
   check "$(basename "$tree"): help lists cleanup-supervisor-logs" 'grep -q "cleanup-supervisor-logs" <<<"$help"'
+  check "$(basename "$tree"): help has no shell interpolation errors" '! grep -q "command not found" <<<"$help"'
 done
 
 echo "Test 2: sandboxed retention"

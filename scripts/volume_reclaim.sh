@@ -160,8 +160,16 @@ PYDIAG
  printf '%s\n' "$result"
 }
 if [[ "$below_trigger" != true ]] && (( ! cursor_error )); then
-while IFS=$'\t' read -r newest entry; do
+while IFS= read -r -d '' entry; do
  [[ -n "$entry" ]] || continue
+ rel="${entry#"$root"/}"
+ [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]] || continue
+ # Keep the potentially slow content-mtime walk in this consumer loop. If it
+ # runs in a producer/subshell, that producer can scan later paths and exhaust
+ # the shared deadline while the first eligible artifact is still in C14.
+ newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)" || continue
+ [[ "$newest" =~ ^[0-9]+$ ]] || continue
+ (( $(date +%s) - newest > 86400 )) || continue
  if [[ "$available_floor" == true ]]; then
   pressure_measure || { TOP_REASON=measurement-unavailable; measurement_error=1; pressure_failed=1; break; }
   (( free_bytes < 53687091200 )) || break
@@ -186,16 +194,7 @@ while IFS=$'\t' read -r newest entry; do
  else
   (( now_used * 100 > now_quota * target_pct )) || break
  fi
-done < <(
- while IFS= read -r -d '' entry; do
-  rel="${entry#"$root"/}"
-  [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]] || continue
-  newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)" || continue
-  [[ "$newest" =~ ^[0-9]+$ ]] || continue
-  (( $(date +%s) - newest > 172800 )) || continue
-  printf '%s\t%s\n' "$newest" "$entry"
- done < <(find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null) | sort -n -k1,1
-)
+done < <(find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null)
 fi
 # Every clean pass ends by running the idempotent reserve ensure. It physically
 # validates or recreates the reserve after reclaim and before success is recorded.

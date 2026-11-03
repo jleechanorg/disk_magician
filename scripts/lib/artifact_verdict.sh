@@ -186,8 +186,9 @@ c14_ephemeral_retention() {
     while IFS= read -r r; do
         r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" ]] || continue
         [[ "$archive_origin" != --archive-origin ]] || return 1
-        if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 2880; return 0; fi
-    done < <(scratch_roots_get_volumes)
+        if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 1440; return 0; fi
+        if [[ "$rel" =~ ^[^./][^/]*$ && ( -d "$content/.git" || -f "$content/.git" ) ]]; then echo 1440; return 0; fi
+    done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
@@ -212,7 +213,7 @@ c14_archive_origin() (
     IFS= read -r -d '' original < <(python3 -c 'import json,sys; sys.stdout.write(json.loads(sys.argv[1])["original_path"]); sys.stdout.write("\0")' "$info" 2>/dev/null) || { echo kept:archive-identity; return 0; }
     archived_at="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["archived_at"])' "$info" 2>/dev/null)" || { echo kept:archive-identity; return 0; }
     retention="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["retention_minutes"])' "$info" 2>/dev/null)" || { echo kept:archive-identity; return 0; }
-    case "$retention" in 60|240|2880|4320|10080|30240|43200) ;; *) echo kept:archive-identity; return 0 ;; esac
+    case "$retention" in 60|240|1440|2880|4320|10080|30240|43200) ;; *) echo kept:archive-identity; return 0 ;; esac
     expected_retention="$(c14_ephemeral_retention "$original" "$p" --archive-origin)" || { echo kept:archive-identity; return 0; }
     [[ "$retention" == "$expected_retention" ]] || { echo kept:archive-identity; return 0; }
     minimum=1440
@@ -562,7 +563,7 @@ if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kep
     scratch_roots_is_protected_path "$p" "$q" && { echo kept:protected; return 0; }
     if [[ "$kind" == ephemeral ]]; then
         local volume_root volume_match=0
-        while IFS= read -r volume_root; do [[ "$p" == "$volume_root/"* ]] && { volume_match=1; break; }; done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-$q}")
+        while IFS= read -r volume_root; do [[ "$p" == "$volume_root/"* ]] && { volume_match=1; break; }; done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-$q}" scratch)
         if [[ "$volume_match" == 1 ]] && ! python3 "$_AV_DIR/../volume.py" verify-mount "$volume_root" >/dev/null 2>&1; then echo kept:volume-identity; return 0; fi
     fi
     if [[ -n "${DISK_MAGICIAN_TEST_AFTER_NOMINATE:-}" ]]; then

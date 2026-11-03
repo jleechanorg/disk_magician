@@ -34,6 +34,7 @@ class SchedulerFixture(unittest.TestCase):
         self.package.mkdir(parents=True)
         for filename in ("__init__.py", "cli.py"):
             shutil.copy2(ROOT / "src/disk_magician" / filename, self.package / filename)
+        shutil.copytree(ROOT / "src/disk_magician/python_bin", self.package / "python_bin")
         shutil.copy2(ROOT / "disk_magician.sh", self.package / "disk_magician.sh")
         shutil.copytree(ROOT / "scripts", self.package / "scripts")
         shutil.copytree(ROOT / "launchd", self.package / "launchd")
