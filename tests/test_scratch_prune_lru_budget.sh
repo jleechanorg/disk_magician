@@ -222,6 +222,19 @@ done
 gone all-dirty
 check "every-repository-known entry logs each prior verdict" "scratch-lru:kept:dirty" "$(grep -F "$SCRATCH_ROOT/all-dirty" "$LOG")"
 
+echo "Test 8e: a repository whose remote cannot be queried keeps the entry"
+use_root
+make_tree remote-down 600
+git -C "$SCRATCH_ROOT/remote-down" init -q
+printf 'work\n' >"$SCRATCH_ROOT/remote-down/tracked.txt"
+git -C "$SCRATCH_ROOT/remote-down" add tracked.txt
+git -C "$SCRATCH_ROOT/remote-down" -c user.email=t@example.invalid -c user.name=t commit -qm work
+git -C "$SCRATCH_ROOT/remote-down" remote add origin "$T/no-such-remote-${ROOT_SEQ}.git"
+age "$SCRATCH_ROOT/remote-down" 600
+out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+kept remote-down
+check "unverifiable remote is the keep reason" "kept:remote-unverified $SCRATCH_ROOT/remote-down" "$out"
+
 echo "Test 9: usage that cannot be measured fails closed"
 use_root
 make_tree a 600

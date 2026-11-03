@@ -83,8 +83,9 @@ MAX_GIB_SET=false
 [[ -n "${SCRATCH_PRUNE_MAX_GIB:-}" ]] && MAX_GIB_SET=true
 BUDGET_PCT=""
 BUDGET_FLOOR_MINUTES=120
-# Known content/provenance keeps budget mode may override; anything else keeps.
-BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
+# Known content/provenance keeps budget mode may override; anything else keeps,
+# including remote-unverified (a failed ls-remote is an unknown, not a keep).
+BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
 DRY_RUN=true
 
 usage() {
@@ -340,14 +341,11 @@ verdict_and_maybe_remove() {
     # Budget mode decides over the WHOLE entry: every repository the inventory
     # holds is checked (rc 2 = every keep was a known overridable one); a linked
     # worktree or submodule anywhere inside, or any failed, deferred or unknown
-    # check, keeps the entry whatever order repositories are discovered in.
+    # check, keeps the entry whatever order repositories are discovered in. Other
+    # modes pass an empty C14_OVERRIDABLE, so rc 2 cannot occur and every keep holds.
     # Keep Git status from refreshing the index after the immutable inventory.
-    if [[ -n "$BUDGET_PCT" ]]; then
-      repo_reason="$(GIT_OPTIONAL_LOCKS=0 C14_OVERRIDABLE="$BUDGET_OVERRIDABLE" c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || repo_rc=$?
-      (( repo_rc == 2 )) && { [[ "$repo_reason" == "$override" ]] || override+="+${repo_reason}"; repo_rc=0; }
-    else
-      repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || repo_rc=$?
-    fi
+    repo_reason="$(GIT_OPTIONAL_LOCKS=0 C14_OVERRIDABLE="${BUDGET_PCT:+$BUDGET_OVERRIDABLE}" c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || repo_rc=$?
+    (( repo_rc == 2 )) && { [[ "$repo_reason" == "$override" ]] || override+="+${repo_reason}"; repo_rc=0; }
     if (( repo_rc != 0 )); then
       [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
       rm -f "$inv" "$binding"
