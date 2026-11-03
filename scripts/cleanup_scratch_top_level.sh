@@ -338,10 +338,22 @@ verdict_and_maybe_remove() {
     # the shared repository gate regardless of the chosen recency floor.
     local repo_reason
     if [[ -n "$BUDGET_PCT" && ! -f "$entry/.git" ]]; then
-      # Operator-approved LRU budget mode (--budget-pct) evicts by recency and only
-      # records repository provenance for the audit log; every other mode keeps it.
+      # Operator-approved LRU budget mode (--budget-pct) overrides KNOWN repository
+      # keeps (dirty, not-pushed, ...) for a secret-like entry. A repository check
+      # that fails, defers or returns an unrecognised token is unknown state and
+      # keeps the entry, like every other mode.
       if [[ "$override" == "kept:secret-like" ]]; then
-        repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || override="kept:secret-like+${repo_reason:-kept:check-failed}"
+        if ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
+          case "$repo_reason" in
+            kept:unproven-content|kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data)
+              override="kept:secret-like+${repo_reason}" ;;
+            *)
+              [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
+              rm -f "$inv" "$binding"
+              echo "${repo_reason:-kept:check-failed}"
+              return 0 ;;
+          esac
+        fi
       fi
     # Keep Git status from refreshing the index after the immutable inventory.
     elif ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then

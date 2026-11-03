@@ -160,6 +160,29 @@ check "deletion log line carries the dirty verdict" "scratch-lru:kept:dirty" "$(
 check "summary counts the dirty eviction" "not_pushed_or_dirty=1" "$out"
 check "summary lists the prior verdict" "lru: prior_verdict kept:dirty=1" "$out"
 
+echo "Test 8b: a secret-like entry is kept when its repository check fails or defers"
+use_root
+make_tree secret-known 600; make_tree secret-unknown 600
+for n in secret-known secret-unknown; do
+  git -C "$SCRATCH_ROOT/$n" init -q
+  printf 'k=v\n' >"$SCRATCH_ROOT/$n/.env"
+  age "$SCRATCH_ROOT/$n" 600
+done
+# Test-only git shim: `git status` fails for the unknown entry, so its repository state cannot be measured.
+GSHIM="$T/gitshim"; mkdir -p "$GSHIM"
+real_git="$(command -v git)"
+cat >"$GSHIM/git" <<EOF2
+#!/usr/bin/env bash
+case "\$*" in *secret-unknown*status*|*status*secret-unknown*) exit 3 ;; esac
+exec "$real_git" "\$@"
+EOF2
+chmod +x "$GSHIM/git"
+out="$(RUN_PATH="$GSHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+kept secret-unknown
+gone secret-known
+check "unknown repository state keeps the secret-like entry" "kept:" "$(printf '%s\n' "$out" | grep -E "^kept:.* $SCRATCH_ROOT/secret-unknown")"
+if printf '%s\n' "$out" | grep -qE "^removed:.* $SCRATCH_ROOT/secret-unknown"; then bad "unknown-state secret-like entry is not reported removed"; else ok "unknown-state secret-like entry is not reported removed"; fi
+
 echo "Test 9: usage that cannot be measured fails closed"
 use_root
 make_tree a 600
