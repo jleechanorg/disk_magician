@@ -9,5 +9,5 @@ Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
 Environment=DISK_MAGICIAN_TRIGGER=timer
 Environment=DISK_MAGICIAN_DELETION_LOG=@DELETION_LOG@
 ExecStart=/usr/bin/bash @ORCHESTRATOR@ tmp-scratch-sweep --scratch-only --clean
-TimeoutStartSec=350
+TimeoutStartSec=950
 Restart=no
