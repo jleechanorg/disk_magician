@@ -349,20 +349,25 @@ scratch_budget_content_mtime() {
     [[ -d "$path" && ! -L "$path" ]] || return 1
     links="$(find "$path" -xdev -type l -print -quit 2>/dev/null)" || return 1
     [[ -z "$links" ]] || return 1
-    local files item stamp newest=0
-    files="$(find "$path" -xdev -type f -print 2>/dev/null)" || return 1
-    [[ -n "$files" ]] || return 1
+    # Batched `-exec stat {} +` (one process fan-out), NOT one `stat`
+    # subprocess per file. The previous per-file loop made this O(files)
+    # process spawns: measured 2026-11-03 on
+    # /Volumes/diskm-scratch/worldai_frontend/build/vn-native-build-* (67,099
+    # files) it ran >600s, so `volume reclaim` never got past its first
+    # candidate and every --strict caller silently degraded to "unmeasurable,
+    # preserve". The batched form measures the same tree in 2.3s (260x) with
+    # identical semantics, and matches what tests/test_scratch_budget.sh
+    # already mocked for this function. find's non-zero exit is still checked,
+    # so an unreadable subtree keeps the fail-closed rc 1.
     if [[ "$(uname -s)" == Darwin ]]; then stat_format='%m'; else stat_format='%Y'; fi
-    while IFS= read -r item; do
-      [[ -n "$item" ]] || continue
-      if [[ "$(uname -s)" == Darwin ]]; then
-        stamp="$(stat -f "$stat_format" "$item" 2>/dev/null)" || return 1
-      else
-        stamp="$(stat -c "$stat_format" "$item" 2>/dev/null)" || return 1
-      fi
-      [[ "$stamp" =~ ^[0-9]+$ ]] || return 1
-      (( stamp > newest )) && newest="$stamp"
-    done <<<"$files"
+    local stamped newest
+    if [[ "$(uname -s)" == Darwin ]]; then
+      stamped="$(find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null)" || return 1
+    else
+      stamped="$(find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null)" || return 1
+    fi
+    newest="$(printf '%s\n' "$stamped" | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')"
+    [[ "$newest" =~ ^[0-9]+$ ]] || return 1
     (( newest > 0 )) || return 1
     echo "$newest"
     return 0
