@@ -79,6 +79,36 @@ assert_contains() {
   fi
 }
 
+test_keep_only_cursor() {
+  # A keep-only shared-cursor visit must not enter C14/quarantine. This lets
+  # callers checkpoint a classified unknown candidate without acquiring a
+  # destructive-path lock or repeating inventory work.
+  local candidate="$TMP_TEST_ROOT/t26/unknown"
+  local cursor="$TMP_TEST_ROOT/t26.cursor.json"
+  local calls="$TMP_TEST_ROOT/t26-quarantine.calls"
+  mkdir -p "$candidate"
+  local output
+  output="$(C26_DIR="$candidate" C26_CURSOR="$cursor" C26_CALLS="$calls" bash -c '
+    set -euo pipefail
+    source "'"$REPO_ROOT"'/scripts/lib/actuator_deadline.sh"
+    source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"
+    ACT_CURSOR="$C26_CURSOR"; ACT_CURSOR_SOURCE="scratch_prune:test26"; DRY_RUN=false
+    act_cursor_save "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" "[]" 0
+    quarantine_remove() { echo invoked >>"$C26_CALLS"; echo removed:unexpected; }
+    scratch_budget_quarantine_remove "$C26_DIR" --keep-unproven-content
+  ')"
+  assert_eq "Test26: keep-only visit reports the unknown-content keep" "kept:unproven-content" "$output"
+  assert_eq "Test26: keep-only visit advances the shared cursor" 1 "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["next_index"])' "$cursor")"
+  assert_missing "Test26: keep-only visit never invokes quarantine" "$calls"
+}
+
+if [[ "${SCRATCH_BUDGET_TEST_FILTER:-}" == keep-only-cursor ]]; then
+  test_keep_only_cursor
+  echo "test_scratch_budget (keep-only-cursor): $PASS passed, $FAIL failed"
+  [[ "$FAIL" -eq 0 ]]
+  exit $?
+fi
+
 # make_kb_file <path> <kb> — a file of exactly <kb> KiB.
 make_kb_file() {
   local path="$1" kb="$2"
@@ -612,6 +642,8 @@ set -e
 [[ $strict_empty_rc -ne 0 ]] && record_pass "Test25: strict content mtime rejects empty tree" || record_fail "Test25: strict content mtime rejects empty tree" "rc=$strict_empty_rc"
 [[ $strict_symlink_rc -ne 0 ]] && record_pass "Test25: strict content mtime rejects symlink traversal" || record_fail "Test25: strict content mtime rejects symlink traversal" "rc=$strict_symlink_rc"
 [[ $strict_error_rc -ne 0 ]] && record_pass "Test25: strict content mtime preserves on traversal error" || record_fail "Test25: strict content mtime preserves on traversal error" "rc=$strict_error_rc"
+
+test_keep_only_cursor
 
 echo ""
 echo "===================================="

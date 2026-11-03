@@ -9,17 +9,20 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCRIPT="$ROOT/scripts/cleanup_scratch_top_level.sh"
+REAL_PYTHON3="$(command -v python3)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/dm-scratch-prune.XXXXXX")"
 trap 'rm -rf "${T:?}"' EXIT
 PASS=0; FAIL=0
 ok() { PASS=$((PASS+1)); echo "  PASS $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL $1${2:+ ($2)}"; }
 check() { [[ "$3" == *"$2"* ]] && ok "$1" || bad "$1" "missing: $2 | got: $(printf '%s' "$3" | tr '\n' ' ' | cut -c1-400)"; }
+assert_eq() { [[ "$1" == "$2" ]] && ok "$3 (= $2)" || bad "$3" "expected '$2', got '$1'"; }
 
 SANDBOX="$T/sandbox"
 SCRATCH_ROOT="$SANDBOX/scratch"
 STATE="$T/state"
 LOG="$T/deletions.log"
+VOLUME_CONFIG="$T/config.json"
 mkdir -p "$SCRATCH_ROOT" "$STATE" "$SANDBOX"
 export DISK_MAGICIAN_TEST_CONTEXT=1
 export DISK_MAGICIAN_TEST_SANDBOX="$SANDBOX"
@@ -45,12 +48,25 @@ make_tree() { # <name> <age_hours> [content-file]
   echo "$dir"
 }
 
+make_managed_tree() { # <name> <age_hours> [content-file]
+  local dir="$SCRATCH_ROOT/worldai_frontend/build/$1"
+  mkdir -p "$dir"
+  printf 'x%.0s' {1..2048} > "$dir/payload.bin"
+  [[ -n "${3:-}" ]] && printf 'placeholder\n' > "$dir/$3"
+  old_stamp "$dir" "${2:-72}"
+  echo "$dir"
+}
+
 run() { # run with a clean env so ambient settings cannot leak in
   env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" \
     TMPDIR="$T" \
     DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$SANDBOX" \
     DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="$SCRATCH_ROOT" \
-    DISK_MAGICIAN_STATE_DIR="$STATE" DISK_MAGICIAN_DELETION_LOG="$LOG" \
+    DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" DISK_MAGICIAN_DELETION_LOG="$LOG" \
+    DISK_MAGICIAN_CONFIG="${DISK_MAGICIAN_CONFIG:-}" \
+    DISK_MAGICIAN_DISKUTIL_BIN="${DISK_MAGICIAN_DISKUTIL_BIN:-}" \
+    FAKE_DISKUTIL_STATE="${FAKE_DISKUTIL_STATE:-}" FAKE_DISKUTIL_CALLS="${FAKE_DISKUTIL_CALLS:-}" \
+    FAKE_DISKUTIL_MOUNTPOINT="${FAKE_DISKUTIL_MOUNTPOINT:-}" \
     "${@}"
 }
 mkdir -p "$T/home"
@@ -64,9 +80,36 @@ use_root() {
   SANDBOX="$T/sandbox/r${ROOT_SEQ}"
   SCRATCH_ROOT="$SANDBOX/scratch"
   mkdir -p "$SCRATCH_ROOT"
+  SANDBOX="$(cd "$SANDBOX" && pwd -P)"
+  SCRATCH_ROOT="$(cd "$SCRATCH_ROOT" && pwd -P)"
+  python3 - "$VOLUME_CONFIG" "$SCRATCH_ROOT" <<'PY'
+import json,sys
+json.dump({"volumes":{"swap_headroom_gb":40,"alarm_floor_gb":20,"encryption":"none","encryption_acknowledged_at":"2026-10-25T00:00:00Z","classes":{"scratch":{"name":"diskm-scratch","quota_gb":30,"mountpoint":sys.argv[2]}}}}, open(sys.argv[1],"w"))
+PY
+}
+register_test_volume() {
+  DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG"
+  DISK_MAGICIAN_STATE_DIR="$T/state/registered-$ROOT_SEQ"
+  DISK_MAGICIAN_DISKUTIL_BIN="$ROOT/tests/lib/fake_diskutil.py"
+  FAKE_DISKUTIL_STATE="$T/diskutil-$ROOT_SEQ.json"
+  FAKE_DISKUTIL_CALLS="$T/diskutil-$ROOT_SEQ.calls"
+  FAKE_DISKUTIL_MOUNTPOINT="$SCRATCH_ROOT"
+  export DISK_MAGICIAN_STATE_DIR DISK_MAGICIAN_CONFIG DISK_MAGICIAN_DISKUTIL_BIN
+  export FAKE_DISKUTIL_STATE FAKE_DISKUTIL_CALLS FAKE_DISKUTIL_MOUNTPOINT
+  mkdir -p "$DISK_MAGICIAN_STATE_DIR"
+  python3 - "$FAKE_DISKUTIL_STATE" <<'PY'
+import json,sys
+state={"container":{"ref":"disk3","uuid":"CONTAINER-UUID","ceiling":1000*2**30,"free":100*2**30},"volumes":[{"uuid":"DATA-UUID","name":"Data","ref":"disk3s1","device":"disk3s1","used":100*2**30,"quota":0,"roles":["Data"],"mountpoint":"/System/Volumes/Data"},{"uuid":"SYSTEM-UUID","name":"System","ref":"disk3s5","device":"disk3s5","used":10*2**30,"quota":0,"roles":["System"],"mountpoint":"/"},{"uuid":"VM-UUID","name":"VM","ref":"disk3s6","device":"disk3s6","used":10*2**30,"quota":0,"roles":["VM"],"mountpoint":"/System/Volumes/VM"}]}
+json.dump(state,open(sys.argv[1],"w"))
+PY
+  # `volume.create_cmd` refuses to register an already-existing mountpoint;
+  # the fake diskutil creates this exact empty fixture root during registration.
+  rmdir "$SCRATCH_ROOT"
+  python3 -c 'import sys; from unittest.mock import patch; sys.path.insert(0, sys.argv[1]); import volume; patch.object(sys, "platform", "linux").start(); raise SystemExit(volume.create_cmd("scratch", True))' "$ROOT/scripts"
 }
 use_root
 
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
 echo "Test 1: dry-run lists candidates and deletes nothing"
 use_root
 make_tree plain-old >/dev/null
@@ -96,23 +139,140 @@ out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"; rc=$?
 check "removal is reported" "removed:" "$out"
 check "deletion log records the removal" "plain-old" "$(cat "$LOG" 2>/dev/null)"
 check "deletion log names the cleaner" "scratch-prune" "$(cat "$LOG" 2>/dev/null)"
+fi
 
-echo "Test 4: the 48 h floor is enforced and cannot be lowered"
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
+echo "Test 4: automatic mode uses a 24 h default and does not bypass C14 safety"
 use_root
-make_tree young-dir 4 >/dev/null
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
-check "young dir kept" "kept:recent-activity" "$out"
-[[ -d "$SCRATCH_ROOT/young-dir" ]] && ok "young dir preserved" || bad "young dir preserved"
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --min-hours 2 2>&1)"
-[[ -d "$SCRATCH_ROOT/young-dir" ]] && ok "--min-hours 2 is clamped up to 48 h" || bad "--min-hours 2 is clamped up to 48 h"
+register_test_volume
+make_tree unknown-25h 25 >/dev/null
+make_managed_tree recent-23h 23 >/dev/null
+make_managed_tree eligible-25h 25 >/dev/null
+make_managed_tree secret-25h 25 'placeholder.pem' >/dev/null
+mkdir -p "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h"
+git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" init -q 2>/dev/null
+printf 'change\n' > "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h/tracked.txt"
+git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" add tracked.txt 2>/dev/null
+old_stamp "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" 25
+assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/eligible-25h")" remove "C14 accepts a known Scratch build artifact after 24h"
+assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/recent-23h")" kept:recent-activity "C14 preserves a known Scratch build artifact before 24h"
+preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --dry-run 2>&1)"
+check "automatic preview marks the 25h managed artifact removable" "would-remove:remove $SCRATCH_ROOT/worldai_frontend/build/eligible-25h" "$preview"
+check "automatic preview keeps the 23h managed artifact" "kept:recent-activity $SCRATCH_ROOT/worldai_frontend/build/recent-23h" "$preview"
+out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean 2>&1)"; rc=$?
+[[ "$rc" == 0 ]] && ok "automatic cleanup completes without override approval" || bad "automatic cleanup completes without override approval" "rc=$rc"
+[[ -d "$SCRATCH_ROOT/worldai_frontend/build/recent-23h" ]] && ok "23h candidate preserved by the 24h default" || bad "23h candidate preserved by the 24h default"
+[[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/eligible-25h" ]] && ok "25h registered ephemeral candidate removed through C14" || bad "25h registered ephemeral candidate removed through C14" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+[[ -e "$SCRATCH_ROOT/worldai_frontend/build/secret-25h/placeholder.pem" ]] && ok "secret-like content remains protected in automatic mode" || bad "secret-like content remains protected in automatic mode"
+[[ -e "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h/.git" ]] && ok "dirty repository remains protected in automatic mode" || bad "dirty repository remains protected in automatic mode"
+[[ -e "$SCRATCH_ROOT/unknown-25h" ]] && ok "unknown direct children remain protected" || bad "unknown direct children remain protected"
+fi
+
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
+echo "Test 4b: a deadline deferral preserves the exact candidate cursor for the next scheduled pass"
+use_root
+register_test_volume
+make_managed_tree resume-25h 25 >/dev/null
+CURSOR="$T/scratch-prune.cursor"
+EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
+out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"
+[[ -d "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "expired deadline does not delete the pending candidate" || bad "expired deadline does not delete the pending candidate"
+if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/worldai_frontend" <<'PY'
+import json,sys
+cursor=json.load(open(sys.argv[1])); assert cursor["schema"] == 1
+assert 0 <= cursor["next_index"] < len(cursor["items"])
+assert cursor["items"][cursor["next_index"]] == sys.argv[2]
+PY
+then ok "deadline deferral persists the exact resume item"; else bad "deadline deferral persists the exact resume item"; fi
+FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
+out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"
+[[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "the next scheduled pass resumes and removes the eligible item" || bad "the next scheduled pass resumes and removes the eligible item" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+fi
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == cursor-contract ]]; then
+  echo "test_cleanup_scratch_top_level (${SCRATCH_PRUNE_TEST_FILTER}): $PASS passed, $FAIL failed"
+  [[ "$FAIL" == 0 ]]
+  exit $?
+fi
+
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == unknown-deadline-contract ]]; then
+  echo "Test: an expired deadline stops before classifying unknown content and resumes safely"
+  use_root
+  register_test_volume
+  make_tree a-unknown-25h 25 >/dev/null
+  make_tree b-unknown-25h 25 >/dev/null
+  make_managed_tree resume-after-unknown-25h 25 >/dev/null
+  CURSOR="$T/unknown-deadline.cursor"
+  EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "expired automatic pass exits cleanly" || bad "expired automatic pass exits cleanly" "rc=$rc"
+  if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-25h"* ]]; then
+    ok "expired deadline is checked before unknown-content classification"
+  else
+    bad "expired deadline is checked before unknown-content classification" "unknown candidate was classified before deadline: $(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+  fi
+  [[ -e "$SCRATCH_ROOT/a-unknown-25h" && -e "$SCRATCH_ROOT/b-unknown-25h" && -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-25h" ]] && ok "expired pass preserves both unknowns and the recognized candidate" || bad "expired pass preserves both unknowns and the recognized candidate"
+  if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/a-unknown-25h" <<'PY'
+import json,sys
+cursor=json.load(open(sys.argv[1])); assert cursor["schema"] == 1
+assert cursor["next_index"] < len(cursor["items"])
+assert cursor["items"][cursor["next_index"]] == sys.argv[2]
+PY
+  then ok "expired pass stores the exact first pending candidate"; else bad "expired pass stores the exact first pending candidate"; fi
+  FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "resumed automatic pass exits cleanly" || bad "resumed automatic pass exits cleanly" "rc=$rc"
+  [[ -e "$SCRATCH_ROOT/a-unknown-25h" ]] && ok "resumed pass preserves the unknown candidate" || bad "resumed pass preserves the unknown candidate"
+  [[ -e "$SCRATCH_ROOT/b-unknown-25h" ]] && ok "resumed pass progresses past the second unknown candidate without deleting it" || bad "resumed pass progresses past the second unknown candidate without deleting it"
+  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-25h" ]] && ok "resumed pass reaches and removes the recognized artifact" || bad "resumed pass reaches and removes the recognized artifact" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+
+  echo "Test: a seeded resume cursor skips prior unknown work and continues after the pending unknown"
+  use_root
+  register_test_volume
+  make_tree a-unknown-25h 25 >/dev/null
+  make_tree b-unknown-25h 25 >/dev/null
+  make_managed_tree resume-after-seeded-unknown-25h 25 >/dev/null
+  CURSOR="$T/seeded-unknown-deadline.cursor"
+  CURSOR_SOURCE="scratch_prune:v1:$SCRATCH_ROOT"
+  python3 - "$CURSOR" "$CURSOR_SOURCE" "$SCRATCH_ROOT/a-unknown-25h" "$SCRATCH_ROOT/b-unknown-25h" <<'PY'
+import json,sys
+with open(sys.argv[1], "w") as f:
+    json.dump({"schema": 1, "source": sys.argv[2], "items": sys.argv[3:], "next_index": 1}, f)
+PY
+  EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "seeded expired pass exits cleanly" || bad "seeded expired pass exits cleanly" "rc=$rc"
+  if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-25h"* ]]; then
+    ok "seeded cursor does not reclassify the completed unknown candidate"
+  else
+    bad "seeded cursor does not reclassify the completed unknown candidate" "completed unknown was reclassified: $(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+  fi
+  if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/b-unknown-25h" <<'PY'
+import json,sys
+cursor=json.load(open(sys.argv[1])); assert cursor["next_index"] < len(cursor["items"])
+assert cursor["items"][cursor["next_index"]] == sys.argv[2]
+PY
+  then ok "seeded expired pass leaves the pending unknown at the cursor"; else bad "seeded expired pass leaves the pending unknown at the cursor"; fi
+  FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "seeded resumed pass exits cleanly" || bad "seeded resumed pass exits cleanly" "rc=$rc"
+  [[ -e "$SCRATCH_ROOT/a-unknown-25h" && -e "$SCRATCH_ROOT/b-unknown-25h" ]] && ok "seeded resumed pass preserves both unknown candidates" || bad "seeded resumed pass preserves both unknown candidates"
+  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-seeded-unknown-25h" ]] && ok "seeded resumed pass reaches the registered artifact" || bad "seeded resumed pass reaches the registered artifact" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+  if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == unknown-deadline-contract ]]; then
+    echo "test_cleanup_scratch_top_level (unknown-deadline-contract): $PASS passed, $FAIL failed"
+    [[ "$FAIL" == 0 ]]
+    exit $?
+  fi
+fi
 
 echo "Test 5: a live owner lease keeps the dir even with approval"
 use_root
 make_tree live-lease 72 >/dev/null
 sleep 300 & lease_pid=$!
-env DISK_MAGICIAN_STATE_DIR="$STATE" bash -c '
+lease_file="$(env DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" bash -c '
 source "$1/scripts/lib/worktree_lease.sh"
-lease_write "$2" "$2" "" scratch-prune-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$SCRATCH_ROOT/live-lease" "$lease_pid"
+lease_write "$2" "$2" "" scratch-prune-test --owner-pid "$3" >/dev/null || exit
+lease_path_for "$2"' _ "$ROOT" "$SCRATCH_ROOT/live-lease" "$lease_pid")"
+[[ -s "$lease_file" ]] && ok "live-owner lease fixture was written to cleaner state" || bad "live-owner lease fixture was written to cleaner state" "$lease_file"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 kill "$lease_pid" 2>/dev/null || true; wait "$lease_pid" 2>/dev/null || true
 check "live lease keeps the candidate" "kept:live-owner" "$out"

@@ -67,6 +67,10 @@ chmod +x "$MOCK_BIN/tmp_scratch_sweep.sh"
 cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK'
 #!/bin/bash
 echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-} deadline=${ACT_DEADLINE_AT:-} cursor=${ACT_CURSOR:-}" >> "${INVOCATION_LOG:?}"
+if [[ "$1" == "scratch-prune" ]]; then
+  echo "scratch_prune_mode automatic=${DISK_MAGICIAN_SCRATCH_AUTOMATIC:-0} approval=${SCRATCH_TOP_LEVEL_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
+  exit "${SCRATCH_PRUNE_MOCK_EXIT:-0}"
+fi
 if [[ "$*" == "volume ballast recover scratch" ]]; then exit "${VOLUME_MOCK_ENSURE_RC:-0}"; fi
 [[ "${VOLUME_MOCK_SLEEP:-0}" == 0 ]] || sleep "$VOLUME_MOCK_SLEEP"
 if [[ "${VOLUME_MOCK_MODE:-receipt}" == skip ]]; then
@@ -115,6 +119,24 @@ assert_receipt_field() {
 
 echo "Test 0: launchd template is a valid plist with the expected schedule"
 python3 -c 'import plistlib,sys; p=plistlib.load(open(sys.argv[1],"rb")); assert p["Label"] == "com.jleechanorg.disk-magician-tmp-scratch", p["Label"]; assert p["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "tmp-scratch-sweep", "--clean"], p["ProgramArguments"]; assert p["StartInterval"] == 3600, p["StartInterval"]; print("  PASS  plist parses and matches Label, ProgramArguments, and StartInterval")' "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template"
+python3 -c 'import plistlib,sys; p=plistlib.load(open(sys.argv[1],"rb")); assert p["Label"] == "com.jleechanorg.disk-magician-scratch-pressure", p["Label"]; assert p["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "tmp-scratch-sweep", "--scratch-only", "--clean"], p["ProgramArguments"]; assert p["StartInterval"] == 1200, p["StartInterval"]; print("  PASS  pressure timer routes through bounded scratch-only wrapper")' "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template"
+
+echo "Test 0b: scheduled Scratch-only mode invokes safe top-level pruning before volume reclaim"
+: > "$INVOCATION_LOG"
+SCRATCH_DEADLINE="$(python3 -c 'import time; print(time.monotonic()+60)')"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" --cursor "$TMP_ROOT/sweep.cursor" >"$TMP_ROOT/scratch-only.out" 2>&1
+SCRATCH_ONLY_RC=$?
+set -e
+[[ "$SCRATCH_ONLY_RC" == 0 ]] && echo "  PASS  Scratch-only scheduled mode exits successfully" || { echo "  FAIL  Scratch-only scheduled mode exits successfully (rc=$SCRATCH_ONLY_RC)"; FAIL=$((FAIL+1)); }
+SCRATCH_ONLY_CALLS="$(cat "$INVOCATION_LOG")"
+assert_contains "Scratch-only mode dispatches the existing scratch-prune CLI" "disk_magician scratch-prune" "$SCRATCH_ONLY_CALLS"
+assert_contains "automatic mode does not use the content-override approval" "scratch_prune_mode automatic=1 approval=0" "$SCRATCH_ONLY_CALLS"
+assert_contains "Scratch-prune receives the shared deadline" "deadline=$SCRATCH_DEADLINE" "$SCRATCH_ONLY_CALLS"
+assert_contains "Scratch-prune receives its own resume cursor" "cursor=$TMP_ROOT/sweep.cursor.scratch-prune" "$SCRATCH_ONLY_CALLS"
+SCRATCH_PRUNE_LINE="$(grep -n '^disk_magician scratch-prune' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+VOLUME_RECLAIM_LINE="$(grep -n '^disk_magician volume reclaim' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+[[ -n "$SCRATCH_PRUNE_LINE" && -n "$VOLUME_RECLAIM_LINE" && "$SCRATCH_PRUNE_LINE" -lt "$VOLUME_RECLAIM_LINE" ]] && echo "  PASS  Scratch pruning precedes its volume-reclaim sibling" || { echo "  FAIL  Scratch pruning precedes its volume-reclaim sibling"; FAIL=$((FAIL+1)); }
 
 echo "Test 1: --clean invokes cleanup_tmp.sh with LARGE_TMP_APPROVED=1"
 : > "$INVOCATION_LOG"

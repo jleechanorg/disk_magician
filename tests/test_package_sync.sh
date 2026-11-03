@@ -34,6 +34,13 @@ cp -R "$REPO_ROOT/scripts" "$TREE/scripts"
 cp -R "$REPO_ROOT/launchd" "$TREE/launchd"
 mkdir -p "$TREE/src/disk_magician"
 cp -R "$REPO_ROOT/src/disk_magician/." "$TREE/src/disk_magician/"
+mkdir -p "$TREE/src/disk_magician/python_bin"
+if [[ -f "$REPO_ROOT/src/disk_magician/python_bin/python3" ]]; then
+  cp -p "$REPO_ROOT/src/disk_magician/python_bin/python3" \
+    "$TREE/src/disk_magician/python_bin/python3"
+else
+  bad "source private Python launcher is missing"
+fi
 SYNC="$TREE/scripts/sync_package_tree.sh"
 
 if [[ -x "$SYNC" ]]; then
@@ -54,6 +61,31 @@ if "$SYNC" --check >/dev/null 2>&1; then
   ok "temp tree is clean (--check exit 0) after bootstrap sync, before fabricating drift"
 else
   bad "temp tree still shows drift after bootstrap sync — sync itself is not idempotent"
+fi
+
+# The Python launcher is package-only (not part of the root-to-package mirror),
+# but deployment staging must include it with its executable mode intact.
+section "0b. --stage includes the private Python launcher resource"
+PACKAGE_STAGE="$WORK/package-stage"
+EXPECTED_LAUNCHER="$TREE/src/disk_magician/python_bin/python3"
+STAGED_LAUNCHER="$PACKAGE_STAGE/python_bin/python3"
+if [[ -f "$EXPECTED_LAUNCHER" && -x "$EXPECTED_LAUNCHER" ]]; then
+  ok "package-only Python launcher fixture exists and is executable"
+else
+  bad "package-only Python launcher fixture is missing/not executable"
+fi
+"$SYNC" --stage "$PACKAGE_STAGE" || bad "package staging command failed"
+if [[ -f "$STAGED_LAUNCHER" ]] && cmp -s "$EXPECTED_LAUNCHER" "$STAGED_LAUNCHER"; then
+  ok "--stage copies the private Python launcher byte-for-byte"
+else
+  bad "--stage omitted or changed the private Python launcher"
+fi
+[[ -x "$STAGED_LAUNCHER" ]] && ok "--stage preserves the private Python launcher's executable bit" \
+  || bad "--stage lost the private Python launcher's executable bit"
+if [[ "${PACKAGE_SYNC_TEST_FILTER:-}" == "python-launcher-stage" ]]; then
+  echo "PASS=$PASS FAIL=$FAIL"
+  [[ "$FAIL" -eq 0 ]]
+  exit $?
 fi
 
 # ─────────────────────────────────────────────────────────────
