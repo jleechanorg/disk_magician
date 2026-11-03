@@ -17,7 +17,8 @@ class ScratchReceiptStatus(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.scripts = self.root / 'scripts'
         (self.scripts / 'lib').mkdir(parents=True)
-        for name in ('tmp_scratch_sweep.sh', 'lib/actuator_deadline.sh', 'lib/actuator_receipt.sh'):
+        for name in ('tmp_scratch_sweep.sh', 'lib/actuator_deadline.sh', 'lib/actuator_receipt.sh',
+                     'lib/scratch_roots.sh'):
             shutil.copy2(ROOT / 'scripts' / name, self.scripts / name)
         self.env = dict(os.environ, PATH=f'{self.scripts}:{os.environ["PATH"]}',
                         CAPTURE=str(self.root / 'receipt.json'))
