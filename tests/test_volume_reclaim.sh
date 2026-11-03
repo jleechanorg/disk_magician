@@ -94,6 +94,38 @@ case "$*" in
 esac
 MOCK
 chmod +x "$DISK_MAGICIAN_DISKM_BIN"
+
+if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == streaming-find ]]; then
+  export BALLAST_LOG="$T/ballast.log"
+  export REAL_FIND="$(command -v find)"
+  export STREAM_FIRST="$TEST_ROOT/repo/evidence/oldest"
+  mkdir "$T/find-bin"
+  cat > "$T/find-bin/find" <<'FIND'
+#!/bin/bash
+if [[ " $* " == *" -mindepth "* ]]; then
+  printf '%s\0' "$STREAM_FIRST"
+  sleep 60
+else
+  exec "$REAL_FIND" "$@"
+fi
+FIND
+  chmod +x "$T/find-bin/find"
+  deadline="$(python3 -c 'import time; print(time.monotonic()+30)')"
+  PATH="$T/find-bin:$PATH" ACT_DEADLINE_AT="$deadline" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/stream.out" 2>&1 &
+  reclaim_pid=$!
+  progressed=false
+  for i in {1..100}; do
+    if [[ ! -d "$STREAM_FIRST" ]]; then progressed=true; break; fi
+    sleep 0.1
+  done
+  wait "$reclaim_pid"
+  cat "$T/stream.out"
+  [[ "$progressed" == true ]] || { echo 'FAIL: first candidate starved behind later discovery wedge'; exit 1; }
+  grep -q 'candidate-discovery-timeout' "$T/stream.out"
+  echo 'PASS: first candidate reclaimed before later discovery wedge deadline'
+  exit 0
+fi
+
 if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" != slow-discovery ]]; then
 OUT="$("$ROOT/scripts/volume_reclaim.sh")"
 [[ "$OUT" == *"evidence/oldest"* && "$OUT" == *"build/younger"* ]]
@@ -248,6 +280,18 @@ if [[ "${1:-}" == - ]]; then
 fi
 exec "$REAL_PYTHON3" "$@"
 SH
+# Filesystem enumeration order is unspecified; pin this causal test's order.
+REAL_FIND="$(command -v find)"
+export REAL_FIND
+cat >"$SLOW_BIN/find" <<'SH'
+#!/usr/bin/env bash
+if [[ " $* " == *" -mindepth "* ]]; then
+  printf '%s\0' "$TEST_ROOT/repo/evidence/first" "$TEST_ROOT/repo/evidence/second"
+else
+  exec "$REAL_FIND" "$@"
+fi
+SH
+chmod +x "$SLOW_BIN/find"
 chmod +x "$SLOW_BIN/stat" "$SLOW_BIN/python3"
 : >"$STATUS_CALLS_FILE"
 ACT_CURSOR="$T/discovery.cursor" ACT_DEADLINE_AT="$(python3 -c 'import time; print(int(time.monotonic())+120)')" \

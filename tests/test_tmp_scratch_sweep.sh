@@ -37,6 +37,7 @@ cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
 helper="${DISK_MAGICIAN_RECEIPT_HELPER:-$(cd "$(dirname "$0")" && pwd)/job_receipt.py}"
 rc="${TMP_MOCK_EXIT:-0}"
+[[ "${TMP_MOCK_NO_RECEIPT:-0}" == 0 ]] || exit 143
 if [[ "$rc" == 75 ]]; then
   echo "[cleanup_tmp] skipped, scratch lock held after waiting 20s" >&2
   exit 75
@@ -388,6 +389,27 @@ assert_receipt_field "tmp deletion plus volume lock is not no-mutation safety" "
 assert_receipt_field "tmp deletion plus volume lock preserves removed_count" "$R" "str(d.get('last_terminal', {}).get('candidates', {}).get('removed_count'))" "3"
 
 echo ""
+
+echo "Test 13: df movement is not attributable removal evidence"
+mkdir -p "$TMP_ROOT/df-bin"
+cat > "$TMP_ROOT/df-bin/df" <<'DF'
+#!/bin/bash
+n=0; [[ ! -f "$DF_CALLS" ]] || n="$(cat "$DF_CALLS")"
+echo $((n+1)) > "$DF_CALLS"
+echo 'Filesystem 1024-blocks Used Available Capacity Mounted'
+echo "fake 100000 100 $((1000+n*100)) 1% /"
+DF
+chmod +x "$TMP_ROOT/df-bin/df"
+PATH="$TMP_ROOT/df-bin:$PATH" DF_CALLS="$TMP_ROOT/df.calls" INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_REMOVED=1 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --clean >/dev/null 2>&1
+assert_receipt_field "one removal does not attribute unrelated df growth" "$R" "str(d['last_terminal']['postcondition']['freed_bytes'])" "None"
+assert_receipt_field "raw df growth is preserved" "$R" "str(d['last_terminal']['postcondition']['df_delta_bytes'])" "102400"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_NO_RECEIPT=1 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --clean >/dev/null 2>&1 || true
+assert_receipt_field "missing terminal receipt leaves removal count unknown" "$R" "str(d['last_terminal']['candidates']['removed_count'])" "None"
+assert_receipt_field "missing terminal receipt leaves reclaimed bytes unknown" "$R" "str(d['last_terminal']['postcondition']['freed_bytes'])" "None"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=124 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1 || true
+assert_receipt_field "timed out prune leaves removal count unknown" "$R" "str(d['last_terminal']['candidates']['scratch_prune_removed'])" "None"
+assert_receipt_field "timed out prune leaves reclaimed bytes unknown" "$R" "str(d['last_terminal']['postcondition']['freed_bytes'])" "None"
+
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then
   exit 1

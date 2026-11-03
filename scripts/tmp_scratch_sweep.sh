@@ -165,6 +165,10 @@ PY
     SCRATCH_PRUNE_OUTCOME=skipped_lock
   elif [[ "$SCRATCH_PRUNE_RC" == 124 || "$SCRATCH_PRUNE_RC" == 137 || "$SCRATCH_PRUNE_RC" == 143 ]]; then
     SCRATCH_PRUNE_OUTCOME=timeout
+    # Interrupted discovery/removal can mutate without emitting a summary.
+    # Even a prior summary cannot establish the final removal count.
+    SCRATCH_PRUNE_REMOVED=null
+    SCRATCH_PRUNE_SCANNED=null
     rc=1
   elif [[ "$SCRATCH_PRUNE_RC" -ne 0 ]]; then
     SCRATCH_PRUNE_OUTCOME=error
@@ -343,7 +347,7 @@ PY
 LOCK_SKIPPED_ANY=false
 [[ "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true || "$VOLUME_LOCK_SKIPPED" == true ]] && LOCK_SKIPPED_ANY=true
 [[ "$SWEEP_MODE" == scratch-only ]] || TMP_REMOVED_NOW="$REMOVED_COUNT"
-REMOVED_ANY=$(( SCRATCH_PRUNE_REMOVED + $([[ "${TMP_REMOVED_NOW:-}" =~ ^[0-9]+$ ]] && echo "$TMP_REMOVED_NOW" || echo 0) + $([[ "$VOLUME_REMOVED" =~ ^[0-9]+$ ]] && echo "$VOLUME_REMOVED" || echo 0) ))
+REMOVED_ANY=$(( $([[ "$SCRATCH_PRUNE_REMOVED" =~ ^[0-9]+$ ]] && echo "$SCRATCH_PRUNE_REMOVED" || echo 0) + $([[ "${TMP_REMOVED_NOW:-}" =~ ^[0-9]+$ ]] && echo "$TMP_REMOVED_NOW" || echo 0) + $([[ "$VOLUME_REMOVED" =~ ^[0-9]+$ ]] && echo "$VOLUME_REMOVED" || echo 0) ))
 
 if [[ $rc -ne 0 ]]; then
   OUTCOME="error"
@@ -380,13 +384,6 @@ DF_DELTA="null"
 FREED_BYTES="null"
 if [[ -n "$FREE_BEFORE" && -n "$FREE_AFTER" ]]; then
   DF_DELTA=$(( FREE_AFTER - FREE_BEFORE ))
-  FREED_BYTES=$(( DF_DELTA > 0 ? DF_DELTA : 0 ))
-  # A dry-run or lock-skipped sweep deletes nothing, so any positive df delta is
-  # unrelated system activity and must never be reported as reclaimed bytes.
-  # freed_bytes is attributed removals only; the observed movement stays in df_delta_bytes.
-  TMP_REMOVED_NUM=0
-  [[ "$REMOVED_COUNT" =~ ^[0-9]+$ ]] && TMP_REMOVED_NUM="$REMOVED_COUNT"
-  [[ "$clean_flag" == "--dry-run" || $(( TMP_REMOVED_NUM + REMOVED_ANY )) -eq 0 ]] && FREED_BYTES=0
 fi
 # Lock contention needs no child receipt, but wrapper df evidence is still required.
 if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && "$DF_DELTA" != null ]]; then
@@ -397,12 +394,17 @@ elif [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_C
   rc=1
   OUTCOME="error"
   REASON="adapter receipt or df postcondition unavailable"
-  REMOVED_COUNT="${REMOVED_COUNT/null/0}"
-  DEFERRED_COUNT="${DEFERRED_COUNT/null/0}"
-  INTERRUPTED_COUNT="${INTERRUPTED_COUNT/null/0}"
 elif [[ $rc -eq 0 && ( "$INTERRUPTED_COUNT" -gt 0 || "$DEFERRED_COUNT" -gt 0 || "$VOLUME_OUTCOME" == partial || "$VOLUME_TARGET" == False || "$VOLUME_TARGET" == false || "$VOLUME_BALLAST_FAILURES" != 0 ) ]]; then
   OUTCOME="partial"
   REASON="sweep completed with candidate deferrals, volume target unmet, or ballast restore failure"
+fi
+
+# df measures unrelated filesystem activity too. No child supplies attributable
+# byte evidence, so mutations (or unknown counts) remain null, not df growth.
+if [[ "$clean_flag" == "--dry-run" ]]; then
+  FREED_BYTES=0
+elif [[ "$REMOVED_COUNT" == 0 && "$SCRATCH_PRUNE_REMOVED" == 0 && "$VOLUME_REMOVED" == 0 ]]; then
+  FREED_BYTES=0
 fi
 
 if (( SCHEDULER_SIGNAL != 0 )); then

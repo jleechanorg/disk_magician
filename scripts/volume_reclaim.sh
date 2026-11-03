@@ -166,16 +166,14 @@ PYDIAG
 # Candidate discovery is a subprocess that can block on a wedged mount, so it
 # runs under the shared monotonic deadline (deferred without starting when
 # already expired) and is killed with its process group on expiry.
-DISCOVERY_OUT=""
+DISCOVERY_DIR=""
 if [[ "$below_trigger" != true ]] && (( ! cursor_error )); then
- DISCOVERY_OUT="$(mktemp "${TMPDIR:-/tmp}/dm-volume-discovery.XXXXXX")" || { echo kept:discovery-create-failed; exit 1; }
- act_run_bounded find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 >"$DISCOVERY_OUT"
- discovery_rc=$?
- if (( discovery_rc == 124 )); then
-  TOP_REASON=deadline-before-unit
-  echo "deferred:deadline-before-unit:candidate-discovery-timeout:$root"
-  : >"$DISCOVERY_OUT"
- fi
+ DISCOVERY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dm-volume-discovery.XXXXXX")" || { echo kept:discovery-create-failed; exit 1; }
+ mkfifo "$DISCOVERY_DIR/candidates" || { rmdir "$DISCOVERY_DIR"; exit 1; }
+ # A FIFO lets C14 process each candidate before discovery reaches a later
+ # wedged subtree. Per-entry printf avoids find's pipe-output stdio buffering.
+ act_run_bounded find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -exec printf '%s\0' {} \; >"$DISCOVERY_DIR/candidates" &
+ discovery_pid=$!
 while IFS= read -r -d '' entry; do
  [[ -n "$entry" ]] || continue
  rel="${entry#"$root"/}"
@@ -216,8 +214,16 @@ while IFS= read -r -d '' entry; do
  else
   (( now_used * 100 > now_quota * target_pct )) || break
  fi
-done <"$DISCOVERY_OUT"
-rm -f "$DISCOVERY_OUT"
+done <"$DISCOVERY_DIR/candidates"
+# Reap the bounded producer even after an early consumer stop. It remains
+# covered by the same deadline and lock; closing the FIFO also stops writes.
+wait "$discovery_pid"; discovery_rc=$?
+rm -f "$DISCOVERY_DIR/candidates"
+rmdir "$DISCOVERY_DIR"
+if (( discovery_rc == 124 )); then
+ TOP_REASON=deadline-before-unit
+ echo "deferred:deadline-before-unit:candidate-discovery-timeout:$root"
+fi
 fi
 # Every clean pass ends by running the idempotent reserve ensure. It physically
 # validates or recreates the reserve after reclaim and before success is recorded.
