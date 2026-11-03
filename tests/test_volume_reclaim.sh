@@ -546,3 +546,14 @@ PATH="$T/pressure-bin:$PATH" PRESSURE_COUNT="$T/pending-pressure-count" TEST_USE
  "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean > "$T/pending-recovery.out"
 [[ ! -e "$TEST_ROOT/repo/evidence/pending-recovery" && "$(cat "$T/recover-count")" == 2 && ! -s "$BALLAST_LOG" ]]
 echo 'available-floor: typed pending low-space recovery permits C14, then retries restoration without another release'
+# The manual deadline must bound candidate discovery itself: a wedged `find`
+# (stubbed to sleep 60) is killed at the deadline and the run defers truthfully.
+HANG_BIN="$T/hang-find-bin"; mkdir -p "$HANG_BIN"
+printf '#!/usr/bin/env bash\nexec sleep 60\n' >"$HANG_BIN/find"; chmod +x "$HANG_BIN/find"
+: >"$STATUS_CALLS_FILE"
+start_s=$SECONDS
+PATH="$HANG_BIN:$PATH" ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+3)')" TEST_STATUS_SEQUENCE="900 900 900" \
+ "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/hung-find.out" 2>&1 || true
+(( SECONDS - start_s < 30 )) || { echo "FAIL: hung find not bounded by deadline ($((SECONDS - start_s))s)"; exit 1; }
+grep -q 'deferred:deadline-before-unit:candidate-discovery-timeout' "$T/hung-find.out" || { echo "FAIL: no truthful discovery-timeout receipt"; cat "$T/hung-find.out"; exit 1; }
+echo 'hung candidate discovery: bounded by deadline, deferred with discovery-timeout reason'

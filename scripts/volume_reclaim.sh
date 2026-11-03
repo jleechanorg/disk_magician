@@ -163,7 +163,26 @@ PYDIAG
  python3 -c 'import os,sys; os.unlink(sys.argv[1])' "$diag" 2>/dev/null || true
  printf '%s\n' "$result"
 }
+# Candidate discovery is a subprocess that can block on a wedged mount, so it
+# runs under the shared monotonic deadline (5s grace when already expired so the
+# cursor is still recorded) and is killed with its process group on expiry.
+DISCOVERY_OUT=""
 if [[ "$below_trigger" != true ]] && (( ! cursor_error )); then
+ DISCOVERY_OUT="$(mktemp "${TMPDIR:-/tmp}/dm-volume-discovery.XXXXXX")" || { echo kept:discovery-create-failed; exit 1; }
+ python3 -c 'import os,signal,subprocess,sys,time
+dl,root=sys.argv[1:]
+rem=max(float(dl)-time.monotonic(),0) if dl else None
+if rem is not None: rem=max(rem,5.0)
+p=subprocess.Popen(["find",root,"-mindepth","3","-maxdepth","3","-type","d","!","-name",".*","-print0"],stdout=sys.stdout.buffer,stderr=subprocess.DEVNULL,start_new_session=True)
+try: sys.exit(p.wait(timeout=rem))
+except subprocess.TimeoutExpired:
+ os.killpg(p.pid,signal.SIGKILL); p.wait(); sys.exit(124)' "${ACT_DEADLINE_AT:-}" "$root" >"$DISCOVERY_OUT"
+ discovery_rc=$?
+ if (( discovery_rc == 124 )); then
+  TOP_REASON=deadline-before-unit
+  echo "deferred:deadline-before-unit:candidate-discovery-timeout:$root"
+  : >"$DISCOVERY_OUT"
+ fi
 while IFS= read -r -d '' entry; do
  [[ -n "$entry" ]] || continue
  rel="${entry#"$root"/}"
@@ -198,7 +217,8 @@ while IFS= read -r -d '' entry; do
  else
   (( now_used * 100 > now_quota * target_pct )) || break
  fi
-done < <(find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null)
+done <"$DISCOVERY_OUT"
+rm -f "$DISCOVERY_OUT"
 fi
 # Every clean pass ends by running the idempotent reserve ensure. It physically
 # validates or recreates the reserve after reclaim and before success is recorded.
