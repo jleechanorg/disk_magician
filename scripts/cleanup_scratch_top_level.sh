@@ -337,8 +337,14 @@ verdict_and_maybe_remove() {
     # probe can short-circuit before provenance, so validate every override with
     # the shared repository gate regardless of the chosen recency floor.
     local repo_reason
+    if [[ -n "$BUDGET_PCT" && ! -f "$entry/.git" ]]; then
+      # Operator-approved LRU budget mode (--budget-pct) evicts by recency and only
+      # records repository provenance for the audit log; every other mode keeps it.
+      if [[ "$override" == "kept:secret-like" ]]; then
+        repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || override="kept:secret-like+${repo_reason:-kept:check-failed}"
+      fi
     # Keep Git status from refreshing the index after the immutable inventory.
-    if ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
+    elif ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
       [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
       rm -f "$inv" "$binding"
       echo "${repo_reason:-kept:check-failed}"
