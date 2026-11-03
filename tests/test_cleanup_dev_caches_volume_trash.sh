@@ -4,6 +4,7 @@
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d -t test_dev_caches_volume_trash.XXXXXX)"
+WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 HOME_FIXTURE="$WORK/home"
 mkdir -p "$HOME_FIXTURE" "$WORK/tmp" "$WORK/state"

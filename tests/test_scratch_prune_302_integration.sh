@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d -t test_scratch_302.XXXXXX)"
+WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/home" "$WORK/scratch/worldai_frontend/build/fixture" "$WORK/state"
 printf '{}\n' >"$WORK/config.json"
