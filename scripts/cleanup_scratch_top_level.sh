@@ -257,12 +257,6 @@ verdict_and_maybe_remove() {
         override="$verdict"
         verdict=remove
       fi ;;
-    kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data|kept:admin-unknown)
-      # A numeric recency override never grants permission to discard unpushed work.
-      if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" && -n "${RECENCY_SPEC:-}" && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" == "" ]]; then
-        override="$verdict"
-        verdict=remove
-      fi ;;
   esac
   if [[ "$verdict" != remove ]]; then
     [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
@@ -281,19 +275,16 @@ verdict_and_maybe_remove() {
       echo kept:check-failed
       return 0
     fi
-    # The secrets probe short-circuits BEFORE c14_repos_ok inside the verdict, so
-    # a tree that is both secret-like and a dirty/unpushed repository returns
-    # kept:secret-like without ever having its repositories checked. An override
-    # must therefore re-run the repository provenance gate explicitly unless the
-    # operator-approved 12h emergency scratch floor is active.
-    if [[ "$override" == "kept:secret-like" && -z "${RECENCY_SPEC:-}" ]]; then
-      local repo_reason
-      if ! repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
-        [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
-        rm -f "$inv" "$binding"
-        echo "${repo_reason:-kept:check-failed}"
-        return 0
-      fi
+    # A content override never grants repository-discard authority. The secrets
+    # probe can short-circuit before provenance, so validate every override with
+    # the shared repository gate regardless of the chosen recency floor.
+    local repo_reason
+    # Keep Git status from refreshing the index after the immutable inventory.
+    if ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
+      [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
+      rm -f "$inv" "$binding"
+      echo "${repo_reason:-kept:check-failed}"
+      return 0
     fi
   fi
   # A preview must reach the same verdict --clean would reach, so the override's

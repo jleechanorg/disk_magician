@@ -236,7 +236,21 @@ for _trash_root in "${_trash_roots[@]}"; do
       _trash_scan_roots=("$_trash_root")
       [[ -d "$_trash_root/files" ]] && _trash_scan_roots+=("$_trash_root/files")
       for _scan_dir in "${_trash_scan_roots[@]}"; do
-        while IFS= read -r _trash_entry; do
+        [[ ! -L "$_scan_dir" ]] || continue
+        while IFS= read -r -d '' _trash_entry; do
+          # Path records are NUL-delimited: du output is not a filename protocol.
+          # Reject symlinks and verify canonical immediate-child containment
+          # before forwarding an absolute candidate to C14.
+          [[ ! -L "$_trash_entry" ]] || continue
+          _canonical_entry=""
+          IFS= read -r -d '' _canonical_entry < <(python3 - "$_scan_dir" "$_trash_entry" <<'PY_TRASH'
+import os, sys
+root, entry = map(os.path.realpath, sys.argv[1:])
+if os.path.dirname(entry) == root and os.path.lexists(entry):
+    sys.stdout.buffer.write(os.fsencode(entry) + b'\0')
+PY_TRASH
+          ) || continue
+          _trash_entry="$_canonical_entry"
           [[ -z "$_trash_entry" || "${_trash_entry##*/}" == ".dm-quarantine" ]] && continue
           if [[ "$_scan_dir" == "$_trash_root" && -d "$_trash_root/files" ]]; then
             case "${_trash_entry##*/}" in files|info|expunged) continue ;; esac
@@ -249,7 +263,28 @@ for _trash_root in "${_trash_roots[@]}"; do
               rm -f "$_trash_root/info/${_trash_entry##*/}.trashinfo" 2>/dev/null || true
             fi
           fi
-        done < <(du -sk "$_scan_dir"/* "$_scan_dir"/.[!.]* 2>/dev/null | sort -rn | awk '$1 >= 1024 {sub(/^[0-9]+[[:space:]]+/, ""); print}')
+        done < <(python3 - "$_scan_dir" <<'PY_TRASH'
+import os, subprocess, sys
+# Keep the existing >=1 MiB, largest-first policy without parsing paths from du.
+entries = []
+with os.scandir(sys.argv[1]) as children:
+    for child in children:
+        if child.name.startswith("..") or child.is_symlink():
+            continue
+        result = subprocess.run(['du', '-sk', child.path], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
+        if result.returncode:
+            continue
+        try:
+            size = int(result.stdout.split(b'\t', 1)[0])
+        except ValueError:
+            continue
+        if size >= 1024:
+            entries.append((size, os.fsencode(child.path)))
+for _, path in sorted(entries, reverse=True):
+    sys.stdout.buffer.write(path + b'\0')
+PY_TRASH
+        )
       done
       _trash_after_kb=$(size_kb "$_trash_root")
       _trash_freed_kb=$(( _trash_before_kb - _trash_after_kb ))

@@ -109,7 +109,60 @@ PY
 }
 use_root
 
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == numeric-secret-contract ]]; then
+  echo "Test: numeric manual floor never bypasses secret-like repository provenance"
+  for pushed in no yes; do
+    use_root
+    candidate="$SCRATCH_ROOT/secret-repo-$pushed"
+    mkdir -p "$candidate/repo"
+    printf 'fixture-only secret marker\n' >"$candidate/.env"
+    git init -q --bare "$T/remote-$ROOT_SEQ.git"
+    git -C "$candidate/repo" init -q
+    printf 'base\n' >"$candidate/repo/payload"
+    git -C "$candidate/repo" add payload
+    git -C "$candidate/repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm base
+    git -C "$candidate/repo" remote add origin "$T/remote-$ROOT_SEQ.git"
+    git -C "$candidate/repo" push -q origin HEAD
+    printf 'must preserve unpushed data\n' >>"$candidate/repo/payload"
+    git -C "$candidate/repo" add payload
+    git -C "$candidate/repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm candidate
+    [[ "$pushed" == no ]] || git -C "$candidate/repo" push -q origin HEAD
+    # Use the same released producer metadata fixture as test_artifact_verdict.sh.
+    run bash -c 'source "$1/scripts/lib/worktree_lease.sh"
+f="$(lease_path_for "$2")"; gd="$(git -C "$2" rev-parse --absolute-git-dir)"
+mkdir -p "${f%/*}"
+printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s}\n" "$2" "$(python3 "$1/scripts/c14_probe.py" gitmeta "$gd")" >"$f"' _ "$ROOT" "$candidate/repo"
+    old_stamp "$candidate" 13
+    initial="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2"' _ "$ROOT" "$candidate")"
+    assert_eq "$initial" kept:secret-like "fixture reaches the real secret-like C14 gate ($pushed)"
+    provenance="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_repos_ok "$2"' _ "$ROOT" "$candidate")"
+    if [[ "$pushed" == no ]]; then expected=kept:not-pushed; else expected=ok; fi
+    assert_eq "$provenance" "$expected" "fixture has expected repository provenance ($pushed)"
+    old_stamp "$candidate" 13  # Git provenance probes refresh metadata mtimes.
+    preview="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 bash "$SCRIPT" --dry-run 2>&1)"
+    old_stamp "$candidate" 13
+    out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 bash "$SCRIPT" --clean 2>&1)"
+    if [[ "$pushed" == no ]]; then
+      check "numeric-floor preview preserves unpushed secret-like repository" "kept:not-pushed $candidate" "$preview"
+      check "numeric-floor clean refuses unpushed secret-like repository" "kept:not-pushed $candidate" "$out"
+      [[ -f "$candidate/repo/payload" ]] && grep -qF 'must preserve unpushed data' "$candidate/repo/payload" && ok "unpushed payload survives" || bad "unpushed payload survives"
+      if grep -Fq "$candidate" "$LOG" 2>/dev/null; then bad "no deletion record for retained repository"; else ok "no deletion record for retained repository"; fi
+    else
+      check "pushed control is eligible in preview" "would-remove:kept:secret-like $candidate" "$preview"
+      [[ ! -e "$candidate" ]] && ok "pushed control remains removable with explicit approval" || bad "pushed control remains removable with explicit approval" "$out"
+    fi
+  done
+  if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == numeric-secret-contract ]]; then
+    echo "test_cleanup_scratch_top_level (numeric-secret-contract): $PASS passed, $FAIL failed"
+    [[ "$FAIL" == 0 ]]
+    exit $?
+  fi
+fi
+
 if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
+# Earlier numeric-secret contract cases include a pushed control that is
+# correctly removed and logged; start this independent suite with a fresh log.
+: > "$LOG"
 echo "Test 1: dry-run lists candidates and deletes nothing"
 use_root
 make_tree plain-old >/dev/null
