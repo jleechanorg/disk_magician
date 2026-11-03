@@ -351,15 +351,15 @@ scratch_budget_content_mtime() {
   local path="$1" epoch strict="${2:-}" links stat_format
   if [[ "$strict" == --strict ]]; then
     [[ -d "$path" && ! -L "$path" ]] || return 1
-    links="$(act_run_bounded 5 find "$path" -xdev -type l -print -quit)" || return $?
+    links="$(act_run_bounded find "$path" -xdev -type l -print -quit)" || return $?
     [[ -z "$links" ]] || return 1
     # One batched find|stat pass instead of a stat fork per file (this runs
     # under the Scratch lock). Any find/stat failure still fails closed.
     local files newest
     if [[ "$(uname -s)" == Darwin ]]; then
-      files="$(act_run_bounded 5 find "$path" -xdev -type f -exec stat -f %m {} +)" || return $?
+      files="$(act_run_bounded find "$path" -xdev -type f -exec stat -f %m {} +)" || return $?
     else
-      files="$(act_run_bounded 5 find "$path" -xdev -type f -exec stat -c %Y {} +)" || return $?
+      files="$(act_run_bounded find "$path" -xdev -type f -exec stat -c %Y {} +)" || return $?
     fi
     newest="$(awk '$0 !~ /^[0-9]+$/ {bad=1} $0+0 > m {m=$0+0} END {if (bad || NR==0 || m==0) exit 1; print m}' <<<"$files")" || return 1
     echo "$newest"

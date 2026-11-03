@@ -183,18 +183,25 @@ kill "$LOCK_HOLDER" 2>/dev/null || true; wait "$LOCK_HOLDER" 2>/dev/null || true
 [[ "$REAL_LOCK_RC" == 75 ]] && grep -q 'scratch lock held' "$T/real-lock.err"
 [[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
 echo 'real external lock holder: rc 75, zero removals, candidates untouched'
-# A pre-expired governor deadline reaches the C14 preflight, preserves the
-# current artifact, and leaves the cursor on that interrupted unit.
-CURSOR="$T/volume-reclaim.cursor"
+# A pre-expired governor deadline defers before any bounded scan starts: no
+# grace, no scan of any candidate (a wedged-mount find would hold the lock ~5s
+# per candidate), nothing removed, truthful deferral receipt.
+for i in 1 2 3 4 5 6; do mkdir -p "$TEST_ROOT/repo/evidence/many$i"; printf x >"$TEST_ROOT/repo/evidence/many$i/content"; done
+EXP_BIN="$T/expired-find-bin"; mkdir -p "$EXP_BIN"
+EXP_MARKER="$T/expired-find-ran"
+cat >"$EXP_BIN/find" <<'SH'
+#!/usr/bin/env bash
+: >>"$EXP_MARKER"; sleep 30
+SH
+chmod +x "$EXP_BIN/find"
 DEADLINE="$(python3 -c 'import time; print(time.monotonic()-1)')"
 : >"$STATUS_CALLS_FILE"
-ACT_DEADLINE_AT="$DEADLINE" ACT_CURSOR="$CURSOR" TEST_STATUS_SEQUENCE="900 900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-deadline.out"
+EXP_START="$(date +%s)"
+EXP_MARKER="$EXP_MARKER" PATH="$EXP_BIN:$PATH" ACT_DEADLINE_AT="$DEADLINE" TEST_STATUS_SEQUENCE="900 900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-deadline.out"
+(( $(date +%s) - EXP_START < 3 ))
+[[ ! -e "$EXP_MARKER" ]]
 grep -q 'deferred:deadline-before-unit' "$T/c14-deadline.out"
-[[ -e "$TEST_ROOT/repo/evidence/oldest" ]]
-python3 - "$CURSOR" "$TEST_ROOT/repo/evidence/oldest" <<'PY'
-import json,sys
-cursor=json.load(open(sys.argv[1])); assert cursor["next_index"]==0 and cursor["items"]==[sys.argv[2]]
-PY
+[[ -e "$TEST_ROOT/repo/evidence/oldest" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="deadline-before-unit"'
 fi
 # A later candidate's mtime probe must not make the earlier eligible candidate

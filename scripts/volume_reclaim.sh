@@ -164,12 +164,12 @@ PYDIAG
  printf '%s\n' "$result"
 }
 # Candidate discovery is a subprocess that can block on a wedged mount, so it
-# runs under the shared monotonic deadline (5s grace when already expired so the
-# cursor is still recorded) and is killed with its process group on expiry.
+# runs under the shared monotonic deadline (deferred without starting when
+# already expired) and is killed with its process group on expiry.
 DISCOVERY_OUT=""
 if [[ "$below_trigger" != true ]] && (( ! cursor_error )); then
  DISCOVERY_OUT="$(mktemp "${TMPDIR:-/tmp}/dm-volume-discovery.XXXXXX")" || { echo kept:discovery-create-failed; exit 1; }
- act_run_bounded 5 find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 >"$DISCOVERY_OUT"
+ act_run_bounded find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 >"$DISCOVERY_OUT"
  discovery_rc=$?
  if (( discovery_rc == 124 )); then
   TOP_REASON=deadline-before-unit
