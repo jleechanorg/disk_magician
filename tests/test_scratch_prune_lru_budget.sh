@@ -199,6 +199,25 @@ kept nested-wt
 grep -qs unsaved "$SCRATCH_ROOT/nested-wt/wt/tracked.txt" && ok "nested worktree's uncommitted change survives" || bad "nested worktree's uncommitted change survives"
 check "nested linked worktree is the keep reason" "kept:linked-worktree $SCRATCH_ROOT/nested-wt" "$out"
 
+echo "Test 8c2: a clean pushed linked worktree is preserved without a content override"
+use_root
+make_tree pressure 45
+HOST="$T/hosts/clean${ROOT_SEQ}"; mkdir -p "$HOST"
+git -C "$HOST" init -q
+head -c 1024000 /dev/urandom >"$HOST/tracked.bin"
+git -C "$HOST" add tracked.bin
+git -C "$HOST" -c user.email=t@example.invalid -c user.name=t commit -qm base
+git init -q --bare "$T/remote${ROOT_SEQ}.git"
+git -C "$HOST" remote add origin "$T/remote${ROOT_SEQ}.git"
+git -C "$HOST" push -q origin HEAD
+mkdir -p "$SCRATCH_ROOT/clean-linked"
+git -C "$HOST" worktree add -q -b clean-linked "$SCRATCH_ROOT/clean-linked/wt" HEAD
+git -C "$SCRATCH_ROOT/clean-linked/wt" push -qu origin HEAD
+age "$SCRATCH_ROOT/clean-linked" 15000
+out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+kept clean-linked
+check "clean pushed linked worktree is the keep reason" "kept:linked-worktree $SCRATCH_ROOT/clean-linked" "$out"
+
 echo "Test 8d: the override is decided over every repository, in either discovery order"
 use_root
 mk_repo() { # <dir> dirty|broken

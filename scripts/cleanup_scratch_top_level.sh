@@ -334,6 +334,10 @@ verdict_and_maybe_remove() {
       echo kept:check-failed
       return 0
     fi
+  fi
+  # Budget policy protects linked worktrees even when ordinary C14 already
+  # approved a clean, pushed entry without requiring a content override.
+  if [[ -n "$override" || -n "$BUDGET_PCT" ]]; then
     # A content override never grants repository-discard authority. The secrets
     # probe can short-circuit before provenance, so validate every override with
     # the shared repository gate regardless of the chosen recency floor.
