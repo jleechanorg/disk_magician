@@ -353,10 +353,16 @@ with open(notready_file, encoding="utf-8", errors="replace") as f:
         if st_p.st_blocks <= 0 or st_d.st_blocks <= 0 or st_d.st_size <= 0:
             continue
         is_p_comp = (primary.endswith(".gz") and not dbx_path.endswith(".gz")) or (primary.endswith(".zst") and not dbx_path.endswith(".zst"))
-        if not is_p_comp and st_p.st_size < st_d.st_size and not sqlite_backup_matches(primary, dbx_path, st_p, st_d):
-            continue
-        if not prefix_matches(primary, dbx_path, st_d.st_size) and not sqlite_backup_matches(primary, dbx_path, st_p, st_d):
-            continue
+        if "/codex_conversations/" in dbx_path and dbx_path.endswith(".sqlite"):
+            # SQLite is not append-only: a prefix match must never bypass the
+            # exact database comparison, even when the primary is larger.
+            if not sqlite_backup_matches(primary, dbx_path, st_p, st_d):
+                continue
+        else:
+            if not is_p_comp and st_p.st_size < st_d.st_size:
+                continue
+            if not prefix_matches(primary, dbx_path, st_d.st_size):
+                continue
         print(f"{st_d.st_blocks}\t{st_d.st_size}\t{dbx_path}\t{primary}")
 PY
   if [[ "$CLEAN" == true && -s "$WORK/dups_verified.txt" ]]; then
