@@ -145,6 +145,33 @@ for approved_cache in \
   clean_dir_contents "${approved_cache%%:*}" "${approved_cache#*:}" false "$approved_kind"
 done
 
+# 3c. Hugging Face model caches. src/disk_magician/scripts/disk_report_html.py:215
+# advertises huggingface cleanup, but this script had no such section, so
+# ~/.cache/huggingface and ~/.cache/hy3dgen were unreachable (measured 11 GiB and
+# 6.9 GiB on 2026-11-03). These are model downloads a running job may be using, so a
+# root with ANY file touched in the last 24 h is preserved wholesale, and an
+# unmeasurable scan also preserves (fail closed).
+clean_hf_cache_if_idle() {
+  local label="$1" path="$2" young rc=0
+  if [[ ! -d "$path" ]]; then
+    log "$label: directory not found, skipping"
+    return
+  fi
+  young="$(find "$path" -type f -mmin -1440 -print -quit 2>/dev/null)" || rc=$?
+  if (( rc != 0 )); then
+    log "$label: mtime scan failed (rc=$rc) — preserving (fail closed)"
+    return
+  fi
+  if [[ -n "$young" ]]; then
+    log "$label: recently written (${young#"$path"/}) — preserving, younger than 24h"
+    return
+  fi
+  clean_dir_contents "$label" "$path" true rebuildable
+}
+log "=== Section 3c: Hugging Face caches ==="
+clean_hf_cache_if_idle "huggingface cache" "$HOME/.cache/huggingface"
+clean_hf_cache_if_idle "hy3dgen cache" "$HOME/.cache/hy3dgen"
+
 # 3c. Rotated dated log dirs (YYYY.MM.DD or YYYY/MM/DD) older than 7 days. Only
 # dated leaf dirs are candidates, so a year/month parent holding this week's
 # logs is never removed on its own (older) mtime.
