@@ -30,7 +30,18 @@
 # (bind -> candidate -> verdict+inventory -> remove) and logged through
 # deletion_log_removal, so a keep is always the default.
 #
+# LRU budget mode (bead disk_magician-walx, --budget-pct N): Scratch is
+# disposable by contract, so when the volume is above N% used, top-level entries
+# (plus <repo>/{build,evidence}/<name> units) are evicted least-recently-used
+# first by canonical content mtime, re-measuring usage before each removal, until
+# usage is at or below N%. Only live use keeps: C14 lease/live-cwd/open-file/
+# 60-minute activity, the --budget-floor-minutes floor (default 120, minimum 60),
+# safety_gate, and unmeasurable recency or usage. Content and repository
+# provenance keeps (dirty, not-pushed, secret-like, ...) are overridden, and each
+# eviction logs its prior C14 verdict so unpushed losses stay auditable.
+#
 # Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--min-hours N] [--max-gib N]
+#        [--budget-pct N [--budget-floor-minutes N]]
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,11 +79,16 @@ if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^
 fi
 MIN_HOURS="${SCRATCH_PRUNE_MIN_HOURS:-$MIN_HOURS_FLOOR}"
 MAX_GIB="${SCRATCH_PRUNE_MAX_GIB:-25}"
+MAX_GIB_SET=false
+[[ -n "${SCRATCH_PRUNE_MAX_GIB:-}" ]] && MAX_GIB_SET=true
+BUDGET_PCT=""
+BUDGET_FLOOR_MINUTES=120
 DRY_RUN=true
 
 usage() {
   cat <<'USAGE'
 Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--deadline-at T] [--cursor PATH] [--min-hours N] [--max-gib N]
+       cleanup_scratch_top_level.sh [--dry-run|--clean] --budget-pct N [--budget-floor-minutes N] [--max-gib N] [--deadline-at T]
 
   --dry-run       Preview candidates and their C14 verdicts (default).
   --clean         Actually remove eligible candidates. Requires
@@ -81,7 +97,14 @@ Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--d
   --available-floor  Stop at 50 GiB available and recheck before each removal.
   --min-hours N   Recency floor in hours (default 24; values below 24 are
                   clamped up to 24).
-  --max-gib N     Per-run removal cap in GiB (default 25; 0 means no cap).
+  --max-gib N     Per-run removal cap in GiB (default 25; 0 means no cap;
+                  budget mode defaults to no cap).
+  --budget-pct N  LRU budget mode: while Scratch is above N% used (1-99),
+                  evict least-recently-used entries until at or below N%.
+                  Overrides content/provenance keeps (dirty, not-pushed,
+                  secret-like, ...); never lease, live-cwd, open-file or
+                  floor keeps. --clean needs SCRATCH_TOP_LEVEL_APPROVED=1.
+  --budget-floor-minutes N  Budget-mode recency floor (default 120, min 60).
 
 Automatic mode removes only C14-recognized ephemeral Scratch artifacts. It never
 overrides C14 secret, unknown-content, lease, live-cwd, open-file, dirty, or
@@ -97,7 +120,9 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=true; shift ;;
     --available-floor) AVAILABLE_FLOOR=true; shift ;;
     --min-hours) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MIN_HOURS="$2"; shift 2 ;;
-    --max-gib) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MAX_GIB="$2"; shift 2 ;;
+    --max-gib) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MAX_GIB="$2"; MAX_GIB_SET=true; shift 2 ;;
+    --budget-pct) [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]?$ ]] || { usage >&2; exit 2; }; BUDGET_PCT="$2"; shift 2 ;;
+    --budget-floor-minutes) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; BUDGET_FLOOR_MINUTES="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -110,6 +135,17 @@ MIN_HOURS=$((10#$MIN_HOURS))
 (( MIN_HOURS < MIN_HOURS_FLOOR )) && MIN_HOURS="$MIN_HOURS_FLOOR"
 [[ "$MAX_GIB" =~ ^[0-9]+$ ]] || MAX_GIB=25
 MAX_GIB=$((10#$MAX_GIB))
+if [[ -n "$BUDGET_PCT" ]]; then
+  # Budget mode never runs inside the C14-only automatic mode, and the budget
+  # target (not the 50 GiB available floor) is its stop condition.
+  if [[ "$SCRATCH_AUTOMATIC" == 1 || "$AVAILABLE_FLOOR" == true ]]; then
+    echo "Refusing --budget-pct with automatic mode or --available-floor." >&2
+    exit 2
+  fi
+  BUDGET_FLOOR_MINUTES=$((10#$BUDGET_FLOOR_MINUTES))
+  (( BUDGET_FLOOR_MINUTES < 60 )) && BUDGET_FLOOR_MINUTES=60
+  [[ "$MAX_GIB_SET" == true ]] || MAX_GIB=0
+fi
 MAX_KB=$(( MAX_GIB * 1024 * 1024 ))
 
 if [[ "$DRY_RUN" != true && "$SCRATCH_AUTOMATIC" == 1 && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == 1 ]]; then
@@ -195,14 +231,24 @@ for path in state["items"][state["next_index"]:]:
   fi
 fi
 
-scratch_available_bytes() {
-  local status rc pair used quota quota_free fs_free
-  "$diskm" volume verify-mount "$root" >/dev/null 2>&1 || return 75
+# scratch_usage_pair — "<allocated_bytes> <quota_bytes>" from the canonical volume
+# status (the metric volume reclaim's trigger/target uses); rc 75 if unmeasurable.
+scratch_usage_pair() {
+  local status rc pair
+  if [[ "$root_registered" == true ]]; then
+    "$diskm" volume verify-mount "$root" >/dev/null 2>&1 || return 75
+  fi
   status="$("$diskm" volume status --json --snapshot 2>/dev/null)"; rc=$?
   (( rc == 0 || rc == 1 )) || return 75
   pair="$(python3 -c 'import json,sys; d=json.load(sys.stdin); r=next(x for x in d["volumes"] if x.get("class")=="scratch"); u=r.get("allocated_bytes"); q=r.get("quota_bytes"); assert type(u) is int and type(q) is int and q>0; print(u,q)' <<<"$status" 2>/dev/null)" || return 75
+  [[ "$pair" =~ ^[0-9]+\ [0-9]+$ ]] || return 75
+  printf '%s\n' "$pair"
+}
+
+scratch_available_bytes() {
+  local pair used quota quota_free fs_free
+  pair="$(scratch_usage_pair)" || return 75
   read -r used quota <<<"$pair"
-  [[ "$used" =~ ^[0-9]+$ && "$quota" =~ ^[0-9]+$ ]] || return 75
   fs_free="$(python3 "$SCRIPT_DIR/scratch_pressure.py" "$root" 2>/dev/null)" || return 75
   [[ "$fs_free" =~ ^[0-9]+$ ]] || return 75
   quota_free=$(( quota - used )); (( quota_free < 0 )) && quota_free=0
@@ -263,6 +309,17 @@ verdict_and_maybe_remove() {
         verdict=remove
       fi ;;
   esac
+  # LRU budget mode (walx): Scratch is disposable, so content and provenance keeps
+  # do not block eviction. A linked-worktree root is excluded because C14 can
+  # return its owner-null lease's dirty/not-pushed reason before the live-cwd and
+  # open-file checks run; every other token below is reached only after them.
+  if [[ "$verdict" != remove && -n "$BUDGET_PCT" && ! -f "$entry/.git" ]]; then
+    case "$verdict" in
+      kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data|kept:admin-unknown)
+        override="$verdict"
+        verdict=remove ;;
+    esac
+  fi
   if [[ "$verdict" != remove ]]; then
     [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
     rm -f "$inv" "$binding"
@@ -285,8 +342,11 @@ verdict_and_maybe_remove() {
     # kept:secret-like without ever having its repositories checked. An override
     # must therefore re-run the repository provenance gate explicitly unless the
     # operator-approved 12h emergency scratch floor is active.
-    if [[ "$override" == "kept:secret-like" && -z "${RECENCY_SPEC:-}" ]]; then
-      local repo_reason
+    local repo_reason
+    if [[ "$override" == "kept:secret-like" && -n "$BUDGET_PCT" && ! -f "$entry/.git" ]]; then
+      # Budget mode does not block on provenance but records it for the audit log.
+      repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || override="kept:secret-like+${repo_reason:-kept:check-failed}"
+    elif [[ "$override" == "kept:secret-like" && -z "${RECENCY_SPEC:-}" ]]; then
       if ! repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
         [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
         rm -f "$inv" "$binding"
@@ -309,7 +369,7 @@ verdict_and_maybe_remove() {
   rm -f "$inv" "$binding"
   case "$out" in
     removed:*)
-      echo "removed:scratch-prune${override:+:$override}"
+      if [[ -n "$BUDGET_PCT" ]]; then echo "removed:scratch-lru:${override:-remove}"; else echo "removed:scratch-prune${override:+:$override}"; fi
       return 0 ;;
     *) echo "${out:-kept:check-failed}"; return 0 ;;
   esac
@@ -350,6 +410,45 @@ if [[ -d "$root/tmp" && ! -L "$root/tmp" ]]; then
   done
 fi
 
+# LRU budget mode: measure first (fail closed), then order every candidate past
+# the floor by canonical content mtime, oldest first. Usage is re-measured before
+# each eviction in the main loop; the ordering is all-or-nothing under a deadline.
+LRU_LIST="" budget_used=0 budget_quota=0 budget_stop="" lru_priors=""
+if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
+  budget_pair="$(scratch_usage_pair)" || { echo skipped:measurement-unavailable; exit 75; }
+  read -r budget_used budget_quota <<<"$budget_pair"
+  echo "budget: used_pct=$(( budget_used * 100 / budget_quota )) target_pct=${BUDGET_PCT} floor=${BUDGET_FLOOR_MINUTES}m"
+  if (( budget_used * 100 <= budget_quota * BUDGET_PCT )); then
+    echo "skipped:budget-target-met"
+    exit 0
+  fi
+  floor_epoch=$(( now - BUDGET_FLOOR_MINUTES * 60 ))
+  # scratch-new artifacts are LRU units too, so one hot sibling cannot pin a
+  # whole <repo> container; a vanished nested unit is skipped in the main loop.
+  for _sub in "$root"/*/build/* "$root"/*/evidence/*; do
+    [[ -d "$_sub" && ! -L "$_sub" ]] && candidates+=("$_sub")
+  done
+  LRU_LIST="$(mktemp "${TMPDIR:-/tmp}/dm-sp-lru.XXXXXX")" || { echo skipped:measurement-unavailable; exit 75; }
+  for entry in ${candidates[@]+"${candidates[@]}"}; do
+    if deadline_exceeded; then
+      rm -f "$LRU_LIST"
+      echo "deferred:deadline (LRU ordering incomplete; nothing evicted)"
+      exit 0
+    fi
+    if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
+    [[ -d "$entry" ]] || continue
+    mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
+    if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
+      echo "kept:mtime-unmeasurable $entry"; kept=$(( kept + 1 )); continue
+    fi
+    if (( mtime > floor_epoch )); then
+      echo "kept:recent-activity $entry (age $(( (now - mtime) / 60 ))m < ${BUDGET_FLOOR_MINUTES}m)"
+      kept=$(( kept + 1 )); continue
+    fi
+    printf '%s\t%s\0' "$mtime" "$entry" >>"$LRU_LIST"
+  done
+fi
+
 if (( ! CURSOR_ERROR )); then
 while IFS= read -r -d '' entry; do
   [[ -e "$entry" || -L "$entry" ]] || continue
@@ -384,6 +483,20 @@ while IFS= read -r -d '' entry; do
   (( scanned % 25 == 0 )) && echo "progress: scanned=${scanned} kept=${kept} removable=${removable} removed=${removed}"
   if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
   if [[ ! -d "$entry" ]]; then continue; fi
+  if [[ -n "$BUDGET_PCT" ]]; then
+    # Recency was measured during LRU ordering; here re-measure usage (a preview
+    # subtracts what it would have freed) and stop as soon as the target holds.
+    if [[ "$DRY_RUN" == true ]]; then
+      budget_now=$(( budget_used - planned_kb * 1024 ))
+    else
+      budget_pair="$(scratch_usage_pair)" || { budget_stop=measurement-unavailable; break; }
+      read -r budget_now budget_quota_now <<<"$budget_pair"
+      [[ "$budget_quota_now" == "$budget_quota" ]] || { budget_stop=measurement-unavailable; break; }
+    fi
+    if (( budget_now * 100 <= budget_quota * BUDGET_PCT )); then
+      budget_stop=target-reached; break
+    fi
+  else
   dir_mtime="$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null)"
   if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > floor_epoch )); then
     mtime="$dir_mtime"
@@ -396,6 +509,7 @@ while IFS= read -r -d '' entry; do
   if (( mtime > floor_epoch )); then
     echo "kept:recent-activity $entry (age $(( (now - mtime) / 3600 ))h < ${MIN_HOURS}h)"
     kept=$(( kept + 1 )); continue
+  fi
   fi
   if ! reason="$(safety_gate "$entry" 2>/dev/null)"; then
     echo "kept:${reason:-safety} $entry"; kept=$(( kept + 1 )); continue
@@ -435,9 +549,11 @@ while IFS= read -r -d '' entry; do
     removed:*)
       [[ "$automatic_logged" == true ]] || deletion_log_removal "$entry" "$kb" "${outcome#removed:}${RECENCY_SPEC:+:recency=$RECENCY_SPEC}"
       removed=$(( removed + 1 )); removed_kb=$(( removed_kb + kb ))
+      [[ -n "$BUDGET_PCT" ]] && lru_priors+="${outcome#removed:scratch-lru:}"$'\n'
       echo "$outcome $entry (${kb} KB)" ;;
     would-remove:*)
       removable=$(( removable + 1 )); planned_kb=$(( planned_kb + kb ))
+      [[ -n "$BUDGET_PCT" ]] && lru_priors+="${outcome#would-remove:}"$'\n'
       echo "$outcome $entry (${kb} KB)" ;;
     kept:lease-busy)
       kept=$(( kept + 1 ))
@@ -462,14 +578,26 @@ while IFS= read -r -d '' entry; do
   esac
   busy_streak=0
 done < <(
+  if [[ -n "$BUDGET_PCT" ]]; then
+    sort -z -t $'\t' -k1,1n "$LRU_LIST" | while IFS= read -r -d '' _row; do printf '%s\0' "${_row#*$'\t'}"; done
+  else
   for candidate in ${candidates[@]+"${candidates[@]}"}; do printf '%s\0' "$candidate"; done
   if [[ "$root_registered" == true ]]; then
     find "$root" -mindepth 3 -maxdepth 3 -type d ! -path '*/.*' -print0 2>/dev/null
   fi
+  fi
 )
 fi
+[[ -n "$LRU_LIST" ]] && rm -f "$LRU_LIST"
 
 echo "=== Summary ==="
 echo "scanned=${scanned} kept=${kept} removable=${removable} removed=${removed} planned_mb=$(( (planned_kb + removed_kb) / 1024 ))"
 (( capped )) && echo "capped: at least one candidate skipped by --max-gib ${MAX_GIB}"
+if [[ -n "$BUDGET_PCT" ]]; then
+  # Audit line: which C14 verdicts the evictions overrode, and how many of them
+  # held dirty or unpushed repository work.
+  echo "lru: stop=${budget_stop:-candidates-exhausted} $([[ "$DRY_RUN" == true ]] && echo would_evict || echo evicted)=$(( removed + removable )) not_pushed_or_dirty=$(printf '%s' "$lru_priors" | grep -cE 'kept:(not-pushed|dirty)')"
+  printf '%s' "$lru_priors" | sort | uniq -c | sed 's/^ */lru: prior_verdict /'
+  [[ "$budget_stop" == measurement-unavailable ]] && { echo skipped:measurement-unavailable; exit 75; }
+fi
 exit 0

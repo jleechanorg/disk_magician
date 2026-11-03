@@ -128,11 +128,17 @@ SCRATCH_PRUNE_REMOVED=0
 SCRATCH_PRUNE_SCANNED=0
 if [[ "$SWEEP_MODE" == scratch-only ]]; then
   SCRATCH_CURSOR="${ACT_CURSOR}.scratch-prune"
-  scratch_args=(scratch-prune)
-  if [[ "$clean_flag" == "--clean" ]]; then
-    scratch_args+=(--clean --available-floor)
+  scratch_args=(scratch-prune "$clean_flag")
+  # Opt-in LRU budget mode (walx, default off): DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=N
+  # in the scheduler environment replaces the C14-only automatic pass with the
+  # approved LRU eviction down to N% used. The variable is the operator approval.
+  SCRATCH_LRU_PCT="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
+  if [[ "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
+    scratch_args+=(--budget-pct "$SCRATCH_LRU_PCT")
+    scratch_mode_env=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=0 SCRATCH_TOP_LEVEL_APPROVED=1)
   else
-    scratch_args+=(--dry-run --available-floor)
+    scratch_args+=(--available-floor)
+    scratch_mode_env=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 SCRATCH_TOP_LEVEL_APPROVED=0)
   fi
   SCRATCH_TIMEOUT_SEC="$(python3 - "$ACT_DEADLINE_AT" <<'PY'
 import sys,time
@@ -146,8 +152,8 @@ PY
     SCRATCH_PRUNE_RC=124
   else
     run_bounded_capture SCRATCH_PRUNE_OUTPUT env ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$SCRATCH_CURSOR" \
-      DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 \
-      DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= SCRATCH_TOP_LEVEL_APPROVED=0 \
+      DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" "${scratch_mode_env[@]}" \
+      DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= \
       "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${SCRATCH_TIMEOUT_SEC}s" \
       "$SCRIPT_DIR/../disk_magician.sh" "${scratch_args[@]}" || SCRATCH_PRUNE_RC=$?
   fi
@@ -171,7 +177,7 @@ PY
     rc=1
   elif grep -qE '^(deferred:|skipped:measurement-unavailable)' <<<"$SCRATCH_PRUNE_OUTPUT"; then
     SCRATCH_PRUNE_OUTCOME=partial
-  elif grep -q '^skipped:available-floor' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+  elif grep -qE '^skipped:(available-floor|budget-target-met)' <<<"$SCRATCH_PRUNE_OUTPUT"; then
     SCRATCH_PRUNE_OUTCOME=success_noop
   else
     SCRATCH_PRUNE_OUTCOME=success

@@ -138,6 +138,18 @@ SCRATCH_PRUNE_LINE="$(grep -n '^disk_magician scratch-prune' "$INVOCATION_LOG" |
 VOLUME_RECLAIM_LINE="$(grep -n '^disk_magician volume reclaim' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
 [[ -n "$SCRATCH_PRUNE_LINE" && -n "$VOLUME_RECLAIM_LINE" && "$SCRATCH_PRUNE_LINE" -lt "$VOLUME_RECLAIM_LINE" ]] && echo "  PASS  Scratch pruning precedes its volume-reclaim sibling" || { echo "  FAIL  Scratch pruning precedes its volume-reclaim sibling"; FAIL=$((FAIL+1)); }
 
+echo "Test 0c: the LRU budget opt-in switches the Scratch pass to approved budget mode"
+: > "$INVOCATION_LOG"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 \
+  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
+LRU_CALLS="$(cat "$INVOCATION_LOG")"
+assert_contains "opt-in passes --budget-pct to scratch-prune" "disk_magician scratch-prune --clean --budget-pct 50 " "$LRU_CALLS"
+assert_contains "opt-in runs the approved non-automatic mode" "scratch_prune_mode automatic=0 approval=1" "$LRU_CALLS"
+: > "$INVOCATION_LOG"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=0 \
+  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
+assert_contains "an invalid opt-in value keeps the C14-only automatic pass" "scratch_prune_mode automatic=1 approval=0" "$(cat "$INVOCATION_LOG")"
+
 echo "Test 1: --clean invokes cleanup_tmp.sh with LARGE_TMP_APPROVED=1"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" --clean
