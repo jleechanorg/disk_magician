@@ -251,6 +251,38 @@ out="$(run bash "$SCRIPT" --dry-run --available-floor --budget-pct 50 2>&1)"; rc
 out="$(run bash "$SCRIPT" --dry-run --budget-pct 100 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "budget percent above 99 refuses" || bad "budget percent above 99 refuses" "rc=$rc"
 
+echo "Test 11: managed discovery never follows top-level or intermediate symlink parents"
+for kind in build evidence; do
+  for parent in top intermediate; do
+    use_root
+    make_tree pressure 45
+    outside="$SANDBOX/outside"
+    mkdir -p "$outside/$kind/old-unit"
+    printf 'outside data must survive\n' >"$outside/$kind/old-unit/payload.bin"
+    age "$outside" 600
+    if [[ "$parent" == top ]]; then
+      ln -s "$outside" "$SCRATCH_ROOT/worldai_frontend"
+    else
+      mkdir -p "$SCRATCH_ROOT/worldai_frontend"
+      ln -s "$outside/$kind" "$SCRATCH_ROOT/worldai_frontend/$kind"
+    fi
+    out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
+    [[ -f "$outside/$kind/old-unit/payload.bin" ]] && ok "$parent $kind symlink target survives" || bad "$parent $kind symlink target survives"
+    [[ "$out" != *"removed:"* ]] && ok "$parent $kind symlink is not traversed for removal" || bad "$parent $kind symlink is not traversed for removal" "$out"
+    [[ "$rc" == 4 ]] && ok "$parent $kind preserves unmet target" || bad "$parent $kind preserves unmet target" "rc=$rc"
+  done
+done
+
+echo "Test 12: managed units already discovered are not counted twice in a preview"
+use_root
+make_tree worldai_frontend/build/old-unit 600
+make_tree pressure 45
+out="$(run bash "$SCRIPT" --dry-run --budget-pct 1 2>&1)"; rc=$?
+count="$(printf '%s\n' "$out" | grep -c "^would-remove:.* $SCRATCH_ROOT/worldai_frontend/build/old-unit ")"
+[[ "$count" == 1 ]] && ok "managed unit previewed exactly once" || bad "managed unit previewed exactly once" "count=$count"
+check "preview reports one unit rather than duplicates" "would_evict=1" "$out"
+kept worldai_frontend/build/old-unit
+
 echo
 echo "test_scratch_prune_lru_budget: $PASS passed, $FAIL failed"
 [[ "$FAIL" == 0 ]]

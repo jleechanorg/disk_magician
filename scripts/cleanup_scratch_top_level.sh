@@ -446,8 +446,25 @@ if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
   floor_epoch=$(( now - BUDGET_FLOOR_MINUTES * 60 ))
   # scratch-new artifacts are LRU units too, so one hot sibling cannot pin a
   # whole <repo> container; a vanished nested unit is skipped in the main loop.
-  for _sub in "$root"/*/build/* "$root"/*/evidence/*; do
-    [[ -d "$_sub" && ! -L "$_sub" ]] && candidates+=("$_sub")
+  # Expand each level only after checking it: a leaf-only symlink check does
+  # not prevent a glob from traversing a symlinked repository or unit parent.
+  for _top in "$root"/*; do
+    [[ -d "$_top" && ! -L "$_top" ]] || continue
+    for _unit_parent in "$_top/build" "$_top/evidence"; do
+      [[ -d "$_unit_parent" && ! -L "$_unit_parent" ]] || continue
+      for _sub in "$_unit_parent"/*; do
+        [[ -d "$_sub" && ! -L "$_sub" ]] || continue
+        # Managed containers above may already have supplied this exact unit.
+        _already_candidate=0
+        for _candidate in ${candidates[@]+"${candidates[@]}"}; do
+          if [[ "$_candidate" == "$_sub" ]]; then
+            _already_candidate=1
+            break
+          fi
+        done
+        (( _already_candidate )) || candidates+=("$_sub")
+      done
+    done
   done
   LRU_LIST="$(mktemp "${TMPDIR:-/tmp}/dm-sp-lru.XXXXXX")" || { echo skipped:measurement-unavailable; exit 75; }
   for entry in ${candidates[@]+"${candidates[@]}"}; do
