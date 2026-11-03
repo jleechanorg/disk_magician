@@ -1935,9 +1935,71 @@ def linux_scheduler_candidate_runtime(runtime: Path, candidates: Path) -> bool:
             and (runtime / "disk_magician.sh").is_file())
 
 
+def linux_scheduler_dropins(unit_dir: Path, unit_name: str) -> list[tuple[Path, str, str]]:
+    """Accept only the operator's exact stable-entrypoint and cadence overrides."""
+    stable = str(Path.home() / '.local/bin/diskm')
+    if any(c in stable for c in ' \t\n%$;\\'):
+        raise ValueError('unsafe stable scheduler entrypoint')
+    old = ('# Pin to the deployed uv-tool entry point, matching disk-magician-snapshot and\n'
+           '# disk-magician-routine-clean. The base unit hard-coded a\n'
+           '# candidates/<sha>/venv/... path built from 19f764bc, so every deploy since then\n'
+           '# was invisible to this timer (verified 2026-10-30: deployed 0.2.331 while this\n'
+           '# unit still executed the 19f764bc candidate).\n'
+           '[Service]\nExecStart=\nExecStart=' + stable + ' volume reclaim --clean\n')
+    new = old.replace(' volume reclaim --clean\n', ' tmp-scratch-sweep --scratch-only --clean\n')
+    cadence = '[Timer]\nOnCalendar=\nOnCalendar=*-*-* *:00/20:00\n'
+    result = []
+    for suffix, filename, before, after in (
+            ('service', '10-stable-entrypoint.conf', old, new),
+            ('timer', '20-cadence.conf', cadence, cadence)):
+        directory = unit_dir / (unit_name + '.' + suffix + '.d')
+        if directory.is_symlink():
+            raise ValueError('scheduler drop-in directory is a symlink')
+        if not directory.exists():
+            continue
+        if (not directory.is_dir() or directory.stat().st_uid != os.geteuid()
+                or not linux_path_components_owned(directory, os.geteuid())):
+            raise ValueError('unsafe scheduler drop-in directory')
+        target = directory / filename
+        backup_name = filename + '.diskm-backup-' + hashlib.sha256(before.encode()).hexdigest()[:16]
+        for child in directory.iterdir():
+            if (child.is_symlink() or not child.is_file() or child.stat().st_uid != os.geteuid()
+                    or child.stat().st_nlink != 1):
+                raise ValueError('unsafe scheduler drop-in file')
+            if child.name == backup_name and child.read_bytes() == before.encode():
+                continue
+            if child != target or child.read_bytes() not in (before.encode(), after.encode()):
+                raise ValueError('unrecognized scheduler drop-in customization')
+        if not target.is_file():
+            raise ValueError('missing known scheduler drop-in')
+        result.append((target, after, target.read_bytes().decode("utf-8")))
+    return result
+
+
+def linux_scheduler_effective(unit_name: str) -> tuple[str, str, str]:
+    """Read normalized effective properties, not the unshadowed template bytes."""
+    def show(suffix: str, prop: str) -> str:
+        return linux_command(['systemctl', '--user', 'show', unit_name + '.' + suffix,
+                              '--property=' + prop, '--value']).strip()
+    command = show('service', 'ExecStart')
+    match = re.fullmatch(r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=no ;[^{}]*\}', command)
+    if match is None or match.group(1) != match.group(2).split()[0]:
+        raise ValueError('unrecognized effective scheduler ExecStart')
+    calendar = show('timer', 'TimersCalendar')
+    calendars = re.findall(r'OnCalendar=([^;]+) ;', calendar)
+    if len(calendars) != 1:
+        raise ValueError('unrecognized effective scheduler calendar')
+    timeout = show('service', 'TimeoutStartUSec')
+    # systemctl formats microsecond properties as human-readable timespans.
+    if timeout in {'15min 50s', '950s', '950000000'}:
+        timeout = '950000000'
+    return match.group(2), timeout, calendars[0].strip()
+
+
 def linux_scheduler_install_cmd(name: str, interval: int | None = None,
                                 upgrade_from: str | None = None) -> int:
     replaced: list[tuple[Path, bytes, bytes, os.stat_result]] = []
+    effective_before = None
     try:
         if name != "scratch" or not linux_backend_enabled(name):
             return 2
@@ -1958,7 +2020,9 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
         unit_name = "diskm-scratch-reclaim"
         if not production:
             unit_name += "-" + hashlib.sha256(os.fsencode(config_path)).hexdigest()[:12]
-        runtime = Path(__file__).resolve().parent.parent
+        runtime = Path(__file__).absolute().parent.parent
+        if runtime.resolve(strict=True) != runtime:
+            return 75
         if (runtime / ".git").exists() or not (runtime / "disk_magician.sh").is_file():
             return 75
         if production and any(runtime.is_relative_to(path.resolve()) for path in (Path("/tmp"), Path("/var/tmp"))):
@@ -1972,14 +2036,21 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
         if upgrade_from is not None:
             previous_runtime = Path(upgrade_from)
             candidates = Path.home() / ".local/share/disk-magician/candidates"
-            if (not linux_scheduler_candidate_runtime(previous_runtime, candidates)
-                    or not linux_scheduler_candidate_runtime(runtime, candidates)):
+            if not linux_scheduler_candidate_runtime(previous_runtime, candidates):
                 return 75
+            if not linux_scheduler_candidate_runtime(runtime, candidates):
+                manifest = linux_validate_installed_runtime(runtime, state_root(), return_manifest=True)
+                required = {"scripts/volume.py", "disk_magician.sh",
+                            "systemd/diskm-scratch-reclaim.service.in", "systemd/diskm-scratch-reclaim.timer.in"}
+                if not required.issubset(manifest["package_hashes"]):
+                    raise ValueError("deployed scheduler inputs are not pinned")
         cadence = "OnCalendar=*:0/20\nPersistent=true"
         if interval is not None:
             cadence = f"OnBootSec=5s\nOnUnitActiveSec={interval}s\nAccuracySec=1s"
         units = []
         unit_dir = Path.home() / ".config/systemd/user"
+        if unit_dir.exists() and not linux_path_components_owned(unit_dir, os.geteuid()):
+            return 75
         for suffix in ("service", "timer"):
             template = (runtime / "systemd" / f"diskm-scratch-reclaim.{suffix}.in").read_text()
             def render(orchestrator: str, source: str = template, timing: str = cadence) -> str:
@@ -1994,7 +2065,7 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
             if target.is_symlink() or (target.exists() and
                     (not target.is_file() or target.stat().st_uid != os.geteuid())):
                 return 75
-            old_content = target.read_text() if target.exists() else None
+            old_content = target.read_bytes().decode("utf-8") if target.exists() else None
             if old_content is not None and old_content != content:
                 if previous_runtime is None:
                     return 75
@@ -2004,11 +2075,27 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
                         render(str(previous_runtime / "disk_magician.sh"), previous_template, previous_cadence)):
                     return 75
             units.append((target, content, old_content))
+        dropins = linux_scheduler_dropins(unit_dir, unit_name)
+        if dropins and previous_runtime is None:
+            raise ValueError("scheduler drop-ins require explicit upgrade")
+        units.extend(dropins)
+        verify_effective = previous_runtime is not None and (
+            bool(dropins) or not linux_scheduler_candidate_runtime(runtime, candidates))
         if previous_runtime is not None:
             active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit_name + ".service"],
                                     capture_output=True, timeout=15, check=False)
-            if active.returncode == 0:
+            if active.returncode != 3:
                 return 75
+        if verify_effective:
+            if any(old is None for _, _, old in units):
+                raise ValueError("scheduler upgrade requires existing units")
+            for suffix in ("service", "timer"):
+                effective_dropins = linux_command(["systemctl", "--user", "show", unit_name + "." + suffix,
+                                                   "--property=DropInPaths", "--value"]).split()
+                expected_dropins = [str(p) for p, _, _ in dropins if p.parent.name == unit_name + "." + suffix + ".d"]
+                if sorted(effective_dropins) != sorted(expected_dropins):
+                    raise ValueError("unrecognized effective scheduler drop-in")
+            effective_before = linux_scheduler_effective(unit_name)
         if production:
             usage = shutil.disk_usage(scratch["mountpoint"])
             trigger_pct = scratch.get("trigger_pct", 70)
@@ -2017,7 +2104,7 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
         unit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         for target, content, old_content in units:
             if old_content is not None and (target.is_symlink() or not target.is_file()
-                    or target.stat().st_uid != os.geteuid() or target.read_text() != old_content):
+                    or target.stat().st_uid != os.geteuid() or target.read_bytes().decode("utf-8") != old_content):
                 raise RuntimeError("scheduler unit changed after preflight")
             if not target.exists():
                 with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
@@ -2039,6 +2126,13 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
                 linux_atomic_bytes(target, content.encode(), details)
                 replaced.append((target, previous_bytes, content.encode(), details))
         linux_command(["systemctl", "--user", "daemon-reload"])
+        if verify_effective:
+            stable_override = any(p.name == "10-stable-entrypoint.conf" for p, _, _ in dropins)
+            expected_command = (str(Path.home() / ".local/bin/diskm") if stable_override
+                                else "/usr/bin/bash " + str(runtime / "disk_magician.sh"))
+            expected_command += " tmp-scratch-sweep --scratch-only --clean"
+            if linux_scheduler_effective(unit_name) != (expected_command, "950000000", "*-*-* *:00/20:00"):
+                raise RuntimeError("effective scheduler command/timeout/cadence mismatch")
         linux_validate_mount(settings, scratch, registry()["volumes"].get(name))
         linux_command(["systemctl", "--user", "enable", "--now", unit_name + ".timer"])
         linux_command(["systemctl", "--user", "is-active", "--quiet", unit_name + ".timer"])
@@ -2052,13 +2146,17 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
         print("volume scheduler: " + str(error), file=sys.stderr)
         for target, previous_bytes, installed_bytes, details in reversed(replaced):
             try:
-                if target.read_bytes() == installed_bytes:
-                    linux_atomic_bytes(target, previous_bytes, details)
+                if (target.is_symlink() or target.stat().st_uid != os.geteuid()
+                        or target.read_bytes() != installed_bytes):
+                    raise RuntimeError("scheduler rollback target changed; backup retained")
+                linux_atomic_bytes(target, previous_bytes, details)
             except Exception as rollback_error:
                 print("volume scheduler rollback: " + str(rollback_error), file=sys.stderr)
         if replaced:
             try:
                 linux_command(["systemctl", "--user", "daemon-reload"])
+                if effective_before is not None and linux_scheduler_effective(unit_name) != effective_before:
+                    raise RuntimeError("restored effective scheduler state mismatch; backups retained")
             except Exception as rollback_error:
                 print("volume scheduler rollback reload: " + str(rollback_error), file=sys.stderr)
         return 75

@@ -227,6 +227,264 @@ class LinuxScratchTest(VolumeTestBase):
                            ["--interval-seconds", "1.5"], ["--interval-seconds"], ["--unknown"]):
                 self.assertEqual(volume.main(["scheduler", "install", "scratch", *suffix]), 2)
 
+    def test_scheduler_timeout_covers_wrapper_deadline(self):
+        service = (ROOT / "systemd/diskm-scratch-reclaim.service.in").read_text()
+        self.assertIn("TimeoutStartSec=950\n", service)
+        self.assertIn("tmp-scratch-sweep --scratch-only --clean", service)
+
+    @contextlib.contextmanager
+    def scheduler_deployed_fixture(self):
+        import hashlib
+        import shutil
+        self.set_linux_image_config(2)
+        previous = self.root / '.local/share/disk-magician/candidates' / ('a' * 40) / 'venv/lib/python3.12/site-packages/disk_magician'
+        current = self.root / 'deployed-package'
+        for runtime in (previous, current):
+            (runtime / 'scripts').mkdir(parents=True)
+            (runtime / 'systemd').mkdir()
+            (runtime / 'disk_magician.sh').write_text('# fixture')
+            (runtime / 'scripts/volume.py').write_text('# pinned helper')
+            for suffix in ('service', 'timer'):
+                shutil.copy(ROOT / 'systemd' / f'diskm-scratch-reclaim.{suffix}.in', runtime / 'systemd')
+        unit_name = 'diskm-scratch-reclaim-' + hashlib.sha256(os.fsencode(self.config.resolve())).hexdigest()[:12]
+        units = self.root / '.config/systemd/user'
+        service = units / (unit_name + '.service')
+        timer = service.with_suffix('.timer')
+        calls = []
+        def command(args):
+            calls.append(args)
+            if 'show' not in args:
+                return ''
+            prop = next(a for a in args if a.startswith('--property=')).split('=', 1)[1]
+            dropin = service.with_name(service.name + '.d') / '10-stable-entrypoint.conf'
+            if prop == 'DropInPaths':
+                return str(dropin if args[3].endswith('.service') else timer.with_name(timer.name + '.d') / '20-cadence.conf')
+            if prop == 'ExecStart':
+                source = dropin.read_text() if dropin.exists() else service.read_text()
+                value = [line.split('=', 1)[1] for line in source.splitlines() if line.startswith('ExecStart=')][-1]
+                return '{ path=' + value.split()[0] + ' ; argv[]=' + value + ' ; ignore_errors=no ; }'
+            if prop == 'TimeoutStartUSec':
+                return '950000000' if 'TimeoutStartSec=950' in service.read_text() else 'infinity'
+            if prop == 'TimersCalendar':
+                return '{ OnCalendar=*-*-* *:00/20:00 ; next_elapse=123 ; }'
+            raise AssertionError(args)
+        with mock.patch.object(volume.Path, 'home', return_value=self.root), \
+             mock.patch.object(volume, 'linux_validate_mount'), \
+             mock.patch.object(volume, 'linux_command', side_effect=command) as cmd, \
+             mock.patch.object(volume.subprocess, 'run', return_value=mock.Mock(returncode=3)):
+            with mock.patch.object(volume, '__file__', str(previous / 'scripts/volume.py')):
+                self.assertEqual(volume.linux_scheduler_install_cmd('scratch'), 0)
+            for path in (previous / 'systemd/diskm-scratch-reclaim.service.in', service):
+                path.write_text(path.read_text().replace('tmp-scratch-sweep --scratch-only --clean', 'volume reclaim --clean').replace('TimeoutStartSec=350\n', '').replace('TimeoutStartSec=950\n', ''))
+            timer.write_text(timer.read_text().replace('OnCalendar=*:0/20', 'OnCalendar=hourly'))
+            sd = service.with_name(service.name + '.d')
+            td = timer.with_name(timer.name + '.d')
+            sd.mkdir(); td.mkdir()
+            dropin = sd / '10-stable-entrypoint.conf'
+            dropin.write_text('# Pin to the deployed uv-tool entry point, matching disk-magician-snapshot and\n'
+                '# disk-magician-routine-clean. The base unit hard-coded a\n'
+                '# candidates/<sha>/venv/... path built from 19f764bc, so every deploy since then\n'
+                '# was invisible to this timer (verified 2026-10-30: deployed 0.2.331 while this\n'
+                '# unit still executed the 19f764bc candidate).\n'
+                '[Service]\nExecStart=\nExecStart=' + str(self.root / '.local/bin/diskm') + ' volume reclaim --clean\n')
+            cadence = td / '20-cadence.conf'
+            cadence.write_text('[Timer]\nOnCalendar=\nOnCalendar=*-*-* *:00/20:00\n')
+            self.state_dir.mkdir(exist_ok=True)
+            manifest = {'package_root': str(current), 'package_hashes': {str(p.relative_to(current)): hashlib.sha256(p.read_bytes()).hexdigest() for p in current.rglob('*') if p.is_file()}}
+            (self.state_dir / 'deployed.json').write_text(json.dumps(manifest))
+            calls.clear(); cmd.reset_mock()
+            with mock.patch.object(volume, '__file__', str(current / 'scripts/volume.py')):
+                yield previous, current, service, timer, dropin, cadence, cmd, command
+
+    def test_scheduler_deployed_upgrade_migrates_known_dropin(self):
+        with self.scheduler_deployed_fixture() as (previous, current, service, timer, dropin, cadence, cmd, command):
+            old_dropin = dropin.read_text()
+            old_cadence = cadence.read_bytes()
+            self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 0)
+            self.assertEqual(dropin.read_text(), old_dropin.replace('volume reclaim --clean', 'tmp-scratch-sweep --scratch-only --clean'))
+            self.assertEqual(cadence.read_bytes(), old_cadence)
+            self.assertIn('TimeoutStartSec=950', service.read_text())
+            self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 0)
+
+    def test_scheduler_deployed_upgrade_rejects_manifest_drift(self):
+        for failure in ('missing', 'stale', 'unpinned', 'hash', 'root', 'git', 'symlink'):
+            with self.subTest(failure=failure), self.scheduler_deployed_fixture() as fixture:
+                previous, current, service, timer, dropin, cadence, cmd, command = fixture
+                old = [p.read_bytes() for p in (service, timer, dropin, cadence)]
+                manifest = self.state_dir / 'deployed.json'
+                if failure == 'missing': manifest.unlink()
+                elif failure == 'stale': manifest.write_text(json.dumps({'version': '0.2.339'}))
+                elif failure == 'unpinned':
+                    document = json.loads(manifest.read_text())
+                    del document['package_hashes']['systemd/diskm-scratch-reclaim.service.in']
+                    manifest.write_text(json.dumps(document))
+                elif failure == 'hash': (current / 'scripts/volume.py').write_text('drift')
+                elif failure == 'root': manifest.write_text(json.dumps({'package_root': str(previous), 'package_hashes': {'scripts/volume.py': 'a' * 64}}))
+                elif failure == 'git': (current / '.git').mkdir()
+                else:
+                    helper = current / 'disk_magician.sh'
+                    helper.unlink(); helper.symlink_to(previous / 'disk_magician.sh')
+                self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 75)
+                self.assertEqual([p.read_bytes() for p in (service, timer, dropin, cadence)], old)
+                cmd.assert_not_called()
+            # Each subtest gets independent fixture directories.
+            import shutil
+            for p in (self.root / '.local', self.root / '.config', self.root / 'deployed-package'):
+                shutil.rmtree(p)
+
+    def test_scheduler_deployed_upgrade_rejects_unknown_dropins(self):
+        for failure in ('bytes', 'extra', 'symlink', 'owner'):
+            with self.subTest(failure=failure), self.scheduler_deployed_fixture() as fixture:
+                previous, current, service, timer, dropin, cadence, cmd, command = fixture
+                if failure == 'bytes': dropin.write_text(dropin.read_text() + '# unknown\n')
+                elif failure == 'extra': (dropin.parent / 'override.conf').write_text('[Service]\nExecStart=/bin/true\n')
+                elif failure == 'symlink':
+                    target = self.root / 'original-dropin'; target.write_bytes(dropin.read_bytes())
+                    dropin.unlink(); dropin.symlink_to(target)
+                old = [p.read_bytes() for p in (service, timer, dropin, cadence)]
+                original_stat = pathlib.Path.stat
+                def wrong_owner(path, *args, **kwargs):
+                    details = original_stat(path, *args, **kwargs)
+                    if path == dropin:
+                        details = os.stat_result((*details[:4], os.geteuid() + 1, *details[5:]))
+                    return details
+                with mock.patch.object(pathlib.Path, 'stat', wrong_owner if failure == 'owner' else original_stat):
+                    self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 75)
+                self.assertEqual([p.read_bytes() for p in (service, timer, dropin, cadence)], old)
+                self.assertFalse(list(service.parent.rglob('*.diskm-backup-*')))
+                cmd.assert_not_called()
+            import shutil
+            for p in (self.root / '.local', self.root / '.config', self.root / 'deployed-package'):
+                shutil.rmtree(p)
+
+    def test_scheduler_deployed_upgrade_effective_mismatch_rolls_back(self):
+        for prop in ('ExecStart', 'TimeoutStartUSec', 'TimersCalendar'):
+            with self.subTest(prop=prop), self.scheduler_deployed_fixture() as fixture:
+                previous, current, service, timer, dropin, cadence, cmd, command = fixture
+                old = [p.read_bytes() for p in (service, timer, dropin, cadence)]
+                def wrong_effective(args):
+                    if '--property=' + prop in args and 'TimeoutStartSec=950' in service.read_text():
+                        return 'wrong effective state'
+                    return command(args)
+                cmd.side_effect = wrong_effective
+                self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 75)
+                self.assertEqual([p.read_bytes() for p in (service, timer, dropin, cadence)], old)
+                self.assertGreaterEqual(sum('daemon-reload' in c.args[0] for c in cmd.call_args_list), 2)
+                self.assertTrue(list(service.parent.rglob('*.diskm-backup-*')))
+            import shutil
+            for p in (self.root / '.local', self.root / '.config', self.root / 'deployed-package'):
+                shutil.rmtree(p)
+
+    def test_scheduler_deployed_upgrade_rejects_crlf_override_bytes(self):
+        with self.scheduler_deployed_fixture() as fixture:
+            previous, current, service, timer, dropin, cadence, cmd, command = fixture
+            dropin.write_bytes(dropin.read_bytes().replace(b'\n', b'\r\n'))
+            old = [p.read_bytes() for p in (service, timer, dropin, cadence)]
+            self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 75)
+            self.assertEqual([p.read_bytes() for p in (service, timer, dropin, cadence)], old)
+            cmd.assert_not_called()
+            self.assertFalse(list(service.parent.rglob('*.diskm-backup-*')))
+
+    def test_scheduler_deployed_upgrade_rejects_effective_external_dropin(self):
+        with self.scheduler_deployed_fixture() as fixture:
+            previous, current, service, timer, dropin, cadence, cmd, command = fixture
+            def external(args):
+                if '--property=DropInPaths' in args:
+                    return command(args) + ' /etc/systemd/user/service.d/unknown.conf'
+                return command(args)
+            cmd.side_effect = external
+            old = [p.read_bytes() for p in (service, timer, dropin, cadence)]
+            self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 75)
+            self.assertEqual([p.read_bytes() for p in (service, timer, dropin, cadence)], old)
+            self.assertFalse(list(service.parent.rglob('*.diskm-backup-*')))
+            self.assertFalse(any('daemon-reload' in c.args[0] for c in cmd.call_args_list))
+
+    def test_scheduler_deployed_upgrade_active_preserves_all_files(self):
+        with self.scheduler_deployed_fixture() as fixture:
+            previous, current, service, timer, dropin, cadence, cmd, command = fixture
+            old = [p.read_bytes() for p in (service, timer, dropin, cadence)]
+            with mock.patch.object(volume.subprocess, 'run', return_value=mock.Mock(returncode=0)):
+                self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 75)
+            self.assertEqual([p.read_bytes() for p in (service, timer, dropin, cadence)], old)
+            cmd.assert_not_called()
+            self.assertFalse(list(service.parent.rglob('*.diskm-backup-*')))
+
+    def test_scheduler_deployed_upgrade_still_requires_old_candidate(self):
+        with self.scheduler_deployed_fixture() as fixture:
+            previous, current, service, timer, dropin, cadence, cmd, command = fixture
+            self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(current)), 75)
+            cmd.assert_not_called()
+            self.assertFalse(list(service.parent.rglob('*.diskm-backup-*')))
+
+    def test_scheduler_deployed_upgrade_rollback_failures_keep_backups(self):
+        for failure in ('reload', 'restore-state', 'restore-write'):
+            with self.subTest(failure=failure), self.scheduler_deployed_fixture() as fixture:
+                previous, current, service, timer, dropin, cadence, cmd, command = fixture
+                old = {p: p.read_bytes() for p in (service, timer, dropin)}
+                reloads = 0
+                def failing_command(args):
+                    nonlocal reloads
+                    if 'daemon-reload' in args:
+                        reloads += 1
+                        if failure == 'reload':
+                            raise RuntimeError('fixture reload failed')
+                    if '--property=ExecStart' in args and reloads:
+                        return 'broken effective state'
+                    return command(args)
+                cmd.side_effect = failing_command
+                atomic = volume.linux_atomic_bytes
+                def failing_write(path, data, details):
+                    if failure == 'restore-write' and reloads and data == old.get(path):
+                        raise OSError('fixture restore write failed')
+                    atomic(path, data, details)
+                with mock.patch.object(volume, 'linux_atomic_bytes', side_effect=failing_write), \
+                     mock.patch('sys.stderr', new_callable=io.StringIO) as errors:
+                    self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 75)
+                self.assertIn('rollback', errors.getvalue())
+                for p, original in old.items():
+                    import hashlib
+                    backup = p.with_name(p.name + '.diskm-backup-' + hashlib.sha256(original).hexdigest()[:16])
+                    self.assertEqual(backup.read_bytes(), original)
+                    if failure != 'restore-write':
+                        self.assertEqual(p.read_bytes(), original)
+            import shutil
+            for p in (self.root / '.local', self.root / '.config', self.root / 'deployed-package'):
+                shutil.rmtree(p)
+
+    def test_scheduler_effective_rejects_mismatched_path_and_extra_commands(self):
+        argv = '/home/owner/.local/bin/diskm tmp-scratch-sweep --scratch-only --clean'
+        record = '{ path=/home/owner/.local/bin/diskm ; argv[]=' + argv + ' ; ignore_errors=no ; }'
+        for command in (record.replace('path=/home/owner/.local/bin/diskm', 'path=/tmp/unexpected'),
+                        record + ' { path=/bin/true ; argv[]=/bin/true ; ignore_errors=no ; }'):
+            with self.subTest(command=command):
+                def show(args):
+                    if '--property=ExecStart' in args: return command
+                    if '--property=TimersCalendar' in args: return '{ OnCalendar=*-*-* *:00/20:00 ; next_elapse=0 ; }'
+                    return '950000000'
+                with mock.patch.object(volume, 'linux_command', side_effect=show):
+                    with self.assertRaises(ValueError):
+                        volume.linux_scheduler_effective('fixture')
+
+    def test_scheduler_effective_rejects_thirty_minute_timeout(self):
+        with self.scheduler_deployed_fixture() as fixture:
+            previous, current, service, timer, dropin, cadence, cmd, command = fixture
+            old = [p.read_bytes() for p in (service, timer, dropin, cadence)]
+            def thirty_minutes(args):
+                value = command(args)
+                return '30min' if value == '950000000' else value
+            cmd.side_effect = thirty_minutes
+            self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 75)
+            self.assertEqual([p.read_bytes() for p in (service, timer, dropin, cadence)], old)
+
+    def test_scheduler_effective_normalizes_systemctl_timespan(self):
+        with self.scheduler_deployed_fixture() as fixture:
+            previous, current, service, timer, dropin, cadence, cmd, command = fixture
+            def formatted(args):
+                value = command(args)
+                return '15min 50s' if value == '950000000' else value
+            cmd.side_effect = formatted
+            self.assertEqual(volume.linux_scheduler_install_cmd('scratch', upgrade_from=str(previous)), 0)
+
     def test_scheduler_upgrade_replaces_only_exact_previous_candidate(self):
         import hashlib
         import shutil
@@ -252,8 +510,8 @@ class LinuxScratchTest(VolumeTestBase):
             # Reproduce installed pre-policy hourly units, not a second copy
             # of the new renderer. Upgrade must migrate BOTH exact units.
             old_template = previous / "systemd/diskm-scratch-reclaim.service.in"
-            old_template.write_text(old_template.read_text().replace(" --available-floor", "").replace("TimeoutStartSec=350\n", ""))
-            service.write_text(service.read_text().replace(" --available-floor", "").replace("TimeoutStartSec=350\n", ""))
+            old_template.write_text(old_template.read_text().replace(" --available-floor", "").replace("TimeoutStartSec=950\n", ""))
+            service.write_text(service.read_text().replace(" --available-floor", "").replace("TimeoutStartSec=950\n", ""))
             timer.write_text(timer.read_text().replace("OnCalendar=*:0/20", "OnCalendar=hourly"))
             old = service.read_bytes()
             old_timer = timer.read_bytes()
