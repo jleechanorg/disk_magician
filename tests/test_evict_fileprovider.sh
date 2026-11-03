@@ -137,6 +137,8 @@ n_dup="$(awk -F'\t' '$2=="evict_fileprovider.sh" && $3=="prune_unuploaded_duplic
 SQL_HOME="$T/sqlite-home"
 SQL_BACKUPS="$T/sqlite-backups/codex_conversations"
 mkdir -p "$SQL_HOME/.codex" "$SQL_BACKUPS"
+# Host rm shims (~/.local/bin/rm -> $HOME/.local/bin/guards/rm) resolve via $HOME; keep them reachable under the fixture HOME.
+if [[ -d "$HOME/.local/bin/guards" ]]; then mkdir -p "$SQL_HOME/.local/bin"; ln -s "$HOME/.local/bin/guards" "$SQL_HOME/.local/bin/guards"; fi
 python3 - "$SQL_HOME/.codex" "$SQL_BACKUPS" <<'PYSQL'
 import os, shutil, sqlite3, sys
 primary, backups = sys.argv[1:]
