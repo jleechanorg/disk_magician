@@ -101,6 +101,7 @@ c_line="$(printf '%s\n' "$out" | grep -n "^removed:.*/c " | cut -d: -f1)"
 [[ -n "$b_line" && -n "$c_line" && "$b_line" -lt "$c_line" ]] && ok "oldest entry is evicted first" || bad "oldest entry is evicted first" "b=$b_line c=$c_line"
 check "clean reports the target stop" "lru: stop=target-reached evicted=2" "$out"
 check "deletion log records the prior C14 verdict" "scratch-lru:kept:unproven-content" "$(cat "$LOG")"
+check "summary tallies prior verdicts" "lru: prior_verdict kept:unproven-content=2" "$out"
 
 echo "Test 4: under target is a no-op"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 90 2>&1)"; rc=$?
@@ -153,7 +154,7 @@ out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 
 gone dirty-repo
 check "deletion log line carries the dirty verdict" "scratch-lru:kept:dirty" "$(grep -F "$SCRATCH_ROOT/dirty-repo" "$LOG")"
 check "summary counts the dirty eviction" "not_pushed_or_dirty=1" "$out"
-check "summary lists the prior verdict" "lru: prior_verdict kept:dirty" "$out"
+check "summary lists the prior verdict" "lru: prior_verdict kept:dirty=1" "$out"
 
 echo "Test 9: usage that cannot be measured fails closed"
 use_root

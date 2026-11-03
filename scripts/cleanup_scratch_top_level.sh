@@ -375,7 +375,7 @@ verdict_and_maybe_remove() {
   esac
 }
 
-echo "=== SCRATCH TOP-LEVEL PRUNE ($([[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo CLEAN)) — floor ${MIN_HOURS}h, cap ${MAX_GIB} GiB ==="
+echo "=== SCRATCH TOP-LEVEL PRUNE ($([[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo CLEAN)) — floor $([[ -n "$BUDGET_PCT" ]] && echo "${BUDGET_FLOOR_MINUTES}m" || echo "${MIN_HOURS}h"), cap ${MAX_GIB} GiB ==="
 echo "root: $root"
 
 # A scan of a large Scratch volume walks every candidate twice (content mtime
@@ -597,7 +597,7 @@ if [[ -n "$BUDGET_PCT" ]]; then
   # Audit line: which C14 verdicts the evictions overrode, and how many of them
   # held dirty or unpushed repository work.
   echo "lru: stop=${budget_stop:-candidates-exhausted} $([[ "$DRY_RUN" == true ]] && echo would_evict || echo evicted)=$(( removed + removable )) not_pushed_or_dirty=$(printf '%s' "$lru_priors" | grep -cE 'kept:(not-pushed|dirty)')"
-  printf '%s' "$lru_priors" | sort | uniq -c | sed 's/^ */lru: prior_verdict /'
+  printf '%s' "$lru_priors" | sort | uniq -c | sed -E 's/^ *([0-9]+) (.*)$/lru: prior_verdict \2=\1/'
   [[ "$budget_stop" == measurement-unavailable ]] && { echo skipped:measurement-unavailable; exit 75; }
 fi
 exit 0
