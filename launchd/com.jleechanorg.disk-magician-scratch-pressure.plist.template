@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Every 20 minutes, reclaim only verified Scratch below 50 GiB available.
-     Does not accelerate the legacy general /tmp sweep. Installation is separate. -->
+<!-- Every 20 minutes, run safe top-level Scratch pruning and the existing
+     quota reclaim. Each step requires the verified Scratch mount and the
+     available-space floor; the ordinary /tmp sweep keeps its hourly cadence. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -9,9 +10,8 @@
   <key>ProgramArguments</key>
   <array>
     <string>@HOME@/.local/bin/diskm</string>
-    <string>volume</string>
-    <string>reclaim</string>
-    <string>--available-floor</string>
+    <string>tmp-scratch-sweep</string>
+    <string>--scratch-only</string>
     <string>--clean</string>
   </array>
   <key>EnvironmentVariables</key>

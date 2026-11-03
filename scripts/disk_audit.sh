@@ -581,9 +581,9 @@ if [[ "$MODE" == "clean" ]]; then
         run_category "PR scratch & analyzers" "$SCRIPT_DIR/cleanup_pr_scratch.sh" $clean_arg
     fi
 
-    # Top-level Scratch volume & tmp/ prune (>=48h floor, live-PID + lease + ballast gated)
+    # Top-level Scratch volume & tmp/ prune (>=24h floor, C14 live-PID + lease + ballast gated)
     if [[ -f "$SCRIPT_DIR/cleanup_scratch_top_level.sh" ]]; then
-        run_category "Scratch top-level & tmp (>=48h)" "$SCRIPT_DIR/cleanup_scratch_top_level.sh" $clean_arg
+        run_category "Scratch top-level & tmp (>=24h)" "$SCRIPT_DIR/cleanup_scratch_top_level.sh" $clean_arg
     fi
 
     # Rebuildable Xcode DerivedData & simulator caches (Tier 2: Xcode, bead disk_magician-wgo)

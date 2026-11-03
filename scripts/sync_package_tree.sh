@@ -51,8 +51,9 @@ PATTERNS=(
 
 if [[ -n "$STAGE_DIR" ]]; then
   mkdir -p "$STAGE_DIR"
-  for pkg_file in "__init__.py" "cli.py"; do
+  for pkg_file in "__init__.py" "cli.py" "python_bin/python3"; do
     if [[ -f "$DEST_ROOT/$pkg_file" ]]; then
+      mkdir -p "$(dirname "$STAGE_DIR/$pkg_file")"
       cp -p "$DEST_ROOT/$pkg_file" "$STAGE_DIR/$pkg_file"
     fi
   done

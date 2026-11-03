@@ -444,6 +444,18 @@ def entry_ok(rel, st, data=None):  # git's own type and name; refs/logs files mu
     return bool(REF.fullmatch(data)) if top == "refs" else all(map(LOG.fullmatch, data.splitlines(True)))
 
 
+def _sparse_pattern_file_present(ad):
+    """True only when <admin>/info/sparse-checkout exists as a non-empty regular file.
+    entry_ok already allows that path as git-owned, so this adds no new trust; it is the
+    positive evidence that `git sparse-checkout` really is active in THIS worktree."""
+    p = os.path.join(ad, "info", "sparse-checkout")
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_size > 0
+
+
 def _is_sparse_only_worktree_config(data):
     if not data:
         return False
@@ -539,7 +551,14 @@ def admin(ad, lease=None):
         now = os.lstat(ad if rel == "." else os.path.join(ad, rel))
         if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
             return print("kept:check-failed")
-    sparse_wt_cfg = _is_sparse_only_worktree_config(small.get("config.worktree", b""))
+    # config.worktree is trusted only when it is a genuine sparse-checkout artifact:
+    # `git sparse-checkout set` writes the [core] sparseCheckout keys here AND the
+    # per-worktree info/sparse-checkout pattern file. Content alone is not proof --
+    # a forged or leftover config.worktree carrying sparse-looking keys but no
+    # pattern file holds arbitrary git config (hooks, filters) that no lease
+    # git_meta hash covers, so it must fail closed as kept:admin-unknown.
+    sparse_wt_cfg = _is_sparse_only_worktree_config(
+        small.get("config.worktree", b"")) and _sparse_pattern_file_present(ad)
     if "config.worktree" in names and small.get("config.worktree") and not sparse_wt_cfg and hashlib.sha256(small["config.worktree"]).hexdigest() != (
             (json.load(open(lease)).get("git_meta") or {}) if lease and os.path.isfile(lease) else {}).get("config.worktree"):
         return print("kept:admin-unknown")
