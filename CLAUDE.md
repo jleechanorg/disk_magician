@@ -468,8 +468,10 @@ contradicted it. Check them in this order before proposing a reclaim change:
   symlink.** Moved-`/tmp` and checkout scratch are full of them, so the largest
   orphans were never candidates at all (a 32 GiB directory silently excluded).
   Callers should fall back to the best-effort walk, which reads file mtimes and
-  never traverses a link (`find` without `-L`). Candidate set went 7.2 → 166 GiB
-  with that one fallback.
+  never traverses a link (`find` without `-L`). With that fallback in a branch
+  (PR #293, since superseded by a redesign of `volume_reclaim.sh`), the candidate
+  set measured 7.2 → 166 GiB — re-measure against current main rather than
+  assuming that landed.
 - **Trim exists — do not grep for the `fstrim` binary.** `scripts/volume.py`
   issues a raw `FITRIM` ioctl (`fcntl.ioctl(fd, 0xc0185879, …)`). Grepping for
   "fstrim" finds nothing and yields the false conclusion "there is no trim step".
@@ -478,8 +480,11 @@ contradicted it. Check them in this order before proposing a reclaim change:
   225 KB. A manual `sudo fstrim` right afterwards legitimately prints ~4 KiB
   because there is nothing left to trim.
 - **`--clean` can delete exactly one entry.** The walk breaks once usage is at or
-  below the stop rate; on a 74%-full volume that is after the first removal. The
-  stop rate is now `VOLUME_RECLAIM_TARGET_PCT` (default 80).
+  below the stop rate. The rate is `DISK_MAGICIAN_SCRATCH_TARGET_PCT`, else config
+  `volumes.classes.scratch.target_pct` (default 50); the trigger is the sibling
+  `trigger_pct` (default 70). Reaching top-level allocations is a *shape* problem,
+  not a knob problem: main still enumerates `find -mindepth 3 -maxdepth 3`, so
+  `relocated-tmp`, `test-loc-review` and `advice-*` are unreachable at any env value.
 - **A scheduled unit pinned to `candidates/<sha>/venv/...` ignores every deploy.**
   `diskm-scratch-reclaim.service` was pinned that way while its siblings ran
   `/home/jleechan/.local/bin/diskm`; deploys were invisible to it for days. If a
