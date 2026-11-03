@@ -257,11 +257,6 @@ verdict_and_maybe_remove() {
         override="$verdict"
         verdict=remove
       fi ;;
-    kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data|kept:admin-unknown)
-      if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" && -n "${RECENCY_SPEC:-}" ]]; then
-        override="$verdict"
-        verdict=remove
-      fi ;;
   esac
   if [[ "$verdict" != remove ]]; then
     [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
@@ -280,19 +275,16 @@ verdict_and_maybe_remove() {
       echo kept:check-failed
       return 0
     fi
-    # The secrets probe short-circuits BEFORE c14_repos_ok inside the verdict, so
-    # a tree that is both secret-like and a dirty/unpushed repository returns
-    # kept:secret-like without ever having its repositories checked. An override
-    # must therefore re-run the repository provenance gate explicitly unless the
-    # operator-approved 12h emergency scratch floor is active.
-    if [[ "$override" == "kept:secret-like" && -z "${RECENCY_SPEC:-}" ]]; then
-      local repo_reason
-      if ! repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
-        [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
-        rm -f "$inv" "$binding"
-        echo "${repo_reason:-kept:check-failed}"
-        return 0
-      fi
+    # A content override never grants repository-discard authority. The secrets
+    # probe can short-circuit before provenance, so validate every override with
+    # the shared repository gate regardless of the chosen recency floor.
+    local repo_reason
+    # Keep Git status from refreshing the index after the immutable inventory.
+    if ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
+      [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
+      rm -f "$inv" "$binding"
+      echo "${repo_reason:-kept:check-failed}"
+      return 0
     fi
   fi
   # A preview must reach the same verdict --clean would reach, so the override's
@@ -332,7 +324,30 @@ candidates=()
 for _top in "$root"/*; do
   [[ -e "$_top" || -L "$_top" ]] || continue
   _base="${_top##*/}"
-  case "$_base" in .*|tmp) continue ;; esac
+  case "$_base" in
+    .*|tmp) continue ;;
+    evidence|worldai_frontend|worldarchitect.ai|worldai_claw|disk_magician|mirrors|relocated-tmp|advice-11070)
+      # Keep automatic cursor ordering/source identity on the existing queue.
+      # Nested manual discovery must not replace its pending root item.
+      if [[ "$SCRATCH_AUTOMATIC" != 1 && -d "$_top" && ! -L "$_top" ]]; then
+        for _sub in "$_top"/*; do
+          [[ -e "$_sub" || -L "$_sub" ]] || continue
+          case "${_sub##*/}" in
+            .*) continue ;;
+            build|evidence|r10)
+              if [[ -d "$_sub" && ! -L "$_sub" ]]; then
+                for _grand in "$_sub"/*; do
+                  [[ -e "$_grand" || -L "$_grand" ]] || continue
+                  case "${_grand##*/}" in .*) continue ;; esac
+                  candidates+=("$_grand")
+                done
+              fi ;;
+            *) candidates+=("$_sub") ;;
+          esac
+        done
+        continue
+      fi ;;
+  esac
   candidates+=("$_top")
 done
 if [[ -d "$root/tmp" && ! -L "$root/tmp" ]]; then
@@ -402,6 +417,11 @@ while IFS= read -r -d '' entry; do
   fi
   kb="$(deletion_size_kb "$entry" 2>/dev/null)" || kb=0
   [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
+  # Manual prioritization must not alter the automatic retention/cursor queue.
+  if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 && kb < 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} )); then
+    kept=$(( kept + 1 ))
+    continue
+  fi
   if (( MAX_KB > 0 && planned_kb + removed_kb + kb > MAX_KB )); then
     echo "capped:max-gib $entry ($(( kb / 1024 )) MB) — rerun with --max-gib to raise"
     capped=1
