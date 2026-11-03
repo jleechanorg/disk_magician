@@ -103,7 +103,8 @@ Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--d
                   evict least-recently-used entries until at or below N%.
                   Overrides content/provenance keeps (dirty, not-pushed,
                   secret-like, ...); never lease, live-cwd, open-file or
-                  floor keeps. --clean needs SCRATCH_TOP_LEVEL_APPROVED=1.
+                  floor keeps; linked-worktree roots keep repository keeps.
+                  --clean needs SCRATCH_TOP_LEVEL_APPROVED=1.
   --budget-floor-minutes N  Budget-mode recency floor (default 120, min 60).
 
 Automatic mode removes only C14-recognized ephemeral Scratch artifacts. It never
