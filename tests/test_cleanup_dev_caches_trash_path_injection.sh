@@ -3,6 +3,7 @@
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK=$(mktemp -d)
+WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/home/.Trash" "$WORK/tmp" "$WORK/state"
 git init -q --bare -b main "$WORK/origin.git"
