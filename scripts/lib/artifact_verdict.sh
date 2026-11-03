@@ -135,8 +135,17 @@ c14_repo_pushed_ok() (
 
 # c14_repos_ok <root> [--outer-certificate <receipt>]: validate the outer copy
 # certificate, then run ordinary content and remote checks on every nested repository.
+# C14_OVERRIDABLE ("|"-separated kept: tokens, budget mode only): every repository
+# gets both checks; a listed keep is recorded and the walk continues, any other
+# keep or a `.git` file (linked worktree or submodule) returns rc 1 at once. rc 2
+# with the first recorded token means every keep was listed, so the decision does
+# not depend on discovery order.
+_c14_keep() {  # records into the caller's `soft`
+    if [[ -n "${C14_OVERRIDABLE:-}" && "|$C14_OVERRIDABLE|" == *"|$1|"* ]]; then soft=${soft:-$1}; return 0; fi
+    echo "${1:-kept:check-failed}"; return 1
+}
 c14_check_repo_list() {
-    local root=$1 deadline=${2:-} outer_receipt=${3:-} r v done= canon
+    local root=$1 deadline=${2:-} outer_receipt=${3:-} r v done= canon soft=
     canon="$(cd "$root" 2>/dev/null && pwd -P)" || { echo kept:check-failed; return 1; }
     if [[ -n "$outer_receipt" ]]; then
         v="$(python3 "$_AV_DIR/../c14_probe.py" outer-certificate "$canon" "$outer_receipt")" || { echo "${v:-kept:check-failed}"; return 1; }
@@ -146,10 +155,12 @@ c14_check_repo_list() {
         [[ "$r" == OK ]] && { done=1; continue; }
         [[ "$r" == kept:* ]] && { echo "$r"; return 1; }
         if [[ -n "$outer_receipt" && "$r" == "$canon" ]]; then continue; fi
-        v="$(c14_repo_content_ok "$r")" || { echo "$v"; return 1; }
-        v="$(c14_repo_pushed_ok "$r" "$root" "$deadline")" || { echo "$v"; return 1; }
+        [[ -n "${C14_OVERRIDABLE:-}" && -f "$r/.git" ]] && { echo kept:linked-worktree; return 1; }
+        v="$(c14_repo_content_ok "$r")" || _c14_keep "$v" || return 1
+        v="$(c14_repo_pushed_ok "$r" "$root" "$deadline")" || _c14_keep "$v" || return 1
     done
     [[ -n "$done" ]] || { echo kept:check-failed; return 1; }
+    [[ -z "$soft" ]] || { echo "$soft"; return 2; }
     echo ok
 }
 

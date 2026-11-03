@@ -183,6 +183,45 @@ gone secret-known
 check "unknown repository state keeps the secret-like entry" "kept:" "$(printf '%s\n' "$out" | grep -E "^kept:.* $SCRATCH_ROOT/secret-unknown")"
 if printf '%s\n' "$out" | grep -qE "^removed:.* $SCRATCH_ROOT/secret-unknown"; then bad "unknown-state secret-like entry is not reported removed"; else ok "unknown-state secret-like entry is not reported removed"; fi
 
+echo "Test 8c: a dirty linked worktree nested inside an entry keeps the entry"
+use_root
+make_tree nested-wt 600
+HOST="$T/hosts/h${ROOT_SEQ}"; mkdir -p "$HOST"
+git -C "$HOST" init -q
+printf 'base\n' >"$HOST/tracked.txt"
+git -C "$HOST" add tracked.txt
+git -C "$HOST" -c user.email=t@example.invalid -c user.name=t commit -qm base
+git -C "$HOST" worktree add -q -b nested-wt "$SCRATCH_ROOT/nested-wt/wt" HEAD
+printf 'unsaved\n' >>"$SCRATCH_ROOT/nested-wt/wt/tracked.txt"
+age "$SCRATCH_ROOT/nested-wt" 600
+out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+kept nested-wt
+grep -qs unsaved "$SCRATCH_ROOT/nested-wt/wt/tracked.txt" && ok "nested worktree's uncommitted change survives" || bad "nested worktree's uncommitted change survives"
+check "nested linked worktree is the keep reason" "kept:linked-worktree $SCRATCH_ROOT/nested-wt" "$out"
+
+echo "Test 8d: the override is decided over every repository, in either discovery order"
+use_root
+mk_repo() { # <dir> dirty|broken
+  mkdir -p "$1"; git -C "$1" init -q
+  case "$2" in
+    dirty) printf 'change\n' >"$1/tracked.txt"; git -C "$1" add tracked.txt ;;
+    broken) printf 'not-a-ref\n' >"$1/.git/HEAD" ;;
+  esac
+}
+# repos() lists repositories sorted, so the a-/z- names fix which one is checked first.
+make_tree dirty-first 600; mk_repo "$SCRATCH_ROOT/dirty-first/a-dirty" dirty; mk_repo "$SCRATCH_ROOT/dirty-first/z-broken" broken
+make_tree broken-first 600; mk_repo "$SCRATCH_ROOT/broken-first/a-broken" broken; mk_repo "$SCRATCH_ROOT/broken-first/z-dirty" dirty
+make_tree all-dirty 600; mk_repo "$SCRATCH_ROOT/all-dirty/a-dirty" dirty; mk_repo "$SCRATCH_ROOT/all-dirty/z-dirty" dirty
+for n in dirty-first broken-first all-dirty; do age "$SCRATCH_ROOT/$n" 600; done
+out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+kept dirty-first; kept broken-first
+[[ -d "$SCRATCH_ROOT/dirty-first/z-broken/.git" ]] && ok "unmeasured repository after a dirty one survives" || bad "unmeasured repository after a dirty one survives"
+for n in dirty-first broken-first; do
+  check "$n keeps on the unmeasured repository" "kept:check-failed $SCRATCH_ROOT/$n" "$out"
+done
+gone all-dirty
+check "every-repository-known entry logs each prior verdict" "scratch-lru:kept:dirty" "$(grep -F "$SCRATCH_ROOT/all-dirty" "$LOG")"
+
 echo "Test 9: usage that cannot be measured fails closed"
 use_root
 make_tree a 600

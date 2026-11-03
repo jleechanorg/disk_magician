@@ -83,6 +83,8 @@ MAX_GIB_SET=false
 [[ -n "${SCRATCH_PRUNE_MAX_GIB:-}" ]] && MAX_GIB_SET=true
 BUDGET_PCT=""
 BUDGET_FLOOR_MINUTES=120
+# Known content/provenance keeps budget mode may override; anything else keeps.
+BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
 DRY_RUN=true
 
 usage() {
@@ -102,8 +104,10 @@ Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--d
   --budget-pct N  LRU budget mode: while Scratch is above N% used (1-99),
                   evict least-recently-used entries until at or below N%.
                   Overrides content/provenance keeps (dirty, not-pushed,
-                  secret-like, ...); never lease, live-cwd, open-file or
-                  floor keeps; linked-worktree roots keep repository keeps.
+                  secret-like, ...) only when every repository in the entry
+                  returns such a known keep; never lease, live-cwd, open-file,
+                  floor, unknown or failed checks, and never an entry holding
+                  a linked worktree.
                   --clean needs SCRATCH_TOP_LEVEL_APPROVED=1.
   --budget-floor-minutes N  Budget-mode recency floor (default 120, min 60).
 
@@ -305,16 +309,12 @@ verdict_and_maybe_remove() {
         verdict=remove
       fi ;;
   esac
-  # LRU budget mode (walx): Scratch is disposable, so content and provenance keeps
-  # do not block eviction. A linked-worktree root is excluded because C14 can
-  # return its owner-null lease's dirty/not-pushed reason before the live-cwd and
-  # open-file checks run; every other token below is reached only after them.
-  if [[ "$verdict" != remove && -n "$BUDGET_PCT" && ! -f "$entry/.git" ]]; then
-    case "$verdict" in
-      kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data|kept:admin-unknown)
-        override="$verdict"
-        verdict=remove ;;
-    esac
+  # LRU budget mode (walx): Scratch is disposable, so known content and provenance
+  # keeps may be overridden. C14 stops at the first failing check, so this is only
+  # a candidate override: the whole-entry repository check below decides it.
+  if [[ "$verdict" != remove && -n "$BUDGET_PCT" && "|$BUDGET_OVERRIDABLE|" == *"|$verdict|"* ]]; then
+    override="$verdict"
+    verdict=remove
   fi
   if [[ "$verdict" != remove ]]; then
     [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
@@ -336,27 +336,19 @@ verdict_and_maybe_remove() {
     # A content override never grants repository-discard authority. The secrets
     # probe can short-circuit before provenance, so validate every override with
     # the shared repository gate regardless of the chosen recency floor.
-    local repo_reason
-    if [[ -n "$BUDGET_PCT" && ! -f "$entry/.git" ]]; then
-      # Operator-approved LRU budget mode (--budget-pct) overrides KNOWN repository
-      # keeps (dirty, not-pushed, ...) for a secret-like entry. A repository check
-      # that fails, defers or returns an unrecognised token is unknown state and
-      # keeps the entry, like every other mode.
-      if [[ "$override" == "kept:secret-like" ]]; then
-        if ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
-          case "$repo_reason" in
-            kept:unproven-content|kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data)
-              override="kept:secret-like+${repo_reason}" ;;
-            *)
-              [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
-              rm -f "$inv" "$binding"
-              echo "${repo_reason:-kept:check-failed}"
-              return 0 ;;
-          esac
-        fi
-      fi
+    local repo_reason repo_rc=0
+    # Budget mode decides over the WHOLE entry: every repository the inventory
+    # holds is checked (rc 2 = every keep was a known overridable one); a linked
+    # worktree or submodule anywhere inside, or any failed, deferred or unknown
+    # check, keeps the entry whatever order repositories are discovered in.
     # Keep Git status from refreshing the index after the immutable inventory.
-    elif ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
+    if [[ -n "$BUDGET_PCT" ]]; then
+      repo_reason="$(GIT_OPTIONAL_LOCKS=0 C14_OVERRIDABLE="$BUDGET_OVERRIDABLE" c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || repo_rc=$?
+      (( repo_rc == 2 )) && { [[ "$repo_reason" == "$override" ]] || override+="+${repo_reason}"; repo_rc=0; }
+    else
+      repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || repo_rc=$?
+    fi
+    if (( repo_rc != 0 )); then
       [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
       rm -f "$inv" "$binding"
       echo "${repo_reason:-kept:check-failed}"
