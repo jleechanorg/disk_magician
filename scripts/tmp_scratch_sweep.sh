@@ -262,6 +262,13 @@ PY
   done
 fi
 [[ -n "$VOLUME_OUTPUT" ]] && printf '%s\n' "$VOLUME_OUTPUT"
+# Same classification as the scratch-prune child: rc 75 with the lock helper's
+# message is contention (nothing ran), not a failed reclaim.
+VOLUME_LOCK_SKIPPED=false
+if [[ $VOLUME_RC -eq 75 ]] && grep -q 'scratch lock held' <<<"$VOLUME_OUTPUT"; then
+  VOLUME_LOCK_SKIPPED=true
+  VOLUME_RC=0
+fi
 if [[ $VOLUME_RC -ne 0 ]]; then
   echo "[tmp_scratch_sweep] ERROR: volume reclaim failed" >&2
   rc=1
@@ -278,6 +285,8 @@ elif sys.argv[4].strip() == "skipped:measurement-unavailable":
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"measurement-unavailable"},separators=(",",":")))
 elif sys.argv[4].strip() == "skipped:unavailable" or sys.argv[4].strip().startswith("skipped:below-trigger:"):
  print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":sys.argv[4].strip(),"aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":None},separators=(",",":")))
+elif "scratch lock held" in sys.argv[4]:
+ print(json.dumps({"valid":True,"outcome":"skipped_lock","skip_reason":"scratch-lock-held","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scratch-lock-held"},separators=(",",":")))
 elif sys.argv[4].strip() == "skipped:scheduler-interrupted":
  print(json.dumps({"valid":True,"outcome":"timeout","skip_reason":"scheduler-interrupted","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scheduler-interrupted"},separators=(",",":")))
 else:
@@ -295,16 +304,19 @@ PYV
 )"
 VOLUME_REASON_JSON="$(python3 -c 'import json,sys; print(json.dumps(None if sys.argv[1]=="null" else sys.argv[1]))' "$VOLUME_REASON")"
 if [[ "$VOLUME_VALID" != true || "$VOLUME_OUTCOME" == error || "$VOLUME_OUTCOME" == timeout ]]; then rc=1; fi
+LOCK_SKIPPED_ANY=false
+[[ "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true || "$VOLUME_LOCK_SKIPPED" == true ]] && LOCK_SKIPPED_ANY=true
+REMOVED_ANY=$(( SCRATCH_PRUNE_REMOVED + $([[ "$VOLUME_REMOVED" =~ ^[0-9]+$ ]] && echo "$VOLUME_REMOVED" || echo 0) ))
 
 if [[ $rc -ne 0 ]]; then
   OUTCOME="error"
   REASON="one or more sweep steps failed"
-elif [[ "$SCRATCH_PRUNE_LOCK_SKIPPED" == true && "$VOLUME_REMOVED" =~ ^[0-9]+$ && "$VOLUME_REMOVED" -gt 0 ]]; then
+elif [[ "$LOCK_SKIPPED_ANY" == true && "$TMP_LOCK_SKIPPED" != true && $REMOVED_ANY -gt 0 ]]; then
   OUTCOME="partial"
-  REASON="scratch-prune skipped on lease lock; volume reclaim removed ${VOLUME_REMOVED} artifacts"
-elif [[ "$SCRATCH_PRUNE_LOCK_SKIPPED" == true && ( "$VOLUME_REMOVED" == "null" || "$VOLUME_REMOVED" -eq 0 ) ]]; then
+  REASON="a Scratch child skipped on the scratch lock; ${REMOVED_ANY} artifacts removed by the other"
+elif [[ "$LOCK_SKIPPED_ANY" == true && "$TMP_LOCK_SKIPPED" != true ]]; then
   OUTCOME="skipped_lock"
-  REASON="scratch-prune skipped on lease lock"
+  REASON="scratch lock held by another cleanup; no Scratch child ran"
 elif [[ "$SCRATCH_PRUNE_OUTCOME" == partial || "$SCRATCH_PRUNE_OUTCOME" == timeout ]]; then
   OUTCOME="partial"
   REASON="scratch-prune ended with ${SCRATCH_PRUNE_OUTCOME}; volume reclaim result is recorded separately"
@@ -370,7 +382,10 @@ if [[ -n "$FREE_BEFORE" && -n "$FREE_AFTER" ]]; then
   FREED_BYTES=$(( DF_DELTA > 0 ? DF_DELTA : 0 ))
   # A dry-run or lock-skipped sweep deletes nothing, so any positive df delta is
   # unrelated system activity and must never be reported as reclaimed bytes.
-  [[ "$clean_flag" == "--dry-run" || ( ( "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true ) && "$VOLUME_REMOVED" != "null" && "$VOLUME_REMOVED" -eq 0 ) ]] && FREED_BYTES=0
+  # freed_bytes is attributed removals only; the observed movement stays in df_delta_bytes.
+  TMP_REMOVED_NUM=0
+  [[ "$REMOVED_COUNT" =~ ^[0-9]+$ ]] && TMP_REMOVED_NUM="$REMOVED_COUNT"
+  [[ "$clean_flag" == "--dry-run" || $(( TMP_REMOVED_NUM + REMOVED_ANY )) -eq 0 ]] && FREED_BYTES=0
 fi
 # Lock contention needs no child receipt, but wrapper df evidence is still required.
 if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && "$DF_DELTA" != null ]]; then
@@ -396,7 +411,7 @@ if (( SCHEDULER_SIGNAL != 0 )); then
   rc=$((128 + SCHEDULER_SIGNAL))
 fi
 
-if [[ ( "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true ) && $rc -eq 0 && ( "$VOLUME_REMOVED" == "null" || "$VOLUME_REMOVED" -eq 0 ) ]]; then
+if [[ "$LOCK_SKIPPED_ANY" == true && $rc -eq 0 && $REMOVED_ANY -eq 0 ]]; then
   SAFETY='{"status": "not_applicable", "reason": "scratch_lock_contention_no_mutation", "delegated": false}'
 elif [[ "$clean_flag" == "--dry-run" ]]; then
   SAFETY='{"status": "no_mutation", "reason": "dry-run sweep completed without deletions", "delegated": false}'
@@ -406,7 +421,7 @@ else
   SAFETY='{"status": "delegated", "reason": "delegated to cleanup_tmp, cleanup_claude_state, and pressure-gated volume reclaim", "delegated": true}'
 fi
 LOCK_ARGS=()
-if [[ ( "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true ) && $rc -eq 0 ]]; then
+if [[ "$LOCK_SKIPPED_ANY" == true ]]; then
   LOCK_ARGS=(--lock '{"held": true, "acquired": false, "reason": "scratch lock held"}')
 fi
 SCRATCH_PRUNE_OUTCOME_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$SCRATCH_PRUNE_OUTCOME")"

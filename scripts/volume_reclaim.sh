@@ -9,8 +9,12 @@ for arg in "$@"; do
  case "$arg" in --clean) clean=true;; --available-floor) available_floor=true;;
  *) echo "usage: volume reclaim [--clean] [--available-floor]" >&2; exit 2;; esac
 done
-if [[ "$available_floor" == true && -z "$ACT_DEADLINE_AT" ]]; then
- ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+300)')" || exit 75
+# Every destructive pass holds the shared Scratch lock, so every clean pass is
+# bounded; an unbounded manual run starved the scheduled timer for 27 minutes.
+if [[ ( "$available_floor" == true || "$clean" == true ) && -z "$ACT_DEADLINE_AT" ]]; then
+ deadline_secs="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
+ [[ "$deadline_secs" =~ ^[1-9][0-9]*$ ]] || deadline_secs=300
+ ACT_DEADLINE_AT="$(python3 -c 'import sys,time; print(time.monotonic()+int(sys.argv[1]))' "$deadline_secs")" || exit 75
  export ACT_DEADLINE_AT
 fi
 if [[ "$clean" == true ]]; then source "$SCRIPT_DIR/lib/scratch_lock.sh"; scratch_lock_acquire volume_reclaim "$@" || exit $?; fi

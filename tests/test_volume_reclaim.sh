@@ -161,6 +161,28 @@ grep -q 'trim_target_not_reached before_bytes=900 after_bytes=900 quota_bytes=10
 [[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["aged_scanned"]==2 and r["candidates"]["removed"]==0 and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="protected"'
 touch "$TEST_ROOT/repo/build/younger/content"
+# An external holder of the real Scratch lock yields rc 75, zero removals and
+# untouched candidates; the holder's FD is a real flock, not a mock.
+ROOT_DIR="$ROOT" python3 - "$HOME" <<'PYH' &
+import fcntl,os,sys,time
+os.environ["HOME"]=sys.argv[1]
+sys.path.insert(0,os.path.join(os.environ["ROOT_DIR"],"scripts"))
+import scratch_lock
+fd=scratch_lock.open_lock(scratch_lock.lock_path(),create=True)
+fcntl.flock(fd,fcntl.LOCK_EX)
+print("held",flush=True)
+time.sleep(30)
+PYH
+LOCK_HOLDER=$!
+sleep 1
+set +e
+ROOT_DIR="$ROOT" DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/real-lock.out" 2>"$T/real-lock.err"
+REAL_LOCK_RC=$?
+set -e
+kill "$LOCK_HOLDER" 2>/dev/null || true; wait "$LOCK_HOLDER" 2>/dev/null || true
+[[ "$REAL_LOCK_RC" == 75 ]] && grep -q 'scratch lock held' "$T/real-lock.err"
+[[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
+echo 'real external lock holder: rc 75, zero removals, candidates untouched'
 # A pre-expired governor deadline reaches the C14 preflight, preserves the
 # current artifact, and leaves the cursor on that interrupted unit.
 CURSOR="$T/volume-reclaim.cursor"

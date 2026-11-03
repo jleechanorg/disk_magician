@@ -349,21 +349,15 @@ scratch_budget_content_mtime() {
     [[ -d "$path" && ! -L "$path" ]] || return 1
     links="$(find "$path" -xdev -type l -print -quit 2>/dev/null)" || return 1
     [[ -z "$links" ]] || return 1
-    local files item stamp newest=0
-    files="$(find "$path" -xdev -type f -print 2>/dev/null)" || return 1
-    [[ -n "$files" ]] || return 1
-    if [[ "$(uname -s)" == Darwin ]]; then stat_format='%m'; else stat_format='%Y'; fi
-    while IFS= read -r item; do
-      [[ -n "$item" ]] || continue
-      if [[ "$(uname -s)" == Darwin ]]; then
-        stamp="$(stat -f "$stat_format" "$item" 2>/dev/null)" || return 1
-      else
-        stamp="$(stat -c "$stat_format" "$item" 2>/dev/null)" || return 1
-      fi
-      [[ "$stamp" =~ ^[0-9]+$ ]] || return 1
-      (( stamp > newest )) && newest="$stamp"
-    done <<<"$files"
-    (( newest > 0 )) || return 1
+    # One batched find|stat pass instead of a stat fork per file (this runs
+    # under the Scratch lock). Any find/stat failure still fails closed.
+    local files newest
+    if [[ "$(uname -s)" == Darwin ]]; then
+      files="$(find "$path" -xdev -type f -exec stat -f %m {} + 2>/dev/null)" || return 1
+    else
+      files="$(find "$path" -xdev -type f -exec stat -c %Y {} + 2>/dev/null)" || return 1
+    fi
+    newest="$(awk '$0 !~ /^[0-9]+$/ {bad=1} $0+0 > m {m=$0+0} END {if (bad || NR==0 || m==0) exit 1; print m}' <<<"$files")" || return 1
     echo "$newest"
     return 0
   fi
