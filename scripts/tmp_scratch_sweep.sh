@@ -10,6 +10,7 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
+source "$SCRIPT_DIR/lib/scratch_roots.sh"
 act_parse_deadline_args "$@" || exit 2
 # Bash 3.2 with nounset treats an empty array expansion as an unbound variable.
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
@@ -41,8 +42,33 @@ governor_args=()
 [[ -n "$ACT_CURSOR" ]] && governor_args+=(--cursor "$ACT_CURSOR")
 
 RECEIPT_HELPER="${DISK_MAGICIAN_RECEIPT_HELPER:-$SCRIPT_DIR/job_receipt.py}"
+# The receipt's free-space evidence must measure the volume this sweep DELETES
+# from, never $SCRIPT_DIR: the installed package dir lives on /System/Volumes/Data
+# while the sweep prunes the Scratch volume (e.g. /Volumes/diskm-scratch). A
+# measurement of the wrong filesystem makes every free-space gate meaningless
+# (live 2026-11-03: receipt recorded free_bytes_before=30005886976 while the
+# Scratch mount had 3.82 GB free). Resolution reuses the same canonical command
+# the delegates use (volume_reclaim.sh, cleanup_scratch_top_level.sh), and falls
+# back to the tmp scratch roots cleanup_tmp.sh prunes only when this host has no
+# Scratch volume at all — never to the package dir.
+resolve_sweep_measure_target() {
+  local diskm="${DISK_MAGICIAN_DISKM_BIN:-$SCRIPT_DIR/../disk_magician.sh}" root
+  if root="$("$diskm" volume path scratch --for-reclaim 2>/dev/null)" && [[ -n "$root" && -d "$root" ]]; then
+    printf '%s' "$root"
+    return 0
+  fi
+  while IFS= read -r root; do
+    if [[ -n "$root" && -d "$root" ]]; then
+      printf '%s' "$root"
+      return 0
+    fi
+  done < <(scratch_roots_get_unique 2>/dev/null || true)
+  return 1
+}
+SWEEP_MEASURE_TARGET="$(resolve_sweep_measure_target)" || SWEEP_MEASURE_TARGET=""
 _df_free_bytes() {
-  df -kP "$SCRIPT_DIR" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4 * 1024}'
+  [[ -n "$SWEEP_MEASURE_TARGET" ]] || return 0
+  df -kP "$SWEEP_MEASURE_TARGET" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4 * 1024}'
 }
 FREE_BEFORE="$(_df_free_bytes)"
 [[ "$FREE_BEFORE" =~ ^[0-9]+$ ]] || FREE_BEFORE=""

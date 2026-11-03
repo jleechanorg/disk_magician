@@ -63,11 +63,20 @@ chmod +x "$MOCK_BIN/job_receipt.py"
 mkdir -p "$MOCK_BIN/lib"
 cp "$REPO_ROOT/scripts/lib/actuator_deadline.sh" "$MOCK_BIN/lib/actuator_deadline.sh"
 cp "$REPO_ROOT/scripts/lib/actuator_receipt.sh" "$MOCK_BIN/lib/actuator_receipt.sh"
+cp "$REPO_ROOT/scripts/lib/scratch_roots.sh" "$MOCK_BIN/lib/scratch_roots.sh"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/tmp_scratch_sweep.sh"
 chmod +x "$MOCK_BIN/tmp_scratch_sweep.sh"
 cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK'
 #!/bin/bash
 echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-} deadline=${ACT_DEADLINE_AT:-} cursor=${ACT_CURSOR:-}" >> "${INVOCATION_LOG:?}"
+if [[ "$*" == "volume path scratch --for-reclaim" ]]; then
+  # This fixture host has no registered Scratch volume, so the sweep's
+  # free-space receipt falls back to the tmp roots it prunes. Modeling the
+  # real 3/75 "no volume" answer keeps this a stub instead of a synthetic
+  # volume_reclaim run (see tests/test_tmp_scratch_sweep_df_target.sh for the
+  # volume-present case).
+  exit 75
+fi
 if [[ "$1" == "scratch-prune" ]]; then
   echo "scratch_prune_mode automatic=${DISK_MAGICIAN_SCRATCH_AUTOMATIC:-0} approval=${SCRATCH_TOP_LEVEL_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
   [[ -z "${SCRATCH_PRUNE_MOCK_LINE:-}" ]] || echo "$SCRATCH_PRUNE_MOCK_LINE"
