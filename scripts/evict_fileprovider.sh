@@ -296,6 +296,18 @@ def prefix_matches(primary, dbx_path, size):
             except Exception: pass
 
 
+def sqlite_backup_matches(primary, dbx_path, st_p, st_d):
+    if "/codex_conversations/" not in dbx_path or not dbx_path.endswith(".sqlite"):
+        return False
+    if st_p.st_size < int(st_d.st_size * 0.9):
+        return False
+    try:
+        with open(primary, "rb") as fp, open(dbx_path, "rb") as fd:
+            return fp.read(16) == b"SQLite format 3\x00" and fd.read(16) == b"SQLite format 3\x00"
+    except Exception:
+        return False
+
+
 with open(notready_file, encoding="utf-8", errors="replace") as f:
     for line in f:
         parts = line.rstrip("\n").split("\t", 3)
@@ -319,9 +331,9 @@ with open(notready_file, encoding="utf-8", errors="replace") as f:
         if st_p.st_blocks <= 0 or st_d.st_blocks <= 0 or st_d.st_size <= 0:
             continue
         is_p_comp = (primary.endswith(".gz") and not dbx_path.endswith(".gz")) or (primary.endswith(".zst") and not dbx_path.endswith(".zst"))
-        if not is_p_comp and st_p.st_size < st_d.st_size:
+        if not is_p_comp and st_p.st_size < st_d.st_size and not sqlite_backup_matches(primary, dbx_path, st_p, st_d):
             continue
-        if not prefix_matches(primary, dbx_path, st_d.st_size):
+        if not prefix_matches(primary, dbx_path, st_d.st_size) and not sqlite_backup_matches(primary, dbx_path, st_p, st_d):
             continue
         print(f"{st_d.st_blocks}\t{st_d.st_size}\t{dbx_path}\t{primary}")
 PY
