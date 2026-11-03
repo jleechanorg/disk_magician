@@ -557,3 +557,19 @@ PATH="$HANG_BIN:$PATH" ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.mo
 (( SECONDS - start_s < 30 )) || { echo "FAIL: hung find not bounded by deadline ($((SECONDS - start_s))s)"; exit 1; }
 grep -q 'deferred:deadline-before-unit:candidate-discovery-timeout' "$T/hung-find.out" || { echo "FAIL: no truthful discovery-timeout receipt"; cat "$T/hung-find.out"; exit 1; }
 echo 'hung candidate discovery: bounded by deadline, deferred with discovery-timeout reason'
+# The per-candidate strict content-mtime scan runs under the Scratch lock too:
+# a wedged scan (discovery find passes through; every other find hangs) must be
+# killed at the deadline, defer truthfully, keep the artifact, and free the lock.
+MTIME_BIN="$T/hang-mtime-bin"; mkdir -p "$MTIME_BIN"
+REAL_FIND="$(command -v find)"
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == -mindepth ]] && exec %q "$@"; done\nexec sleep 60\n' "$REAL_FIND" >"$MTIME_BIN/find"; chmod +x "$MTIME_BIN/find"
+mkdir -p "$TEST_ROOT/repo/evidence/hang-mtime"; printf x >"$TEST_ROOT/repo/evidence/hang-mtime/content"
+python3 -c 'import os,sys,time; [os.utime(p,(time.time()-72*3600,)*2) for p in (sys.argv[1],sys.argv[1]+"/content")]' "$TEST_ROOT/repo/evidence/hang-mtime"
+: >"$STATUS_CALLS_FILE"
+start_s=$SECONDS
+PATH="$MTIME_BIN:$PATH" ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+3)')" TEST_STATUS_SEQUENCE="900 900 900" \
+ "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/hung-mtime.out" 2>&1 || true
+(( SECONDS - start_s < 30 )) || { echo "FAIL: hung mtime scan not bounded by deadline ($((SECONDS - start_s))s)"; exit 1; }
+grep -q 'deferred:deadline-before-unit:mtime-scan-timeout' "$T/hung-mtime.out" || { echo "FAIL: no truthful mtime-scan-timeout receipt"; cat "$T/hung-mtime.out"; exit 1; }
+[[ -d "$TEST_ROOT/repo/evidence/hang-mtime" ]] || { echo "FAIL: artifact removed despite deferred scan"; exit 1; }
+echo 'hung per-candidate mtime scan: bounded by deadline, deferred, artifact kept'

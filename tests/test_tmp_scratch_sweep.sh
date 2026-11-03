@@ -45,7 +45,7 @@ if [[ "$rc" == 0 ]]; then outcome=success; else outcome=error; fi
 run_id="$(python3 "$helper" begin --job cleanup_tmp --trigger "${DISK_MAGICIAN_RECEIPT_TRIGGER:-mock}" --precondition '{}')"
 python3 "$helper" finish --job cleanup_tmp --run-id "$run_id" --outcome "$outcome" \
   --reason "mock cleanup result" --safety '{}' \
-  --candidates '{"count":null,"bytes":null,"removed_count":0,"deferred_count":0,"interrupted_count":0}' \
+  --candidates '{"count":null,"bytes":null,"removed_count":'"${TMP_MOCK_REMOVED:-0}"',"deferred_count":0,"interrupted_count":0}' \
   --postcondition '{"df_delta_bytes":0,"freed_bytes":0}' >/dev/null
 exit "$rc"
 MOCK
@@ -378,6 +378,14 @@ VOL_LOCK_RC=$?
 set -e
 [[ "$VOL_LOCK_RC" -eq 0 ]] && { echo "  PASS  volume-only lock contention exits 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  volume-only lock contention exited $VOL_LOCK_RC"; FAIL=$(( FAIL + 1 )); }
 assert_receipt_field "volume-only lock contention records skipped_lock" "$R" "d.get('last_terminal', {}).get('outcome')" "skipped_lock"
+
+echo "Test 12: cleanup_tmp deletions are never reported as no-mutation when a Scratch child skips on the lock"
+: > "$INVOCATION_LOG"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_REMOVED=3 VOLUME_MOCK_MODE=lock /bin/bash "$SCRIPT" --clean >/dev/null 2>&1 || true
+R="$STATE_DIR/receipts/tmp_scratch_sweep.json"
+assert_receipt_field "tmp deletion plus volume lock is not skipped_lock" "$R" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "tmp deletion plus volume lock is not no-mutation safety" "$R" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
+assert_receipt_field "tmp deletion plus volume lock preserves removed_count" "$R" "str(d.get('last_terminal', {}).get('candidates', {}).get('removed_count'))" "3"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

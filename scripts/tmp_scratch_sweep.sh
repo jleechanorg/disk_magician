@@ -304,39 +304,6 @@ PYV
 )"
 VOLUME_REASON_JSON="$(python3 -c 'import json,sys; print(json.dumps(None if sys.argv[1]=="null" else sys.argv[1]))' "$VOLUME_REASON")"
 if [[ "$VOLUME_VALID" != true || "$VOLUME_OUTCOME" == error || "$VOLUME_OUTCOME" == timeout ]]; then rc=1; fi
-LOCK_SKIPPED_ANY=false
-[[ "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true || "$VOLUME_LOCK_SKIPPED" == true ]] && LOCK_SKIPPED_ANY=true
-REMOVED_ANY=$(( SCRATCH_PRUNE_REMOVED + $([[ "$VOLUME_REMOVED" =~ ^[0-9]+$ ]] && echo "$VOLUME_REMOVED" || echo 0) ))
-
-if [[ $rc -ne 0 ]]; then
-  OUTCOME="error"
-  REASON="one or more sweep steps failed"
-elif [[ "$LOCK_SKIPPED_ANY" == true && "$TMP_LOCK_SKIPPED" != true && $REMOVED_ANY -gt 0 ]]; then
-  OUTCOME="partial"
-  REASON="a Scratch child skipped on the scratch lock; ${REMOVED_ANY} artifacts removed by the other"
-elif [[ "$LOCK_SKIPPED_ANY" == true && "$TMP_LOCK_SKIPPED" != true ]]; then
-  OUTCOME="skipped_lock"
-  REASON="scratch lock held by another cleanup; no Scratch child ran"
-elif [[ "$SCRATCH_PRUNE_OUTCOME" == partial || "$SCRATCH_PRUNE_OUTCOME" == timeout ]]; then
-  OUTCOME="partial"
-  REASON="scratch-prune ended with ${SCRATCH_PRUNE_OUTCOME}; volume reclaim result is recorded separately"
-elif [[ "$SCRATCH_PRUNE_OUTCOME" == success_noop && "$VOLUME_OUTCOME" == skipped ]]; then
-  OUTCOME="success_noop"
-  REASON="available-floor held for both Scratch pruning and volume reclaim"
-elif [[ "$TMP_LOCK_SKIPPED" == true && "$VOLUME_REMOVED" =~ ^[0-9]+$ && "$VOLUME_REMOVED" -gt 0 ]]; then
-  OUTCOME="partial"
-  REASON="cleanup_tmp skipped on scratch lock; volume reclaim removed ${VOLUME_REMOVED} artifacts"
-elif [[ "$TMP_LOCK_SKIPPED" == true ]]; then
-  OUTCOME="skipped_lock"
-  REASON="scratch lock held"
-elif [[ "$clean_flag" == "--dry-run" ]]; then
-  OUTCOME="success_noop"
-  REASON="dry-run sweep completed without deletions"
-else
-  OUTCOME="success"
-  REASON="clean sweep completed"
-fi
-
 if [[ "$SWEEP_MODE" == scratch-only ]]; then
   scratch_deferred=0
   scratch_interrupted=0
@@ -373,6 +340,40 @@ for k in ("removed_count","deferred_count","interrupted_count","df_delta_bytes")
     print(v if isinstance(v,int) and not isinstance(v,bool) else "null", end=" ")
 PY
 )"
+LOCK_SKIPPED_ANY=false
+[[ "$TMP_LOCK_SKIPPED" == true || "$SCRATCH_PRUNE_LOCK_SKIPPED" == true || "$VOLUME_LOCK_SKIPPED" == true ]] && LOCK_SKIPPED_ANY=true
+[[ "$SWEEP_MODE" == scratch-only ]] || TMP_REMOVED_NOW="$REMOVED_COUNT"
+REMOVED_ANY=$(( SCRATCH_PRUNE_REMOVED + $([[ "${TMP_REMOVED_NOW:-}" =~ ^[0-9]+$ ]] && echo "$TMP_REMOVED_NOW" || echo 0) + $([[ "$VOLUME_REMOVED" =~ ^[0-9]+$ ]] && echo "$VOLUME_REMOVED" || echo 0) ))
+
+if [[ $rc -ne 0 ]]; then
+  OUTCOME="error"
+  REASON="one or more sweep steps failed"
+elif [[ "$LOCK_SKIPPED_ANY" == true && "$TMP_LOCK_SKIPPED" != true && $REMOVED_ANY -gt 0 ]]; then
+  OUTCOME="partial"
+  REASON="a Scratch child skipped on the scratch lock; ${REMOVED_ANY} artifacts removed by the other"
+elif [[ "$LOCK_SKIPPED_ANY" == true && "$TMP_LOCK_SKIPPED" != true ]]; then
+  OUTCOME="skipped_lock"
+  REASON="scratch lock held by another cleanup; no Scratch child ran"
+elif [[ "$SCRATCH_PRUNE_OUTCOME" == partial || "$SCRATCH_PRUNE_OUTCOME" == timeout ]]; then
+  OUTCOME="partial"
+  REASON="scratch-prune ended with ${SCRATCH_PRUNE_OUTCOME}; volume reclaim result is recorded separately"
+elif [[ "$SCRATCH_PRUNE_OUTCOME" == success_noop && "$VOLUME_OUTCOME" == skipped ]]; then
+  OUTCOME="success_noop"
+  REASON="available-floor held for both Scratch pruning and volume reclaim"
+elif [[ "$TMP_LOCK_SKIPPED" == true && "$VOLUME_REMOVED" =~ ^[0-9]+$ && "$VOLUME_REMOVED" -gt 0 ]]; then
+  OUTCOME="partial"
+  REASON="cleanup_tmp skipped on scratch lock; volume reclaim removed ${VOLUME_REMOVED} artifacts"
+elif [[ "$TMP_LOCK_SKIPPED" == true ]]; then
+  OUTCOME="skipped_lock"
+  REASON="scratch lock held"
+elif [[ "$clean_flag" == "--dry-run" ]]; then
+  OUTCOME="success_noop"
+  REASON="dry-run sweep completed without deletions"
+else
+  OUTCOME="success"
+  REASON="clean sweep completed"
+fi
+
 FREE_AFTER="$(_df_free_bytes)"
 [[ "$FREE_AFTER" =~ ^[0-9]+$ ]] || FREE_AFTER=""
 DF_DELTA="null"

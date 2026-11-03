@@ -637,7 +637,8 @@ strict_empty_rc=$?
 strict_symlink_rc=0
 bash -c 'source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"; scratch_budget_content_mtime "'"$R25/linked"'" --strict' >/dev/null 2>&1 || strict_symlink_rc=$?
 strict_error_rc=0
-bash -c 'source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"; find() { return 1; }; scratch_budget_content_mtime "'"$R25/regular"'" --strict' >/dev/null 2>&1 || strict_error_rc=$?
+mkdir -p "$R25/failbin"; printf '#!/bin/sh\nexit 1\n' >"$R25/failbin/find"; chmod +x "$R25/failbin/find"
+PATH="$R25/failbin:$PATH" bash -c 'source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"; scratch_budget_content_mtime "'"$R25/regular"'" --strict' >/dev/null 2>&1 || strict_error_rc=$?
 set -e
 [[ $strict_empty_rc -ne 0 ]] && record_pass "Test25: strict content mtime rejects empty tree" || record_fail "Test25: strict content mtime rejects empty tree" "rc=$strict_empty_rc"
 [[ $strict_symlink_rc -ne 0 ]] && record_pass "Test25: strict content mtime rejects symlink traversal" || record_fail "Test25: strict content mtime rejects symlink traversal" "rc=$strict_symlink_rc"

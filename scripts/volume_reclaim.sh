@@ -169,14 +169,7 @@ PYDIAG
 DISCOVERY_OUT=""
 if [[ "$below_trigger" != true ]] && (( ! cursor_error )); then
  DISCOVERY_OUT="$(mktemp "${TMPDIR:-/tmp}/dm-volume-discovery.XXXXXX")" || { echo kept:discovery-create-failed; exit 1; }
- python3 -c 'import os,signal,subprocess,sys,time
-dl,root=sys.argv[1:]
-rem=max(float(dl)-time.monotonic(),0) if dl else None
-if rem is not None: rem=max(rem,5.0)
-p=subprocess.Popen(["find",root,"-mindepth","3","-maxdepth","3","-type","d","!","-name",".*","-print0"],stdout=sys.stdout.buffer,stderr=subprocess.DEVNULL,start_new_session=True)
-try: sys.exit(p.wait(timeout=rem))
-except subprocess.TimeoutExpired:
- os.killpg(p.pid,signal.SIGKILL); p.wait(); sys.exit(124)' "${ACT_DEADLINE_AT:-}" "$root" >"$DISCOVERY_OUT"
+ act_run_bounded 5 find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 >"$DISCOVERY_OUT"
  discovery_rc=$?
  if (( discovery_rc == 124 )); then
   TOP_REASON=deadline-before-unit
@@ -190,7 +183,13 @@ while IFS= read -r -d '' entry; do
  # Keep the potentially slow content-mtime walk in this consumer loop. If it
  # runs in a producer/subshell, that producer can scan later paths and exhaust
  # the shared deadline while the first eligible artifact is still in C14.
- newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)" || continue
+ newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)"; mtime_rc=$?
+ if (( mtime_rc == 124 )); then
+  TOP_REASON=deadline-before-unit
+  echo "deferred:deadline-before-unit:mtime-scan-timeout:$entry"
+  break
+ fi
+ (( mtime_rc == 0 )) || continue
  [[ "$newest" =~ ^[0-9]+$ ]] || continue
  (( $(date +%s) - newest > 86400 )) || continue
  if [[ "$available_floor" == true ]]; then
