@@ -172,6 +172,8 @@ PY
   elif [[ "$SCRATCH_PRUNE_RC" == 124 || "$SCRATCH_PRUNE_RC" == 137 || "$SCRATCH_PRUNE_RC" == 143 ]]; then
     SCRATCH_PRUNE_OUTCOME=timeout
     rc=1
+  elif [[ "$SCRATCH_PRUNE_RC" == 4 ]] && grep -q '^partial:budget-target-unmet' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+    SCRATCH_PRUNE_OUTCOME=partial
   elif [[ "$SCRATCH_PRUNE_RC" -ne 0 ]]; then
     SCRATCH_PRUNE_OUTCOME=error
     rc=1

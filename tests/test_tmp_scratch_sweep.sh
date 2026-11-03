@@ -69,6 +69,7 @@ cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK'
 echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-} deadline=${ACT_DEADLINE_AT:-} cursor=${ACT_CURSOR:-}" >> "${INVOCATION_LOG:?}"
 if [[ "$1" == "scratch-prune" ]]; then
   echo "scratch_prune_mode automatic=${DISK_MAGICIAN_SCRATCH_AUTOMATIC:-0} approval=${SCRATCH_TOP_LEVEL_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
+  [[ -z "${SCRATCH_PRUNE_MOCK_LINE:-}" ]] || echo "$SCRATCH_PRUNE_MOCK_LINE"
   exit "${SCRATCH_PRUNE_MOCK_EXIT:-0}"
 fi
 if [[ "$*" == "volume ballast recover scratch" ]]; then exit "${VOLUME_MOCK_ENSURE_RC:-0}"; fi
@@ -149,6 +150,15 @@ assert_contains "opt-in runs the approved non-automatic mode" "scratch_prune_mod
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=0 \
   /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
 assert_contains "an invalid opt-in value keeps the C14-only automatic pass" "scratch_prune_mode automatic=1 approval=0" "$(cat "$INVOCATION_LOG")"
+
+echo "Test 0d: an unmet LRU budget target is recorded as partial, never success"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 \
+  SCRATCH_PRUNE_MOCK_EXIT=4 SCRATCH_PRUNE_MOCK_LINE="partial:budget-target-unmet" \
+  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1
+set -e
+assert_receipt_field "unmet budget target is not a success receipt" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
 
 echo "Test 1: --clean invokes cleanup_tmp.sh with LARGE_TMP_APPROVED=1"
 : > "$INVOCATION_LOG"

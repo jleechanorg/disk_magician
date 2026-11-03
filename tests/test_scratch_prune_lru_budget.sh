@@ -128,13 +128,17 @@ lease_write "$2" "$2" "" scratch-lru-test --owner-pid "$3" >/dev/null' _ "$ROOT"
 ( cd "$SCRATCH_ROOT/cwd-held" && exec sleep 300 ) & cwd_pid=$!
 ( exec 3<"$SCRATCH_ROOT/open-held/payload.bin"; exec sleep 300 ) & open_pid=$!
 sleep 1
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
 kill "$lease_pid" "$cwd_pid" "$open_pid" 2>/dev/null; wait "$lease_pid" "$cwd_pid" "$open_pid" 2>/dev/null
 gone plain; kept leased; kept cwd-held; kept open-held
 check "live lease is the keep reason" "kept:live-owner $SCRATCH_ROOT/leased" "$out"
 check "live cwd is the keep reason" "kept:live-cwd $SCRATCH_ROOT/cwd-held" "$out"
 check "open file is the keep reason" "kept:open-file $SCRATCH_ROOT/open-held" "$out"
 check "candidates ran out before the target" "lru: stop=candidates-exhausted" "$out"
+[[ "$rc" == 4 ]] && ok "unmet target exits 4, not 0" || bad "unmet target exits 4, not 0" "rc=$rc"
+check "unmet target is reported with target, achieved and reason" "budget: target_pct=1 achieved_pct=" "$out"
+check "unmet target states target_reached=false and the reason" "target_reached=false reason=candidates-exhausted" "$out"
+check "unmet target emits the partial marker" "partial:budget-target-unmet" "$out"
 
 echo "Test 7: unmeasurable recency is kept"
 use_root

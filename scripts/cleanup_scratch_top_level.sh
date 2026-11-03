@@ -304,11 +304,6 @@ verdict_and_maybe_remove() {
         override="$verdict"
         verdict=remove
       fi ;;
-    kept:not-pushed|kept:dirty|kept:remote-unverified|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data|kept:admin-unknown)
-      if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" && -n "${RECENCY_SPEC:-}" ]]; then
-        override="$verdict"
-        verdict=remove
-      fi ;;
   esac
   # LRU budget mode (walx): Scratch is disposable, so content and provenance keeps
   # do not block eviction. A linked-worktree root is excluded because C14 can
@@ -338,22 +333,16 @@ verdict_and_maybe_remove() {
       echo kept:check-failed
       return 0
     fi
-    # The secrets probe short-circuits BEFORE c14_repos_ok inside the verdict, so
-    # a tree that is both secret-like and a dirty/unpushed repository returns
-    # kept:secret-like without ever having its repositories checked. An override
-    # must therefore re-run the repository provenance gate explicitly unless the
-    # operator-approved 12h emergency scratch floor is active.
+    # A content override never grants repository-discard authority. The secrets
+    # probe can short-circuit before provenance, so validate every override with
+    # the shared repository gate regardless of the chosen recency floor.
     local repo_reason
-    if [[ "$override" == "kept:secret-like" && -n "$BUDGET_PCT" && ! -f "$entry/.git" ]]; then
-      # Budget mode does not block on provenance but records it for the audit log.
-      repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")" || override="kept:secret-like+${repo_reason:-kept:check-failed}"
-    elif [[ "$override" == "kept:secret-like" && -z "${RECENCY_SPEC:-}" ]]; then
-      if ! repo_reason="$(c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
-        [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
-        rm -f "$inv" "$binding"
-        echo "${repo_reason:-kept:check-failed}"
-        return 0
-      fi
+    # Keep Git status from refreshing the index after the immutable inventory.
+    if ! repo_reason="$(GIT_OPTIONAL_LOCKS=0 c14_repos_ok "$entry" "$inv" "${ACT_DEADLINE_AT:-}")"; then
+      [[ "$DRY_RUN" == true ]] || lease_registry_mutation_lock_exit || true
+      rm -f "$inv" "$binding"
+      echo "${repo_reason:-kept:check-failed}"
+      return 0
     fi
   fi
   # A preview must reach the same verdict --clean would reach, so the override's
@@ -393,7 +382,30 @@ candidates=()
 for _top in "$root"/*; do
   [[ -e "$_top" || -L "$_top" ]] || continue
   _base="${_top##*/}"
-  case "$_base" in .*|tmp) continue ;; esac
+  case "$_base" in
+    .*|tmp) continue ;;
+    evidence|worldai_frontend|worldarchitect.ai|worldai_claw|disk_magician|mirrors|relocated-tmp|advice-11070)
+      # Keep automatic cursor ordering/source identity on the existing queue.
+      # Nested manual discovery must not replace its pending root item.
+      if [[ "$SCRATCH_AUTOMATIC" != 1 && -d "$_top" && ! -L "$_top" ]]; then
+        for _sub in "$_top"/*; do
+          [[ -e "$_sub" || -L "$_sub" ]] || continue
+          case "${_sub##*/}" in
+            .*) continue ;;
+            build|evidence|r10)
+              if [[ -d "$_sub" && ! -L "$_sub" ]]; then
+                for _grand in "$_sub"/*; do
+                  [[ -e "$_grand" || -L "$_grand" ]] || continue
+                  case "${_grand##*/}" in .*) continue ;; esac
+                  candidates+=("$_grand")
+                done
+              fi ;;
+            *) candidates+=("$_sub") ;;
+          esac
+        done
+        continue
+      fi ;;
+  esac
   candidates+=("$_top")
 done
 if [[ -d "$root/tmp" && ! -L "$root/tmp" ]]; then
@@ -414,7 +426,7 @@ fi
 # LRU budget mode: measure first (fail closed), then order every candidate past
 # the floor by canonical content mtime, oldest first. Usage is re-measured before
 # each eviction in the main loop; the ordering is all-or-nothing under a deadline.
-LRU_LIST="" budget_used=0 budget_quota=0 budget_stop="" lru_priors=""
+LRU_LIST="" budget_used=0 budget_quota=0 budget_stop="" budget_unmet=0 budget_now=0 lru_priors=""
 if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
   budget_pair="$(scratch_usage_pair)" || { echo skipped:measurement-unavailable; exit 75; }
   read -r budget_used budget_quota <<<"$budget_pair"
@@ -517,6 +529,11 @@ while IFS= read -r -d '' entry; do
   fi
   kb="$(deletion_size_kb "$entry" 2>/dev/null)" || kb=0
   [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
+  # Manual prioritization must not alter the automatic retention/cursor queue.
+  if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 && kb < 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} )); then
+    kept=$(( kept + 1 ))
+    continue
+  fi
   if (( MAX_KB > 0 && planned_kb + removed_kb + kb > MAX_KB )); then
     echo "capped:max-gib $entry ($(( kb / 1024 )) MB) — rerun with --max-gib to raise"
     capped=1
@@ -562,11 +579,11 @@ while IFS= read -r -d '' entry; do
       echo "$outcome $entry"
       if [[ "$SCRATCH_AUTOMATIC" == 1 ]]; then
         echo "skipped:lease-busy (registry lock held by a producer; rerun when the sweeper finishes)"
-        break
+        budget_stop=lease-busy; break
       fi
       if (( busy_streak >= 10 )); then
         echo "skipped:lease-busy (registry lock held by a producer; rerun when the sweeper finishes)"
-        break
+        budget_stop=lease-busy; break
       fi
       continue ;;
     *)
@@ -575,7 +592,7 @@ while IFS= read -r -d '' entry; do
       echo "$outcome $entry" ;;
   esac
   case "$outcome" in
-    deferred:deadline-before-unit|kept:cursor-*) break ;;
+    deferred:deadline-before-unit|kept:cursor-*) budget_stop=deferred; break ;;
   esac
   busy_streak=0
 done < <(
@@ -597,8 +614,27 @@ echo "scanned=${scanned} kept=${kept} removable=${removable} removed=${removed} 
 if [[ -n "$BUDGET_PCT" ]]; then
   # Audit line: which C14 verdicts the evictions overrode, and how many of them
   # held dirty or unpushed repository work.
-  echo "lru: stop=${budget_stop:-candidates-exhausted} $([[ "$DRY_RUN" == true ]] && echo would_evict || echo evicted)=$(( removed + removable )) not_pushed_or_dirty=$(printf '%s' "$lru_priors" | grep -cE 'kept:(not-pushed|dirty)')"
+  # The loop only re-measures before each candidate, so the last eviction (or an
+  # exhausted candidate list) is judged here: an unmet target is not a success.
+  if [[ -z "$budget_stop" ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+      budget_now=$(( budget_used - planned_kb * 1024 ))
+    else
+      budget_pair="$(scratch_usage_pair)" || budget_pair=""
+      read -r budget_now budget_quota_now <<<"$budget_pair"
+      [[ -n "$budget_pair" && "$budget_quota_now" == "$budget_quota" ]] || budget_stop=measurement-unavailable
+    fi
+    if [[ -z "$budget_stop" ]]; then
+      if (( budget_now * 100 <= budget_quota * BUDGET_PCT )); then budget_stop=target-reached; else budget_stop=candidates-exhausted; budget_unmet=1; fi
+    fi
+  fi
+  if [[ "$budget_stop" == target-reached || "$budget_unmet" == 1 ]]; then
+    echo "budget: target_pct=${BUDGET_PCT} achieved_pct=$(( budget_now * 100 / budget_quota )) target_reached=$([[ "$budget_unmet" == 1 ]] && echo false || echo true) reason=${budget_stop}"
+  fi
+  echo "lru: stop=${budget_stop} $([[ "$DRY_RUN" == true ]] && echo would_evict || echo evicted)=$(( removed + removable )) not_pushed_or_dirty=$(printf '%s' "$lru_priors" | grep -cE 'kept:(not-pushed|dirty)')"
   printf '%s' "$lru_priors" | sort | uniq -c | sed -E 's/^ *([0-9]+) (.*)$/lru: prior_verdict \2=\1/'
   [[ "$budget_stop" == measurement-unavailable ]] && { echo skipped:measurement-unavailable; exit 75; }
+  # Distinct partial status: target unmet with nothing left to evict (4 = budget-target-unmet).
+  (( budget_unmet )) && { echo "partial:budget-target-unmet"; exit 4; }
 fi
 exit 0

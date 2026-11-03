@@ -296,6 +296,40 @@ def prefix_matches(primary, dbx_path, size):
             except Exception: pass
 
 
+def sqlite_backup_matches(primary, dbx_path, st_p, st_d):
+    if "/codex_conversations/" not in dbx_path or not dbx_path.endswith(".sqlite"):
+        return False
+    if st_p.st_size < int(st_d.st_size * 0.9):
+        return False
+    # A matching 16-byte header only proves both files are SQLite, not that they hold
+    # the same data: two unrelated databases of similar size would pass and the
+    # unuploaded backup below would then be deleted. Require content equivalence -
+    # compare page counts from the header and then the bytes themselves.
+    try:
+        with open(primary, "rb") as fp, open(dbx_path, "rb") as fd:
+            hp = fp.read(100)
+            hd = fd.read(100)
+            if len(hp) < 100 or len(hd) < 100:
+                return False
+            if hp[:16] != b"SQLite format 3\x00" or hd[:16] != b"SQLite format 3\x00":
+                return False
+            # Bytes 28..32 and 92..96 are the change counter and version-valid-for;
+            # either differing means the files are not the same database state.
+            if hp[24:28] != hd[24:28] or hp[92:96] != hd[92:96]:
+                return False
+            fp.seek(0)
+            fd.seek(0)
+            while True:
+                bp = fp.read(1024 * 1024)
+                bd = fd.read(1024 * 1024)
+                if bp != bd:
+                    return False
+                if not bp:
+                    return True
+    except Exception:
+        return False
+
+
 with open(notready_file, encoding="utf-8", errors="replace") as f:
     for line in f:
         parts = line.rstrip("\n").split("\t", 3)
@@ -319,10 +353,16 @@ with open(notready_file, encoding="utf-8", errors="replace") as f:
         if st_p.st_blocks <= 0 or st_d.st_blocks <= 0 or st_d.st_size <= 0:
             continue
         is_p_comp = (primary.endswith(".gz") and not dbx_path.endswith(".gz")) or (primary.endswith(".zst") and not dbx_path.endswith(".zst"))
-        if not is_p_comp and st_p.st_size < st_d.st_size:
-            continue
-        if not prefix_matches(primary, dbx_path, st_d.st_size):
-            continue
+        if "/codex_conversations/" in dbx_path and dbx_path.endswith(".sqlite"):
+            # SQLite is not append-only: a prefix match must never bypass the
+            # exact database comparison, even when the primary is larger.
+            if not sqlite_backup_matches(primary, dbx_path, st_p, st_d):
+                continue
+        else:
+            if not is_p_comp and st_p.st_size < st_d.st_size:
+                continue
+            if not prefix_matches(primary, dbx_path, st_d.st_size):
+                continue
         print(f"{st_d.st_blocks}\t{st_d.st_size}\t{dbx_path}\t{primary}")
 PY
   if [[ "$CLEAN" == true && -s "$WORK/dups_verified.txt" ]]; then
