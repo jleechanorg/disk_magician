@@ -94,6 +94,38 @@ case "$*" in
 esac
 MOCK
 chmod +x "$DISK_MAGICIAN_DISKM_BIN"
+
+if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == streaming-find ]]; then
+  export BALLAST_LOG="$T/ballast.log"
+  export REAL_FIND="$(command -v find)"
+  export STREAM_FIRST="$TEST_ROOT/repo/evidence/oldest"
+  mkdir "$T/find-bin"
+  cat > "$T/find-bin/find" <<'FIND'
+#!/bin/bash
+if [[ " $* " == *" -mindepth "* ]]; then
+  printf '%s\0' "$STREAM_FIRST"
+  sleep 60
+else
+  exec "$REAL_FIND" "$@"
+fi
+FIND
+  chmod +x "$T/find-bin/find"
+  deadline="$(python3 -c 'import time; print(time.monotonic()+30)')"
+  PATH="$T/find-bin:$PATH" ACT_DEADLINE_AT="$deadline" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/stream.out" 2>&1 &
+  reclaim_pid=$!
+  progressed=false
+  for i in {1..100}; do
+    if [[ ! -d "$STREAM_FIRST" ]]; then progressed=true; break; fi
+    sleep 0.1
+  done
+  wait "$reclaim_pid"
+  cat "$T/stream.out"
+  [[ "$progressed" == true ]] || { echo 'FAIL: first candidate starved behind later discovery wedge'; exit 1; }
+  grep -q 'candidate-discovery-timeout' "$T/stream.out"
+  echo 'PASS: first candidate reclaimed before later discovery wedge deadline'
+  exit 0
+fi
+
 if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" != slow-discovery ]]; then
 OUT="$("$ROOT/scripts/volume_reclaim.sh")"
 [[ "$OUT" == *"evidence/oldest"* && "$OUT" == *"build/younger"* ]]
@@ -161,18 +193,47 @@ grep -q 'trim_target_not_reached before_bytes=900 after_bytes=900 quota_bytes=10
 [[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["aged_scanned"]==2 and r["candidates"]["removed"]==0 and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="protected"'
 touch "$TEST_ROOT/repo/build/younger/content"
-# A pre-expired governor deadline reaches the C14 preflight, preserves the
-# current artifact, and leaves the cursor on that interrupted unit.
-CURSOR="$T/volume-reclaim.cursor"
+# An external holder of the real Scratch lock yields rc 75, zero removals and
+# untouched candidates; the holder's FD is a real flock, not a mock.
+ROOT_DIR="$ROOT" python3 - "$HOME" <<'PYH' &
+import fcntl,os,sys,time
+os.environ["HOME"]=sys.argv[1]
+sys.path.insert(0,os.path.join(os.environ["ROOT_DIR"],"scripts"))
+import scratch_lock
+fd=scratch_lock.open_lock(scratch_lock.lock_path(),create=True)
+fcntl.flock(fd,fcntl.LOCK_EX)
+print("held",flush=True)
+time.sleep(30)
+PYH
+LOCK_HOLDER=$!
+sleep 1
+set +e
+ROOT_DIR="$ROOT" DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/real-lock.out" 2>"$T/real-lock.err"
+REAL_LOCK_RC=$?
+set -e
+kill "$LOCK_HOLDER" 2>/dev/null || true; wait "$LOCK_HOLDER" 2>/dev/null || true
+[[ "$REAL_LOCK_RC" == 75 ]] && grep -q 'scratch lock held' "$T/real-lock.err"
+[[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
+echo 'real external lock holder: rc 75, zero removals, candidates untouched'
+# A pre-expired governor deadline defers before any bounded scan starts: no
+# grace, no scan of any candidate (a wedged-mount find would hold the lock ~5s
+# per candidate), nothing removed, truthful deferral receipt.
+for i in 1 2 3 4 5 6; do mkdir -p "$TEST_ROOT/repo/evidence/many$i"; printf x >"$TEST_ROOT/repo/evidence/many$i/content"; done
+EXP_BIN="$T/expired-find-bin"; mkdir -p "$EXP_BIN"
+EXP_MARKER="$T/expired-find-ran"
+cat >"$EXP_BIN/find" <<'SH'
+#!/usr/bin/env bash
+: >>"$EXP_MARKER"; sleep 30
+SH
+chmod +x "$EXP_BIN/find"
 DEADLINE="$(python3 -c 'import time; print(time.monotonic()-1)')"
 : >"$STATUS_CALLS_FILE"
-ACT_DEADLINE_AT="$DEADLINE" ACT_CURSOR="$CURSOR" TEST_STATUS_SEQUENCE="900 900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-deadline.out"
+EXP_START="$(date +%s)"
+EXP_MARKER="$EXP_MARKER" PATH="$EXP_BIN:$PATH" ACT_DEADLINE_AT="$DEADLINE" TEST_STATUS_SEQUENCE="900 900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-deadline.out"
+(( $(date +%s) - EXP_START < 3 ))
+[[ ! -e "$EXP_MARKER" ]]
 grep -q 'deferred:deadline-before-unit' "$T/c14-deadline.out"
-[[ -e "$TEST_ROOT/repo/evidence/oldest" ]]
-python3 - "$CURSOR" "$TEST_ROOT/repo/evidence/oldest" <<'PY'
-import json,sys
-cursor=json.load(open(sys.argv[1])); assert cursor["next_index"]==0 and cursor["items"]==[sys.argv[2]]
-PY
+[[ -e "$TEST_ROOT/repo/evidence/oldest" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="deadline-before-unit"'
 fi
 # A later candidate's mtime probe must not make the earlier eligible candidate
@@ -219,6 +280,18 @@ if [[ "${1:-}" == - ]]; then
 fi
 exec "$REAL_PYTHON3" "$@"
 SH
+# Filesystem enumeration order is unspecified; pin this causal test's order.
+REAL_FIND="$(command -v find)"
+export REAL_FIND
+cat >"$SLOW_BIN/find" <<'SH'
+#!/usr/bin/env bash
+if [[ " $* " == *" -mindepth "* ]]; then
+  printf '%s\0' "$TEST_ROOT/repo/evidence/first" "$TEST_ROOT/repo/evidence/second"
+else
+  exec "$REAL_FIND" "$@"
+fi
+SH
+chmod +x "$SLOW_BIN/find"
 chmod +x "$SLOW_BIN/stat" "$SLOW_BIN/python3"
 : >"$STATUS_CALLS_FILE"
 ACT_CURSOR="$T/discovery.cursor" ACT_DEADLINE_AT="$(python3 -c 'import time; print(int(time.monotonic())+120)')" \
@@ -524,3 +597,30 @@ PATH="$T/pressure-bin:$PATH" PRESSURE_COUNT="$T/pending-pressure-count" TEST_USE
  "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean > "$T/pending-recovery.out"
 [[ ! -e "$TEST_ROOT/repo/evidence/pending-recovery" && "$(cat "$T/recover-count")" == 2 && ! -s "$BALLAST_LOG" ]]
 echo 'available-floor: typed pending low-space recovery permits C14, then retries restoration without another release'
+# The manual deadline must bound candidate discovery itself: a wedged `find`
+# (stubbed to sleep 60) is killed at the deadline and the run defers truthfully.
+HANG_BIN="$T/hang-find-bin"; mkdir -p "$HANG_BIN"
+printf '#!/usr/bin/env bash\nexec sleep 60\n' >"$HANG_BIN/find"; chmod +x "$HANG_BIN/find"
+: >"$STATUS_CALLS_FILE"
+start_s=$SECONDS
+PATH="$HANG_BIN:$PATH" ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+3)')" TEST_STATUS_SEQUENCE="900 900 900" \
+ "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/hung-find.out" 2>&1 || true
+(( SECONDS - start_s < 30 )) || { echo "FAIL: hung find not bounded by deadline ($((SECONDS - start_s))s)"; exit 1; }
+grep -q 'deferred:deadline-before-unit:candidate-discovery-timeout' "$T/hung-find.out" || { echo "FAIL: no truthful discovery-timeout receipt"; cat "$T/hung-find.out"; exit 1; }
+echo 'hung candidate discovery: bounded by deadline, deferred with discovery-timeout reason'
+# The per-candidate strict content-mtime scan runs under the Scratch lock too:
+# a wedged scan (discovery find passes through; every other find hangs) must be
+# killed at the deadline, defer truthfully, keep the artifact, and free the lock.
+MTIME_BIN="$T/hang-mtime-bin"; mkdir -p "$MTIME_BIN"
+REAL_FIND="$(command -v find)"
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == -mindepth ]] && exec %q "$@"; done\nexec sleep 60\n' "$REAL_FIND" >"$MTIME_BIN/find"; chmod +x "$MTIME_BIN/find"
+mkdir -p "$TEST_ROOT/repo/evidence/hang-mtime"; printf x >"$TEST_ROOT/repo/evidence/hang-mtime/content"
+python3 -c 'import os,sys,time; [os.utime(p,(time.time()-72*3600,)*2) for p in (sys.argv[1],sys.argv[1]+"/content")]' "$TEST_ROOT/repo/evidence/hang-mtime"
+: >"$STATUS_CALLS_FILE"
+start_s=$SECONDS
+PATH="$MTIME_BIN:$PATH" ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+3)')" TEST_STATUS_SEQUENCE="900 900 900" \
+ "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/hung-mtime.out" 2>&1 || true
+(( SECONDS - start_s < 30 )) || { echo "FAIL: hung mtime scan not bounded by deadline ($((SECONDS - start_s))s)"; exit 1; }
+grep -q 'deferred:deadline-before-unit:mtime-scan-timeout' "$T/hung-mtime.out" || { echo "FAIL: no truthful mtime-scan-timeout receipt"; cat "$T/hung-mtime.out"; exit 1; }
+[[ -d "$TEST_ROOT/repo/evidence/hang-mtime" ]] || { echo "FAIL: artifact removed despite deferred scan"; exit 1; }
+echo 'hung per-candidate mtime scan: bounded by deadline, deferred, artifact kept'

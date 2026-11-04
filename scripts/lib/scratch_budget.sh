@@ -331,9 +331,13 @@ is_mountpoint_or_foreign_fs() {
   is_different_filesystem "$@"
 }
 
+declare -F act_run_bounded >/dev/null || source "$(dirname "${BASH_SOURCE[0]}")/actuator_deadline.sh"
+
 # scratch_budget_content_mtime <path> — newest content mtime under <path> in
 # epoch seconds, or EMPTY STRING if it cannot be determined (stat/find
-# failure, unreadable subtree). Uses the same batched `find -exec stat +`
+# failure, unreadable subtree). With --strict the scans run under
+# act_run_bounded and rc 124 means the
+# ACT_DEADLINE_AT deadline expired. Uses the same batched `find -exec stat +`
 # approach as worktree_last_activity_epoch: one process fan-out, not one
 # `stat` per file.
 #
@@ -347,28 +351,17 @@ scratch_budget_content_mtime() {
   local path="$1" epoch strict="${2:-}" links stat_format
   if [[ "$strict" == --strict ]]; then
     [[ -d "$path" && ! -L "$path" ]] || return 1
-    links="$(find "$path" -xdev -type l -print -quit 2>/dev/null)" || return 1
+    links="$(act_run_bounded find "$path" -xdev -type l -print -quit)" || return $?
     [[ -z "$links" ]] || return 1
-    # Batched `-exec stat {} +` (one process fan-out), NOT one `stat`
-    # subprocess per file. The previous per-file loop made this O(files)
-    # process spawns: measured 2026-11-03 on
-    # /Volumes/diskm-scratch/worldai_frontend/build/vn-native-build-* (67,099
-    # files) it ran >600s, so `volume reclaim` never got past its first
-    # candidate and every --strict caller silently degraded to "unmeasurable,
-    # preserve". The batched form measures the same tree in 2.3s (260x) with
-    # identical semantics, and matches what tests/test_scratch_budget.sh
-    # already mocked for this function. find's non-zero exit is still checked,
-    # so an unreadable subtree keeps the fail-closed rc 1.
-    if [[ "$(uname -s)" == Darwin ]]; then stat_format='%m'; else stat_format='%Y'; fi
-    local stamped newest
+    # One batched find|stat pass instead of a stat fork per file (this runs
+    # under the Scratch lock). Any find/stat failure still fails closed.
+    local files newest
     if [[ "$(uname -s)" == Darwin ]]; then
-      stamped="$(find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null)" || return 1
+      files="$(act_run_bounded find "$path" -xdev -type f -exec stat -f %m {} +)" || return $?
     else
-      stamped="$(find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null)" || return 1
+      files="$(act_run_bounded find "$path" -xdev -type f -exec stat -c %Y {} +)" || return $?
     fi
-    newest="$(printf '%s\n' "$stamped" | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')"
-    [[ "$newest" =~ ^[0-9]+$ ]] || return 1
-    (( newest > 0 )) || return 1
+    newest="$(awk '$0 !~ /^[0-9]+$/ {bad=1} $0+0 > m {m=$0+0} END {if (bad || NR==0 || m==0) exit 1; print m}' <<<"$files")" || return 1
     echo "$newest"
     return 0
   fi
@@ -553,4 +546,42 @@ scratch_budget_evict_root() {
   done < <(sort -t $'\t' -k1,1n "$candidates_file")
 
   rm -f "$snapshot_file" "$candidates_file"
+}
+
+# scratch_budget_artifact_children <dir> [max_depth]
+# Print artifact-shaped descendant directories of <dir>, one per line, deepest
+# useful unit first-encountered order. Purpose: a directory's "newest content"
+# is an AGGREGATE, so one freshly-written child shelters every stale sibling in
+# the tree -- measured 2026-11-03 on Scratch: worldai_frontend/build held 23.7
+# GiB of 39-41 h old Android build dirs, yet the whole 35 GiB read as 0 h old
+# because a single sibling had been written minutes earlier. Callers must be able
+# to evaluate each child on its own age, so this enumerates them.
+# Refuses to descend into symlinks or into any directory containing .git (a
+# working tree is never a build artifact), and is depth-bounded.
+scratch_budget_artifact_children() {
+  local dir="$1" max_depth="${2:-3}"
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=3
+  # A .git marker can be a directory, a file, or a dangling link. Check the
+  # root before walking, then prune every marked directory in this one bounded
+  # walk so a shallower Git ancestor cannot be bypassed by a later depth pass.
+  [[ -e "$dir/.git" || -L "$dir/.git" ]] && return 0
+  local child base
+  while IFS= read -r -d '' child; do
+    [[ -d "$child" && ! -L "$child" ]] || continue
+    base="${child##*/}"
+    case "$base" in
+      .*|node_modules) : ;;   # node_modules itself is a strip target, not a descent root
+    esac
+    case "$base" in
+      build|dist|out|target|coverage|artifacts|gradle|.gradle|android-sdk|avd\
+      |isolated-*|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods)
+        printf '%s\n' "$child" ;;
+    esac
+  done < <(
+    find "$dir" -mindepth 1 -maxdepth "$max_depth" -type d \
+      \( -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune \) -o \
+      -type d ! -name '.*' -print0 2>/dev/null
+  )
+  return 0
 }

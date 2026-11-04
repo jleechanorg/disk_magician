@@ -450,8 +450,96 @@ Verify the deployed tree and scheduled receipts before claiming production behav
 (stale-deploy incident 2026-07-11: v2 code was committed for hours while
 production ran v1).
 
+## Reclaim eligibility is per-file, never per-directory (hard)
+
+**A directory's "newest content mtime" is an AGGREGATE, and using it as the
+staleness test silently shelters stale data.** Measured 2026-11-03 on Jeff-Ubuntu:
+`Scratch/worldai_frontend/build` held **23.7 GiB of 39-41 h old Android build
+dirs** (`isolated-b506`, `isolated-cbdcd704`, `isolated-c68b06d`) plus a 6.9 GiB
+39 h-old `android-sdk` -- and the entire 35 GiB tree read as **"0 h old"** because
+one sibling (`isolated-02ea`) had been written minutes earlier. Consequence: a
+35 GiB build root was never eligible no matter which floor or trigger was set,
+and the operator's first instinct ("aren't there older files in there?") was
+right while the tool said no.
+
+Rules that follow, and that any new reclaim code must obey:
+
+- Evaluate eligibility **per child**, not on a parent aggregate. Enumerate
+  artifact-shaped descendants (`scratch_budget_artifact_children`, depth-bounded)
+  and judge each on **its own** newest-file age.
+- The descent is **name-scoped to build outputs** (`build|dist|out|target|coverage|
+  artifacts|gradle|android-sdk|avd|isolated-*|.next|.cache|DerivedData|Pods|…`),
+  depth-bounded, never follows a symlink, and **never enters a directory that
+  contains `.git`** -- a working tree is not a build artifact and deleting a
+  nested source directory would be data loss.
+- Size reporting must sum **file sizes**, not stop at directory entries: `du` on a
+  parent cannot tell you that 23.7 of 35 GiB is stale while 7 GiB is live.
+- Do not special-case directory names in a hardcoded list to reach nested
+  content. The previous code had exactly that (`evidence|worldai_frontend|…` plus
+  a fixed extra depth) and it still could not reach `build/android-native-*/isolated-*`.
+- Tests live in `tests/test_scratch_budget_artifact_children.sh`: stale sibling
+  discovered beside a fresh one, `.git` tree not descended, symlink not followed,
+  ordinary directory ignored, depth bound respected.
+
 ## Operational gotchas (learned the hard way — details in roadmap/ and beads)
 
+### Why scratch reclaim "reports success" and frees nothing (2026-10-29 → 11-03)
+
+Each of these was measured, and each looked like "the fix" until measurement
+contradicted it. Check them in this order before proposing a reclaim change:
+
+- **The binding cap is `kept:unproven-content`, not the trigger.**
+  `scripts/lib/artifact_verdict.sh` returns it when `c14_ephemeral_retention()`
+  cannot prove a retention rule for the entry's class. Arbitrary agent scratch
+  names (`relocated-tmp`, `test-loc-review`, `advice-primary-pair-*`) are not in
+  that class map, so ~118 GiB of unleased, no-live-owner orphan stays put under
+  *any* trigger/floor/shape/rate setting. Widening the class map is the change
+  that matters; tuning the trigger is not. Row **E8** now exists for the Scratch
+  volume: a direct child of the registered `scratch`-class root (real directory,
+  non-dot, never a symlink, one path component) is declared ephemeral at 1440 min,
+  the same retention as the other volume rows. Deeper paths and top-level files
+  stay `kept:unproven-content`, and lease / live-cwd / open-file / secret /
+  repository / recency gates all still run first.
+- **`scratch_budget_content_mtime --strict` returns 1 for any tree containing a
+  symlink.** Moved-`/tmp` and checkout scratch are full of them, so the largest
+  orphans were never candidates at all (a 32 GiB directory silently excluded).
+  Callers should fall back to the best-effort walk, which reads file mtimes and
+  never traverses a link (`find` without `-L`). With that fallback in a branch
+  (PR #293, since superseded by a redesign of `volume_reclaim.sh`), the candidate
+  set measured 7.2 → 166 GiB — re-measure against current main rather than
+  assuming that landed.
+- **Trim exists — do not grep for the `fstrim` binary.** `scripts/volume.py`
+  issues a raw `FITRIM` ioctl (`fcntl.ioctl(fd, 0xc0185879, …)`). Grepping for
+  "fstrim" finds nothing and yields the false conclusion "there is no trim step".
+  Measured proof it works: `status=trimmed host_free_delta=6.90 GiB` and
+  `+8.90 GiB` on consecutive hourly runs, with `image_reclaimed` matching to
+  225 KB. A manual `sudo fstrim` right afterwards legitimately prints ~4 KiB
+  because there is nothing left to trim.
+- **`--clean` can delete exactly one entry.** The walk breaks once usage is at or
+  below the stop rate. The rate is `DISK_MAGICIAN_SCRATCH_TARGET_PCT`, else config
+  `volumes.classes.scratch.target_pct` (default 50); the trigger is the sibling
+  `trigger_pct` (default 70). Reaching top-level allocations is a *shape* problem,
+  not a knob problem: main still enumerates `find -mindepth 3 -maxdepth 3`, so
+  `relocated-tmp`, `test-loc-review` and `advice-*` are unreachable at any env value.
+- **A scheduled unit pinned to `candidates/<sha>/venv/...` ignores every deploy.**
+  `diskm-scratch-reclaim.service` was pinned that way while its siblings ran
+  `/home/jleechan/.local/bin/diskm`; deploys were invisible to it for days. If a
+  merged fix "does nothing", compare `systemctl --user cat <unit>` against
+  `~/.disk_magician_state/deployed.json` before re-debugging the code.
+- **`deploy_uv_tool.sh` cannot run while `sync_package_tree.sh --check` fails.**
+  It requires a clean tree, `HEAD == origin/main`, *and* zero package-tree drift.
+  When root scripts are changed and merged without syncing `src/disk_magician`,
+  main itself is undeployable: fix is `scripts/sync_package_tree.sh` committed in
+  its own PR, then deploy.
+- **The Evidence Gate validator only reads text on the same line as the label.**
+  `**Commands and results:**` followed by a fenced block on the next lines counts
+  as an empty field (`placeholder or empty evidence field`). Put a sentence after
+  the label, then the block. Validate locally before pushing:
+  `python3 .github/scripts/validate_evidence.py < body.md`.
+- **Never `rm -rf /tmp/*` on this box.** `/tmp` carries fuse mounts of other
+  hosts (`mac-evidence-baseline-mount`, bridge mounts, RustDesk cliprdr). Use
+  `-xdev` and exclude mountpoints explicitly, or a "clean temp" deletes data on
+  the other machine.
 - Snapshot mode holds an mkdir lock (`~/.disk_magician_state/snapshot.lock`);
   concurrent runs skip, they don't queue.
 - `cleanup_tmp.sh` defaults to DRY-RUN; callers must pass `--clean`.
