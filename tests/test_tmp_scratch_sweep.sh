@@ -37,6 +37,7 @@ cat > "$MOCK_BIN/cleanup_tmp.sh" <<'MOCK'
 echo "cleanup_tmp $* LARGE_TMP_APPROVED=${LARGE_TMP_APPROVED:-0}" >> "${INVOCATION_LOG:?}"
 helper="${DISK_MAGICIAN_RECEIPT_HELPER:-$(cd "$(dirname "$0")" && pwd)/job_receipt.py}"
 rc="${TMP_MOCK_EXIT:-0}"
+[[ "${TMP_MOCK_NO_RECEIPT:-0}" == 0 ]] || exit 143
 if [[ "$rc" == 75 ]]; then
   echo "[cleanup_tmp] skipped, scratch lock held after waiting 20s" >&2
   exit 75
@@ -45,7 +46,7 @@ if [[ "$rc" == 0 ]]; then outcome=success; else outcome=error; fi
 run_id="$(python3 "$helper" begin --job cleanup_tmp --trigger "${DISK_MAGICIAN_RECEIPT_TRIGGER:-mock}" --precondition '{}')"
 python3 "$helper" finish --job cleanup_tmp --run-id "$run_id" --outcome "$outcome" \
   --reason "mock cleanup result" --safety '{}' \
-  --candidates '{"count":null,"bytes":null,"removed_count":0,"deferred_count":0,"interrupted_count":0}' \
+  --candidates '{"count":null,"bytes":null,"removed_count":'"${TMP_MOCK_REMOVED:-0}"',"deferred_count":0,"interrupted_count":0}' \
   --postcondition '{"df_delta_bytes":0,"freed_bytes":0}' >/dev/null
 exit "$rc"
 MOCK
@@ -74,6 +75,10 @@ if [[ "$1" == "scratch-prune" ]]; then
 fi
 if [[ "$*" == "volume ballast recover scratch" ]]; then exit "${VOLUME_MOCK_ENSURE_RC:-0}"; fi
 [[ "${VOLUME_MOCK_SLEEP:-0}" == 0 ]] || sleep "$VOLUME_MOCK_SLEEP"
+if [[ "${VOLUME_MOCK_MODE:-receipt}" == lock ]]; then
+  echo "[volume_reclaim] skipped, scratch lock held after waiting 20s" >&2
+  exit 75
+fi
 if [[ "${VOLUME_MOCK_MODE:-receipt}" == skip ]]; then
   echo "${VOLUME_MOCK_SKIP:-skipped:below-trigger:80}"
   exit 0
@@ -369,7 +374,64 @@ assert_receipt_field "lock plus volume mutation preserves removal metric" "$STAT
 assert_receipt_field "lock plus volume mutation is delegated safety" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
 assert_receipt_field "lock plus volume mutation avoids no-mutation reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('safety', {}).get('reason')" "delegated to cleanup_tmp, cleanup_claude_state, and pressure-gated volume reclaim"
 
+echo "Test 11: both Scratch children blocked by an external lock holder"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 VOLUME_MOCK_MODE=lock /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+BOTH_LOCK_RC=$?
+set -e
+if [[ "$BOTH_LOCK_RC" -eq 0 ]]; then
+  echo "  PASS  volume child rc 75 lock contention is not a wrapper error"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  wrapper exited $BOTH_LOCK_RC on dual lock contention (expected 0)"
+  FAIL=$(( FAIL + 1 ))
+fi
+R="$STATE_DIR/receipts/tmp_scratch_sweep.json"
+assert_receipt_field "dual lock contention records skipped_lock" "$R" "d.get('last_terminal', {}).get('outcome')" "skipped_lock"
+assert_receipt_field "dual lock contention clears false lock.acquired" "$R" "str(d.get('last_terminal', {}).get('lock', {}).get('acquired'))" "False"
+assert_receipt_field "dual lock contention attributes zero freed bytes" "$R" "str(d.get('last_terminal', {}).get('postcondition', {}).get('freed_bytes'))" "0"
+assert_receipt_field "dual lock contention records zero volume removals" "$R" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "0"
+
+echo "Test 11a: volume-only lock contention after a scratch-prune no-op is skipped_lock, not available-floor"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_MODE=lock /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+VOL_LOCK_RC=$?
+set -e
+[[ "$VOL_LOCK_RC" -eq 0 ]] && { echo "  PASS  volume-only lock contention exits 0"; PASS=$(( PASS + 1 )); } || { echo "  FAIL  volume-only lock contention exited $VOL_LOCK_RC"; FAIL=$(( FAIL + 1 )); }
+assert_receipt_field "volume-only lock contention records skipped_lock" "$R" "d.get('last_terminal', {}).get('outcome')" "skipped_lock"
+
+echo "Test 12: cleanup_tmp deletions are never reported as no-mutation when a Scratch child skips on the lock"
+: > "$INVOCATION_LOG"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_REMOVED=3 VOLUME_MOCK_MODE=lock /bin/bash "$SCRIPT" --clean >/dev/null 2>&1 || true
+R="$STATE_DIR/receipts/tmp_scratch_sweep.json"
+assert_receipt_field "tmp deletion plus volume lock is not skipped_lock" "$R" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "tmp deletion plus volume lock is not no-mutation safety" "$R" "d.get('last_terminal', {}).get('safety', {}).get('status')" "delegated"
+assert_receipt_field "tmp deletion plus volume lock preserves removed_count" "$R" "str(d.get('last_terminal', {}).get('candidates', {}).get('removed_count'))" "3"
+
 echo ""
+
+echo "Test 13: df movement is not attributable removal evidence"
+mkdir -p "$TMP_ROOT/df-bin"
+cat > "$TMP_ROOT/df-bin/df" <<'DF'
+#!/bin/bash
+n=0; [[ ! -f "$DF_CALLS" ]] || n="$(cat "$DF_CALLS")"
+echo $((n+1)) > "$DF_CALLS"
+echo 'Filesystem 1024-blocks Used Available Capacity Mounted'
+echo "fake 100000 100 $((1000+n*100)) 1% /"
+DF
+chmod +x "$TMP_ROOT/df-bin/df"
+PATH="$TMP_ROOT/df-bin:$PATH" DF_CALLS="$TMP_ROOT/df.calls" INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_REMOVED=1 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --clean >/dev/null 2>&1
+assert_receipt_field "one removal does not attribute unrelated df growth" "$R" "str(d['last_terminal']['postcondition']['freed_bytes'])" "None"
+assert_receipt_field "raw df growth is preserved" "$R" "str(d['last_terminal']['postcondition']['df_delta_bytes'])" "102400"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" TMP_MOCK_NO_RECEIPT=1 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --clean >/dev/null 2>&1 || true
+assert_receipt_field "missing terminal receipt leaves removal count unknown" "$R" "str(d['last_terminal']['candidates']['removed_count'])" "None"
+assert_receipt_field "missing terminal receipt leaves reclaimed bytes unknown" "$R" "str(d['last_terminal']['postcondition']['freed_bytes'])" "None"
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=124 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1 || true
+assert_receipt_field "timed out prune leaves removal count unknown" "$R" "str(d['last_terminal']['candidates']['scratch_prune_removed'])" "None"
+assert_receipt_field "timed out prune leaves reclaimed bytes unknown" "$R" "str(d['last_terminal']['postcondition']['freed_bytes'])" "None"
+
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then
   exit 1
