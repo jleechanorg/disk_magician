@@ -47,6 +47,24 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 PSDUMP="$(mktemp "${TMPDIR:-/tmp}/dm-adel-ps.XXXXXX")" || exit 1
 ps -Ao pid,command > "$PSDUMP" 2>/dev/null || true
 
+# in_live_use <path> -- rc 0 when a live process actually holds this path.
+# A one-time argv snapshot misses `cd`-ed shells (argv keeps the launch cwd) and
+# processes started after the snapshot; check real cwd + open handles too.
+in_live_use() {
+  local p=$1 pid cwd
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -F n 2>/dev/null | grep -Fq -- "$p" && return 0
+  fi
+  if [[ -d /proc ]]; then
+    for pid in /proc/[0-9]*; do
+      cwd=$(readlink "$pid/cwd" 2>/dev/null) || continue
+      case "$cwd" in "$p"|"$p"/*) return 0 ;; esac
+    done
+  fi
+  grep -Fq -- "$p" "$PSDUMP" 2>/dev/null && return 0
+  return 1
+}
+
 deletion_log() {
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "advice_scratch_manual.sh" "remove" "$1" "$2" \
@@ -83,7 +101,7 @@ while IFS= read -r p || [[ -n "$p" ]]; do
   if [[ -L "$p" ]]; then echo "SKIP symlink: $p"; skipped=$((skipped+1)); continue; fi
   if [[ ! -d "$p" ]]; then echo "SKIP not-a-dir: $p"; skipped=$((skipped+1)); continue; fi
 
-  if grep -Fq -- "$p" "$PSDUMP" 2>/dev/null; then
+  if in_live_use "$p"; then
     echo "SKIP live-process: $p"; skipped=$((skipped+1)); continue
   fi
 

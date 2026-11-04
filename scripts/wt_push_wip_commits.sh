@@ -45,7 +45,20 @@ while IFS=$'\t' read -r _gib _age _rem _onrem rel; do
     echo "SKIP nothing-unpushed: $rel"; skip=$((skip+1)); continue
   fi
 
+  # SHA must be a full 40/64-hex object id. A failed/timed-out rev-parse yields
+  # an EMPTY string, and `git push origin "$sha:$ref"` with an empty source is
+  # the refspec DELETE form (`:refs/heads/x`) -- it silently removes the remote
+  # ref instead of publishing anything. Measured 2026-11-04: `git push origin
+  # ":refs/heads/victim"` printed `- [deleted] victim`. Never push on an
+  # unvalidated capture.
   sha=$(timeout 30 git -C "$wt" rev-parse HEAD 2>/dev/null)
+  if [[ ! "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+    echo "SKIP unvalidated-sha ('$sha'): $rel"; skip=$((skip+1)); continue
+  fi
+  # Re-confirm the object actually resolves before using it in a refspec.
+  if ! timeout 30 git -C "$wt" cat-file -e "$sha^{commit}" 2>/dev/null; then
+    echo "SKIP sha-not-a-commit: $rel"; skip=$((skip+1)); continue
+  fi
   name=$(echo "$rel" | tr '/' '-')
   ref="refs/heads/wip/worktree-preserve/$DATE/$name"
 
