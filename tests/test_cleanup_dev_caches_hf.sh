@@ -46,5 +46,12 @@ out="$(run --clean)"
 [[ "$out" != *"huggingface cache: recently written"* ]] \
   && ok "old huggingface cache not treated as young" || bad "old cache misclassified as young"
 
+# ---- Case 4: the old entry is actually reclaimed -- C14's cache-root table must answer
+# `rebuildable` for a model-cache entry under its registered root, not
+# kept:unproven-content, or this sweep frees nothing.
+[[ ! -e "$T/home/.cache/huggingface/models--old" ]] \
+  && ok "old huggingface entry removed under --clean" \
+  || bad "old huggingface entry survived --clean (C14 kept it)"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -266,7 +266,16 @@ _av_rebuildable() (
         worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
-    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" && "${1#"$h"/}" =~ $re ]] && return 0
+    h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" ]] || return 1
+    # Model-cache roots: Hugging Face (hub/modules/xet) and Hunyuan3D's tencent
+    # cache. Their tools re-download every object, so an entry UNDER one of these
+    # two roots is rebuildable. The row is the whole path from $HOME, so a `hub`
+    # or `tencent` dir anywhere else stays kept:unproven-content, and it matches
+    # only a DIRECTORY: a client can drop credential material beside the cache
+    # (huggingface_hub's older `token` file), which no secret-name pattern covers
+    # and which must never be classified by its parent's name.
+    if [[ -d "$1" && "${1#"$h"/}" =~ ^\.cache/(huggingface|hy3dgen)/[^/] ]]; then return 0; fi
+    [[ "${1#"$h"/}" =~ $re ]] && return 0
     local app_root="${DISK_MAGICIAN_XCODE_APP_ROOT:-/Applications}"
     app_root="$(cd "$app_root" 2>/dev/null && pwd -P)" && [[ -n "$app_root" && "$1" == "$app_root"/Xcode*.app ]] && return 0
     return 1
