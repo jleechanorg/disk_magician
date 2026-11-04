@@ -585,3 +585,167 @@ scratch_budget_artifact_children() {
   )
   return 0
 }
+
+# scratch_budget_measure_files <path> [threshold_mib] [max_depth]
+# Measurement counterpart to scratch_budget_artifact_children. Reporting used to
+# print ONE `du` total per candidate, which hides exactly what the per-child age
+# rule above exists to expose: measured 2026-11-03, a 35 GiB Scratch build root
+# whose 23.7 GiB of stale Android build dirs never appeared in any report line.
+# This walks <path> with a stopping rule instead:
+#   - a directory whose total apparent file size is BELOW <threshold_mib>
+#     (default 100) is reported as ONE aggregated row;
+#   - at or above it the directory is descended, so the caller sees which child
+#     holds the bytes. A row at or above the threshold is NEVER aggregated --
+#     that would hide the same detail a `du` total hides.
+# Output is one row per line, tab-separated, depth-first in sorted path order:
+#   <bytes>\t<files>\t<newest_epoch>\t<flag>\t<path>
+#     A  aggregated directory (total below the threshold)
+#     F  single file, measured on its own
+#     T  truncated: directory at max_depth whose total is still >= threshold
+#        (raise max_depth for detail; reported rather than aggregated silently)
+#     L  symlink, never followed (bytes = the link itself, not its target)
+#     E  unreadable: the subtree could not be measured
+# <bytes> is APPARENT size (stat), never block usage, so the threshold is exact
+# at the boundary and a sparse file counts its full length. Symlinks are never
+# followed. max_depth defaults to 6 (depth 0 = <path> itself).
+# Returns 0 when every subtree was measured, 1 if any E row was emitted (a
+# caller must not read partial rows as a complete total), 2 on usage error.
+_DM_MF_ERR="" _DM_MF_LIST="" _DM_MF_WORK="" _DM_MF_SEQ=0
+_DM_MF_RC=0 _DM_MF_DIALECT=""
+_DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
+
+# One batched find|stat pass per subtree (same idiom as
+# scratch_budget_content_mtime --strict: one process fan-out, not one stat fork
+# per file). Sets the _DM_MF_BYTES/_DM_MF_FILES/_DM_MF_NEWEST globals; returns
+# 1 when find could not read some part of the subtree.
+_dm_mf_subtree() {
+  local dir="$1" out agg rc
+  _DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
+  if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
+    if out="$(find "$dir" -xdev -type f -exec stat -f '%z %m' {} + 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
+  else
+    if out="$(find "$dir" -xdev -type f -exec stat -c '%s %Y' {} + 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
+  fi
+  (( rc == 0 )) || return 1
+  # A filename containing a newline cannot disturb this: stat prints one line
+  # per file and the name is never printed, so the line count is the file count.
+  agg="$(printf '%s\n' "$out" | awk '
+    NF == 0 { next }
+    NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      bytes += $1; files += 1; if ($2 + 0 > newest) newest = $2 + 0; next
+    }
+    { exit 3 }
+    END { printf "%d %d %d\n", bytes, files, newest }')" || return 1
+  read -r _DM_MF_BYTES _DM_MF_FILES _DM_MF_NEWEST <<<"$agg"
+  return 0
+}
+
+# _dm_mf_list <dir> — write the NUL-separated, sorted direct children of <dir>
+# to a per-call file (recursion must never share one list path: a child level
+# would clobber the parent's enumeration mid-read). Sets $_DM_MF_LIST. Returns 1
+# when the directory could not be listed.
+_dm_mf_list() {
+  _DM_MF_LIST="$_DM_MF_WORK/list.$(( ++_DM_MF_SEQ ))"
+  find "$1" -xdev -mindepth 1 -maxdepth 1 -print0 2>"$_DM_MF_ERR" >"$_DM_MF_LIST" || return 1
+  sort -z -o "$_DM_MF_LIST" "$_DM_MF_LIST" || return 1
+  return 0
+}
+
+_dm_mf_report_err() {
+  local msg
+  msg="$(head -n 3 "$_DM_MF_ERR" 2>/dev/null | tr '\n' ' ')"
+  printf 'scratch_budget_measure_files: unreadable: %s: %s\n' "${1}" "${msg:-measurement failed}" >&2
+  _DM_MF_RC=1
+}
+
+# _dm_mf_stat <path> — lstat size and mtime of <path> (never its target).
+_dm_mf_stat() {
+  if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
+    stat -f '%z %m' "$1" 2>/dev/null
+  else
+    stat -c '%s %Y' "$1" 2>/dev/null
+  fi
+}
+
+_dm_mf_emit_leaf() {
+  local path="$1" flag="$2" out
+  out="$(_dm_mf_stat "$path")"
+  if [[ ! "$out" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
+    printf '0\t0\t0\tE\t%s\n' "$path"
+    _dm_mf_report_err "$path"
+    return 0
+  fi
+  printf '%s\t1\t%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$flag" "$path"
+}
+
+_dm_mf_walk() {
+  local dir="$1" depth="$2" threshold_bytes="$3" max_depth="$4"
+  local bytes files newest child
+  if _dm_mf_subtree "$dir"; then
+    bytes=$_DM_MF_BYTES files=$_DM_MF_FILES newest=$_DM_MF_NEWEST
+    if (( bytes < threshold_bytes )); then
+      printf '%s\t%s\t%s\tA\t%s\n' "$bytes" "$files" "$newest" "$dir"
+      return 0
+    fi
+    if (( depth >= max_depth )); then
+      printf '%s\t%s\t%s\tT\t%s\n' "$bytes" "$files" "$newest" "$dir"
+      return 0
+    fi
+  elif (( depth >= max_depth )); then
+    # Unmeasurable and unable to descend: an explicit error row, never a total.
+    printf '0\t0\t0\tE\t%s\n' "$dir"
+    _dm_mf_report_err "$dir"
+    return 0
+  fi
+  # At or above the threshold: descend so the caller sees where the bytes are.
+  # An unmeasurable subtree is descended too (it cannot be aggregated), which
+  # reports the failure at the path that could not be read instead of claiming
+  # an aggregate for it.
+  if ! _dm_mf_list "$dir"; then
+    printf '0\t0\t0\tE\t%s\n' "$dir"
+    _dm_mf_report_err "$dir"
+    return 0
+  fi
+  while IFS= read -r -d '' child; do
+    if [[ -L "$child" ]]; then
+      _dm_mf_emit_leaf "$child" L
+    elif [[ -d "$child" ]]; then
+      _dm_mf_walk "$child" $(( depth + 1 )) "$threshold_bytes" "$max_depth"
+    else
+      _dm_mf_emit_leaf "$child" F
+    fi
+  done <"$_DM_MF_LIST"
+  return 0
+}
+
+scratch_budget_measure_files() {
+  local path="${1:-}" threshold_mib="${2:-100}" max_depth="${3:-6}" work rc
+  if [[ -z "$path" ]]; then
+    echo 'scratch_budget_measure_files: usage: scratch_budget_measure_files <path> [threshold_mib] [max_depth]' >&2
+    return 2
+  fi
+  [[ "$threshold_mib" =~ ^[0-9]+$ ]] || threshold_mib=100
+  [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=6
+  _DM_MF_RC=0
+  if [[ "$(uname -s)" == Darwin ]]; then _DM_MF_DIALECT=Darwin; else _DM_MF_DIALECT=GNU; fi
+  _DM_MF_ERR="" _DM_MF_LIST=""
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    printf '0\t0\t0\tE\t%s\n' "$path"
+    printf 'scratch_budget_measure_files: unreadable: %s: no such file\n' "$path" >&2
+    return 1
+  fi
+  if [[ -L "$path" ]]; then
+    _dm_mf_emit_leaf "$path" L
+    return $_DM_MF_RC
+  fi
+  if [[ ! -d "$path" ]]; then
+    _dm_mf_emit_leaf "$path" F
+    return $_DM_MF_RC
+  fi
+  work="$(mktemp -d "${TMPDIR:-/tmp}/dm-mf.XXXXXX")" || return 2
+  _DM_MF_WORK="$work" _DM_MF_ERR="$work/err" _DM_MF_LIST="" _DM_MF_SEQ=0
+  _dm_mf_walk "$path" 0 "$(( threshold_mib * 1024 * 1024 ))" "$max_depth"
+  rc=$_DM_MF_RC
+  rm -rf "$work"
+  return $rc
+}

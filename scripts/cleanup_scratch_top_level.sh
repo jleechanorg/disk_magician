@@ -261,6 +261,23 @@ scratch_available_bytes() {
   (( fs_free < quota_free )) && printf '%s\n' "$fs_free" || printf '%s\n' "$quota_free"
 }
 
+# Detail floor for candidate reporting. A candidate at or above it is reported
+# file-by-file instead of as ONE `du` total, so the operator sees which child
+# holds the bytes: measured 2026-11-03, a 35 GiB build root reported as a single
+# line while 23.7 GiB of its children were 39-41 h old. Reporting only -- the
+# C14 verdict, the recency floor, the cursor and the LRU order are untouched.
+DETAIL_MIB=100
+DETAIL_DEPTH=6
+report_candidate_detail() {
+  local entry="$1" kb="$2" rows bytes files newest flag path
+  (( kb >= DETAIL_MIB * 1024 )) || return 0
+  rows="$(scratch_budget_measure_files "$entry" "$DETAIL_MIB" "$DETAIL_DEPTH" 2>/dev/null)" || :
+  while IFS=$'\t' read -r bytes files newest flag path; do
+    [[ -n "${flag:-}" ]] || continue
+    printf 'detail:%s bytes=%s files=%s newest=%s %s\n' "$flag" "$bytes" "$files" "$newest" "$path"
+  done <<<"$rows"
+}
+
 if [[ "$AVAILABLE_FLOOR" == true ]]; then
   scratch_available="$(scratch_available_bytes)" || { echo skipped:measurement-unavailable; exit 75; }
   if (( scratch_available >= 50 * 1024 * 1024 * 1024 )); then
@@ -587,6 +604,9 @@ while IFS= read -r -d '' entry; do
     capped=1
     continue
   fi
+  # Before the verdict: a --clean run removes $entry, and a removed path cannot
+  # be itemised afterwards. Nothing here changes what gets removed.
+  report_candidate_detail "$entry" "$kb"
   automatic_logged=false
   if [[ "$SCRATCH_AUTOMATIC" == 1 ]]; then
     if [[ "$DRY_RUN" != true ]]; then
