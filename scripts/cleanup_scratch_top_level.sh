@@ -545,10 +545,22 @@ while IFS= read -r -d '' entry; do
   for _blocked in ${_artifact_discovery_blocked[@]+"${_artifact_discovery_blocked[@]}"}; do
     if [[ "$entry" == "$_blocked" ]]; then _artifact_blocked=true; break; fi
   done
-  [[ "$_artifact_blocked" == true ]] && { kept=$(( kept + 1 )); continue; }
   if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true && -n "$CURSOR_RESUME_TARGET" ]]; then
     [[ "$entry" == "$CURSOR_RESUME_TARGET" ]] || continue
+    # The resume target is now VISITED, whether or not it turns out to be
+    # unmeasurable below. Clear it here, before any `continue` path, so an
+    # unreadable root cannot leave the cursor pinned to itself forever.
+    # (Previously the blocked check ran FIRST and `continue`d past this line,
+    # so an unmeasurable resume target never cleared and every later candidate
+    # was skipped by the equality gate -- the whole pass stalled.)
     CURSOR_RESUME_TARGET=""
+  fi
+  if [[ "$_artifact_blocked" == true ]]; then
+    # Complete this visit through the cursor: count the keep, and if it was the
+    # resume target the cursor advance below records it as done.
+    kept=$(( kept + 1 ))
+    echo "kept:artifact-discovery-unmeasurable $entry"
+    continue
   fi
   if deadline_exceeded; then
     if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
