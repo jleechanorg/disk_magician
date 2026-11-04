@@ -463,7 +463,12 @@ contradicted it. Check them in this order before proposing a reclaim change:
   names (`relocated-tmp`, `test-loc-review`, `advice-primary-pair-*`) are not in
   that class map, so ~118 GiB of unleased, no-live-owner orphan stays put under
   *any* trigger/floor/shape/rate setting. Widening the class map is the change
-  that matters; tuning the trigger is not.
+  that matters; tuning the trigger is not. Row **E8** now exists for the Scratch
+  volume: a direct child of the registered `scratch`-class root (real directory,
+  non-dot, never a symlink, one path component) is declared ephemeral at 1440 min,
+  the same retention as the other volume rows. Deeper paths and top-level files
+  stay `kept:unproven-content`, and lease / live-cwd / open-file / secret /
+  repository / recency gates all still run first.
 - **`scratch_budget_content_mtime --strict` returns 1 for any tree containing a
   symlink.** Moved-`/tmp` and checkout scratch are full of them, so the largest
   orphans were never candidates at all (a 32 GiB directory silently excluded).
