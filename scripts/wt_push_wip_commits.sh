@@ -38,9 +38,16 @@ while IFS=$'\t' read -r _gib _age _rem _onrem rel; do
   fi
 
   # anything to push?
-  ahead=$(GIT_OPTIONAL_LOCKS=0 timeout 60 git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null)
-  ahead=${ahead//[!0-9]/}
-  [[ -n "$ahead" ]] || ahead=0
+  # An UNKNOWN count must never collapse to 0: "we could not measure" reported
+  # as "nothing to preserve" silently drops unpushed work. Keep the failure and
+  # count it as an error, not a no-op.
+  if ! ahead_raw="$(GIT_OPTIONAL_LOCKS=0 timeout 60 git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null)"; then
+    echo "FAILED unmeasurable-unpushed-count: $rel"; fail=$((fail+1)); continue
+  fi
+  ahead="${ahead_raw//[!0-9]/}"
+  if [[ -z "$ahead" ]]; then
+    echo "FAILED unmeasurable-unpushed-count: $rel"; fail=$((fail+1)); continue
+  fi
   if (( ahead == 0 )); then
     echo "SKIP nothing-unpushed: $rel"; skip=$((skip+1)); continue
   fi

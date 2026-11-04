@@ -48,7 +48,16 @@ in_live_use() {
       case "$cwd" in "$p"|"$p"/*) return 0 ;; esac
     done
   fi
-  case "$(cat "$PSDUMP" 2>/dev/null || true)" in *"$p"*) return 0 ;; esac
+  # Refresh the command-line probe PER CANDIDATE, immediately before deletion.
+  # The one-time snapshot taken at startup cannot see a process that started
+  # afterwards, and a process may hold the path in argv while its cwd and open
+  # descriptors live elsewhere. Ignoring a failed capture is also fail-open.
+  local fresh
+  if ! fresh="$(timeout 30 ps -Ao pid,command 2>/dev/null)"; then
+    return 0   # probe unavailable -> preserve
+  fi
+  [[ -n "$fresh" ]] || return 0
+  case "$fresh" in *"$p"*) return 0 ;; esac
   return 1
 }
 
@@ -78,19 +87,24 @@ reverify_gates() {
   [[ "$age" =~ ^[0-9]+$ ]] || return 1
   (( age >= min_days )) || { echo "SKIP too-recent (age=${age}d): $rel"; return 1; }
 
-  # 2) machine-local protection gates, when the canonical safety module exists.
-  local safety
+  # 2) machine-local protection gates. An UNLOCATABLE safety module is a FAILED
+  # gate, not a passed one: silently skipping it means a path covered by a
+  # never_delete or needs_decision rule gets removed because the checker could
+  # not be found. Absence of the checker must never read as absence of a rule.
+  local safety found=0
   for safety in \
+    "${WT_SAFETY_CHECK:-}" \
     "$HOME/.local/share/uv/tools/disk-magician/lib/python3.13/site-packages/disk_magician/scripts/safety_check.sh" \
     "$HOME/.local/share/uv/tools/disk-magician/lib/python3.12/site-packages/disk_magician/scripts/safety_check.sh"
   do
-    if [[ -f "$safety" ]]; then
-      if ! bash "$safety" "$wt" >/dev/null 2>&1; then
-        echo "SKIP safety-gate: $rel"; return 1
-      fi
-      break
+    [[ -n "$safety" && -f "$safety" ]] || continue
+    found=1
+    if ! bash "$safety" "$wt" >/dev/null 2>&1; then
+      echo "SKIP safety-gate: $rel"; return 1
     fi
+    break
   done
+  (( found == 1 )) || { echo "SKIP safety-module-missing (fail closed): $rel"; return 1; }
   return 0
 }
 
@@ -174,7 +188,7 @@ while IFS=$'\t' read -r _gib rel; do
     # .git/worktrees/<name> admin entry must be the thing that is missing.
     # Without that positive signal we cannot distinguish "orphaned worktree"
     # from "someone's plain folder", so preserve.
-    wt_name="${wt##*/}"
+
     main_repo=$(timeout 30 git -C "$WT_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
     if [[ -z "$main_repo" ]]; then
       # Resolve the owning repo from the list's first path component instead.
@@ -190,13 +204,29 @@ while IFS=$'\t' read -r _gib rel; do
     if [[ -z "$main_repo" ]] || ! timeout 20 git -C "$main_repo" rev-parse --git-dir >/dev/null 2>&1; then
       echo "SKIP no-orphan-provenance (main repo unresolved): $rel"; skip=$((skip+1)); continue
     fi
-    # The main repo must still list this worktree; an admin entry that is
-    # present means this is NOT an orphan and must go through worktree remove.
+    # POSITIVE provenance is required, not merely the absence of a Git record.
+    # "Not listed by worktree list" and "no admin dir" are NEGATIVE conditions:
+    # an ordinary directory that never was a worktree (say
+    # ~/.worktrees/<repo>/notes) satisfies both, and would be recursively
+    # deleted on a hand-list mistake. Deletion additionally requires a leftover
+    # artifact that only a real worktree leaves behind: a `.git` FILE containing
+    # a `gitdir:` pointer whose target is now missing. Absent that proof, the
+    # candidate is preserved.
+    wt_git="$wt/.git"
+    proven_orphan=0
+    if [[ -f "$wt_git" && ! -L "$wt_git" ]]; then
+      gitdir_target="$(sed -n 's/^gitdir:[[:space:]]*//p' "$wt_git" 2>/dev/null | head -1)"
+      if [[ -n "$gitdir_target" && ! -e "$gitdir_target" ]]; then
+        proven_orphan=1
+      fi
+    fi
+    if (( proven_orphan == 0 )); then
+      echo "SKIP no-positive-orphan-provenance (no dangling gitdir pointer): $rel"
+      skip=$((skip+1)); continue
+    fi
+    # A still-listed worktree is not an orphan even with a dangling pointer.
     if timeout 30 git -C "$main_repo" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $wt"; then
       echo "SKIP still-registered-worktree: $rel"; skip=$((skip+1)); continue
-    fi
-    if [[ -e "$main_repo/.git/worktrees/$wt_name" ]]; then
-      echo "SKIP admin-entry-present: $rel"; skip=$((skip+1)); continue
     fi
 
     in_live_use "$wt" && { echo "SKIP live: $rel"; skip=$((skip+1)); continue; }

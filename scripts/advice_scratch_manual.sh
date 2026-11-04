@@ -72,14 +72,23 @@ in_live_use() {
       case "$cwd" in "$p"|"$p"/*) return 0 ;; esac
     done
   fi
-  case "$(cat "$PSDUMP" 2>/dev/null || true)" in *"$p"*) return 0 ;; esac
+  # Refresh the command-line probe PER CANDIDATE, immediately before deletion.
+  # The one-time snapshot taken at startup cannot see a process that started
+  # afterwards, and a process may hold the path in argv while its cwd and open
+  # descriptors live elsewhere. Ignoring a failed capture is also fail-open.
+  local fresh
+  if ! fresh="$(timeout 30 ps -Ao pid,command 2>/dev/null)"; then
+    return 0   # probe unavailable -> preserve
+  fi
+  [[ -n "$fresh" ]] || return 0
+  case "$fresh" in *"$p"*) return 0 ;; esac
   return 1
 }
 
 deletion_log() {
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "advice_scratch_manual.sh" "remove" "$1" "$2" \
-    >>"$LOG" 2>/dev/null || true
+    >>"$LOG" 2>/dev/null
 }
 
 removed=0
@@ -105,8 +114,17 @@ while IFS= read -r p || [[ -n "$p" ]]; do
     *) echo "SKIP out-of-scope ($SCOPE_MATCH): $p"; skipped=$((skipped+1)); continue ;;
   esac
 
-  if [[ -n "$EXCLUDE_FILE" && -f "$EXCLUDE_FILE" ]] && grep -Fxq "$p" "$EXCLUDE_FILE"; then
-    echo "SKIP excluded: $p"; skipped=$((skipped+1)); continue
+  # A configured exclusion file that cannot be read must REFUSE the candidate,
+  # not silently pass it. `[[ -f ]] && grep` makes a mistyped path look like
+  # "nothing excluded", which turns the safeguard off exactly when it cannot be
+  # evaluated. Proven readable once up front; re-checked here per path.
+  if [[ -n "$EXCLUDE_FILE" ]]; then
+    if [[ ! -r "$EXCLUDE_FILE" ]]; then
+      echo "SKIP exclusion-unreadable: $p"; skipped=$((skipped+1)); continue
+    fi
+    if grep -Fxq "$p" "$EXCLUDE_FILE"; then
+      echo "SKIP excluded: $p"; skipped=$((skipped+1)); continue
+    fi
   fi
 
   if [[ -L "$p" ]]; then echo "SKIP symlink: $p"; skipped=$((skipped+1)); continue; fi
@@ -124,7 +142,12 @@ while IFS= read -r p || [[ -n "$p" ]]; do
   find "$p" -type d -exec chmod u+w {} + 2>/dev/null || true
 
   if rm -rf -- "$p" 2>/dev/null && [[ ! -e "$p" ]]; then
-    deletion_log "$kb" "$p"
+    # The audit row is part of the contract, not a side effect. A failed append
+    # leaves a deletion nobody can account for, so it counts as a failure.
+    if ! deletion_log "$kb" "$p"; then
+      echo "LOGGED-FAILED (deleted but audit row missing): $p"
+      failed=$((failed+1))
+    fi
     removed=$((removed+1))
     removed_kb=$((removed_kb+kb))
     printf 'REMOVED %6.2f GiB  %s\n' "$(awk -v k="$kb" 'BEGIN{print k/1048576}')" "$rel"
