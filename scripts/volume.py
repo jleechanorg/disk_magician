@@ -3341,6 +3341,12 @@ def pressure_process(arguments, state, env=None, recovery=False):
                 if process.poll() is None:
                     try: os.killpg(process.pid, signal.SIGTERM)
                     except ProcessLookupError: pass
+                    except PermissionError:
+                        # The owned child may have exited between poll() and
+                        # killpg(). Ignore EPERM only after re-polling this
+                        # exact Popen child; a live child still propagates it.
+                        if process.poll() is None:
+                            raise
                 forwarded = True
             try:
                 return subprocess.CompletedProcess(arguments, process.wait(timeout=.1))
