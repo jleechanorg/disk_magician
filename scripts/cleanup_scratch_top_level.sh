@@ -556,10 +556,23 @@ while IFS= read -r -d '' entry; do
     CURSOR_RESUME_TARGET=""
   fi
   if [[ "$_artifact_blocked" == true ]]; then
-    # Complete this visit through the cursor: count the keep, and if it was the
-    # resume target the cursor advance below records it as done.
-    kept=$(( kept + 1 ))
-    echo "kept:artifact-discovery-unmeasurable $entry"
+    # Complete this visit through the canonical keep-only cursor helper. It
+    # never invokes C14/quarantine, but it persists the finished visit so a
+    # discovery error cannot pin the automatic cursor forever.
+    if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
+      outcome="$(scratch_budget_quarantine_remove "$entry" --keep-unproven-content)"
+      kept=$(( kept + 1 ))
+      case "$outcome" in
+        kept:unproven-content) echo "kept:artifact-discovery-unmeasurable $entry" ;;
+        *) echo "$outcome $entry" ;;
+      esac
+      case "$outcome" in
+        deferred:deadline-before-unit|kept:cursor-*) break ;;
+      esac
+    else
+      kept=$(( kept + 1 ))
+      echo "kept:artifact-discovery-unmeasurable $entry"
+    fi
     continue
   fi
   if deadline_exceeded; then
