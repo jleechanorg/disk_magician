@@ -154,9 +154,15 @@ while IFS=$'\t' read -r _gib rel; do
     # remove step destroyed the file. Check ignored content explicitly and
     # preserve -- an ignored path is exactly where build outputs, local config
     # and credentials live.
-    dirty=$(GIT_OPTIONAL_LOCKS=0 timeout 60 git -C "$wt" status --porcelain 2>/dev/null | wc -l)
-    dirty=${dirty//[!0-9]/}
-    [[ "$dirty" == "0" ]] || { echo "SKIP dirty=$dirty: $rel"; skip=$((skip+1)); continue; }
+    # Capture FIRST, then count. `git status ... | wc -l` hides a failing git:
+    # measured 2026-11-04, `git status` returned 128 on a bad repo while the
+    # pipeline still printed 0 lines -- a broken/unreadable repo read as clean.
+    if ! status_out="$(GIT_OPTIONAL_LOCKS=0 timeout 60 git -C "$wt" status --porcelain 2>/dev/null)"; then
+      echo "SKIP git-status-failed: $rel"; skip=$((skip+1)); continue
+    fi
+    if [[ -n "$status_out" ]]; then
+      echo "SKIP dirty: $rel"; skip=$((skip+1)); continue
+    fi
 
     if ! ignored_list="$(GIT_OPTIONAL_LOCKS=0 timeout 120 git -C "$wt" status --porcelain --ignored=matching --untracked-files=normal 2>/dev/null)"; then
       echo "SKIP ignored-scan-unmeasurable: $rel"; skip=$((skip+1)); continue
@@ -275,6 +281,26 @@ while IFS=$'\t' read -r _gib rel; do
 
     in_live_use "$wt" && { echo "SKIP live: $rel"; skip=$((skip+1)); continue; }
     reverify_gates "$wt" "$rel" || { skip=$((skip+1)); continue; }
+
+    # CONTENT SAFETY for an orphaned worktree.
+    #
+    # With the git admin dir gone there is NO way to tell which files were
+    # committed and which were never committed: the index and object store that
+    # would answer that are exactly what is missing. Any content check I could
+    # run here would be a guess, and a guess in the delete direction destroys
+    # uncommitted work. So an unverifiable worktree is preserved unless the
+    # caller attests, per path, that its content was already accounted for.
+    #   WT_ORPHAN_CONTENT_VERIFIED=<path>[,<path>...]  explicit operator attestation
+    if [[ -n "${WT_ORPHAN_CONTENT_VERIFIED:-}" ]]; then
+      case ",${WT_ORPHAN_CONTENT_VERIFIED}," in
+        *",$wt,"*) : ;;
+        *) echo "SKIP orphan-content-unverified: $rel"; skip=$((skip+1)); continue ;;
+      esac
+    else
+      echo "SKIP orphan-content-unverified (git admin gone; pass WT_ORPHAN_CONTENT_VERIFIED): $rel"
+      skip=$((skip+1)); continue
+    fi
+
     find "$wt" -type d -exec chmod u+w {} + 2>/dev/null || true
     if rm -rf -- "$wt" 2>/dev/null && [[ ! -e "$wt" ]]; then
       ok=$((ok+1)); kb_total=$((kb_total+kb))
