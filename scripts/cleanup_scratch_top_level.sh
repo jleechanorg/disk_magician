@@ -219,6 +219,32 @@ fi
 
 now="$(date +%s)"
 floor_epoch=$(( now - MIN_HOURS * 3600 ))
+
+# A path in a class with its own explicit C14 ephemeral row uses that row's
+# retention as its floor instead of the coarse global MIN_HOURS.
+#
+# Why: the global floor is a *default*, but it was also acting as a hard lower
+# bound on classes that already declare a shorter life in
+# lib/artifact_verdict.sh. An `advice-*` dir declares 240 min there, yet
+# --min-hours 4 was silently clamped to 24 and the outer check emitted
+# `kept:recent-activity (age 16h < 24h)` before the C14 row was ever consulted
+# — so the declared row could never take effect (measured 2026-11-03: 175
+# advice dirs in the 4-24h band, 17.1 GiB, all unreachable).
+#
+# This does not widen anything: the per-class row is the narrower contract, the
+# verdict still enforces no-open-file / no-live-cwd / no-secrets / no-repo
+# provenance, and MIN_HOURS is still clamped to >= 24 for every path with no
+# row (the default remains non-negotiable). An operator's larger --min-hours
+# still wins, because the per-path floor is only ever the *smaller* of the two
+# when the row is shorter.
+effective_floor_epoch() {
+  local entry=$1 ret row_epoch
+  ret="$(c14_ephemeral_retention "$entry" 2>/dev/null)" || { printf '%s\n' "$floor_epoch"; return 0; }
+  [[ "$ret" =~ ^[0-9]+$ ]] || { printf '%s\n' "$floor_epoch"; return 0; }
+  row_epoch=$(( now - ret * 60 ))
+  # Only ever relax toward the declared row, never past an operator's larger floor.
+  if (( row_epoch > floor_epoch )); then printf '%s\n' "$row_epoch"; else printf '%s\n' "$floor_epoch"; fi
+}
 scanned=0 kept=0 removable=0 removed=0 planned_kb=0 removed_kb=0 capped=0 busy_streak=0
 
 # verdict_and_maybe_remove <entry> — C14 gate plus the operator-approved content
@@ -246,7 +272,24 @@ verdict_and_maybe_remove() {
     done
     if (( tries < 0 )); then rm -f "$inv" "$binding"; echo kept:lease-busy; return 0; fi
   fi
-  verdict="$(artifact_removal_verdict "$verdict_path" --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
+  # An advice artifact is classified `ephemeral` for the verdict. Without this the
+  # verdict ran the un-keyed provenance branch, which returns kept:unproven-content
+  # for any non-repo directory no matter which retention row exists -- that is why
+  # advice-* stayed permanently kept even after gaining a row (2026-11-03: 89 dirs).
+  #
+  # Scope is deliberately narrow: ONLY the two advice name shapes this change
+  # introduced. Keying off "any path with a row" instead would also re-key every
+  # nested-repo candidate (the row set includes a `... .git` arm) and silently
+  # change their inventory/cap accounting -- that broader version broke 21
+  # existing assertions in tests/test_cleanup_scratch_top_level.sh.
+  local verdict_kind=()
+  if [[ "${verdict_path##*/}" =~ ^advice- || "${verdict_path##*/}" =~ ^pr[0-9]+-.*advice ]]; then
+    verdict_kind=(--kind ephemeral)
+  fi
+  # ${verdict_kind[@]+...} guards the empty-array expansion: under `set -u` bash
+  # treats "${arr[@]}" on an EMPTY array as an unbound variable, which aborted
+  # every non-advice candidate with kept:check-failed (21 test failures).
+  verdict="$(artifact_removal_verdict "$verdict_path" ${verdict_kind[@]+"${verdict_kind[@]}"} --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
   case "$verdict" in
     remove) ;;
     kept:secret-like|kept:unproven-content)
@@ -400,7 +443,10 @@ while IFS= read -r -d '' entry; do
   if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
   if [[ ! -d "$entry" ]]; then continue; fi
   dir_mtime="$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null)"
-  if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > floor_epoch )); then
+  # Per-path floor: a class with its own declared C14 row (e.g. advice-* = 240 min)
+  # uses that narrower floor; everything else keeps the >= 24 h global default.
+  entry_floor_epoch="$(effective_floor_epoch "$entry")"
+  if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > entry_floor_epoch )); then
     mtime="$dir_mtime"
   else
     mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
@@ -408,8 +454,8 @@ while IFS= read -r -d '' entry; do
   if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
     echo "kept:mtime-unmeasurable $entry"; kept=$(( kept + 1 )); continue
   fi
-  if (( mtime > floor_epoch )); then
-    echo "kept:recent-activity $entry (age $(( (now - mtime) / 3600 ))h < ${MIN_HOURS}h)"
+  if (( mtime > entry_floor_epoch )); then
+    echo "kept:recent-activity $entry (age $(( (now - mtime) / 3600 ))h < $(( (now - entry_floor_epoch) / 3600 ))h)"
     kept=$(( kept + 1 )); continue
   fi
   if ! reason="$(safety_gate "$entry" 2>/dev/null)"; then

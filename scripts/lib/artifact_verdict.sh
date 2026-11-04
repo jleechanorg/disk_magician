@@ -178,6 +178,15 @@ c14_ephemeral_retention() {
     while IFS= read -r r; do
         r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) ]] || continue
         if [[ "$rel" =~ ^(pr[0-9]|pr-|pr_|claude-|claude_)[^/]*$ ]]; then echo 2880
+        # /advice working dirs (`advice-<pr>`, `advice-<pr>-r2`, `advice-lw-<ts>`).
+        # They are top-level Scratch artifacts with no owner row at all, so every
+        # one of them fell through to `kept:unproven-content` and could never be
+        # pruned (measured 2026-11-03: 257 dirs, 27.2 GiB, ALL permanently kept).
+        # 240 min matches the existing agent_prompt_* precedent for the same kind
+        # of disposable opinion artifact; the verdict still requires no open file,
+        # no live cwd, no secrets, and no repo provenance, so a running advice
+        # session is never touched.
+        elif [[ "$rel" =~ ^advice-(-lw-\([0-9]\){8}T[0-9]{6}Z|[^/]+)$ ]]; then echo 240
         elif [[ ( "$rel" =~ ^agent_prompt_[^/]*\.txt$ && -f "$content" ) || ( "$rel" =~ ^[^/]+(/[^/]+)?$ && -d "$content/.git" ) ]]; then echo 240
         elif [[ ( "$rel" =~ ^cli_validation_gemini_[^/]*$ && -d "$content" ) || ( "$rel" != */* && -f "$content/.git" ) ]]; then echo 60
         else continue; fi
@@ -188,6 +197,23 @@ c14_ephemeral_retention() {
         [[ "$archive_origin" != --archive-origin ]] || return 1
         if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 1440; return 0; fi
         if [[ "$rel" =~ ^[^./][^/]*$ && ( -d "$content/.git" || -f "$content/.git" ) ]]; then echo 1440; return 0; fi
+        # /advice working dirs directly under the Scratch volume root
+        # (`advice-<pr>`, `advice-<pr>-r2`, `advice-lw-<ts>`). Without this row
+        # they matched nothing and every one was permanently `kept:unproven-
+        # content` (measured 2026-11-03: 257 dirs / 27.2 GiB, 0 ever prunable).
+        # 240 min matches the agent_prompt_* precedent for the same class of
+        # disposable opinion artifact. The verdict still requires no open file,
+        # no live cwd, no secrets and no repo provenance, so an in-flight advice
+        # session is never removed.
+        if [[ "$rel" =~ ^advice-(-lw-([0-9]){8}T[0-9]{6}Z|[^/]+)$ ]]; then echo 240; return 0; fi
+        # The other half of the same class: advice artifacts named for the PR they
+        # reviewed rather than for the tool (`pr11094-final-advice`,
+        # `pr465-advice`, `pr11065-agy-advice-55857`). These carry the bulk of the
+        # bytes -- 22 dirs / 19.1 GiB measured 2026-11-03 -- and matched no row at
+        # all, so they were permanently kept while their `advice-*` siblings were.
+        # Anchored `^pr[0-9]+-.*[-]advice` so it cannot catch a plain `pr1234`
+        # checkout (those keep their own longer 2880-minute PR row).
+        if [[ "$rel" =~ ^pr[0-9]+-.*advice[^/]*$ ]]; then echo 240; return 0; fi
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
