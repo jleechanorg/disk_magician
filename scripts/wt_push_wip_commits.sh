@@ -23,6 +23,16 @@ LIST="${1:-/tmp/wt-pushable.txt}"
 [[ "${WIP_PUSH_APPROVED:-0}" == "1" ]] || { echo "Refusing: set WIP_PUSH_APPROVED=1" >&2; exit 2; }
 [[ -f "$LIST" ]] || { echo "missing list: $LIST" >&2; exit 2; }
 
+# bounded <seconds> <cmd...> -- cap the wall clock when `timeout` exists, else
+# run the command alone. `timeout` is coreutils and absent from base images; an
+# unguarded call exits 127, which makes the git probes look like "no object
+# store" and silently skips preservation.
+if command -v timeout >/dev/null 2>&1; then
+  bounded() { timeout "$@"; }
+else
+  bounded() { local _secs=$1; shift; "$@"; }
+fi
+
 DATE="$(date -u +%Y%m%d)"
 ok=0; skip=0; fail=0
 : > /tmp/wt-pushed-refs.txt
@@ -33,7 +43,7 @@ while IFS=$'\t' read -r _gib _age _rem _onrem rel; do
   [[ -d "$wt" ]] || { echo "SKIP not-a-dir: $rel"; skip=$((skip+1)); continue; }
 
   # orphaned git admin dir => no object store to push from
-  if ! GIT_OPTIONAL_LOCKS=0 timeout 30 git -C "$wt" rev-parse HEAD >/dev/null 2>&1; then
+  if ! GIT_OPTIONAL_LOCKS=0 bounded 30 git -C "$wt" rev-parse HEAD >/dev/null 2>&1; then
     echo "SKIP orphaned-admin: $rel"; skip=$((skip+1)); continue
   fi
 
@@ -41,7 +51,7 @@ while IFS=$'\t' read -r _gib _age _rem _onrem rel; do
   # An UNKNOWN count must never collapse to 0: "we could not measure" reported
   # as "nothing to preserve" silently drops unpushed work. Keep the failure and
   # count it as an error, not a no-op.
-  if ! ahead_raw="$(GIT_OPTIONAL_LOCKS=0 timeout 60 git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null)"; then
+  if ! ahead_raw="$(GIT_OPTIONAL_LOCKS=0 bounded 60 git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null)"; then
     echo "FAILED unmeasurable-unpushed-count: $rel"; fail=$((fail+1)); continue
   fi
   ahead="${ahead_raw//[!0-9]/}"
@@ -58,21 +68,21 @@ while IFS=$'\t' read -r _gib _age _rem _onrem rel; do
   # ref instead of publishing anything. Measured 2026-11-04: `git push origin
   # ":refs/heads/victim"` printed `- [deleted] victim`. Never push on an
   # unvalidated capture.
-  sha=$(timeout 30 git -C "$wt" rev-parse HEAD 2>/dev/null)
+  sha=$(bounded 30 git -C "$wt" rev-parse HEAD 2>/dev/null)
   if [[ ! "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
     echo "SKIP unvalidated-sha ('$sha'): $rel"; skip=$((skip+1)); continue
   fi
   # Re-confirm the object actually resolves before using it in a refspec.
-  if ! timeout 30 git -C "$wt" cat-file -e "$sha^{commit}" 2>/dev/null; then
+  if ! bounded 30 git -C "$wt" cat-file -e "$sha^{commit}" 2>/dev/null; then
     echo "SKIP sha-not-a-commit: $rel"; skip=$((skip+1)); continue
   fi
   name=$(echo "$rel" | tr '/' '-')
   ref="refs/heads/wip/worktree-preserve/$DATE/$name"
 
   # commits-only push: <sha>:<ref>. The index is not involved.
-  if timeout 300 git -C "$wt" push origin "$sha:$ref" >/dev/null 2>&1; then
+  if bounded 300 git -C "$wt" push origin "$sha:$ref" >/dev/null 2>&1; then
     # prove the remote actually has it
-    if timeout 60 git -C "$wt" ls-remote --heads origin "$ref" 2>/dev/null | grep -q "${sha:0:40}"; then
+    if bounded 60 git -C "$wt" ls-remote --heads origin "$ref" 2>/dev/null | grep -q "${sha:0:40}"; then
       printf 'PUSHED %s  (%s commits)  %s\n' "${sha:0:10}" "$ahead" "$ref"
       printf '%s\t%s\n' "$rel" "$ref" >> /tmp/wt-pushed-refs.txt
       ok=$((ok+1))

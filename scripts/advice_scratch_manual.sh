@@ -29,6 +29,16 @@ set -uo pipefail
 LIST="${1:-}"
 SCRATCH_ROOT="${SCRATCH_ROOT:-/Volumes/diskm-scratch}"
 SCOPE_MATCH="${SCOPE_MATCH:-advice}"
+
+# bounded <seconds> <cmd...> -- cap the wall clock when `timeout` exists, else
+# run the command alone. `timeout` is coreutils and absent from base images; an
+# unguarded call exits 127 and every probe then reads as "unmeasurable", which
+# silently disables the guard it was meant to enforce.
+if command -v timeout >/dev/null 2>&1; then
+  bounded() { timeout "$@"; }
+else
+  bounded() { local _secs=$1; shift; "$@"; }
+fi
 EXCLUDE_FILE="${EXCLUDE_FILE:-}"
 
 if [[ -n "${DISK_MAGICIAN_DELETION_LOG:-}" ]]; then
@@ -60,7 +70,7 @@ ps -Ao pid,command > "$PSDUMP" 2>/dev/null || true
 in_live_use() {
   local p=$1 pid cwd listing
   if command -v lsof >/dev/null 2>&1; then
-    if listing="$(timeout 60 lsof -nP -F n 2>/dev/null)"; then
+    if listing="$(bounded 60 lsof -nP -F n 2>/dev/null)"; then
       case "$listing" in *"$p"*) return 0 ;; esac
     else
       return 0   # probe unavailable -> preserve
@@ -77,10 +87,14 @@ in_live_use() {
   # afterwards, and a process may hold the path in argv while its cwd and open
   # descriptors live elsewhere. Ignoring a failed capture is also fail-open.
   local fresh
-  if ! fresh="$(timeout 30 ps -Ao pid,command 2>/dev/null)"; then
+  if ! fresh="$(bounded 30 ps -Ao pid,command 2>/dev/null)"; then
     return 0   # probe unavailable -> preserve
   fi
   [[ -n "$fresh" ]] || return 0
+  # Drop our own process and our parent before matching: a shell that carries
+  # the candidate path in its own command string would otherwise match itself
+  # and the candidate could never be removed (a self-induced permanent "live").
+  fresh="$(printf '%s\n' "$fresh" | grep -vE "^[[:space:]]*($$|$PPID)[[:space:]]" || true)"
   case "$fresh" in *"$p"*) return 0 ;; esac
   return 1
 }

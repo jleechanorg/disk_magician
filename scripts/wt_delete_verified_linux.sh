@@ -27,6 +27,23 @@ WT_ROOT="${WORKTREE_ROOT:-$HOME/.worktrees}"
 # rejected as "escapes-root" -- a fail-closed but total denial of service on
 # real cleanup. Measured 2026-11-04 while writing the regression suite.
 WT_ROOT="$(cd "$WT_ROOT" 2>/dev/null && pwd -P)" || { echo "Refusing: worktree root does not exist: $WT_ROOT" >&2; exit 2; }
+
+# `timeout` is coreutils, not part of a base macOS or minimal Linux image, and it
+# is NOT guaranteed just because the repo's CI installs it. Repo convention
+# (cleanup_claude_state.sh, cleanup_colima.sh, ...) is to degrade rather than
+# assume. Guarding matters here because an unguarded call exits 127, which the
+# git probe then classifies as "unverified" -- every candidate silently
+# preserved, a guard suite that fails, and a cleanup that never runs.
+# TO=() means "no timeout available": commands run unbounded.
+# bounded <seconds> <cmd...> -- run with a wall-clock cap when `timeout` exists,
+# otherwise run the command alone. The duration and the command MUST travel
+# together: expanding an empty timeout array in front of a literal duration
+# leaves `30 git ...` and bash tries to execute "30".
+if command -v timeout >/dev/null 2>&1; then
+  bounded() { timeout "$@"; }
+else
+  bounded() { local _secs=$1; shift; "$@"; }
+fi
 PSDUMP="$(mktemp "${TMPDIR:-/tmp}/wtd.XXXXXX")" || exit 1
 ps -Ao pid,command > "$PSDUMP" 2>/dev/null || true
 
@@ -43,7 +60,7 @@ ps -Ao pid,command > "$PSDUMP" 2>/dev/null || true
 in_live_use() {
   local p=$1 pid cwd listing
   if command -v lsof >/dev/null 2>&1; then
-    if listing="$(timeout 60 lsof -nP -F n 2>/dev/null)"; then
+    if listing="$(bounded 60 lsof -nP -F n 2>/dev/null)"; then
       case "$listing" in *"$p"*) return 0 ;; esac
     else
       return 0
@@ -60,7 +77,7 @@ in_live_use() {
   # afterwards, and a process may hold the path in argv while its cwd and open
   # descriptors live elsewhere. Ignoring a failed capture is also fail-open.
   local fresh
-  if ! fresh="$(timeout 30 ps -Ao pid,command 2>/dev/null)"; then
+  if ! fresh="$(bounded 30 ps -Ao pid,command 2>/dev/null)"; then
     return 0   # probe unavailable -> preserve
   fi
   [[ -n "$fresh" ]] || return 0
@@ -165,7 +182,7 @@ while IFS=$'\t' read -r _gib rel; do
   # an arbitrary directory whenever git is merely slow, locked, or the timeout
   # fires. Only a probe that positively reports "not a git repository" may
   # qualify for the orphan path.
-  probe_err="$(timeout 30 git -C "$wt" rev-parse HEAD 2>&1 >/dev/null)"
+  probe_err="$(bounded 30 git -C "$wt" rev-parse HEAD 2>&1 >/dev/null)"
   probe_rc=$?
 
   if (( probe_rc == 0 )); then
@@ -179,14 +196,14 @@ while IFS=$'\t' read -r _gib rel; do
     # Capture FIRST, then count. `git status ... | wc -l` hides a failing git:
     # measured 2026-11-04, `git status` returned 128 on a bad repo while the
     # pipeline still printed 0 lines -- a broken/unreadable repo read as clean.
-    if ! status_out="$(GIT_OPTIONAL_LOCKS=0 timeout 60 git -C "$wt" status --porcelain 2>/dev/null)"; then
+    if ! status_out="$(GIT_OPTIONAL_LOCKS=0 bounded 60 git -C "$wt" status --porcelain 2>/dev/null)"; then
       echo "SKIP git-status-failed: $rel"; skip=$((skip+1)); continue
     fi
     if [[ -n "$status_out" ]]; then
       echo "SKIP dirty: $rel"; skip=$((skip+1)); continue
     fi
 
-    if ! ignored_list="$(GIT_OPTIONAL_LOCKS=0 timeout 120 git -C "$wt" status --porcelain --ignored=matching --untracked-files=normal 2>/dev/null)"; then
+    if ! ignored_list="$(GIT_OPTIONAL_LOCKS=0 bounded 120 git -C "$wt" status --porcelain --ignored=matching --untracked-files=normal 2>/dev/null)"; then
       echo "SKIP ignored-scan-unmeasurable: $rel"; skip=$((skip+1)); continue
     fi
     if grep -qE '^!![[:space:]]' <<<"$ignored_list"; then
@@ -201,27 +218,27 @@ while IFS=$'\t' read -r _gib rel; do
     # `for-each-ref --contains HEAD refs/remotes` still reports a match -- so a
     # commit that exists nowhere counted as "on remote" and would be deleted.
     # `ls-remote` is the authoritative check; failure or timeout preserves.
-    if ! remote_urls="$(timeout 60 git -C "$wt" remote 2>/dev/null)" || [[ -z "$remote_urls" ]]; then
+    if ! remote_urls="$(bounded 60 git -C "$wt" remote 2>/dev/null)" || [[ -z "$remote_urls" ]]; then
       echo "SKIP no-remote-configured: $rel"; skip=$((skip+1)); continue
     fi
-    if ! live_heads="$(timeout 120 git -C "$wt" ls-remote --heads origin 2>/dev/null)"; then
+    if ! live_heads="$(bounded 120 git -C "$wt" ls-remote --heads origin 2>/dev/null)"; then
       echo "SKIP remote-unverifiable: $rel"; skip=$((skip+1)); continue
     fi
-    head_sha=$(timeout 30 git -C "$wt" rev-parse HEAD 2>/dev/null)
+    head_sha=$(bounded 30 git -C "$wt" rev-parse HEAD 2>/dev/null)
     if [[ -z "$head_sha" ]] || ! grep -q "^${head_sha}[[:space:]]" <<<"$live_heads"; then
       echo "SKIP head-not-on-live-remote: $rel"; skip=$((skip+1)); continue
     fi
 
-    gd=$(timeout 30 git -C "$wt" rev-parse --git-dir 2>/dev/null)
+    gd=$(bounded 30 git -C "$wt" rev-parse --git-dir 2>/dev/null)
     case "$gd" in /*) ;; *) gd="$wt/$gd" ;; esac
     [[ -f "$gd/locked" ]] && { echo "SKIP locked: $rel"; skip=$((skip+1)); continue; }
 
     in_live_use "$wt" && { echo "SKIP live: $rel"; skip=$((skip+1)); continue; }
     reverify_gates "$wt" "$rel" || { skip=$((skip+1)); continue; }
 
-    main_repo=$(timeout 30 git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    main_repo=$(bounded 30 git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
     main_repo="${main_repo%/.git}"
-    if timeout 300 git -C "${main_repo:-$wt}" worktree remove "$wt" 2>/dev/null && [[ ! -e "$wt" ]]; then
+    if bounded 300 git -C "${main_repo:-$wt}" worktree remove "$wt" 2>/dev/null && [[ ! -e "$wt" ]]; then
       ok=$((ok+1)); kb_total=$((kb_total+kb))
       printf 'REMOVED(lw)     %6.2f GiB  %s\n' "$(awk -v k="$kb" 'BEGIN{print k/1048576}')" "$rel"
     else
@@ -245,19 +262,19 @@ while IFS=$'\t' read -r _gib rel; do
     # Without that positive signal we cannot distinguish "orphaned worktree"
     # from "someone's plain folder", so preserve.
 
-    main_repo=$(timeout 30 git -C "$WT_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    main_repo=$(bounded 30 git -C "$WT_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
     if [[ -z "$main_repo" ]]; then
       # Resolve the owning repo from the list's first path component instead.
       repo_key="${rel%%/*}"
       for cand in "$HOME/projects/$repo_key" "$HOME/projects_other/$repo_key" "$HOME/$repo_key"; do
-        if timeout 20 git -C "$cand" rev-parse --git-dir >/dev/null 2>&1; then
-          main_repo="$(timeout 20 git -C "$cand" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+        if bounded 20 git -C "$cand" rev-parse --git-dir >/dev/null 2>&1; then
+          main_repo="$(bounded 20 git -C "$cand" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
           break
         fi
       done
     fi
     main_repo="${main_repo%/.git}"
-    if [[ -z "$main_repo" ]] || ! timeout 20 git -C "$main_repo" rev-parse --git-dir >/dev/null 2>&1; then
+    if [[ -z "$main_repo" ]] || ! bounded 20 git -C "$main_repo" rev-parse --git-dir >/dev/null 2>&1; then
       echo "SKIP no-orphan-provenance (main repo unresolved): $rel"; skip=$((skip+1)); continue
     fi
     # POSITIVE provenance is required, not merely the absence of a Git record.
@@ -311,7 +328,7 @@ while IFS=$'\t' read -r _gib rel; do
     # If the registration check FAILS or times out, the answer is unknown, and
     # unknown must preserve -- never let a failed `worktree list` read as
     # "not registered".
-    if ! wt_list="$(timeout 30 git -C "$main_repo" worktree list --porcelain 2>/dev/null)"; then
+    if ! wt_list="$(bounded 30 git -C "$main_repo" worktree list --porcelain 2>/dev/null)"; then
       echo "SKIP registration-unverifiable: $rel"; skip=$((skip+1)); continue
     fi
     if [[ -z "$wt_list" ]]; then
