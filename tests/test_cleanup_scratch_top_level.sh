@@ -314,7 +314,7 @@ if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract || "${SCRATCH_PRUNE_TEST_
   exit $?
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == discovery-cursor-contract ]]; then
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == discovery-cursor-contract ]]; then
   echo "Test: discovery failure on the resume item completes its keep and reaches the next eligible child"
   use_root
   register_test_volume
@@ -344,8 +344,37 @@ import json,sys
 d=json.load(open(sys.argv[1])); assert d["next_index"] >= len(d["items"])
 PY
   then ok "cursor advances past the failed discovery visit"; else bad "cursor advances past the failed discovery visit" "$(cat "$CURSOR")"; fi
-  echo "test_cleanup_scratch_top_level (discovery-cursor-contract): $PASS passed, $FAIL failed"
-  [[ "$FAIL" == 0 ]]; exit $?
+  echo "Test: discovery failure as the final cursor item persists completion without a sibling"
+  use_root
+  register_test_volume
+  make_tree discovery-final 2880 >/dev/null
+  SHIM="$T/discovery-final-shim"; mkdir -p "$SHIM"
+  REAL_PYTHON="$(command -v python3)"
+  cat >"$SHIM/python3" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == - && "\${2:-}" == *"$SCRATCH_ROOT/discovery-final"* ]]; then exit 1; fi
+exec "$REAL_PYTHON" "\$@"
+EOF
+  chmod 700 "$SHIM/python3"
+  CURSOR="$T/discovery-final-cursor.json"
+  python3 - "$CURSOR" "$SCRATCH_ROOT" <<'PY'
+import json,sys
+root=sys.argv[2]
+json.dump({"schema":1,"source":f"scratch_prune:v1:{root}","items":[f"{root}/discovery-final"],"next_index":0}, open(sys.argv[1],"w"))
+PY
+  out="$(RUN_PATH="$SHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "final discovery-error pass exits cleanly" || bad "final discovery-error pass exits cleanly" "rc=$rc"
+  [[ -e "$SCRATCH_ROOT/discovery-final/payload.bin" ]] && ok "final discovery-failed candidate is preserved" || bad "final discovery-failed candidate is preserved"
+  check "final discovery failure is explicitly reported" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/discovery-final" "$out"
+  if python3 - "$CURSOR" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); assert d["next_index"] == len(d["items"]) == 1
+PY
+  then ok "final failed discovery persists cursor completion"; else bad "final failed discovery persists cursor completion" "$(cat "$CURSOR")"; fi
+  if [[ -n "${SCRATCH_PRUNE_TEST_FILTER:-}" ]]; then
+    echo "test_cleanup_scratch_top_level (discovery-cursor-contract): $PASS passed, $FAIL failed"
+    [[ "$FAIL" == 0 ]]; exit $?
+  fi
 fi
 
 if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == unknown-deadline-contract ]]; then
