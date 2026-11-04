@@ -331,9 +331,13 @@ is_mountpoint_or_foreign_fs() {
   is_different_filesystem "$@"
 }
 
+declare -F act_run_bounded >/dev/null || source "$(dirname "${BASH_SOURCE[0]}")/actuator_deadline.sh"
+
 # scratch_budget_content_mtime <path> — newest content mtime under <path> in
 # epoch seconds, or EMPTY STRING if it cannot be determined (stat/find
-# failure, unreadable subtree). Uses the same batched `find -exec stat +`
+# failure, unreadable subtree). With --strict the scans run under
+# act_run_bounded and rc 124 means the
+# ACT_DEADLINE_AT deadline expired. Uses the same batched `find -exec stat +`
 # approach as worktree_last_activity_epoch: one process fan-out, not one
 # `stat` per file.
 #
@@ -347,23 +351,17 @@ scratch_budget_content_mtime() {
   local path="$1" epoch strict="${2:-}" links stat_format
   if [[ "$strict" == --strict ]]; then
     [[ -d "$path" && ! -L "$path" ]] || return 1
-    links="$(find "$path" -xdev -type l -print -quit 2>/dev/null)" || return 1
+    links="$(act_run_bounded find "$path" -xdev -type l -print -quit)" || return $?
     [[ -z "$links" ]] || return 1
-    local files item stamp newest=0
-    files="$(find "$path" -xdev -type f -print 2>/dev/null)" || return 1
-    [[ -n "$files" ]] || return 1
-    if [[ "$(uname -s)" == Darwin ]]; then stat_format='%m'; else stat_format='%Y'; fi
-    while IFS= read -r item; do
-      [[ -n "$item" ]] || continue
-      if [[ "$(uname -s)" == Darwin ]]; then
-        stamp="$(stat -f "$stat_format" "$item" 2>/dev/null)" || return 1
-      else
-        stamp="$(stat -c "$stat_format" "$item" 2>/dev/null)" || return 1
-      fi
-      [[ "$stamp" =~ ^[0-9]+$ ]] || return 1
-      (( stamp > newest )) && newest="$stamp"
-    done <<<"$files"
-    (( newest > 0 )) || return 1
+    # One batched find|stat pass instead of a stat fork per file (this runs
+    # under the Scratch lock). Any find/stat failure still fails closed.
+    local files newest
+    if [[ "$(uname -s)" == Darwin ]]; then
+      files="$(act_run_bounded find "$path" -xdev -type f -exec stat -f %m {} +)" || return $?
+    else
+      files="$(act_run_bounded find "$path" -xdev -type f -exec stat -c %Y {} +)" || return $?
+    fi
+    newest="$(awk '$0 !~ /^[0-9]+$/ {bad=1} $0+0 > m {m=$0+0} END {if (bad || NR==0 || m==0) exit 1; print m}' <<<"$files")" || return 1
     echo "$newest"
     return 0
   fi

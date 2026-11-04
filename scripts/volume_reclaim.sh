@@ -9,8 +9,12 @@ for arg in "$@"; do
  case "$arg" in --clean) clean=true;; --available-floor) available_floor=true;;
  *) echo "usage: volume reclaim [--clean] [--available-floor]" >&2; exit 2;; esac
 done
-if [[ "$available_floor" == true && -z "$ACT_DEADLINE_AT" ]]; then
- ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+300)')" || exit 75
+# Every destructive pass holds the shared Scratch lock, so every clean pass is
+# bounded; an unbounded manual run starved the scheduled timer for 27 minutes.
+if [[ ( "$available_floor" == true || "$clean" == true ) && -z "$ACT_DEADLINE_AT" ]]; then
+ deadline_secs="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
+ [[ "$deadline_secs" =~ ^[1-9][0-9]*$ ]] || deadline_secs=300
+ ACT_DEADLINE_AT="$(python3 -c 'import sys,time; print(time.monotonic()+int(sys.argv[1]))' "$deadline_secs")" || exit 75
  export ACT_DEADLINE_AT
 fi
 if [[ "$clean" == true ]]; then source "$SCRIPT_DIR/lib/scratch_lock.sh"; scratch_lock_acquire volume_reclaim "$@" || exit $?; fi
@@ -159,7 +163,17 @@ PYDIAG
  python3 -c 'import os,sys; os.unlink(sys.argv[1])' "$diag" 2>/dev/null || true
  printf '%s\n' "$result"
 }
+# Candidate discovery is a subprocess that can block on a wedged mount, so it
+# runs under the shared monotonic deadline (deferred without starting when
+# already expired) and is killed with its process group on expiry.
+DISCOVERY_DIR=""
 if [[ "$below_trigger" != true ]] && (( ! cursor_error )); then
+ DISCOVERY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dm-volume-discovery.XXXXXX")" || { echo kept:discovery-create-failed; exit 1; }
+ mkfifo "$DISCOVERY_DIR/candidates" || { rmdir "$DISCOVERY_DIR"; exit 1; }
+ # A FIFO lets C14 process each candidate before discovery reaches a later
+ # wedged subtree. Per-entry printf avoids find's pipe-output stdio buffering.
+ act_run_bounded find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -exec printf '%s\0' {} \; >"$DISCOVERY_DIR/candidates" &
+ discovery_pid=$!
 while IFS= read -r -d '' entry; do
  [[ -n "$entry" ]] || continue
  rel="${entry#"$root"/}"
@@ -167,7 +181,13 @@ while IFS= read -r -d '' entry; do
  # Keep the potentially slow content-mtime walk in this consumer loop. If it
  # runs in a producer/subshell, that producer can scan later paths and exhaust
  # the shared deadline while the first eligible artifact is still in C14.
- newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)" || continue
+ newest="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)"; mtime_rc=$?
+ if (( mtime_rc == 124 )); then
+  TOP_REASON=deadline-before-unit
+  echo "deferred:deadline-before-unit:mtime-scan-timeout:$entry"
+  break
+ fi
+ (( mtime_rc == 0 )) || continue
  [[ "$newest" =~ ^[0-9]+$ ]] || continue
  (( $(date +%s) - newest > 86400 )) || continue
  if [[ "$available_floor" == true ]]; then
@@ -194,7 +214,16 @@ while IFS= read -r -d '' entry; do
  else
   (( now_used * 100 > now_quota * target_pct )) || break
  fi
-done < <(find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -print0 2>/dev/null)
+done <"$DISCOVERY_DIR/candidates"
+# Reap the bounded producer even after an early consumer stop. It remains
+# covered by the same deadline and lock; closing the FIFO also stops writes.
+wait "$discovery_pid"; discovery_rc=$?
+rm -f "$DISCOVERY_DIR/candidates"
+rmdir "$DISCOVERY_DIR"
+if (( discovery_rc == 124 )); then
+ TOP_REASON=deadline-before-unit
+ echo "deferred:deadline-before-unit:candidate-discovery-timeout:$root"
+fi
 fi
 # Every clean pass ends by running the idempotent reserve ensure. It physically
 # validates or recreates the reserve after reclaim and before success is recorded.
