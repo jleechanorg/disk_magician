@@ -556,21 +556,18 @@ while IFS= read -r -d '' entry; do
     CURSOR_RESUME_TARGET=""
   fi
   if [[ "$_artifact_blocked" == true ]]; then
-    # Complete this visit through the canonical keep-only cursor helper. It
-    # never invokes C14/quarantine, but it persists the finished visit so a
-    # discovery error cannot pin the automatic cursor forever.
+    # Complete this visit THROUGH the cursor, not merely past it. Clearing
+    # CURSOR_RESUME_TARGET in memory only fixes the current pass; the persisted
+    # cursor still points at this entry, so the next invocation resumes onto the
+    # same unreadable root and stalls again. The keep-only helper never invokes
+    # C14/quarantine, but persists the finished visit and keeps the same
+    # deferred/cursor break contract as the unproven-content branch.
+    kept=$(( kept + 1 ))
     if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
       outcome="$(scratch_budget_quarantine_remove "$entry" --keep-unproven-content)"
-      kept=$(( kept + 1 ))
-      case "$outcome" in
-        kept:unproven-content) echo "kept:artifact-discovery-unmeasurable $entry" ;;
-        *) echo "$outcome $entry" ;;
-      esac
-      case "$outcome" in
-        deferred:deadline-before-unit|kept:cursor-*) break ;;
-      esac
+      echo "${outcome/kept:unproven-content/kept:artifact-discovery-unmeasurable} $entry"
+      case "$outcome" in deferred:deadline-before-unit|kept:cursor-*) break ;; esac
     else
-      kept=$(( kept + 1 ))
       echo "kept:artifact-discovery-unmeasurable $entry"
     fi
     continue
