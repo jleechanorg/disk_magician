@@ -109,8 +109,12 @@ while IFS= read -r p || [[ -n "$p" ]]; do
     */*) echo "SKIP nested-path: $p"; skipped=$((skipped+1)); continue ;;
   esac
 
+  # Scope guard. A plain substring match is too weak: "notadvice-dir" contains
+  # "advice" and passed, so a hand-list typo could delete an unrelated path.
+  # Require the token to appear as a name-delimited segment: start of name, or
+  # after a `-`/`_`/`.` separator.
   case "$rel" in
-    *"$SCOPE_MATCH"*) ;;
+    "$SCOPE_MATCH"*|*[-_.]"$SCOPE_MATCH"*) ;;
     *) echo "SKIP out-of-scope ($SCOPE_MATCH): $p"; skipped=$((skipped+1)); continue ;;
   esac
 

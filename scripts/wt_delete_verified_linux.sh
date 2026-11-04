@@ -20,6 +20,13 @@ LIST="${1:-}"
 [[ -n "$LIST" && -f "$LIST" ]] || { echo "usage: $0 <list-file>  (TSV: gib<TAB>relative-worktree-path)" >&2; exit 2; }
 
 WT_ROOT="${WORKTREE_ROOT:-$HOME/.worktrees}"
+# Canonicalize the root once. The per-path containment check compares against
+# `pwd -P` of the resolved parent, which returns the PHYSICAL path (macOS
+# resolves /var -> /private/var and /tmp similarly). Without this, a root under
+# such a path can never match the resolved parent, so every candidate is
+# rejected as "escapes-root" -- a fail-closed but total denial of service on
+# real cleanup. Measured 2026-11-04 while writing the regression suite.
+WT_ROOT="$(cd "$WT_ROOT" 2>/dev/null && pwd -P)" || { echo "Refusing: worktree root does not exist: $WT_ROOT" >&2; exit 2; }
 PSDUMP="$(mktemp "${TMPDIR:-/tmp}/wtd.XXXXXX")" || exit 1
 ps -Ao pid,command > "$PSDUMP" 2>/dev/null || true
 
@@ -71,21 +78,36 @@ reverify_gates() {
   local wt=$1 rel=$2 min_days age newest
   min_days="${WT_MIN_AGE_DAYS:-7}"
 
+  # NOTE: this function's SKIP messages go to STDERR so the caller's
+  # `|| { ...; continue; }` cannot swallow them. Written to stdout they were
+  # silently discarded, leaving a bare "skipped=1" with no reason in the output
+  # -- which made a real guard fire indistinguishable from a no-op.
   # 1) recency: newest content mtime, via the canonical helper when available.
   if [[ -n "${DISK_MAGICIAN_RECENCY_LIB:-}" && -f "${DISK_MAGICIAN_RECENCY_LIB:-}" ]]; then
     # shellcheck source=/dev/null
     . "$DISK_MAGICIAN_RECENCY_LIB" 2>/dev/null || true
   fi
+  # Portable stat: BSD (-f %m) on macOS, GNU (-c %Y) on Linux. The Linux-only
+  # form silently measured nothing on macOS, so every candidate looked
+  # unmeasurable and was preserved -- fail-closed but useless.
+  local stat_mtime=(stat -f '%m')
+  stat -f '%m' / >/dev/null 2>&1 || stat_mtime=(stat -c '%Y')
   if command -v worktree_age_days >/dev/null 2>&1; then
-    age="$(worktree_age_days "$wt" 2>/dev/null)" || return 1
+    if ! age="$(worktree_age_days "$wt" 2>/dev/null)"; then
+      echo "SKIP age-unmeasurable: $rel" >&2; return 1
+    fi
   else
-    newest="$(find "$wt" -xdev -type f -exec stat -c '%Y' {} + 2>/dev/null \
+    newest="$(find "$wt" -xdev -type f -exec "${stat_mtime[@]}" {} + 2>/dev/null \
       | awk '$1+0>m{m=$1+0} END{if(m>0)print m}')"
-    [[ "$newest" =~ ^[0-9]+$ ]] || return 1
+    if [[ ! "$newest" =~ ^[0-9]+$ ]]; then
+      echo "SKIP age-unmeasurable (no file mtimes): $rel" >&2; return 1
+    fi
     age=$(( ( $(date +%s) - newest ) / 86400 ))
   fi
-  [[ "$age" =~ ^[0-9]+$ ]] || return 1
-  (( age >= min_days )) || { echo "SKIP too-recent (age=${age}d): $rel"; return 1; }
+  if [[ ! "$age" =~ ^[0-9]+$ ]]; then
+    echo "SKIP age-not-numeric ('$age'): $rel" >&2; return 1
+  fi
+  (( age >= min_days )) || { echo "SKIP too-recent (age=${age}d): $rel" >&2; return 1; }
 
   # 2) machine-local protection gates. An UNLOCATABLE safety module is a FAILED
   # gate, not a passed one: silently skipping it means a path covered by a
@@ -100,11 +122,11 @@ reverify_gates() {
     [[ -n "$safety" && -f "$safety" ]] || continue
     found=1
     if ! bash "$safety" "$wt" >/dev/null 2>&1; then
-      echo "SKIP safety-gate: $rel"; return 1
+      echo "SKIP safety-gate: $rel" >&2; return 1
     fi
     break
   done
-  (( found == 1 )) || { echo "SKIP safety-module-missing (fail closed): $rel"; return 1; }
+  (( found == 1 )) || { echo "SKIP safety-module-missing (fail closed): $rel" >&2; return 1; }
   return 0
 }
 
@@ -255,8 +277,28 @@ while IFS=$'\t' read -r _gib rel; do
       # this repo never owned. Require the target to sit under <main_repo>/.git/
       # and to name this worktree.
       if [[ -n "$gitdir_target" && ! -e "$gitdir_target" ]]; then
-        case "$gitdir_target" in
-          "$main_repo"/.git/worktrees/"${wt##*/}"|"$main_repo"/.git/worktrees/"${wt##*/}"/*) proven_orphan=1 ;;
+        # Canonicalize the recorded pointer before comparing. git writes the
+        # path it was given, which may be a LOGICAL path (e.g. /var/...), while
+        # main_repo resolves PHYSICAL (/private/var/...). Comparing raw strings
+        # made a correctly-owned orphan look foreign, so it was preserved
+        # forever. Measured 2026-11-04. Compare both the recorded and resolved
+        # forms so either spelling matches.
+        # Resolve the nearest EXISTING ancestor and re-join the tail: the whole
+        # point of this branch is that the target is missing, so `cd` on its own
+        # dirname always fails and would degrade to "/<basename>".
+        gitdir_phys="$gitdir_target"
+        probe="$gitdir_target"; tail=""
+        while [[ -n "$probe" && "$probe" != "/" ]]; do
+          if [[ -d "$probe" ]]; then
+            gitdir_phys="$(cd "$probe" 2>/dev/null && pwd -P)${tail}"
+            break
+          fi
+          tail="/${probe##*/}${tail}"
+          probe="$(dirname "$probe")"
+        done
+        case "$gitdir_target:$gitdir_phys" in
+          "$main_repo"/.git/worktrees/"${wt##*/}":*|*:"$main_repo"/.git/worktrees/"${wt##*/}"|\
+          "$main_repo"/.git/worktrees/"${wt##*/}"/*:*|*:"$main_repo"/.git/worktrees/"${wt##*/}"/*) proven_orphan=1 ;;
           *) echo "SKIP orphan-pointer-not-owned-by-main-repo: $rel"; skip=$((skip+1)); continue ;;
         esac
       fi
