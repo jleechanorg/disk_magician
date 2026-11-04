@@ -556,10 +556,20 @@ while IFS= read -r -d '' entry; do
     CURSOR_RESUME_TARGET=""
   fi
   if [[ "$_artifact_blocked" == true ]]; then
-    # Complete this visit through the cursor: count the keep, and if it was the
-    # resume target the cursor advance below records it as done.
+    # Complete this visit THROUGH the cursor, not merely past it. Clearing
+    # CURSOR_RESUME_TARGET in memory only fixes the current pass; the persisted
+    # cursor still points at this entry, so the next invocation resumes onto the
+    # same unreadable root and stalls again. Recording the keep via the shared
+    # cursor mechanism is what actually advances it. Same call shape the
+    # unproven-content branch uses, and the same kept:cursor-* break contract.
     kept=$(( kept + 1 ))
-    echo "kept:artifact-discovery-unmeasurable $entry"
+    if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
+      outcome="$(scratch_budget_quarantine_remove "$entry" --keep-unproven-content)"
+      echo "$outcome $entry"
+      case "$outcome" in deferred:deadline-before-unit|kept:cursor-*) break ;; esac
+    else
+      echo "kept:artifact-discovery-unmeasurable $entry"
+    fi
     continue
   fi
   if deadline_exceeded; then
