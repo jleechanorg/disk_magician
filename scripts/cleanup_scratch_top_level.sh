@@ -312,7 +312,21 @@ verdict_and_maybe_remove() {
     done
     if (( tries < 0 )); then rm -f "$inv" "$binding"; echo kept:lease-busy; return 0; fi
   fi
-  verdict="$(artifact_removal_verdict "$verdict_path" --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
+  verdict_args=("$verdict_path" --inventory-out "$inv")
+  # Strict manual mode is explicitly for proven Scratch ephemera. Preserve
+  # legacy generic-kind behavior for ordinary manual mode, but use the
+  # canonical ephemeral classifier so known managed build children can be
+  # removed without granting any content/provenance override.
+  if [[ "$STRICT_MODE" == true ]]; then
+    strict_rel="${verdict_path#"$root"/}"
+    # Do not turn every direct Scratch child into a proven E8 ephemeral unit:
+    # strict mode must preserve genuinely unproven ordinary content. Restrict
+    # the typed classifier to the existing managed build/evidence shape.
+    if [[ "$strict_rel" != "$verdict_path" && "$strict_rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then
+      verdict_args+=(--kind ephemeral)
+    fi
+  fi
+  verdict="$(artifact_removal_verdict "${verdict_args[@]}" 2>/dev/null)" || verdict=kept:check-failed
   case "$verdict" in
     remove) ;;
     kept:secret-like|kept:unproven-content)

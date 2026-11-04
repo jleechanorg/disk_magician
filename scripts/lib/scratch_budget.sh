@@ -566,6 +566,7 @@ scratch_budget_artifact_children() {
   # root before walking, then prune every marked directory in this one bounded
   # walk so a shallower Git ancestor cannot be bypassed by a later depth pass.
   [[ -e "$dir/.git" || -L "$dir/.git" ]] && return 0
+  (( max_depth > 0 )) || return 0
   # One Python stdlib walker avoids a shell process for every visited directory.
   # It checks the actuator deadline before each directory expansion and returns
   # 124 when expansion is deferred; callers must report that explicitly rather
@@ -587,7 +588,11 @@ def expired():
     return deadline_value is not None and time.monotonic() >= deadline_value
 
 def has_git_marker(path):
-    return os.path.lexists(os.path.join(path, ".git"))
+    try:
+        os.lstat(os.path.join(path, ".git"))
+    except FileNotFoundError:
+        return False
+    return True
 
 def is_artifact_name(name):
     return name in {
@@ -613,7 +618,9 @@ def walk(path, depth):
                     # descended into.
                     if has_git_marker(child):
                         continue
-                    if is_artifact_name(entry.name):
+                    # find's `! -name '.*' -print0` filters hidden output
+                    # basenames, while still traversing hidden parents.
+                    if not entry.name.startswith(".") and is_artifact_name(entry.name):
                         print(child, flush=True)
                     if depth < max_depth:
                         walk(child, depth + 1)

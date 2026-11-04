@@ -443,13 +443,14 @@ old_stamp "$SCRATCH_ROOT/strict-dirty" 72
 sleep 300 & strict_lease_pid=$!
 make_tree strict-live 72 >/dev/null
 run env DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_write "$2" "$2" "" strict-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$SCRATCH_ROOT/strict-live" "$strict_lease_pid"
+[[ -d "$SCRATCH_ROOT/worldai_frontend/build/strict-good" ]] && ok "strict fixture exists before clean" || bad "strict fixture exists before clean"
 strict_verdict="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/strict-good")"
 assert_eq "$strict_verdict" remove "strict fixture is a proven aged ephemeral child"
 run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --strict --dry-run >/dev/null 2>&1
 out="$(run bash "$SCRIPT" --strict --clean 2>&1)"; rc=$?
 kill "$strict_lease_pid" 2>/dev/null || true; wait "$strict_lease_pid" 2>/dev/null || true
 [[ "$rc" == 0 ]] && ok "strict clean exits 0 without approval env" || bad "strict clean exits 0 without approval env" "rc=$rc"
-[[ ! -e "$SCRATCH_ROOT/strict-good" ]] && ok "strict clean removes proven aged ephemeral child" || bad "strict clean removes proven aged ephemeral child" "$out"
+[[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/strict-good" ]] && ok "strict clean removes proven aged ephemeral child" || bad "strict clean removes proven aged ephemeral child" "$out"
 [[ -e "$SCRATCH_ROOT/worldai_frontend/build/strict-recent" ]] && ok "strict clean preserves recent child" || bad "strict clean preserves recent child"
 [[ -e "$SCRATCH_ROOT/strict-unproven" && -e "$SCRATCH_ROOT/strict-secret" ]] && ok "strict clean preserves unproven and secret-like content" || bad "strict clean preserves unproven and secret-like content"
 [[ -e "$SCRATCH_ROOT/strict-dirty" ]] && ok "strict clean preserves dirty repository" || bad "strict clean preserves dirty repository"
