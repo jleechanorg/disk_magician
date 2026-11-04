@@ -1781,6 +1781,202 @@ class StatusAndBallastTest(VolumeTestBase):
         self.assertEqual(forwarded, [(process.pid, signal.SIGTERM)])
         self.assertFalse(process.in_wait)
 
+    def test_pressure_process_ignores_eperm_after_owned_child_exits(self):
+        import signal
+        import threading
+        import time
+
+        real_popen = volume.subprocess.Popen
+        real_killpg = os.killpg
+        owned = []
+        signal_thread = None
+
+        def spawn(*args, **kwargs):
+            nonlocal signal_thread
+            process = real_popen(*args, **kwargs)
+            owned.append(process)
+            signal_thread = threading.Timer(0.02, signals.__setitem__, args=("signal", signal.SIGTERM))
+            signal_thread.start()
+            return process
+
+        def killpg(pid, signum):
+            process = owned[0]
+            self.assertEqual(pid, process.pid)
+            if signum == 0:
+                # This is the real read-only group-existence probe.  A
+                # completed leader must have no remaining group members.
+                return real_killpg(pid, 0)
+            self.assertEqual(signum, signal.SIGTERM)
+            # Confirm the test-only signal boundary targets this owned session.
+            self.assertEqual(os.getpgid(pid), pid)
+            self.assertEqual(os.getsid(pid), pid)
+            while process.poll() is None:
+                time.sleep(0.01)
+            raise PermissionError(errno.EPERM, "completed child group vanished")
+
+        with volume.pressure_signals() as signals:
+            signals["signal"] = 0
+            with mock.patch.object(volume.subprocess, "Popen", side_effect=spawn), \
+                 mock.patch.object(volume.os, "killpg", side_effect=killpg) as forward:
+                result = volume.pressure_process(
+                    [sys.executable, "-c", "import time; time.sleep(0.15)"], signals)
+        signal_thread.join(timeout=1)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            forward.call_args_list,
+            [mock.call(owned[0].pid, signal.SIGTERM), mock.call(owned[0].pid, 0)],
+        )
+        self.assertIsNotNone(owned[0].poll())
+
+    def test_pressure_process_propagates_eperm_when_completed_leader_group_remains(self):
+        import signal
+        import threading
+        import time
+
+        real_popen = volume.subprocess.Popen
+        real_killpg = os.killpg
+        leader = self.root / "leader-with-grandchild.py"
+        child_pid_file = self.root / "grandchild.pid"
+        leader.write_text(
+            "import pathlib, subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+            "time.sleep(0.2)\n"
+        )
+        owned = []
+        signal_thread = None
+
+        def spawn(*args, **kwargs):
+            nonlocal signal_thread
+            process = real_popen(*args, **kwargs)
+            owned.append(process)
+            signal_thread = threading.Timer(0.02, signals.__setitem__, args=("signal", signal.SIGTERM))
+            signal_thread.start()
+            return process
+
+        def killpg(pid, signum):
+            process = owned[0]
+            self.assertEqual(pid, process.pid)
+            if signum == 0:
+                # The real probe must see the inherited group kept alive by
+                # the grandchild after the owned Popen leader exits.
+                return real_killpg(pid, 0)
+            self.assertEqual(signum, signal.SIGTERM)
+            while process.poll() is None:
+                time.sleep(0.01)
+            child_pid = int(child_pid_file.read_text())
+            self.assertEqual(os.getpgid(child_pid), pid)
+            self.assertEqual(os.getsid(child_pid), pid)
+            raise PermissionError(errno.EPERM, "completed leader has live group member")
+
+        try:
+            with volume.pressure_signals() as signals:
+                signals["signal"] = 0
+                with mock.patch.object(volume.subprocess, "Popen", side_effect=spawn), \
+                     mock.patch.object(volume.os, "killpg", side_effect=killpg) as forward:
+                    with self.assertRaises(PermissionError):
+                        volume.pressure_process(
+                            [sys.executable, str(leader), str(child_pid_file)], signals)
+                    forward.assert_any_call(owned[0].pid, signal.SIGTERM)
+                    forward.assert_any_call(owned[0].pid, 0)
+        finally:
+            if signal_thread is not None:
+                signal_thread.join(timeout=1)
+            process = owned[0]
+            process.wait(timeout=5)
+            if child_pid_file.exists():
+                child_pid = int(child_pid_file.read_text())
+                try:
+                    # Prove the cleanup target is the fixture's original
+                    # process group/session before sending the real signal.
+                    self.assertEqual(os.getpgid(child_pid), process.pid)
+                    self.assertEqual(os.getsid(child_pid), process.pid)
+                except ProcessLookupError:
+                    pass
+                else:
+                    real_killpg(process.pid, signal.SIGTERM)
+
+    def test_pressure_process_propagates_original_eperm_when_group_probe_is_denied(self):
+        import signal
+
+        class CompletedProcess:
+            pid = 5151
+
+            def __init__(self):
+                self.poll_calls = 0
+
+            def poll(self):
+                self.poll_calls += 1
+                return None if self.poll_calls == 1 else 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        calls = []
+
+        def killpg(pid, signum):
+            calls.append((pid, signum))
+            if signum == signal.SIGTERM:
+                raise PermissionError(errno.EPERM, "forward denied")
+            raise PermissionError(errno.EPERM, "group probe denied")
+
+        process = CompletedProcess()
+
+        def spawn(*args, **kwargs):
+            signals["signal"] = signal.SIGTERM
+            return process
+
+        with volume.pressure_signals() as signals:
+            signals["signal"] = 0
+            with mock.patch.object(volume.subprocess, "Popen", side_effect=spawn), \
+                 mock.patch.object(volume.os, "killpg", side_effect=killpg):
+                with self.assertRaisesRegex(PermissionError, "forward denied"):
+                    volume.pressure_process(["fake-child"], signals)
+        self.assertEqual(calls, [(5151, signal.SIGTERM), (5151, 0)])
+
+    def test_pressure_process_propagates_eperm_for_live_owned_child(self):
+        import signal
+        import threading
+
+        real_popen = volume.subprocess.Popen
+        owned = []
+        signal_thread = None
+
+        def spawn(*args, **kwargs):
+            nonlocal signal_thread
+            process = real_popen(*args, **kwargs)
+            owned.append(process)
+            signal_thread = threading.Timer(0.02, signals.__setitem__, args=("signal", signal.SIGTERM))
+            signal_thread.start()
+            return process
+
+        def killpg(pid, signum):
+            process = owned[0]
+            self.assertEqual(pid, process.pid)
+            self.assertEqual(os.getpgid(pid), pid)
+            self.assertEqual(os.getsid(pid), pid)
+            raise PermissionError(errno.EPERM, "live child group is not signalable")
+
+        try:
+            with volume.pressure_signals() as signals:
+                signals["signal"] = 0
+                with mock.patch.object(volume.subprocess, "Popen", side_effect=spawn), \
+                     mock.patch.object(volume.os, "killpg", side_effect=killpg) as forward:
+                    with self.assertRaises(PermissionError):
+                        volume.pressure_process(
+                            [sys.executable, "-c", "import time; time.sleep(5)"], signals)
+                    forward.assert_called_once_with(owned[0].pid, signal.SIGTERM)
+        finally:
+            if signal_thread is not None:
+                signal_thread.join(timeout=1)
+            process = owned[0]
+            if process.poll() is None:
+                self.assertEqual(os.getpgid(process.pid), process.pid)
+                self.assertEqual(os.getsid(process.pid), process.pid)
+                os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+
     def test_pressure_timeout_hard_kill_still_recovers_and_finishes_receipt(self):
         import job_receipt
         timeout = volume.shutil.which("timeout") or volume.shutil.which("gtimeout")

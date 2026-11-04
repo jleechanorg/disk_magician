@@ -3341,6 +3341,22 @@ def pressure_process(arguments, state, env=None, recovery=False):
                 if process.poll() is None:
                     try: os.killpg(process.pid, signal.SIGTERM)
                     except ProcessLookupError: pass
+                    except PermissionError as forward_error:
+                        # The owned leader may have exited between poll() and
+                        # killpg(). Ignore EPERM only when the exact process
+                        # group is also proven absent by a read-only probe.
+                        if process.poll() is None:
+                            raise
+                        try:
+                            os.killpg(process.pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        except PermissionError:
+                            raise forward_error
+                        except OSError:
+                            raise
+                        else:
+                            raise forward_error
                 forwarded = True
             try:
                 return subprocess.CompletedProcess(arguments, process.wait(timeout=.1))
