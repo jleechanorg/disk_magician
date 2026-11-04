@@ -30,6 +30,11 @@ export DISK_MAGICIAN_DELETION_LOG="$LOG"
 export DISK_MAGICIAN_STATE_DIR="$STATE"
 export DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="$SCRATCH_ROOT"
 
+make_unknown_file() { # <name> <age_hours> — a direct-child file E8 never classifies
+  printf 'x%.0s' {1..2048} > "$SCRATCH_ROOT/$1"
+  old_stamp "$SCRATCH_ROOT/$1" "${2:-25}"
+}
+
 old_stamp() { python3 -c 'import os,sys,time
 root=sys.argv[1]; t=time.time()-int(sys.argv[2])*3600
 for dirpath,dirnames,filenames in os.walk(root):
@@ -218,7 +223,68 @@ out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUM
 [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/eligible-25h" ]] && ok "25h registered ephemeral candidate removed through C14" || bad "25h registered ephemeral candidate removed through C14" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
 [[ -e "$SCRATCH_ROOT/worldai_frontend/build/secret-25h/placeholder.pem" ]] && ok "secret-like content remains protected in automatic mode" || bad "secret-like content remains protected in automatic mode"
 [[ -e "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h/.git" ]] && ok "dirty repository remains protected in automatic mode" || bad "dirty repository remains protected in automatic mode"
-[[ -e "$SCRATCH_ROOT/unknown-25h" ]] && ok "unknown direct children remain protected" || bad "unknown direct children remain protected"
+# E8 (artifact_verdict.sh:189-197) declares a direct child of the registered
+# scratch volume ephemeral at 1440 min whatever its name, so an aged unknown
+# top-level tree is now removable in automatic mode. Every other gate still ran.
+[[ ! -e "$SCRATCH_ROOT/unknown-25h" ]] && ok "E8 removes an aged unknown direct volume child" || bad "E8 removes an aged unknown direct volume child" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+
+echo "Test 4c: E8 declares an arbitrary direct child of the registered volume ephemeral at 24h"
+use_root
+register_test_volume
+E8_ROOT="$SCRATCH_ROOT"
+make_tree e8-unleased-26h 26 >/dev/null
+mkdir -p "$E8_ROOT/e8-unleased-26h/nested"; old_stamp "$E8_ROOT/e8-unleased-26h" 26
+make_tree e8-recent-23h 23 >/dev/null
+make_tree e8-secret-26h 26 'placeholder.pem' >/dev/null
+make_tree e8-live-cwd-26h 26 >/dev/null
+make_tree e8-leased-26h 26 >/dev/null
+mkdir -p "$E8_ROOT/.dot-26h"; old_stamp "$E8_ROOT/.dot-26h" 26
+mkdir -p "$E8_ROOT/worldai_frontend/build/e2-probe"; old_stamp "$E8_ROOT/worldai_frontend/build/e2-probe" 26
+# A real repository holding a commit no remote advertises: unpushed work.
+mkdir -p "$E8_ROOT/e8-unpushed-26h"
+git -C "$E8_ROOT/e8-unpushed-26h" init -q 2>/dev/null
+printf 'work\n' > "$E8_ROOT/e8-unpushed-26h/tracked.txt"
+git -C "$E8_ROOT/e8-unpushed-26h" add tracked.txt 2>/dev/null
+git -C "$E8_ROOT/e8-unpushed-26h" -c user.email=t@t -c user.name=t commit -qm work 2>/dev/null
+old_stamp "$E8_ROOT/e8-unpushed-26h" 26
+# The symlink target is a plain tree: a target holding .git would match the
+# pre-existing <name>-holds-.git volume row and prove nothing about E8.
+make_tree e8-symlink-target-26h 26 >/dev/null
+ln -s "$E8_ROOT/e8-symlink-target-26h" "$E8_ROOT/e8-link-26h"
+sleep 300 & e8_lease_pid=$!
+(cd "$E8_ROOT/e8-live-cwd-26h" && exec sleep 300) & e8_cwd_pid=$!
+env DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" bash -c '
+source "$1/scripts/lib/worktree_lease.sh"
+lease_write "$2" "$2" "" scratch-prune-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$E8_ROOT/e8-leased-26h" "$e8_lease_pid"
+eph_retention() { run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2" 2>/dev/null' _ "$ROOT" "$1"; }
+assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-26h")" 1440 "E8 proves an arbitrary volume-child name"
+assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-26h/nested")" "" "E8 stays top-level only"
+assert_eq "$(eph_retention "$E8_ROOT/.dot-26h")" "" "E8 never covers a dot entry"
+assert_eq "$(eph_retention "$E8_ROOT/e8-link-26h")" "" "E8 never answers for a symlink"
+assert_eq "$(eph_retention "$E8_ROOT/worldai_frontend/build/e2-probe")" 1440 "the <name>/build/<name> row still answers 1440"
+preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --dry-run 2>&1)"
+check "automatic preview marks the unleased E8 candidate removable" "would-remove:remove $E8_ROOT/e8-unleased-26h" "$preview"
+check "automatic preview keeps the under-24h E8 candidate" "kept:recent-activity $E8_ROOT/e8-recent-23h" "$preview"
+check "automatic preview keeps the secret-like E8 candidate" "kept:secret-like $E8_ROOT/e8-secret-26h" "$preview"
+check "automatic preview keeps the live-cwd E8 candidate" "kept:live-cwd $E8_ROOT/e8-live-cwd-26h" "$preview"
+check "automatic preview keeps the leased E8 candidate" "kept:live-owner $E8_ROOT/e8-leased-26h" "$preview"
+check "automatic preview keeps the symlinked entry as unproven" "kept:unproven-content $E8_ROOT/e8-link-26h" "$preview"
+if printf '%s\n' "$preview" | grep -qE "^would-remove:[^ ]* $E8_ROOT/e8-unpushed-26h$"; then
+  bad "the unpushed repository is never advertised for removal" "$(printf '%s' "$preview" | grep -F "e8-unpushed-26h" | tr '\n' ' ' | cut -c1-200)"
+else
+  ok "the unpushed repository is never advertised for removal"
+fi
+check "the unpushed repository keeps through the repository gate, not the class row" "kept:not-pushed $E8_ROOT/e8-unpushed-26h" "$preview"
+out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean 2>&1)"; rc=$?
+kill "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true; wait "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true
+[[ "$rc" == 0 ]] && ok "automatic E8 cleanup exits 0" || bad "automatic E8 cleanup exits 0" "rc=$rc"
+[[ ! -e "$E8_ROOT/e8-unleased-26h" ]] && ok "an unleased dormant volume child is reclaimed" || bad "an unleased dormant volume child is reclaimed" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+[[ -e "$E8_ROOT/e8-recent-23h" ]] && ok "the 24h floor is still honoured by default" || bad "the 24h floor is still honoured by default"
+[[ -e "$E8_ROOT/e8-leased-26h" ]] && ok "a leased volume child is preserved" || bad "a leased volume child is preserved"
+[[ -e "$E8_ROOT/e8-live-cwd-26h" ]] && ok "a live-cwd volume child is preserved" || bad "a live-cwd volume child is preserved"
+[[ -e "$E8_ROOT/e8-unpushed-26h/tracked.txt" ]] && ok "a volume child holding unpushed commits is preserved" || bad "a volume child holding unpushed commits is preserved"
+[[ -e "$E8_ROOT/e8-secret-26h/placeholder.pem" ]] && ok "a secret-like volume child is preserved" || bad "a secret-like volume child is preserved"
+[[ -L "$E8_ROOT/e8-link-26h" ]] && ok "a symlinked top-level entry is never followed or reclaimed" || bad "a symlinked top-level entry is never followed or reclaimed"
 fi
 
 if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
@@ -251,8 +317,11 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
   echo "Test: an expired deadline stops before classifying unknown content and resumes safely"
   use_root
   register_test_volume
-  make_tree a-unknown-25h 25 >/dev/null
-  make_tree b-unknown-25h 25 >/dev/null
+  # Untyped content that E8 cannot classify: a direct-child *file*, not a
+  # directory. These fixtures exist to prove the deadline is honoured before
+  # unproven content is even classified, so they must stay unproven.
+  make_unknown_file a-unknown-25h 25
+  make_unknown_file b-unknown-25h 25
   make_managed_tree resume-after-unknown-25h 25 >/dev/null
   CURSOR="$T/unknown-deadline.cursor"
   EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
@@ -281,8 +350,11 @@ PY
   echo "Test: a seeded resume cursor skips prior unknown work and continues after the pending unknown"
   use_root
   register_test_volume
-  make_tree a-unknown-25h 25 >/dev/null
-  make_tree b-unknown-25h 25 >/dev/null
+  # Untyped content that E8 cannot classify: a direct-child *file*, not a
+  # directory. These fixtures exist to prove the deadline is honoured before
+  # unproven content is even classified, so they must stay unproven.
+  make_unknown_file a-unknown-25h 25
+  make_unknown_file b-unknown-25h 25
   make_managed_tree resume-after-seeded-unknown-25h 25 >/dev/null
   CURSOR="$T/seeded-unknown-deadline.cursor"
   CURSOR_SOURCE="scratch_prune:v1:$SCRATCH_ROOT"
