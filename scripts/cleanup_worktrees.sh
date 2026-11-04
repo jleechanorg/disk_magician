@@ -520,9 +520,12 @@ worktree_head_reachable_from_main() {
     return 1
 }
 
-# worktree_head_on_live_origin <repo> <head_sha> — rc 0 when HEAD is an ancestor
-# of a tip origin advertises RIGHT NOW (ls-remote heads + PR heads; never the
-# stale remote-tracking refs). Used for detached worktrees. Fail closed.
+# worktree_head_on_live_origin <repo> <head_sha> — rc 0 when HEAD is the exact
+# oid of any ref origin advertises RIGHT NOW (ls-remote heads + PR heads) or an
+# ancestor of such a tip; never the stale remote-tracking refs. Used for both
+# detached and branch-attached worktrees: the branch NAME is not part of the
+# proof, so a renamed branch whose commit is a live ref still qualifies.
+# Fail closed on ls-remote failure/timeout or an unprovable ancestry.
 worktree_head_on_live_origin() {
     local repo="$1" head_sha="$2" t="" refs have unp cache_file=""
     [[ -n "$head_sha" ]] || return 1
@@ -546,20 +549,6 @@ worktree_head_on_live_origin() {
     return 1
 }
 
-# worktree_head_on_origin_branch <repo> <branch> <head_sha> — rc 0 when the exact
-# HEAD is the live tip of that branch on origin (git ls-remote). Fail closed on
-# any error (no timeout available, remote unreachable, mismatch).
-worktree_head_on_origin_branch() {
-    local repo="$1" branch="$2" head_sha="$3" t=""
-    [[ -n "$branch" && "$branch" != "detached" && -n "$head_sha" ]] || return 1
-    command -v timeout >/dev/null 2>&1 && t="timeout 30s"
-    local remote_oid
-    # shellcheck disable=SC2086
-    remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch" </dev/null 2>/dev/null | awk 'NR==1{print $1}')" || return 1
-    [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]] && return 0
-    return 1
-}
-
 classify_content_and_merge() {
     local repo="$1" wt_path="$2" head_sha="$3" branch="$4"
     local status_porcelain status_rc=0
@@ -570,11 +559,30 @@ classify_content_and_merge() {
     fi
     if [[ -n "$status_porcelain" ]]; then
         if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
-            echo "untracked"
+            # Removal uses --force --force, so every untracked entry is deleted
+            # with the checkout. Entries the repo's own allowlist already calls
+            # rebuildable (.husky/_, node_modules, dist-web, __pycache__, ...)
+            # carry nothing a rebuild cannot recreate, so they must not block the
+            # merge checks below the way the ignored-data path already allows.
+            # Anything else — untracked source, evidence, agent tool-state, a
+            # generic build/ dir, or a quoted/ambiguous path — keeps the
+            # worktree preserved.
+            local untracked_entry non_rebuildable=""
+            while IFS= read -r untracked_entry; do
+                [[ -n "$untracked_entry" ]] || continue
+                if ! ignored_entry_rebuildable "$wt_path" "$untracked_entry"; then
+                    non_rebuildable="$untracked_entry"
+                    break
+                fi
+            done <<<"$(sed -n 's/^?? //p; s/^!! //p' <<<"$status_porcelain")"
+            if [[ -n "$non_rebuildable" ]]; then
+                echo "untracked"
+                return 0
+            fi
+        else
+            echo "dirty"
             return 0
         fi
-        echo "dirty"
-        return 0
     fi
 
     if [[ -z "$head_sha" ]]; then
@@ -616,10 +624,10 @@ classify_content_and_merge() {
                         # follow-up: this branch has a MERGED PR but the worktree
                         # HEAD differs from the merged PR head. Removal is still
                         # data-loss-safe when HEAD itself is already reachable from
-                        # main OR is the exact live tip on origin (the commits
-                        # exist elsewhere). Fail closed to PRESERVE otherwise.
+                        # main OR already on live origin (the commits exist
+                        # elsewhere). Fail closed to PRESERVE otherwise.
                         if worktree_head_reachable_from_main "$repo" "$head_sha" "$main_ref" \
-                           || worktree_head_on_origin_branch "$repo" "$branch_clean" "$head_sha"; then
+                           || worktree_head_on_live_origin "$repo" "$head_sha"; then
                             return 0
                         fi
                         echo "merged-differing-head"
@@ -628,23 +636,20 @@ classify_content_and_merge() {
                 fi
             fi
         fi
-        # A clean worktree whose branch tip is already on origin loses nothing
-        # when removed (the branch ref and the remote copy both survive). The
-        # remote is queried live; any failure keeps it "ahead-of-main".
-        if [[ -n "$branch_clean" && "$branch_clean" != "detached" && -n "$head_sha" ]]; then
-            local remote_oid="" t=""
-            command -v timeout >/dev/null 2>&1 && t="timeout 30s"
-            # shellcheck disable=SC2086
-            remote_oid="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ls-remote --heads origin "refs/heads/$branch_clean" </dev/null 2>/dev/null | awk 'NR==1{print $1}')" || remote_oid=""
-            if [[ -n "$remote_oid" && "$remote_oid" == "$head_sha" ]]; then
-                if has_ignored_user_data "$wt_path"; then
-                    echo "ignored-data"
-                    return 0
-                fi
+        # A clean worktree whose commits are already on origin loses nothing when
+        # removed (the branch ref and the remote copy both survive). The proof is
+        # the live advertised ref SET, never refs/heads/<this worktree's branch
+        # name>: a renamed branch, or work landed through a PR head under another
+        # name, advertises the same oid and must not read as unpushed. The same
+        # call also accepts a tip that is an ANCESTOR of a live origin tip (the
+        # commits exist on origin, the branch simply moved on). The remote is
+        # queried live; any failure keeps the verdict at "ahead-of-main".
+        if worktree_head_on_live_origin "$repo" "$head_sha"; then
+            if has_ignored_user_data "$wt_path"; then
+                echo "ignored-data"
                 return 0
             fi
-        elif worktree_head_on_live_origin "$repo" "$head_sha"; then
-            return 0  # detached HEAD already on live origin (reason: detached-on-origin)
+            return 0  # on live origin (exact advertised oid, or ancestor of a tip)
         fi
         echo "ahead-of-main"
         return 0
