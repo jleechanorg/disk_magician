@@ -40,7 +40,7 @@
 # provenance keeps (dirty, not-pushed, secret-like, ...) are overridden, and each
 # eviction logs its prior C14 verdict so unpushed losses stay auditable.
 #
-# Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--min-hours N] [--max-gib N]
+# Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--strict] [--min-hours N] [--max-gib N]
 #        [--budget-pct N [--budget-floor-minutes N]]
 set -uo pipefail
 
@@ -87,16 +87,21 @@ BUDGET_FLOOR_MINUTES=120
 # including remote-unverified (a failed ls-remote is an unknown, not a keep).
 BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
 DRY_RUN=true
+STRICT_MODE=false
 
 usage() {
   cat <<'USAGE'
-Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--deadline-at T] [--cursor PATH] [--min-hours N] [--max-gib N]
+Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--strict] [--available-floor] [--deadline-at T] [--cursor PATH] [--min-hours N] [--max-gib N]
        cleanup_scratch_top_level.sh [--dry-run|--clean] --budget-pct N [--budget-floor-minutes N] [--max-gib N] [--deadline-at T]
 
   --dry-run       Preview candidates and their C14 verdicts (default).
   --clean         Actually remove eligible candidates. Requires
                   SCRATCH_TOP_LEVEL_APPROVED=1, or the C14-only
                   DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 mode on the registered volume.
+  --strict        Manual per-child mode: --clean is admitted without
+                  SCRATCH_TOP_LEVEL_APPROVED=1, but every C14 content/provenance
+                  keep remains protected. Cannot be combined with --budget-pct
+                  or automatic mode.
   --available-floor  Stop at 50 GiB available and recheck before each removal.
   --min-hours N   Recency floor in hours (default 24; values below 24 are
                   clamped up to 24).
@@ -123,6 +128,7 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) DRY_RUN=false; shift ;;
+    --strict) STRICT_MODE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --available-floor) AVAILABLE_FLOOR=true; shift ;;
     --min-hours) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MIN_HOURS="$2"; shift 2 ;;
@@ -152,13 +158,21 @@ if [[ -n "$BUDGET_PCT" ]]; then
   (( BUDGET_FLOOR_MINUTES < 60 )) && BUDGET_FLOOR_MINUTES=60
   [[ "$MAX_GIB_SET" == true ]] || MAX_GIB=0
 fi
+if [[ "$STRICT_MODE" == true && -n "$BUDGET_PCT" ]]; then
+  echo "Refusing --strict with --budget-pct: budget/LRU overrides are incompatible with strict content protection." >&2
+  exit 2
+fi
+if [[ "$STRICT_MODE" == true && "$SCRATCH_AUTOMATIC" == 1 ]]; then
+  echo "Refusing --strict in automatic mode; use ordinary manual enumeration." >&2
+  exit 2
+fi
 MAX_KB=$(( MAX_GIB * 1024 * 1024 ))
 
 if [[ "$DRY_RUN" != true && "$SCRATCH_AUTOMATIC" == 1 && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == 1 ]]; then
   echo "Refusing automatic mode with SCRATCH_TOP_LEVEL_APPROVED=1; automatic mode never overrides C14 keeps." >&2
   exit 2
 fi
-if [[ "$DRY_RUN" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" != "1" && "$SCRATCH_AUTOMATIC" != 1 ]]; then
+if [[ "$DRY_RUN" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" != "1" && "$SCRATCH_AUTOMATIC" != 1 && "$STRICT_MODE" != true ]]; then
   echo "Refusing to delete: set SCRATCH_TOP_LEVEL_APPROVED=1 after reviewing the dry-run output." >&2
   exit 2
 fi
@@ -305,7 +319,7 @@ verdict_and_maybe_remove() {
       # Ordered-gate guarantee: C14 evaluates owner lease, live cwd, open files
       # and recent activity BEFORE these content checks, so both are already
       # proven for this candidate when this branch runs.
-      if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" ]]; then
+      if [[ "$STRICT_MODE" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" ]]; then
         override="$verdict"
         verdict=remove
       fi ;;
@@ -443,12 +457,38 @@ fi
 # descended, depth-bounded, and .git-bearing trees are never entered.
 if (( ${#candidates[@]} )); then
   _artifact_extra=()
+  _artifact_discovery_deferred=false
+  _artifact_discovery_blocked=()
   for _candidate in "${candidates[@]}"; do
+    [[ -d "$_candidate" && ! -L "$_candidate" ]] || continue
+    if deadline_exceeded; then
+      echo "deferred:artifact-discovery-deadline (stopped before $(basename "${_candidate%%/}"))"
+      _artifact_discovery_deferred=true
+      break
+    fi
+    _artifact_output="$(scratch_budget_artifact_children "$_candidate" 3)"
+    _artifact_rc=$?
+    if (( _artifact_rc == 124 )); then
+      echo "deferred:artifact-discovery-deadline (stopped during $(basename "${_candidate%%/}"))"
+      _artifact_discovery_deferred=true
+      break
+    elif (( _artifact_rc != 0 )); then
+      echo "kept:artifact-discovery-unmeasurable $_candidate"
+      _artifact_discovery_blocked+=("$_candidate")
+      continue
+    fi
     while IFS= read -r _artifact_child; do
       [[ -n "$_artifact_child" ]] || continue
       _artifact_extra+=("$_artifact_child")
-    done < <(scratch_budget_artifact_children "$_candidate" 3 2>/dev/null)
+    done <<<"$_artifact_output"
   done
+  if [[ "$_artifact_discovery_deferred" == true ]]; then
+    echo "deferred:artifact-discovery (eligible entries not classified; rerun with a fresh deadline)"
+    # Keep the original root candidates in the queue. The main loop's existing
+    # deadline path records the exact pending item in the shared cursor before
+    # deferring, preserving automatic --cursor resume semantics.
+    _artifact_extra=()
+  fi
   for _artifact_child in ${_artifact_extra[@]+"${_artifact_extra[@]}"}; do
     candidates+=("$_artifact_child")
   done
@@ -515,6 +555,11 @@ while IFS= read -r -d '' entry; do
   [[ -e "$entry" || -L "$entry" ]] || continue
   base="${entry##*/}"
   case "$base" in .*) continue ;; esac
+  _artifact_blocked=false
+  for _blocked in ${_artifact_discovery_blocked[@]+"${_artifact_discovery_blocked[@]}"}; do
+    if [[ "$entry" == "$_blocked" ]]; then _artifact_blocked=true; break; fi
+  done
+  [[ "$_artifact_blocked" == true ]] && { kept=$(( kept + 1 )); continue; }
   if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true && -n "$CURSOR_RESUME_TARGET" ]]; then
     [[ "$entry" == "$CURSOR_RESUME_TARGET" ]] || continue
     CURSOR_RESUME_TARGET=""
@@ -558,11 +603,15 @@ while IFS= read -r -d '' entry; do
       budget_stop=target-reached; break
     fi
   else
-  dir_mtime="$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null)"
-  if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > floor_epoch )); then
-    mtime="$dir_mtime"
+  if [[ "$STRICT_MODE" == true ]]; then
+    mtime="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)"
   else
-    mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
+    dir_mtime="$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null)"
+    if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > floor_epoch )); then
+      mtime="$dir_mtime"
+    else
+      mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
+    fi
   fi
   if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
     echo "kept:mtime-unmeasurable $entry"; kept=$(( kept + 1 )); continue

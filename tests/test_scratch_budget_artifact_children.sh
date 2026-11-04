@@ -25,7 +25,7 @@ mkdir -p "$B/android-native-1/isolated-stale" "$B/android-native-1/isolated-fres
          "$B/android-native-1/android-sdk" "$B/src-tree/.git" "$B/src-tree/dist" \
          "$B/file-git-tree/dist" "$B/root-git-dir/.git" "$B/root-git-dir/dist" \
          "$B/root-git-file/dist" "$B/dangling-git-tree/dist" "$B/ordinary-dir" \
-         "$B/depth-1/depth-2/depth-3/depth-4/dist"
+         "$B/depth-1/depth-2/target" "$B/depth-1/depth-2/depth-3/depth-4/dist"
 printf 'gitdir: /outside\n' >"$B/file-git-tree/.git"
 printf 'gitdir: /outside\n' >"$B/root-git-file/.git"
 ln -s "$T/missing-git-target" "$B/dangling-git-tree/.git"
@@ -39,10 +39,12 @@ echo old >"$B/root-git-dir/dist/blob"
 echo old >"$B/root-git-file/dist/blob"
 echo old >"$B/dangling-git-tree/dist/blob"
 echo old >"$B/ordinary-dir/blob"
+echo old >"$B/depth-1/depth-2/target/blob"
 echo old >"$B/depth-1/depth-2/depth-3/depth-4/dist/blob"
 touch -d '40 hours ago' "$B/android-native-1/isolated-stale/blob" "$B/android-native-1/android-sdk/blob" \
     "$B/src-tree/dist/blob" "$B/file-git-tree/dist/blob" "$B/root-git-dir/dist/blob" \
     "$B/root-git-file/dist/blob" "$B/dangling-git-tree/dist/blob" "$B/ordinary-dir/blob" \
+    "$B/depth-1/depth-2/target/blob" \
     "$B/depth-1/depth-2/depth-3/depth-4/dist/blob" 2>/dev/null || true
 ln -s "$B/android-native-1/isolated-stale" "$B/link-to-stale"
 
@@ -84,6 +86,14 @@ grep -q 'link-to-stale' <<<"$out" \
 # 11. Depth bound respected (nothing at depth 4)
 grep -q 'depth-4/dist$' <<<"$out" \
   && bad "depth bound violated" || ok "depth bound respected"
+# 12. The exact max-depth boundary is still included.
+grep -q 'depth-2/target$' <<<"$out" \
+  && ok "depth-3 boundary is included" || bad "depth-3 boundary was skipped"
+# 13. Expansion reports an expired actuator deadline distinctly from an empty list.
+expired_deadline="$(python3 -c 'import time; print(time.monotonic()-1)')"
+ACT_DEADLINE_AT="$expired_deadline" scratch_budget_artifact_children "$B" 3 >/dev/null 2>&1
+rc=$?
+[[ "$rc" == 124 ]] && ok "expired discovery deadline returns deferred status" || bad "expired discovery deadline returns deferred status (rc=$rc)"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

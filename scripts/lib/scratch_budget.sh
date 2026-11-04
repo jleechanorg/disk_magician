@@ -566,22 +566,67 @@ scratch_budget_artifact_children() {
   # root before walking, then prune every marked directory in this one bounded
   # walk so a shallower Git ancestor cannot be bypassed by a later depth pass.
   [[ -e "$dir/.git" || -L "$dir/.git" ]] && return 0
-  local child base
-  while IFS= read -r -d '' child; do
-    [[ -d "$child" && ! -L "$child" ]] || continue
-    base="${child##*/}"
-    case "$base" in
-      .*|node_modules) : ;;   # node_modules itself is a strip target, not a descent root
-    esac
-    case "$base" in
-      build|dist|out|target|coverage|artifacts|gradle|.gradle|android-sdk|avd\
-      |isolated-*|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods)
-        printf '%s\n' "$child" ;;
-    esac
-  done < <(
-    find "$dir" -mindepth 1 -maxdepth "$max_depth" -type d \
-      \( -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune \) -o \
-      -type d ! -name '.*' -print0 2>/dev/null
-  )
-  return 0
+  # One Python stdlib walker avoids a shell process for every visited directory.
+  # It checks the actuator deadline before each directory expansion and returns
+  # 124 when expansion is deferred; callers must report that explicitly rather
+  # than treating an incomplete list as "no eligible entries".
+  local deadline="${ACT_DEADLINE_AT:-}"
+  python3 - "$dir" "$max_depth" "$deadline" <<'PY'
+import fnmatch
+import os
+import sys
+import time
+
+root, max_depth, deadline = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+try:
+    deadline_value = float(deadline) if deadline else None
+except ValueError:
+    raise SystemExit(1)
+
+def expired():
+    return deadline_value is not None and time.monotonic() >= deadline_value
+
+def has_git_marker(path):
+    return os.path.lexists(os.path.join(path, ".git"))
+
+def is_artifact_name(name):
+    return name in {
+        "build", "dist", "out", "target", "coverage", "artifacts", "gradle",
+        ".gradle", "android-sdk", "avd", ".next", ".cache", ".turbo",
+        ".parcel-cache", "__pycache__", "DerivedData", "Pods",
+    } or fnmatch.fnmatchcase(name, "isolated-*")
+
+def walk(path, depth):
+    if expired():
+        raise TimeoutError
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if expired():
+                    raise TimeoutError
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    child = entry.path
+                    # Match find's -exec marker check followed by -prune: the
+                    # marked directory itself is not emitted and is never
+                    # descended into.
+                    if has_git_marker(child):
+                        continue
+                    if is_artifact_name(entry.name):
+                        print(child, flush=True)
+                    if depth < max_depth:
+                        walk(child, depth + 1)
+                except OSError:
+                    raise
+    except OSError:
+        raise
+
+try:
+    walk(root, 1)
+except TimeoutError:
+    raise SystemExit(124)
+except (OSError, ValueError):
+    raise SystemExit(1)
+PY
 }
