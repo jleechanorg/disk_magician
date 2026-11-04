@@ -435,6 +435,25 @@ if [[ -d "$root/tmp" && ! -L "$root/tmp" ]]; then
   done
 fi
 
+# A directory's newest-content age is an AGGREGATE, so ONE freshly written child
+# shelters every stale sibling in the tree. Measured 2026-11-03: a 35 GiB Android
+# build root read as "0 h old" (and was therefore never eligible) while 23.7 GiB
+# of its children were 39-41 h old. Enqueue artifact-shaped descendants as their
+# own candidates so each is judged on its own age. Only build-output basenames are
+# descended, depth-bounded, and .git-bearing trees are never entered.
+if (( ${#candidates[@]} )); then
+  _artifact_extra=()
+  for _candidate in "${candidates[@]}"; do
+    while IFS= read -r _artifact_child; do
+      [[ -n "$_artifact_child" ]] || continue
+      _artifact_extra+=("$_artifact_child")
+    done < <(scratch_budget_artifact_children "$_candidate" 3 2>/dev/null)
+  done
+  for _artifact_child in ${_artifact_extra[@]+"${_artifact_extra[@]}"}; do
+    candidates+=("$_artifact_child")
+  done
+fi
+
 # LRU budget mode: measure first (fail closed), then order every candidate past
 # the floor by canonical content mtime, oldest first. Usage is re-measured before
 # each eviction in the main loop; the ordering is all-or-nothing under a deadline.
