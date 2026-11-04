@@ -34,6 +34,17 @@ fi
 # shellcheck source=/dev/null
 source "$REC"
 
+# bounded <seconds> <cmd...> -- cap the wall clock when `timeout` exists, else
+# run the command alone. `timeout` is coreutils and absent from base images; an
+# unguarded call exits 127, and this probe then reports a healthy worktree as
+# dirty=0 / onremote=noborn -- a WRONG ANSWER rather than a missing one, which
+# is worse than failing because it feeds the cleanup assessment directly.
+if command -v timeout >/dev/null 2>&1; then
+  bounded() { timeout "$@"; }
+else
+  bounded() { local _secs=$1; shift; "$@"; }
+fi
+
 ROOT="${WORKTREE_ROOT:-$HOME/.worktrees}"
 [[ -d "$ROOT" ]] || { echo "FATAL: worktree root not found: $ROOT" >&2; exit 1; }
 
@@ -54,10 +65,10 @@ while IFS= read -r wt; do
   [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
   gib="$(awk -v k="$kb" 'BEGIN{printf "%.2f", k/1048576}')"
 
-  dirty="$(GIT_OPTIONAL_LOCKS=0 timeout 60 git -C "$wt" status --porcelain 2>/dev/null | wc -l)"
+  dirty="$(GIT_OPTIONAL_LOCKS=0 bounded 60 git -C "$wt" status --porcelain 2>/dev/null | wc -l)"
   dirty="${dirty//[!0-9]/}"; [[ -n "$dirty" ]] || dirty="?"
 
-  nrem="$(timeout 30 git -C "$wt" remote 2>/dev/null | wc -l)"
+  nrem="$(bounded 30 git -C "$wt" remote 2>/dev/null | wc -l)"
   nrem="${nrem//[!0-9]/}"
 
   # "noborn" is a distinct state from "not on a remote": it means the git admin
@@ -66,8 +77,8 @@ while IFS= read -r wt; do
   # plain directories -- but they must not be confused with "commits on no
   # remote", which is a real push-before-delete case.
   onremote="no"
-  if timeout 30 git -C "$wt" rev-parse HEAD >/dev/null 2>&1; then
-    if [[ -n "$(timeout 30 git -C "$wt" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]]; then
+  if bounded 30 git -C "$wt" rev-parse HEAD >/dev/null 2>&1; then
+    if [[ -n "$(bounded 30 git -C "$wt" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]]; then
       onremote="yes"
     fi
   else
@@ -75,8 +86,8 @@ while IFS= read -r wt; do
   fi
 
   locked="no"
-  if timeout 30 git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
-    gd="$(timeout 30 git -C "$wt" rev-parse --git-dir 2>/dev/null)"
+  if bounded 30 git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+    gd="$(bounded 30 git -C "$wt" rev-parse --git-dir 2>/dev/null)"
     case "$gd" in /*) ;; *) gd="$wt/$gd" ;; esac
     [[ -f "$gd/locked" ]] && locked="yes"
   fi

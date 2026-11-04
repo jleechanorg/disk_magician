@@ -381,6 +381,20 @@ has "unpushed commit published" "PUSHED" "$out"
 git -C "$T/o20.git" for-each-ref --format='%(refname)' refs/heads/wip 2>/dev/null | grep -q wip/worktree-preserve \
   && ok "wip ref exists on the remote" || bad "wip ref missing on the remote"
 
+echo "=== Test 21: no script may hard-require coreutils timeout"
+# `timeout` is coreutils, absent from base macOS and minimal Linux images. An
+# unguarded call exits 127, and that does not merely fail -- it makes every
+# probe read as "unmeasurable", so the guard it protects silently stops
+# enforcing. This is how CI failed while the suite passed locally.
+for f in "$WT_DEL" "$ADV_DEL" "$WT_PUSH" "$ROOT/scripts/worktree_residency_check.sh"; do
+  name="$(basename "$f")"
+  # Every invocation of `timeout N` must be routed through the bounded() helper.
+  raw="$(grep -nE '(^|[^_[:alnum:]])timeout [0-9]' "$f" | grep -v 'bounded' || true)"
+  [[ -z "$raw" ]] && ok "$name guards timeout via bounded()" \
+    || bad "$name calls timeout directly" "$(printf '%s' "$raw" | head -1)"
+  has "  $name defines bounded()" "bounded()" "$(cat "$f")"
+done
+
 echo
 echo "===================================="
 echo "Results: $PASS passed, $FAIL failed"
