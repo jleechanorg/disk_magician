@@ -39,7 +39,6 @@ class PackageDependencyTests(unittest.TestCase):
                     "pip",
                     "wheel",
                     "--no-deps",
-                    "--no-build-isolation",
                     "--wheel-dir",
                     str(dist),
                     str(fixture),
