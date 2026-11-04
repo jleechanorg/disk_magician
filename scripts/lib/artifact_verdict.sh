@@ -180,10 +180,11 @@ c14_repos_ok() {
 }
 
 # c14_ephemeral_retention <canonical path> [<archived content path>] [--archive-origin]: minutes of
-# the declared-ephemeral row E2-E7 it matches (§7.2; longest wins), rc 1 for
-# none. --archive-origin restricts classification to the E2/E3 scratch-root
-# rows. When validating a receipt, path selects the row and archived content
-# supplies the source-shape check without probing a recreated original path.
+# the declared-ephemeral row E2-E8 it matches (§7.2; longest wins), rc 1 for
+# none. --archive-origin restricts classification to the E1-E3 scratch-root and
+# scratch-volume rows, never E8. When validating a receipt, path selects the row
+# and archived content supplies the source-shape check without probing a
+# recreated original path.
 c14_ephemeral_retention() {
     local p=$1 content=${2:-$1} archive_origin=${3:-} r rel
     while IFS= read -r r; do
@@ -199,6 +200,15 @@ c14_ephemeral_retention() {
         [[ "$archive_origin" != --archive-origin ]] || return 1
         if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 1440; return 0; fi
         if [[ "$rel" =~ ^[^./][^/]*$ && ( -d "$content/.git" || -f "$content/.git" ) ]]; then echo 1440; return 0; fi
+        # E8: a direct child of the registered scratch-VOLUME root is ephemeral
+        # at 1440 min whatever its name. Name shapes cannot enumerate agent
+        # scratch, and the volume's own class already declares its contents
+        # disposable. This row supplies only the missing retention: lease, live
+        # cwd, open file, secret, repository and recency gates all run before it
+        # (see _av_artifact_removal_verdict), so it bypasses nothing. Depth stays
+        # one component, the OS-owned basenames the tmp-root loop excludes (:179)
+        # stay excluded, and a symlink is never followed.
+        if [[ "$rel" =~ ^[^./][^/]*$ && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) && -d "$content" && ! -L "$p" ]]; then echo 1440; return 0; fi
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}

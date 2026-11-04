@@ -20,6 +20,7 @@
 #    - PID-scoped real native lsof fixture for active writer skips DB and exits non-zero.
 #    - lsof rc1 + stderr warning fails closed.
 #    - lsof rc0 + stderr warning fails closed.
+#    - lsof tracefs-only stderr warning does NOT fail closed (Linux false positive).
 #    - Malformed lsof stdout fails closed.
 #    - Missing lsof capability fails closed.
 #    - lsof timeout fails closed.
@@ -687,6 +688,38 @@ set -e
 
 expect "lsof timeout fails closed" "lsof inspection failed" "$OUT9_TIMEOUT"
 expect_eq "lsof timeout exits non-zero" "1" "$RC9_TIMEOUT"
+
+# Case 9H: tracefs-only stderr warning must NOT fail closed. On Linux lsof prints
+# "can't stat() tracefs ... /sys/kernel/debug/tracing" for every invocation by an
+# unprivileged user, with rc=0 and a correct PID answer. Treating it as failure
+# disabled vacuuming of state_5.sqlite (741M) and friends permanently.
+cat > "$MOCK_LSOF/lsof" <<'SHIM'
+#!/bin/bash
+printf "%s\n" "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing" >&2
+exit 0
+SHIM
+chmod +x "$MOCK_LSOF/lsof"
+
+set +e
+OUT9_TRACEFS=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF/lsof" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state9h" "$SCRIPT" --clean --db "$DB9" 2>&1)
+RC9_TRACEFS=$?
+set -e
+
+expect "tracefs-only warning is recognised as benign" "benign tracefs stat warning" "$OUT9_TRACEFS"
+if [[ "$OUT9_TRACEFS" == *"lsof inspection warning/error"* ]]; then
+  echo "  FAIL: tracefs-only warning still treated as a hard failure"
+  TEST_FAILURES=$((TEST_FAILURES+1))
+else
+  echo "  PASS: tracefs-only warning did not fail closed"
+fi
+# The exit code of this run is not the assertion: the DB may still be busy, so a
+# non-zero exit can be legitimate. What this case proves is that the tracefs stanza is
+# recognised as benign and is NOT the reason for any failure.
+expect "tracefs-only warning did not become the failure reason" "benign tracefs stat warning" "$OUT9_TRACEFS"
+if [[ "$OUT9_TRACEFS" == *"lsof inspection warning/error"* ]]; then
+  echo "  FAIL: tracefs-only warning became the failure reason"
+  TEST_FAILURES=$((TEST_FAILURES+1))
+fi
 rm -rf "$MOCK_LSOF" "$WRAP_LSOF_READER" "$WRAP_LSOF_WRITER"
 
 # ─────────────────────────────────────────────────────────────────────────────
