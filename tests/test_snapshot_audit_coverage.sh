@@ -349,6 +349,8 @@ BUDGET_CLOCK_STATE="$WORK/budget_clock_state"
 # per-path deadline semantics); the parallel orchestrator has its own tests.
 export DISK_MAGICIAN_MEASURE_WORKERS=0
 SYSTEM_DATE=$(command -v date)
+export BUDGET_REAL_TIMEOUT="$(command -v timeout)"
+BUDGET_SCAN_TRACE="$WORK/budget_scanner.jsonl"
 mkdir -p "$BUDGET_HOME/slow-a" "$BUDGET_HOME/slow-b" "$BUDGET_HOME/slow-c" "$BUDGET_BIN"
 : > "$BUDGET_LOG"
 
@@ -378,6 +380,43 @@ fi
 exec "$SYSTEM_DATE" "\$@"
 SH
 chmod +x "$BUDGET_BIN/du" "$BUDGET_BIN/date"
+
+# Observe the actual bounded scanner, not unrelated snapshot initialization.
+# Forward every argument unchanged to real timeout; a sleeping du must really
+# be interrupted, rather than returning a fabricated timeout result.
+cat > "$BUDGET_BIN/timeout" <<'PYTIME'
+#!/usr/bin/env python3
+import json, os, subprocess, sys, time
+args = sys.argv[1:]
+real_timeout = os.environ["BUDGET_REAL_TIMEOUT"]
+trace = os.environ.get("BUDGET_SCAN_TRACE")
+if trace and len(args) >= 2 and args[1] == "du":
+    started = time.monotonic()
+    result = subprocess.run([real_timeout, *args])
+    with open(trace, "a") as stream:
+        stream.write(json.dumps({"args": args, "elapsed": time.monotonic() - started,
+                                 "exit": result.returncode}) + "\n")
+    sys.exit(result.returncode)
+os.execv(real_timeout, [real_timeout, *args])
+PYTIME
+chmod +x "$BUDGET_BIN/timeout"
+
+assert_one_bounded_scan() {
+  python3 - "$BUDGET_SCAN_TRACE" <<'PYTIME'
+import json, sys
+with open(sys.argv[1]) as stream:
+    rows = [json.loads(line) for line in stream]
+assert len(rows) == 1, rows
+row = rows[0]
+print("  Scanner receipt:", json.dumps(row, sort_keys=True))
+assert row["args"][:2] == ["1", "du"], row
+assert row["exit"] == 124, row
+# Same original three-second ceiling, now measured at the scanner boundary.
+# The lower bound also rejects a stub that immediately invents exit 124.
+assert 0.5 <= row["elapsed"] <= 3, row
+PYTIME
+}
+
 
 PARITY_CONFIG="$WORK/budget_parity_config.json"
 cat > "$PARITY_CONFIG" <<JSON
@@ -532,41 +571,45 @@ cat > "$PER_PATH_CONFIG" <<JSON
 JSON
 PER_PATH_OUT="$WORK/budget_per_path.json"
 : > "$BUDGET_LOG"
+: > "$BUDGET_SCAN_TRACE"
+per_path_rc=0
 start=$(date +%s)
 HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
-  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast BUDGET_SCAN_TRACE="$BUDGET_SCAN_TRACE" \
   BUDGET_CLOCK_MODE=fixed BUDGET_CLOCK_STATE="$BUDGET_CLOCK_STATE" \
   DISK_MAGICIAN_CONFIG="$PER_PATH_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
   DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=1 timeout 8 "$SNAP_SCRIPT" --output "$PER_PATH_OUT" \
-  >/dev/null 2>&1 || true
+  >/dev/null 2>&1 || per_path_rc=$?
 per_path_elapsed=$(( $(date +%s) - start ))
-if [[ "$per_path_elapsed" -le 3 ]] && \
+if [[ "$per_path_rc" -eq 0 ]] && assert_one_bounded_scan && \
   [[ "$(sed -n '1p' "$BUDGET_LOG")" == du* ]] && \
   [[ "$(wc -l < "$BUDGET_LOG" | tr -d ' ')" == 1 ]] && \
   python3 -c "import json; d=json.load(open('$PER_PATH_OUT')); assert d['directories']['slow'] is None" 2>/dev/null; then
   ok "one strict du scan stays within the 1s per-path deadline"
 else
-  bad "per-path deadline failed (elapsed=${per_path_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
+  bad "per-path deadline failed (snapshot_rc=$per_path_rc, snapshot_elapsed=${per_path_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
 fi
 
 EXPIRED_OUT="$WORK/budget_expired.json"
 : > "$BUDGET_LOG"
+: > "$BUDGET_SCAN_TRACE"
+expired_rc=0
 rm -f "$BUDGET_CLOCK_STATE"
 start=$(date +%s)
 HOME="$BUDGET_HOME" PATH="$BUDGET_BIN:/opt/homebrew/bin:/usr/bin:/bin" \
-  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast \
+  BUDGET_LOG="$BUDGET_LOG" BUDGET_MODE=fail-fast BUDGET_SCAN_TRACE="$BUDGET_SCAN_TRACE" \
   BUDGET_CLOCK_MODE=boundary BUDGET_CLOCK_STATE="$BUDGET_CLOCK_STATE" \
   DISK_MAGICIAN_CONFIG="$PER_PATH_CONFIG" DISK_MAGICIAN_SNAPSHOT_BUDGET_SECONDS=5 \
   DISK_MAGICIAN_MEASURE_PATH_MAX_SECONDS=1 timeout 8 "$SNAP_SCRIPT" --output "$EXPIRED_OUT" \
-  >/dev/null 2>&1 || true
+  >/dev/null 2>&1 || expired_rc=$?
 expired_elapsed=$(( $(date +%s) - start ))
-if [[ "$expired_elapsed" -le 3 ]] && \
+if [[ "$expired_rc" -eq 0 ]] && assert_one_bounded_scan && \
   [[ "$(wc -l < "$BUDGET_LOG" | tr -d ' ')" == 1 ]] && \
   [[ "$(head -1 "$BUDGET_LOG")" == du* ]] && \
   python3 -c "import json; d=json.load(open('$EXPIRED_OUT')); assert d['directories']['slow'] is None" 2>/dev/null; then
   ok "shared deadline never launches an additional scanner"
 else
-  bad "expired deadline launched extra work (elapsed=${expired_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
+  bad "expired deadline launched extra work (snapshot_rc=$expired_rc, snapshot_elapsed=${expired_elapsed}s, calls=$(tr '\n' ';' < "$BUDGET_LOG"))"
 fi
 
 TOTAL_CONFIG="$WORK/budget_total_config.json"
