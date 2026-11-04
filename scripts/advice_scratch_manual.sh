@@ -47,13 +47,24 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 PSDUMP="$(mktemp "${TMPDIR:-/tmp}/dm-adel-ps.XXXXXX")" || exit 1
 ps -Ao pid,command > "$PSDUMP" 2>/dev/null || true
 
-# in_live_use <path> -- rc 0 when a live process actually holds this path.
-# A one-time argv snapshot misses `cd`-ed shells (argv keeps the launch cwd) and
-# processes started after the snapshot; check real cwd + open handles too.
+# in_live_use <path> -- rc 0 when a live process MAY hold this path.
+#
+# FAIL-CLOSED and PIPEFAIL-SAFE by construction:
+#  * `producer | grep -q` is unusable under `set -o pipefail`: grep exits on the
+#    first match, the producer takes SIGPIPE, and the PIPELINE reports 141 --
+#    i.e. a real match reads as "not live". Measured 2026-11-04:
+#      producer | grep -Fq match   ->  rc=141
+#    So capture the output first, then match on the string, never on the pipe.
+#  * If lsof exists but fails/times out, that is UNKNOWN, not "not live". Any
+#    uncertainty returns 0 (treat as live) so the candidate is preserved.
 in_live_use() {
-  local p=$1 pid cwd
+  local p=$1 pid cwd listing
   if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -F n 2>/dev/null | grep -Fq -- "$p" && return 0
+    if listing="$(timeout 60 lsof -nP -F n 2>/dev/null)"; then
+      case "$listing" in *"$p"*) return 0 ;; esac
+    else
+      return 0   # probe unavailable -> preserve
+    fi
   fi
   if [[ -d /proc ]]; then
     for pid in /proc/[0-9]*; do
@@ -61,7 +72,7 @@ in_live_use() {
       case "$cwd" in "$p"|"$p"/*) return 0 ;; esac
     done
   fi
-  grep -Fq -- "$p" "$PSDUMP" 2>/dev/null && return 0
+  case "$(cat "$PSDUMP" 2>/dev/null || true)" in *"$p"*) return 0 ;; esac
   return 1
 }
 

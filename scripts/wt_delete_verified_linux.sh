@@ -23,17 +23,24 @@ WT_ROOT="${WORKTREE_ROOT:-$HOME/.worktrees}"
 PSDUMP="$(mktemp "${TMPDIR:-/tmp}/wtd.XXXXXX")" || exit 1
 ps -Ao pid,command > "$PSDUMP" 2>/dev/null || true
 
-# in_live_use <path> -- rc 0 when a live process actually holds this path.
+# in_live_use <path> -- rc 0 when a live process MAY hold this path.
 #
-# A one-time `ps` command-line snapshot is NOT sufficient: a shell's argv keeps
-# the cwd it was launched from, so `cd`-ing into a directory never appears in
-# argv at all, and a process that started after the snapshot is invisible. That
-# is exactly how active work gets deleted. Check the real cwd via lsof (macOS)
-# or /proc/*/cwd (Linux), and treat argv as an extra signal only.
+# FAIL-CLOSED and PIPEFAIL-SAFE by construction:
+#  * `producer | grep -q` is unusable under `set -o pipefail`: grep exits on the
+#    first match, the producer takes SIGPIPE, and the PIPELINE reports 141 --
+#    a real match reads as "not live". Measured 2026-11-04:
+#      producer | grep -Fq match   ->  rc=141
+#    Capture the output first, then match on the string, never on the pipe.
+#  * If lsof exists but fails/times out, that is UNKNOWN, not "not live". Any
+#    uncertainty returns 0 (treat as live) so the candidate is preserved.
 in_live_use() {
-  local p=$1 pid cwd
+  local p=$1 pid cwd listing
   if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -F n 2>/dev/null | grep -Fq -- "$p" && return 0
+    if listing="$(timeout 60 lsof -nP -F n 2>/dev/null)"; then
+      case "$listing" in *"$p"*) return 0 ;; esac
+    else
+      return 0
+    fi
   fi
   if [[ -d /proc ]]; then
     for pid in /proc/[0-9]*; do
@@ -41,8 +48,50 @@ in_live_use() {
       case "$cwd" in "$p"|"$p"/*) return 0 ;; esac
     done
   fi
-  grep -Fq -- "$p" "$PSDUMP" 2>/dev/null && return 0
+  case "$(cat "$PSDUMP" 2>/dev/null || true)" in *"$p"*) return 0 ;; esac
   return 1
+}
+
+# reverify_gates <wt> <rel> -- rc 0 only when the candidate STILL satisfies the
+# same recency and machine-local protection gates it satisfied when the list was
+# produced. A list is a snapshot of past judgement; between snapshot and action
+# the checkout can become recent (someone resumed work) or protected (a
+# safety.local.json rule added it to never_delete / needs_decision). Re-checking
+# is the difference between acting on verified state and acting on a stale note.
+reverify_gates() {
+  local wt=$1 rel=$2 min_days age newest
+  min_days="${WT_MIN_AGE_DAYS:-7}"
+
+  # 1) recency: newest content mtime, via the canonical helper when available.
+  if [[ -n "${DISK_MAGICIAN_RECENCY_LIB:-}" && -f "${DISK_MAGICIAN_RECENCY_LIB:-}" ]]; then
+    # shellcheck source=/dev/null
+    . "$DISK_MAGICIAN_RECENCY_LIB" 2>/dev/null || true
+  fi
+  if command -v worktree_age_days >/dev/null 2>&1; then
+    age="$(worktree_age_days "$wt" 2>/dev/null)" || return 1
+  else
+    newest="$(find "$wt" -xdev -type f -exec stat -c '%Y' {} + 2>/dev/null \
+      | awk '$1+0>m{m=$1+0} END{if(m>0)print m}')"
+    [[ "$newest" =~ ^[0-9]+$ ]] || return 1
+    age=$(( ( $(date +%s) - newest ) / 86400 ))
+  fi
+  [[ "$age" =~ ^[0-9]+$ ]] || return 1
+  (( age >= min_days )) || { echo "SKIP too-recent (age=${age}d): $rel"; return 1; }
+
+  # 2) machine-local protection gates, when the canonical safety module exists.
+  local safety
+  for safety in \
+    "$HOME/.local/share/uv/tools/disk-magician/lib/python3.13/site-packages/disk_magician/scripts/safety_check.sh" \
+    "$HOME/.local/share/uv/tools/disk-magician/lib/python3.12/site-packages/disk_magician/scripts/safety_check.sh"
+  do
+    if [[ -f "$safety" ]]; then
+      if ! bash "$safety" "$wt" >/dev/null 2>&1; then
+        echo "SKIP safety-gate: $rel"; return 1
+      fi
+      break
+    fi
+  done
+  return 0
 }
 
 ok=0; skip=0; fail=0; kb_total=0
@@ -98,6 +147,7 @@ while IFS=$'\t' read -r _gib rel; do
     [[ -f "$gd/locked" ]] && { echo "SKIP locked: $rel"; skip=$((skip+1)); continue; }
 
     in_live_use "$wt" && { echo "SKIP live: $rel"; skip=$((skip+1)); continue; }
+    reverify_gates "$wt" "$rel" || { skip=$((skip+1)); continue; }
 
     main_repo=$(timeout 30 git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
     main_repo="${main_repo%/.git}"
@@ -116,7 +166,41 @@ while IFS=$'\t' read -r _gib rel; do
       skip=$((skip+1))
       continue
     fi
+
+    # "not a repository" ALSO describes an ordinary directory with no git at
+    # all, and a damaged repo whose objects were partly lost -- neither is
+    # proven-orphaned worktree state. Require POSITIVE orphan provenance: the
+    # worktree must still be declared by its main repo, and that repo's
+    # .git/worktrees/<name> admin entry must be the thing that is missing.
+    # Without that positive signal we cannot distinguish "orphaned worktree"
+    # from "someone's plain folder", so preserve.
+    wt_name="${wt##*/}"
+    main_repo=$(timeout 30 git -C "$WT_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [[ -z "$main_repo" ]]; then
+      # Resolve the owning repo from the list's first path component instead.
+      repo_key="${rel%%/*}"
+      for cand in "$HOME/projects/$repo_key" "$HOME/projects_other/$repo_key" "$HOME/$repo_key"; do
+        if timeout 20 git -C "$cand" rev-parse --git-dir >/dev/null 2>&1; then
+          main_repo="$(timeout 20 git -C "$cand" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+          break
+        fi
+      done
+    fi
+    main_repo="${main_repo%/.git}"
+    if [[ -z "$main_repo" ]] || ! timeout 20 git -C "$main_repo" rev-parse --git-dir >/dev/null 2>&1; then
+      echo "SKIP no-orphan-provenance (main repo unresolved): $rel"; skip=$((skip+1)); continue
+    fi
+    # The main repo must still list this worktree; an admin entry that is
+    # present means this is NOT an orphan and must go through worktree remove.
+    if timeout 30 git -C "$main_repo" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $wt"; then
+      echo "SKIP still-registered-worktree: $rel"; skip=$((skip+1)); continue
+    fi
+    if [[ -e "$main_repo/.git/worktrees/$wt_name" ]]; then
+      echo "SKIP admin-entry-present: $rel"; skip=$((skip+1)); continue
+    fi
+
     in_live_use "$wt" && { echo "SKIP live: $rel"; skip=$((skip+1)); continue; }
+    reverify_gates "$wt" "$rel" || { skip=$((skip+1)); continue; }
     find "$wt" -type d -exec chmod u+w {} + 2>/dev/null || true
     if rm -rf -- "$wt" 2>/dev/null && [[ ! -e "$wt" ]]; then
       ok=$((ok+1)); kb_total=$((kb_total+kb))
