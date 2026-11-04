@@ -143,16 +143,21 @@ reverify_gates() {
     if ! bash "$WT_SAFETY_CHECK" "$wt" >/dev/null 2>&1; then
       echo "SKIP safety-gate: $rel" >&2; return 1
     fi
-    # A checker that exits 0 without proving it looked at this path is not
-    # evidence of safety. The canonical checker supports --check <path>; when it
-    # does, require that form so a wrong/short-circuiting script cannot pass by
-    # returning 0 for everything.
-    if bash "$WT_SAFETY_CHECK" --check "$wt" >/dev/null 2>&1; then
-      :
-    elif bash "$WT_SAFETY_CHECK" "$wt" >/dev/null 2>&1; then
-      :  # checker does not implement --check; the plain form already passed
-    else
-      echo "SKIP safety-gate: $rel" >&2; return 1
+    # Require the checker to actually EXAMINE this path. The canonical
+    # safety_check.sh takes the path positionally and does not implement
+    # --check, so a --check-first probe proves nothing: it exits 2 (usage) and
+    # the retry below would then accept any checker that returns 0. Instead,
+    # require positive evidence in the OUTPUT -- the canonical checker prints
+    # "OK <path>" for a permitted path. A checker that prints nothing about the
+    # path has not looked at it, and silence is not consent.
+    local out rc2
+    out="$(bash "$WT_SAFETY_CHECK" "$wt" 2>&1)"; rc2=$?
+    if (( rc2 != 0 )); then
+      echo "SKIP safety-gate (checker rc=$rc2): $rel" >&2; return 1
+    fi
+    if ! grep -qE "(^|[[:space:]])OK[[:space:]]+.*${wt//\./\\.}" <<<"$out"; then
+      echo "SKIP safety-gate (checker did not report OK for this path): $rel" >&2
+      return 1
     fi
     return 0
   fi

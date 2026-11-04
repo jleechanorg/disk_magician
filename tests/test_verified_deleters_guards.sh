@@ -66,10 +66,20 @@ export DISK_MAGICIAN_DELETION_LOG="$T/deletions.log"
 mkdir -p "$HOME" "$WORKTREE_ROOT" "$SCRATCH_ROOT" "$HOME/projects"
 
 # Stub safety module: passes unless the path matches the protected marker.
+# Mimics the canonical safety_check.sh contract: one verdict line per path,
+# "PROTECTED <path> <rule>" or "OK <path>", exit 1 when any path is protected.
+# The script requires the positive "OK <path>" line, because a checker that
+# prints nothing about a path has not looked at it.
 cat > "$T/safety_stub.sh" <<'STUB'
 #!/bin/bash
-case "$1" in *"/PROTECTED/"*) exit 1 ;; esac
-exit 0
+rc=0
+for p in "$@"; do
+  case "$p" in
+    *"/PROTECTED/"*) echo "PROTECTED  $p  (stub rule)"; rc=1 ;;
+    *) echo "OK         $p" ;;
+  esac
+done
+exit $rc
 STUB
 chmod +x "$T/safety_stub.sh"
 export WT_SAFETY_CHECK="$T/safety_stub.sh"
