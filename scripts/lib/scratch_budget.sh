@@ -562,21 +562,26 @@ scratch_budget_artifact_children() {
   local dir="$1" max_depth="${2:-3}"
   [[ -d "$dir" && ! -L "$dir" ]] || return 1
   [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=3
-  local depth child base
-  for (( depth = 1; depth <= max_depth; depth++ )); do
-    while IFS= read -r -d '' child; do
-      [[ -d "$child" && ! -L "$child" ]] || continue
-      [[ -e "$child/.git" ]] && continue
-      base="${child##*/}"
-      case "$base" in
-        .*|node_modules) : ;;   # node_modules itself is a strip target, not a descent root
-      esac
-      case "$base" in
-        build|dist|out|target|coverage|artifacts|gradle|.gradle|android-sdk|avd\
-        |isolated-*|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods)
-          printf '%s\n' "$child" ;;
-      esac
-    done < <(find "$dir" -mindepth "$depth" -maxdepth "$depth" -type d ! -name '.*' -print0 2>/dev/null)
-  done
+  # A .git marker can be a directory, a file, or a dangling link. Check the
+  # root before walking, then prune every marked directory in this one bounded
+  # walk so a shallower Git ancestor cannot be bypassed by a later depth pass.
+  [[ -e "$dir/.git" || -L "$dir/.git" ]] && return 0
+  local child base
+  while IFS= read -r -d '' child; do
+    [[ -d "$child" && ! -L "$child" ]] || continue
+    base="${child##*/}"
+    case "$base" in
+      .*|node_modules) : ;;   # node_modules itself is a strip target, not a descent root
+    esac
+    case "$base" in
+      build|dist|out|target|coverage|artifacts|gradle|.gradle|android-sdk|avd\
+      |isolated-*|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods)
+        printf '%s\n' "$child" ;;
+    esac
+  done < <(
+    find "$dir" -mindepth 1 -maxdepth "$max_depth" -type d \
+      \( -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune \) -o \
+      -type d ! -name '.*' -print0 2>/dev/null
+  )
   return 0
 }
