@@ -40,7 +40,7 @@
 # provenance keeps (dirty, not-pushed, secret-like, ...) are overridden, and each
 # eviction logs its prior C14 verdict so unpushed losses stay auditable.
 #
-# Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--strict] [--min-hours N] [--max-gib N]
+# Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--min-hours N] [--max-gib N]
 #        [--budget-pct N [--budget-floor-minutes N]]
 set -uo pipefail
 
@@ -87,21 +87,16 @@ BUDGET_FLOOR_MINUTES=120
 # including remote-unverified (a failed ls-remote is an unknown, not a keep).
 BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
 DRY_RUN=true
-STRICT_MODE=false
 
 usage() {
   cat <<'USAGE'
-Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--strict] [--available-floor] [--deadline-at T] [--cursor PATH] [--min-hours N] [--max-gib N]
+Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--deadline-at T] [--cursor PATH] [--min-hours N] [--max-gib N]
        cleanup_scratch_top_level.sh [--dry-run|--clean] --budget-pct N [--budget-floor-minutes N] [--max-gib N] [--deadline-at T]
 
   --dry-run       Preview candidates and their C14 verdicts (default).
   --clean         Actually remove eligible candidates. Requires
                   SCRATCH_TOP_LEVEL_APPROVED=1, or the C14-only
                   DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 mode on the registered volume.
-  --strict        Manual per-child mode: --clean is admitted without
-                  SCRATCH_TOP_LEVEL_APPROVED=1, but every C14 content/provenance
-                  keep remains protected. Cannot be combined with --budget-pct
-                  or automatic mode.
   --available-floor  Stop at 50 GiB available and recheck before each removal.
   --min-hours N   Recency floor in hours (default 24; values below 24 are
                   clamped up to 24).
@@ -128,7 +123,6 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) DRY_RUN=false; shift ;;
-    --strict) STRICT_MODE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --available-floor) AVAILABLE_FLOOR=true; shift ;;
     --min-hours) [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; MIN_HOURS="$2"; shift 2 ;;
@@ -158,21 +152,13 @@ if [[ -n "$BUDGET_PCT" ]]; then
   (( BUDGET_FLOOR_MINUTES < 60 )) && BUDGET_FLOOR_MINUTES=60
   [[ "$MAX_GIB_SET" == true ]] || MAX_GIB=0
 fi
-if [[ "$STRICT_MODE" == true && -n "$BUDGET_PCT" ]]; then
-  echo "Refusing --strict with --budget-pct: budget/LRU overrides are incompatible with strict content protection." >&2
-  exit 2
-fi
-if [[ "$STRICT_MODE" == true && "$SCRATCH_AUTOMATIC" == 1 ]]; then
-  echo "Refusing --strict in automatic mode; use ordinary manual enumeration." >&2
-  exit 2
-fi
 MAX_KB=$(( MAX_GIB * 1024 * 1024 ))
 
 if [[ "$DRY_RUN" != true && "$SCRATCH_AUTOMATIC" == 1 && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == 1 ]]; then
   echo "Refusing automatic mode with SCRATCH_TOP_LEVEL_APPROVED=1; automatic mode never overrides C14 keeps." >&2
   exit 2
 fi
-if [[ "$DRY_RUN" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" != "1" && "$SCRATCH_AUTOMATIC" != 1 && "$STRICT_MODE" != true ]]; then
+if [[ "$DRY_RUN" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" != "1" && "$SCRATCH_AUTOMATIC" != 1 ]]; then
   echo "Refusing to delete: set SCRATCH_TOP_LEVEL_APPROVED=1 after reviewing the dry-run output." >&2
   exit 2
 fi
@@ -312,28 +298,14 @@ verdict_and_maybe_remove() {
     done
     if (( tries < 0 )); then rm -f "$inv" "$binding"; echo kept:lease-busy; return 0; fi
   fi
-  verdict_args=("$verdict_path" --inventory-out "$inv")
-  # Strict manual mode is explicitly for proven Scratch ephemera. Preserve
-  # legacy generic-kind behavior for ordinary manual mode, but use the
-  # canonical ephemeral classifier so known managed build children can be
-  # removed without granting any content/provenance override.
-  if [[ "$STRICT_MODE" == true ]]; then
-    strict_rel="${verdict_path#"$root"/}"
-    # Do not turn every direct Scratch child into a proven E8 ephemeral unit:
-    # strict mode must preserve genuinely unproven ordinary content. Restrict
-    # the typed classifier to the existing managed build/evidence shape.
-    if [[ "$strict_rel" != "$verdict_path" && "$strict_rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then
-      verdict_args+=(--kind ephemeral)
-    fi
-  fi
-  verdict="$(artifact_removal_verdict "${verdict_args[@]}" 2>/dev/null)" || verdict=kept:check-failed
+  verdict="$(artifact_removal_verdict "$verdict_path" --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
   case "$verdict" in
     remove) ;;
     kept:secret-like|kept:unproven-content)
       # Ordered-gate guarantee: C14 evaluates owner lease, live cwd, open files
       # and recent activity BEFORE these content checks, so both are already
       # proven for this candidate when this branch runs.
-      if [[ "$STRICT_MODE" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" ]]; then
+      if [[ "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == "1" ]]; then
         override="$verdict"
         verdict=remove
       fi ;;
@@ -617,15 +589,11 @@ while IFS= read -r -d '' entry; do
       budget_stop=target-reached; break
     fi
   else
-  if [[ "$STRICT_MODE" == true ]]; then
-    mtime="$(scratch_budget_content_mtime "$entry" --strict 2>/dev/null)"
+  dir_mtime="$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null)"
+  if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > floor_epoch )); then
+    mtime="$dir_mtime"
   else
-    dir_mtime="$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null)"
-    if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > floor_epoch )); then
-      mtime="$dir_mtime"
-    else
-      mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
-    fi
+    mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
   fi
   if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
     echo "kept:mtime-unmeasurable $entry"; kept=$(( kept + 1 )); continue

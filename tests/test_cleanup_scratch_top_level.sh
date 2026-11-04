@@ -75,7 +75,6 @@ run() { # run with a clean env so ambient settings cannot leak in
     "${@}"
 }
 mkdir -p "$T/home"
-chmod 700 "$T/home"
 
 # Each test gets its own Scratch root: the cleaner rescans every candidate on
 # each run, so sharing one root makes the suite quadratic and risks the runner's
@@ -427,42 +426,6 @@ out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 [[ ! -e "$SCRATCH_ROOT/secret-keep" ]] && ok "approved override removes the secret-like tree" || bad "approved override removes the secret-like tree" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
 check "the unproven-content override is logged" "scratch-prune:kept:unproven-content" "$(cat "$LOG" 2>/dev/null)"
 check "the secret-like override is logged" "scratch-prune:kept:secret-like" "$(cat "$LOG" 2>/dev/null)"
-
-echo "Test 7b: strict manual clean preserves every keep and removes only proven aged content"
-use_root
-register_test_volume
-make_managed_tree strict-good 25 >/dev/null
-make_managed_tree strict-recent 1 >/dev/null
-make_tree strict-unproven 72 >/dev/null
-make_tree strict-secret 72 '.env' >/dev/null
-make_tree strict-dirty 72 >/dev/null
-git -C "$SCRATCH_ROOT/strict-dirty" init -q
-printf 'tracked\n' >"$SCRATCH_ROOT/strict-dirty/tracked.txt"
-git -C "$SCRATCH_ROOT/strict-dirty" add tracked.txt
-old_stamp "$SCRATCH_ROOT/strict-dirty" 72
-sleep 300 & strict_lease_pid=$!
-make_tree strict-live 72 >/dev/null
-run env DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" bash -c 'source "$1/scripts/lib/worktree_lease.sh"; lease_write "$2" "$2" "" strict-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$SCRATCH_ROOT/strict-live" "$strict_lease_pid"
-[[ -d "$SCRATCH_ROOT/worldai_frontend/build/strict-good" ]] && ok "strict fixture exists before clean" || bad "strict fixture exists before clean"
-strict_verdict="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/strict-good")"
-assert_eq "$strict_verdict" remove "strict fixture is a proven aged ephemeral child"
-run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --strict --dry-run >/dev/null 2>&1
-out="$(run bash "$SCRIPT" --strict --clean 2>&1)"; rc=$?
-kill "$strict_lease_pid" 2>/dev/null || true; wait "$strict_lease_pid" 2>/dev/null || true
-[[ "$rc" == 0 ]] && ok "strict clean exits 0 without approval env" || bad "strict clean exits 0 without approval env" "rc=$rc"
-[[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/strict-good" ]] && ok "strict clean removes proven aged ephemeral child" || bad "strict clean removes proven aged ephemeral child" "$out"
-[[ -e "$SCRATCH_ROOT/worldai_frontend/build/strict-recent" ]] && ok "strict clean preserves recent child" || bad "strict clean preserves recent child"
-[[ -e "$SCRATCH_ROOT/strict-unproven" && -e "$SCRATCH_ROOT/strict-secret" ]] && ok "strict clean preserves unproven and secret-like content" || bad "strict clean preserves unproven and secret-like content"
-[[ -e "$SCRATCH_ROOT/strict-dirty" ]] && ok "strict clean preserves dirty repository" || bad "strict clean preserves dirty repository"
-[[ -e "$SCRATCH_ROOT/strict-live" ]] && ok "strict clean preserves live-owner entry" || bad "strict clean preserves live-owner entry"
-check "strict output reports content keep" "kept:unproven-content $SCRATCH_ROOT/strict-unproven" "$out"
-check "strict output reports secret keep" "kept:secret-like $SCRATCH_ROOT/strict-secret" "$out"
-check "strict output reports dirty keep" "kept:dirty $SCRATCH_ROOT/strict-dirty" "$out"
-check "strict output reports live-owner keep" "kept:live-owner $SCRATCH_ROOT/strict-live" "$out"
-use_root
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --strict --budget-pct 1 2>&1)"; rc=$?
-[[ "$rc" == 2 ]] && ok "strict rejects incompatible budget mode" || bad "strict rejects incompatible budget mode" "rc=$rc"
-check "strict budget refusal explains content protection" "incompatible with strict content protection" "$out"
 
 echo "Test 8: other content keeps are never overridden"
 use_root
