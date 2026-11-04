@@ -244,8 +244,15 @@ while IFS=$'\t' read -r _gib rel; do
     proven_orphan=0
     if [[ -f "$wt_git" && ! -L "$wt_git" ]]; then
       gitdir_target="$(sed -n 's/^gitdir:[[:space:]]*//p' "$wt_git" 2>/dev/null | head -1)"
+      # The dangling pointer must BELONG to the resolved main repo, otherwise an
+      # unrelated repo's leftover pointer would authorize deleting a directory
+      # this repo never owned. Require the target to sit under <main_repo>/.git/
+      # and to name this worktree.
       if [[ -n "$gitdir_target" && ! -e "$gitdir_target" ]]; then
-        proven_orphan=1
+        case "$gitdir_target" in
+          "$main_repo"/.git/worktrees/"${wt##*/}"|"$main_repo"/.git/worktrees/"${wt##*/}"/*) proven_orphan=1 ;;
+          *) echo "SKIP orphan-pointer-not-owned-by-main-repo: $rel"; skip=$((skip+1)); continue ;;
+        esac
       fi
     fi
     if (( proven_orphan == 0 )); then
@@ -253,7 +260,16 @@ while IFS=$'\t' read -r _gib rel; do
       skip=$((skip+1)); continue
     fi
     # A still-listed worktree is not an orphan even with a dangling pointer.
-    if timeout 30 git -C "$main_repo" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $wt"; then
+    # If the registration check FAILS or times out, the answer is unknown, and
+    # unknown must preserve -- never let a failed `worktree list` read as
+    # "not registered".
+    if ! wt_list="$(timeout 30 git -C "$main_repo" worktree list --porcelain 2>/dev/null)"; then
+      echo "SKIP registration-unverifiable: $rel"; skip=$((skip+1)); continue
+    fi
+    if [[ -z "$wt_list" ]]; then
+      echo "SKIP registration-unverifiable (empty): $rel"; skip=$((skip+1)); continue
+    fi
+    if grep -qxF "worktree $wt" <<<"$wt_list"; then
       echo "SKIP still-registered-worktree: $rel"; skip=$((skip+1)); continue
     fi
 

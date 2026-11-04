@@ -119,12 +119,18 @@ while IFS= read -r p || [[ -n "$p" ]]; do
   # "nothing excluded", which turns the safeguard off exactly when it cannot be
   # evaluated. Proven readable once up front; re-checked here per path.
   if [[ -n "$EXCLUDE_FILE" ]]; then
-    if [[ ! -r "$EXCLUDE_FILE" ]]; then
+    # A DIRECTORY is readable but grep fails on it, and `grep` rc>1 means the
+    # read failed -- not "no match". Distinguish the three outcomes explicitly;
+    # only rc 1 (a genuine no-match) may fall through to deletion.
+    if [[ ! -f "$EXCLUDE_FILE" || ! -r "$EXCLUDE_FILE" ]]; then
       echo "SKIP exclusion-unreadable: $p"; skipped=$((skipped+1)); continue
     fi
-    if grep -Fxq "$p" "$EXCLUDE_FILE"; then
-      echo "SKIP excluded: $p"; skipped=$((skipped+1)); continue
-    fi
+    grep -Fxq "$p" "$EXCLUDE_FILE"
+    case $? in
+      0) echo "SKIP excluded: $p"; skipped=$((skipped+1)); continue ;;
+      1) : ;;  # no match -- allowed to continue
+      *) echo "SKIP exclusion-check-failed: $p"; skipped=$((skipped+1)); continue ;;
+    esac
   fi
 
   if [[ -L "$p" ]]; then echo "SKIP symlink: $p"; skipped=$((skipped+1)); continue; fi
