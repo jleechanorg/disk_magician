@@ -24,10 +24,11 @@ B="$T/build"
 mkdir -p "$B/android-native-1/isolated-stale" "$B/android-native-1/isolated-fresh" \
          "$B/android-native-1/android-sdk" "$B/src-tree/.git" "$B/src-tree/dist" \
          "$B/file-git-tree/dist" "$B/root-git-dir/.git" "$B/root-git-dir/dist" \
-         "$B/root-git-file/dist" "$B/ordinary-dir" \
+         "$B/root-git-file/dist" "$B/dangling-git-tree/dist" "$B/ordinary-dir" \
          "$B/depth-1/depth-2/depth-3/depth-4/dist"
 printf 'gitdir: /outside\n' >"$B/file-git-tree/.git"
 printf 'gitdir: /outside\n' >"$B/root-git-file/.git"
+ln -s "$T/missing-git-target" "$B/dangling-git-tree/.git"
 echo old >"$B/android-native-1/isolated-stale/blob"
 echo old >"$B/android-native-1/android-sdk/blob"
 echo fresh >"$B/android-native-1/isolated-fresh/blob"
@@ -36,11 +37,12 @@ echo old >"$B/src-tree/dist/blob"
 echo old >"$B/file-git-tree/dist/blob"
 echo old >"$B/root-git-dir/dist/blob"
 echo old >"$B/root-git-file/dist/blob"
+echo old >"$B/dangling-git-tree/dist/blob"
 echo old >"$B/ordinary-dir/blob"
 echo old >"$B/depth-1/depth-2/depth-3/depth-4/dist/blob"
 touch -d '40 hours ago' "$B/android-native-1/isolated-stale/blob" "$B/android-native-1/android-sdk/blob" \
     "$B/src-tree/dist/blob" "$B/file-git-tree/dist/blob" "$B/root-git-dir/dist/blob" \
-    "$B/root-git-file/dist/blob" "$B/ordinary-dir/blob" \
+    "$B/root-git-file/dist/blob" "$B/dangling-git-tree/dist/blob" "$B/ordinary-dir/blob" \
     "$B/depth-1/depth-2/depth-3/depth-4/dist/blob" 2>/dev/null || true
 ln -s "$B/android-native-1/isolated-stale" "$B/link-to-stale"
 
@@ -70,13 +72,16 @@ grep -q 'root-git-dir/dist$' <<<"$root_git_dir_out" \
 root_git_file_out="$(scratch_budget_artifact_children "$B/root-git-file" 3 2>/dev/null)"
 grep -q 'root-git-file/dist$' <<<"$root_git_file_out" \
   && bad "entered a root containing a file-form .git" || ok "root file-form .git preserved"
-# 8. Ordinary (non artifact-shaped) directories are not candidates
+# 8. A dangling .git link also preserves the whole subtree
+grep -q 'dangling-git-tree/dist$' <<<"$out" \
+  && bad "entered a tree with a dangling .git link" || ok "dangling .git tree preserved"
+# 9. Ordinary (non artifact-shaped) directories are not candidates
 grep -q 'ordinary-dir' <<<"$out" \
   && bad "ordinary directory enqueued as an artifact" || ok "ordinary directory ignored"
-# 9. Symlinks are never followed
+# 10. Symlinks are never followed
 grep -q 'link-to-stale' <<<"$out" \
   && bad "followed a symlink" || ok "symlink not followed"
-# 10. Depth bound respected (nothing at depth 4)
+# 11. Depth bound respected (nothing at depth 4)
 grep -q 'depth-4/dist$' <<<"$out" \
   && bad "depth bound violated" || ok "depth bound respected"
 
