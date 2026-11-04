@@ -185,18 +185,66 @@ assert_eq "$race" kept:admin-changed 'admin mutation after the C14 receipt fails
 [[ -d "$TMPROOT/c14-phase1-race" ]] && ok 'race checkout retained' || bad 'race checkout moved'
 [[ "$(tail -1 "$ADMIN_RACE/HEAD")" == "appended-after-verdict" ]] && ok 'race admin mutation retained' || bad 'race admin mutation lost'
 
-echo '== WRH phase1 honors a deadline after the lock =='
+echo '== WRH phase1 distinguishes pre-lock expiry from post-lock rollback =='
 git -C "$TMPROOT/main" worktree add -q -b wrh-deadline "$TMPROOT/wrh-deadline"
 wrh_receipt "$TMPROOT/wrh-deadline" "$TMPROOT/wrh-deadline.inventory.json"
+ADMIN_DEADLINE="$(git -C "$TMPROOT/wrh-deadline" rev-parse --absolute-git-dir)"
+PAST="$(python3 -c 'import time; print(time.monotonic()-1)')"
+early="$(python3 "$HELPER" phase1 "$TMPROOT/main" "$TMPROOT/wrh-deadline" "$TMPROOT/wrh-deadline.inventory.json" --deadline-at "$PAST")"
+assert_eq "$early" deferred:deadline 'pre-lock expiration has its distinct deferred token'
+[[ -d "$TMPROOT/wrh-deadline" && ! -e "$ADMIN_DEADLINE/locked" ]] && ok 'pre-lock expiration leaves checkout unlocked in place' || bad 'pre-lock expiration changed checkout or lock'
+
 SLOWBIN="$TMPROOT/slowbin-wrh"; mkdir -p "$SLOWBIN"
-printf '#!/bin/bash\nsleep 1.5\nexit 1\n' > "$SLOWBIN/lsof"; chmod +x "$SLOWBIN/lsof"
-NOW="$(python3 -c 'import time; print(time.monotonic()+0.3)')"
-START="$(python3 -c 'import time; print(time.monotonic())')"
-dres="$(PATH="$SLOWBIN:$PATH" python3 "$HELPER" phase1 "$TMPROOT/main" "$TMPROOT/wrh-deadline" "$TMPROOT/wrh-deadline.inventory.json" --deadline-at "$NOW")"
-END="$(python3 -c 'import time; print(time.monotonic())')"
+cat > "$SLOWBIN/lsof" <<'SH'
+#!/bin/bash
+printf '%s\n' "$$" > "$WRH_PROBE_PID"
+exec sleep 1.5
+SH
+chmod +x "$SLOWBIN/lsof"
+# Scope the original 0.3s deadline to the actual post-lock payload boundary,
+# not Python/Git startup. Observe real filesystem state, without replacing
+# phase1, verification, rollback, or subprocess timeout implementations.
+cat > "$TMPROOT/after_lock_clock.py" <<'PYTEST'
+import json, os, runpy, signal, subprocess, sys, time
+real_monotonic = time.monotonic
+helper, *args = sys.argv[1:]
+worktree, admin = args[2], os.environ['WRH_ADMIN']
+deadline = float(args[args.index('--deadline-at') + 1])
+armed = None
+
+def phase_clock():
+    global armed
+    now = real_monotonic()
+    if armed is None and not os.path.exists(worktree) and os.path.isfile(os.path.join(admin, 'locked')):
+        armed = now
+    # Startup has a separate real outer watchdog. The production deadline and
+    # real subprocess timeout both see the same 0.3s once quarantine is reached.
+    return deadline - 60 if armed is None else deadline - 0.3 + now - armed
+
+time.monotonic = phase_clock
+sys.path.insert(0, os.path.dirname(helper))
+sys.argv = [helper, *args]
+signal.alarm(10)
+try:
+    runpy.run_path(helper, run_name='__main__')
+finally:
+    signal.alarm(0)
+    time.monotonic = real_monotonic
+    with open(os.environ['WRH_PHASE_TIMING'], 'w') as out:
+        json.dump({'armed': armed is not None, 'elapsed': None if armed is None else real_monotonic() - armed}, out)
+PYTEST
+TIMING="$TMPROOT/after-lock-timing.json"
+PROBE_PID="$TMPROOT/after-lock-probe.pid"
+NOW="$(python3 -c 'import time; print(time.monotonic()+60)')"
+dres="$(PATH="$SLOWBIN:$PATH" WRH_ADMIN="$ADMIN_DEADLINE" WRH_PHASE_TIMING="$TIMING" WRH_PROBE_PID="$PROBE_PID" \
+  python3 "$TMPROOT/after_lock_clock.py" "$HELPER" phase1 "$TMPROOT/main" "$TMPROOT/wrh-deadline" "$TMPROOT/wrh-deadline.inventory.json" --deadline-at "$NOW")"
 assert_eq "$dres" kept:deferred:deadline 'WRH phase1 defers during payload rehash'
 [[ -d "$TMPROOT/wrh-deadline" ]] && ok 'deferred WRH phase1 restored the checkout' || bad 'deferred WRH phase1 lost the checkout'
-if python3 -c "import sys; sys.exit(0 if (float('$END')-float('$START')) < 1.0 else 1)"; then ok 'WRH phase1 deadline bound beats the slow lsof probe'; else bad 'WRH phase1 deadline did not bound the slow lsof probe'; fi
+[[ ! -e "$ADMIN_DEADLINE/locked" ]] && ok 'post-lock deadline rollback removes its owned lock' || bad 'post-lock deadline rollback left its lock'
+git -C "$TMPROOT/wrh-deadline" status --porcelain >/dev/null && ok 'post-lock deadline rollback leaves worktree usable' || bad 'post-lock deadline rollback left unusable worktree'
+[[ -s "$PROBE_PID" ]] && ok 'post-lock deadline exercised the real slow lsof process' || bad 'slow lsof process was never reached'
+if [[ -s "$PROBE_PID" ]] && ! kill -0 "$(cat "$PROBE_PID")" 2>/dev/null; then ok 'deadline terminated the slow lsof process'; else bad 'slow lsof process survived the deadline'; fi
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["armed"] and d["elapsed"] < 1.0 else 1)' "$TIMING"; then ok 'WRH phase1 deadline bound beats the slow lsof probe'; else bad 'WRH phase1 deadline did not bound the slow lsof probe'; fi
 
 echo '== phase 2 removes only the selected worktree =='
 git -C "$TMPROOT/main" update-ref refs/rewritten/sibling-private HEAD
