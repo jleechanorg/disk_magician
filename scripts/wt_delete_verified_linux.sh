@@ -262,17 +262,23 @@ while IFS=$'\t' read -r _gib rel; do
     # Without that positive signal we cannot distinguish "orphaned worktree"
     # from "someone's plain folder", so preserve.
 
-    main_repo=$(bounded 30 git -C "$WT_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-    if [[ -z "$main_repo" ]]; then
-      # Resolve the owning repo from the list's first path component instead.
-      repo_key="${rel%%/*}"
-      for cand in "$HOME/projects/$repo_key" "$HOME/projects_other/$repo_key" "$HOME/$repo_key"; do
-        if bounded 20 git -C "$cand" rev-parse --git-dir >/dev/null 2>&1; then
-          main_repo="$(bounded 20 git -C "$cand" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
-          break
-        fi
-      done
-    fi
+    # Resolve the owning repo from the candidate's OWN repo key, never from
+    # $WT_ROOT. `git -C "$WT_ROOT"` walks UP the directory tree, so when the
+    # worktree root happens to live inside any git repository (a checkout, a
+    # nested test sandbox, a parent project) it resolves to THAT repo and never
+    # to the candidate's owner -- the wrong answer, silently. Measured
+    # 2026-11-04: it returned the enclosing temp sandbox's .git instead of the
+    # per-candidate repo.
+    main_repo=""
+    repo_key="${rel%%/*}"
+    for cand in "$HOME/projects/$repo_key" "$HOME/projects_other/$repo_key" \
+                "$HOME/.worktrees/$repo_key" "$HOME/$repo_key"; do
+      [[ -d "$cand" ]] || continue
+      if bounded 20 git -C "$cand" rev-parse --git-dir >/dev/null 2>&1; then
+        main_repo="$(bounded 20 git -C "$cand" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+        break
+      fi
+    done
     main_repo="${main_repo%/.git}"
     if [[ -z "$main_repo" ]] || ! bounded 20 git -C "$main_repo" rev-parse --git-dir >/dev/null 2>&1; then
       echo "SKIP no-orphan-provenance (main repo unresolved): $rel"; skip=$((skip+1)); continue

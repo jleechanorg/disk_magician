@@ -395,6 +395,26 @@ for f in "$WT_DEL" "$ADV_DEL" "$WT_PUSH" "$ROOT/scripts/worktree_residency_check
   has "  $name defines bounded()" "bounded()" "$(cat "$f")"
 done
 
+echo "=== Test 22: owner resolution must not walk up out of the worktree root"
+# `git -C "$WT_ROOT"` walks UP the tree, so when the worktree root sits inside
+# ANY git repository (a checkout, a nested CI sandbox) it resolves to that
+# enclosing repo and never finds the candidate's owner. CI caught this; local
+# runs did not because the fixture root happened to be outside any repo.
+NEST="$T/nested"
+mkdir -p "$NEST/home/projects/o22" "$NEST/home/.worktrees/o22/foreign"
+git init -q "$NEST"
+git init -q "$NEST/home/projects/o22"
+( cd "$NEST/home/projects/o22" && git -c user.email=t@t -c user.name=t commit -qm i --allow-empty ) >/dev/null 2>&1
+printf 'gitdir: %s\n' "$NEST/home/projects/OTHER/.git/worktrees/foreign" > "$NEST/home/.worktrees/o22/foreign/.git"
+echo x > "$NEST/home/.worktrees/o22/foreign/f.txt"
+age_tree "$NEST/home/.worktrees/o22/foreign" 30
+row o22/foreign > "$NEST/list"
+out="$(HOME="$NEST/home" WORKTREE_ROOT="$NEST/home/.worktrees" WT_DELETE_APPROVED=1 \
+       run_clean "$WT_DEL" "$NEST/list" 2>&1)"
+has "nested-parent repo does not hijack owner resolution" "orphan-pointer-not-owned-by-main-repo" "$out"
+[[ -d "$NEST/home/.worktrees/o22/foreign" ]] && ok "foreign dir preserved under a nested parent repo" \
+  || bad "foreign dir deleted under a nested parent repo"
+
 echo
 echo "===================================="
 echo "Results: $PASS passed, $FAIL failed"
