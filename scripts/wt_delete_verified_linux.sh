@@ -148,12 +148,40 @@ while IFS=$'\t' read -r _gib rel; do
 
   if (( probe_rc == 0 )); then
     # Linked (or standalone) repo: re-verify the safety properties.
+    # `git status --porcelain` does NOT list ignored files, and
+    # `git worktree remove` deletes them anyway. Measured 2026-11-04: a worktree
+    # with an ignored, untracked `ignored/data.txt` reported dirty=0 and the
+    # remove step destroyed the file. Check ignored content explicitly and
+    # preserve -- an ignored path is exactly where build outputs, local config
+    # and credentials live.
     dirty=$(GIT_OPTIONAL_LOCKS=0 timeout 60 git -C "$wt" status --porcelain 2>/dev/null | wc -l)
     dirty=${dirty//[!0-9]/}
     [[ "$dirty" == "0" ]] || { echo "SKIP dirty=$dirty: $rel"; skip=$((skip+1)); continue; }
 
-    if [[ -z "$(timeout 30 git -C "$wt" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]]; then
-      echo "SKIP head-not-on-remote: $rel"; skip=$((skip+1)); continue
+    if ! ignored_list="$(GIT_OPTIONAL_LOCKS=0 timeout 120 git -C "$wt" status --porcelain --ignored=matching --untracked-files=normal 2>/dev/null)"; then
+      echo "SKIP ignored-scan-unmeasurable: $rel"; skip=$((skip+1)); continue
+    fi
+    if grep -qE '^!![[:space:]]' <<<"$ignored_list"; then
+      echo "SKIP has-ignored-content (not covered by dirty check): $rel"
+      skip=$((skip+1)); continue
+    fi
+
+    # Confirm against the LIVE remote, not stale local remote-tracking refs.
+    # `for-each-ref refs/remotes` answers from the local ref cache, which keeps
+    # a branch that has since been deleted or force-pushed upstream. Measured
+    # 2026-11-04: after deleting the remote branch and keeping the local ref,
+    # `for-each-ref --contains HEAD refs/remotes` still reports a match -- so a
+    # commit that exists nowhere counted as "on remote" and would be deleted.
+    # `ls-remote` is the authoritative check; failure or timeout preserves.
+    if ! remote_urls="$(timeout 60 git -C "$wt" remote 2>/dev/null)" || [[ -z "$remote_urls" ]]; then
+      echo "SKIP no-remote-configured: $rel"; skip=$((skip+1)); continue
+    fi
+    if ! live_heads="$(timeout 120 git -C "$wt" ls-remote --heads origin 2>/dev/null)"; then
+      echo "SKIP remote-unverifiable: $rel"; skip=$((skip+1)); continue
+    fi
+    head_sha=$(timeout 30 git -C "$wt" rev-parse HEAD 2>/dev/null)
+    if [[ -z "$head_sha" ]] || ! grep -q "^${head_sha}[[:space:]]" <<<"$live_heads"; then
+      echo "SKIP head-not-on-live-remote: $rel"; skip=$((skip+1)); continue
     fi
 
     gd=$(timeout 30 git -C "$wt" rev-parse --git-dir 2>/dev/null)
