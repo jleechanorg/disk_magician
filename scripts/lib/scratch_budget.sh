@@ -547,3 +547,36 @@ scratch_budget_evict_root() {
 
   rm -f "$snapshot_file" "$candidates_file"
 }
+
+# scratch_budget_artifact_children <dir> [max_depth]
+# Print artifact-shaped descendant directories of <dir>, one per line, deepest
+# useful unit first-encountered order. Purpose: a directory's "newest content"
+# is an AGGREGATE, so one freshly-written child shelters every stale sibling in
+# the tree -- measured 2026-11-03 on Scratch: worldai_frontend/build held 23.7
+# GiB of 39-41 h old Android build dirs, yet the whole 35 GiB read as 0 h old
+# because a single sibling had been written minutes earlier. Callers must be able
+# to evaluate each child on its own age, so this enumerates them.
+# Refuses to descend into symlinks or into any directory containing .git (a
+# working tree is never a build artifact), and is depth-bounded.
+scratch_budget_artifact_children() {
+  local dir="$1" max_depth="${2:-3}"
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=3
+  local depth child base
+  for (( depth = 1; depth <= max_depth; depth++ )); do
+    while IFS= read -r -d '' child; do
+      [[ -d "$child" && ! -L "$child" ]] || continue
+      [[ -e "$child/.git" ]] && continue
+      base="${child##*/}"
+      case "$base" in
+        .*|node_modules) : ;;   # node_modules itself is a strip target, not a descent root
+      esac
+      case "$base" in
+        build|dist|out|target|coverage|artifacts|gradle|.gradle|android-sdk|avd\
+        |isolated-*|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods)
+          printf '%s\n' "$child" ;;
+      esac
+    done < <(find "$dir" -mindepth "$depth" -maxdepth "$depth" -type d ! -name '.*' -print0 2>/dev/null)
+  done
+  return 0
+}
