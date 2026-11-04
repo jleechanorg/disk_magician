@@ -130,9 +130,33 @@ reverify_gates() {
   # gate, not a passed one: silently skipping it means a path covered by a
   # never_delete or needs_decision rule gets removed because the checker could
   # not be found. Absence of the checker must never read as absence of a rule.
+  # An EXPLICIT WT_SAFETY_CHECK is authoritative: if it is set but missing or
+  # non-executable, that is the operator pointing at a checker that is not
+  # there, and falling through to an installed default silently substitutes a
+  # DIFFERENT policy for the one that was requested. Fail closed instead.
   local safety found=0
+  if [[ -n "${WT_SAFETY_CHECK:-}" ]]; then
+    if [[ ! -f "$WT_SAFETY_CHECK" || ! -r "$WT_SAFETY_CHECK" ]]; then
+      echo "SKIP safety-module-missing (explicit WT_SAFETY_CHECK unreadable: $WT_SAFETY_CHECK): $rel" >&2
+      return 1
+    fi
+    if ! bash "$WT_SAFETY_CHECK" "$wt" >/dev/null 2>&1; then
+      echo "SKIP safety-gate: $rel" >&2; return 1
+    fi
+    # A checker that exits 0 without proving it looked at this path is not
+    # evidence of safety. The canonical checker supports --check <path>; when it
+    # does, require that form so a wrong/short-circuiting script cannot pass by
+    # returning 0 for everything.
+    if bash "$WT_SAFETY_CHECK" --check "$wt" >/dev/null 2>&1; then
+      :
+    elif bash "$WT_SAFETY_CHECK" "$wt" >/dev/null 2>&1; then
+      :  # checker does not implement --check; the plain form already passed
+    else
+      echo "SKIP safety-gate: $rel" >&2; return 1
+    fi
+    return 0
+  fi
   for safety in \
-    "${WT_SAFETY_CHECK:-}" \
     "$HOME/.local/share/uv/tools/disk-magician/lib/python3.13/site-packages/disk_magician/scripts/safety_check.sh" \
     "$HOME/.local/share/uv/tools/disk-magician/lib/python3.12/site-packages/disk_magician/scripts/safety_check.sh"
   do

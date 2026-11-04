@@ -395,6 +395,20 @@ for f in "$WT_DEL" "$ADV_DEL" "$WT_PUSH" "$ROOT/scripts/worktree_residency_check
   has "  $name defines bounded()" "bounded()" "$(cat "$f")"
 done
 
+echo "=== Test 21b: an explicit but missing WT_SAFETY_CHECK fails closed"
+# Falling through to an installed default would silently substitute a DIFFERENT
+# policy for the checker the operator actually named.
+make_origin "$T/o21b.git"
+make_worktree "$T/o21b.git" wt21b feat21b
+git -C "$WORKTREE_ROOT/wt21b" push -q origin feat21b >/dev/null 2>&1
+age_tree "$WORKTREE_ROOT/wt21b" 30
+row wt21b > "$T/list21b"
+out="$(WT_DELETE_APPROVED=1 WT_SAFETY_CHECK="$T/definitely-not-here.sh" \
+       run_clean "$WT_DEL" "$T/list21b" 2>&1)"
+has "explicit missing checker fails closed" "safety-module-missing" "$out"
+[[ -d "$WORKTREE_ROOT/wt21b" ]] && ok "worktree preserved when named checker is absent" \
+  || bad "worktree deleted despite missing named checker"
+
 echo "=== Test 22: owner resolution must not walk up out of the worktree root"
 # `git -C "$WT_ROOT"` walks UP the tree, so when the worktree root sits inside
 # ANY git repository (a checkout, a nested CI sandbox) it resolves to that
