@@ -319,7 +319,14 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
   use_root
   register_test_volume
   make_tree discovery-failed 2880 >/dev/null
-  make_managed_tree discovery-eligible 25 >/dev/null
+  make_tree isolated-discovery-eligible 25 >/dev/null
+  make_managed_tree isolated-discovery-recent 1 >/dev/null
+  discovery_eligible="$SCRATCH_ROOT/isolated-discovery-eligible"
+  discovery_recent="$SCRATCH_ROOT/worldai_frontend/build/isolated-discovery-recent"
+  [[ -d "$discovery_eligible" ]] && ok "discovery eligible fixture exists before injection" || bad "discovery eligible fixture exists before injection"
+  [[ -d "$discovery_recent" ]] && ok "fresh sibling fixture exists before injection" || bad "fresh sibling fixture exists before injection"
+  discovery_verdict="$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$discovery_eligible")"
+  assert_eq "$discovery_verdict" remove "discovery eligible fixture is independently C14-removable"
   SHIM="$T/discovery-shim"; mkdir -p "$SHIM"
   REAL_PYTHON="$(command -v python3)"
   cat >"$SHIM/python3" <<EOF
@@ -332,12 +339,14 @@ EOF
   python3 - "$CURSOR" "$SCRATCH_ROOT" <<'PY'
 import json,sys
 root=sys.argv[2]
-json.dump({"schema":1,"source":f"scratch_prune:v1:{root}","items":[f"{root}/discovery-failed",f"{root}/worldai_frontend/build/discovery-eligible"],"next_index":0}, open(sys.argv[1],"w"))
+json.dump({"schema":1,"source":f"scratch_prune:v1:{root}","items":[f"{root}/discovery-failed",f"{root}/isolated-discovery-eligible"],"next_index":0}, open(sys.argv[1],"w"))
 PY
   out="$(RUN_PATH="$SHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean --cursor "$CURSOR" 2>&1)"; rc=$?
   [[ "$rc" == 0 ]] && ok "discovery-error pass exits cleanly" || bad "discovery-error pass exits cleanly" "rc=$rc"
   [[ -e "$SCRATCH_ROOT/discovery-failed/payload.bin" ]] && ok "discovery-failed candidate is preserved" || bad "discovery-failed candidate is preserved"
-  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/discovery-eligible" ]] && ok "later eligible child is removed" || bad "later eligible child is removed" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-400)"
+  [[ ! -e "$discovery_eligible" ]] && ok "later eligible child is removed" || bad "later eligible child is removed" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-400)"
+  [[ -e "$discovery_recent" && -d "$SCRATCH_ROOT/worldai_frontend" ]] && ok "fresh sibling and parent are preserved" || bad "fresh sibling and parent are preserved"
+  check "old artifact removal is reported" "removed:" "$out"
   check "discovery failure is explicitly reported" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/discovery-failed" "$out"
   if python3 - "$CURSOR" <<'PY'
 import json,sys
