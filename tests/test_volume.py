@@ -1783,20 +1783,18 @@ class StatusAndBallastTest(VolumeTestBase):
 
     def test_pressure_process_ignores_eperm_after_owned_child_exits(self):
         import signal
-        import threading
-        import time
 
         real_popen = volume.subprocess.Popen
         real_killpg = os.killpg
         owned = []
-        signal_thread = None
 
         def spawn(*args, **kwargs):
-            nonlocal signal_thread
+            kwargs["stdin"] = volume.subprocess.PIPE
             process = real_popen(*args, **kwargs)
             owned.append(process)
-            signal_thread = threading.Timer(0.02, signals.__setitem__, args=("signal", signal.SIGTERM))
-            signal_thread.start()
+            self.addCleanup(process.wait, timeout=5)
+            self.addCleanup(process.stdin.close)
+            signals["signal"] = signal.SIGTERM
             return process
 
         def killpg(pid, signum):
@@ -1810,8 +1808,8 @@ class StatusAndBallastTest(VolumeTestBase):
             # Confirm the test-only signal boundary targets this owned session.
             self.assertEqual(os.getpgid(pid), pid)
             self.assertEqual(os.getsid(pid), pid)
-            while process.poll() is None:
-                time.sleep(0.01)
+            process.stdin.close()
+            process.wait(timeout=5)
             raise PermissionError(errno.EPERM, "completed child group vanished")
 
         with volume.pressure_signals() as signals:
@@ -1819,8 +1817,7 @@ class StatusAndBallastTest(VolumeTestBase):
             with mock.patch.object(volume.subprocess, "Popen", side_effect=spawn), \
                  mock.patch.object(volume.os, "killpg", side_effect=killpg) as forward:
                 result = volume.pressure_process(
-                    [sys.executable, "-c", "import time; time.sleep(0.15)"], signals)
-        signal_thread.join(timeout=1)
+                    [sys.executable, "-c", "import sys; sys.stdin.read()"], signals)
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(
