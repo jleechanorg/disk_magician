@@ -201,10 +201,48 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir=SCRATCH) as t
     os.chmod(filled_pid_only_state, 0o755)
     lock = make_pid_only_lock(filled_pid_only_state, b"2147483647\n")
     os.utime(lock, (old, old))
-    result = run(filled_pid_only_state, 1, "--registry")
-    assert "not empty" in result.stderr
-    assert (lock / "pid").read_bytes() == b"2147483647\n"
-    print("PASS: non-empty pid-only lock is refused and preserved")
+    expected_bytes = {"pid": b"2147483647\n"}
+    result = run(filled_pid_only_state, 0, "--registry")
+    receipt = json.loads(result.stdout)
+    quarantined = Path(receipt["quarantined"])
+    assert receipt["shape"] == "partial_pid_only_nonempty"
+    assert {"pid": (quarantined / "pid").read_bytes()} == expected_bytes
+    stored_record = json.loads(quarantined.with_name(quarantined.name + ".receipt.json").read_text())
+    assert stored_record["outcome"] == "quarantined"
+    assert stored_record["metadata"]["pid"]["size"] == len(expected_bytes["pid"])
+    print("PASS: old dead non-empty pid-only registry lock is quarantined byte-for-byte")
+
+    live_pid_only_state = Path(temp) / "live-pid-only-state"
+    live_pid_only_state.mkdir()
+    os.chmod(live_pid_only_state, 0o755)
+    lock = make_pid_only_lock(live_pid_only_state, f"{os.getpid()}\n".encode())
+    os.utime(lock, (old, old))
+    expected_bytes = {"pid": lock.joinpath("pid").read_bytes()}
+    result = run(live_pid_only_state, 1, "--registry")
+    assert "pid is live" in result.stderr
+    assert {"pid": (lock / "pid").read_bytes()} == expected_bytes
+    print("PASS: old live non-empty pid-only lock remains byte-identical")
+
+    malformed_pid_only_state = Path(temp) / "malformed-pid-only-state"
+    malformed_pid_only_state.mkdir()
+    os.chmod(malformed_pid_only_state, 0o755)
+    lock = make_pid_only_lock(malformed_pid_only_state, b"0\n")
+    os.utime(lock, (old, old))
+    expected_bytes = {"pid": b"0\n"}
+    result = run(malformed_pid_only_state, 1, "--registry")
+    assert "valid positive PID" in result.stderr
+    assert {"pid": (lock / "pid").read_bytes()} == expected_bytes
+    print("PASS: malformed non-empty pid-only lock remains byte-identical")
+
+    fresh_filled_pid_only_state = Path(temp) / "fresh-filled-pid-only-state"
+    fresh_filled_pid_only_state.mkdir()
+    os.chmod(fresh_filled_pid_only_state, 0o755)
+    lock = make_pid_only_lock(fresh_filled_pid_only_state, b"2147483647\n")
+    expected_bytes = {"pid": b"2147483647\n"}
+    result = run(fresh_filled_pid_only_state, 1, "--registry")
+    assert "too recent" in result.stderr
+    assert {"pid": (lock / "pid").read_bytes()} == expected_bytes
+    print("PASS: fresh dead non-empty pid-only lock remains byte-identical")
 
     lock = make_partial_lock(state, os.getpid())
     os.utime(lock, (old, old))
@@ -307,15 +345,13 @@ with tempfile.TemporaryDirectory(prefix="lease-recover-lock-", dir=SCRATCH) as t
     print("PASS: group- or world-writable lease parents (0775, 0777) remain fail-closed")
 
     lock = make_lock(state)
-    (lock / "pid").write_text("123\n")
+    (lock / "pid").write_text("0\n")
+    os.chmod(lock / "pid", 0o644)
     old = time.time() - 7200
     os.utime(lock, (old, old))
-    # A lone pid with content is not a writer shape; the refusal now names that
-    # shape instead of the generic "unexpected metadata entries", and the lock
-    # is still preserved.
-    assert "pid-only metadata is not empty" in run(state, 1, "--registry").stderr and lock.is_dir()
+    assert "valid positive PID" in run(state, 1, "--registry").stderr and lock.is_dir()
     shutil.rmtree(lock)
-    print("PASS: nonempty lock remains fail-closed")
+    print("PASS: malformed pid-only lock remains fail-closed")
 
     lock = make_lock(state)
     assert "too recent" in run(state, 1, "--registry").stderr and lock.is_dir()
