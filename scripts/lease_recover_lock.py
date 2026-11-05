@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Quarantine a stale empty or exactly partial lease-registry lock without deleting it.
+"""Quarantine a stale empty or partial lease-registry lock without deleting it.
 
 The canonical writer (`lease_reuse_lock_acquire` in lib/worktree_lease.sh)
-creates the lock directory with mkdir and writes pid/acquired_at only after
-mkdir succeeds. A pre-existing partial directory therefore is not a normal
-writer interruption; only its separately guarded stale-lock recovery can
-remove/recreate one. This recovery relies on that writer contract plus a
-private-enough lease parent, while still revalidating the observed inode and
-metadata immediately before rename. It does not provide an atomic compare-and-
-rename against arbitrary same-UID mutation. A post-rename identity anomaly
-receipt records the pre-rename snapshot and anomaly outcome; it does not prove
-the moved entry remained unchanged during the rename window.
+creates the lock directory with mkdir, then writes pid and acquired_at in
+sequence. An interruption after writing a positive pid but before acquired_at
+exists therefore leaves a valid partial writer state; stale recovery accepts
+that shape only after validating the pid is dead. Other partial states remain
+fail-closed. Recovery still relies on a private-enough lease parent and
+revalidates the observed inode and metadata immediately before rename. It does
+not provide an atomic compare-and-rename against arbitrary same-UID mutation.
+A post-rename identity anomaly receipt records the pre-rename snapshot and
+anomaly outcome; it does not prove the moved entry remained unchanged during
+the rename window.
 """
 
 from __future__ import annotations
@@ -140,20 +141,29 @@ def read_metadata(lock_fd: int, name: str) -> tuple[os.stat_result, bytes]:
         os.close(fd)
 
 
+def parse_positive_pid(content: bytes) -> int:
+    if not re.fullmatch(rb"([1-9][0-9]{0,9})\n?", content):
+        raise ValueError("registry lock pid metadata is not a valid positive PID")
+    pid = int(content.rstrip(b"\n"))
+    if pid > 2**31 - 1:
+        raise ValueError("registry lock pid metadata exceeds the supported PID range")
+    return pid
+
+
 def lock_snapshot(lock_fd: int) -> dict:
     names = sorted(os.listdir(lock_fd))
     if not names:
         return {"shape": "empty", "members": {}}
     if names == ["pid"]:
         # The canonical writer creates pid and writes it before creating
-        # acquired_at, so a lone EMPTY pid is the same interruption class as an
-        # empty lock: nothing identifies a holder and no timestamp exists yet.
-        # A non-empty lone pid is not a writer shape and stays refused.
+        # acquired_at, so a lone pid is a valid interruption shape whether the
+        # write was interrupted before or after the positive PID reached disk.
         info, content = read_metadata(lock_fd, "pid")
-        if content:
-            raise ValueError("registry lock pid-only metadata is not empty")
-        return {"shape": "partial_pid_only_empty",
-                "members": {"pid": {"identity": stat_identity(info), "bytes": content}}}
+        members = {"pid": {"identity": stat_identity(info), "bytes": content}}
+        if not content:
+            return {"shape": "partial_pid_only_empty", "members": members}
+        members["pid"]["value"] = parse_positive_pid(content)
+        return {"shape": "partial_pid_only_nonempty", "members": members}
     if names != ["acquired_at", "pid"]:
         raise ValueError("registry lock has unexpected metadata entries")
     members = {}
@@ -162,13 +172,7 @@ def lock_snapshot(lock_fd: int) -> dict:
         if name == "acquired_at" and content:
             raise ValueError("registry lock acquired_at metadata is not empty")
         members[name] = {"identity": stat_identity(info), "bytes": content}
-    raw_pid = members["pid"]["bytes"]
-    if not re.fullmatch(rb"([1-9][0-9]{0,9})\n?", raw_pid):
-        raise ValueError("registry lock pid metadata is not a valid positive PID")
-    pid = int(raw_pid.rstrip(b"\n"))
-    if pid > 2**31 - 1:
-        raise ValueError("registry lock pid metadata exceeds the supported PID range")
-    members["pid"]["value"] = pid
+    members["pid"]["value"] = parse_positive_pid(members["pid"]["bytes"])
     return {"shape": "partial_pid_empty_acquired_at", "members": members}
 
 
@@ -283,7 +287,8 @@ def main(argv: list[str]) -> int:
             raise ValueError("lease directory is group- or world-writable")
         lock_fd, info = open_owned_directory(leases_fd, LOCK_NAME, "registry lock", LOCK_MODE)
         snapshot = lock_snapshot(lock_fd)
-        pid = snapshot["members"]["pid"]["value"] if snapshot["shape"] == "partial_pid_empty_acquired_at" else None
+        pid = (snapshot["members"]["pid"]["value"] if snapshot["shape"] in
+               {"partial_pid_empty_acquired_at", "partial_pid_only_nonempty"} else None)
         age_seconds = time.time() - info.st_mtime
         if age_seconds <= LOCK_TTL_SECONDS:
             return fail(f"registry lock is too recent ({age_seconds:.0f}s <= {LOCK_TTL_SECONDS}s)")
