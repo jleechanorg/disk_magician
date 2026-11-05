@@ -115,6 +115,71 @@ PY
 }
 use_root
 
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract ]]; then
+  echo "Test: manual LRU skips sub-threshold probes but keeps fresh usage identity"
+  LRU_DISKM="$T/lru-diskm"
+  cat >"$LRU_DISKM" <<'FAKE_LRU_DISKM'
+#!/usr/bin/env bash
+[[ "$1 $2" == "volume status" ]] || exit 2
+calls_file="${FAKE_STATUS_CALLS:?}"
+count=0
+[[ -f "$calls_file" ]] && count="$(wc -l <"$calls_file")"
+count=$((count + 1))
+printf '%s\n' "$count" >>"$calls_file"
+[[ "${FAKE_STATUS_MODE:-}" == usage-unknown && "$count" -ge 2 ]] && exit 3
+used_kb="$(du -sk "$FAKE_SCRATCH_ROOT" | awk '{print $1}')"
+quota_kb=10240
+if [[ "${FAKE_STATUS_MODE:-}" == quota-change && "$count" -ge 2 ]]; then
+  quota_kb=10241
+fi
+printf '{"volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":%s}]}\n' \
+  "$((used_kb * 1024))" "$((quota_kb * 1024))"
+FAKE_LRU_DISKM
+  chmod +x "$LRU_DISKM"
+  lru_run() {
+    env -i HOME="$T/home" PATH="${RUN_PATH:-/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin}" \
+      TMPDIR="$T" \
+      DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$SANDBOX" \
+      DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="$SCRATCH_ROOT" \
+      DISK_MAGICIAN_STATE_DIR="$STATE" DISK_MAGICIAN_DELETION_LOG="$LOG" \
+      DISK_MAGICIAN_DISKM_BIN="$LRU_DISKM" FAKE_SCRATCH_ROOT="$SCRATCH_ROOT" \
+      SCRATCH_TOP_LEVEL_APPROVED=1 \
+      FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" DISK_MAGICIAN_SCRATCH_MIN_KB=512 "$@"
+  }
+  use_root
+  make_tree lru-small 14 >/dev/null
+  mkdir -p "$SCRATCH_ROOT/lru-large"
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/lru-large/payload.bin"
+  old_stamp "$SCRATCH_ROOT/lru-large" 13
+  make_tree lru-small-after 12 >/dev/null
+  : >"$T/lru-status.calls"
+  out="$(lru_run bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "LRU threshold regression exits 0" || bad "LRU threshold regression exits 0" "rc=$rc"
+  [[ -d "$SCRATCH_ROOT/lru-small" && -d "$SCRATCH_ROOT/lru-small-after" ]] && ok "sub-threshold candidate is preserved" || bad "sub-threshold candidate is preserved"
+  [[ ! -e "$SCRATCH_ROOT/lru-large" ]] && ok "eligible candidate is evicted" || bad "eligible candidate is evicted"
+  check "LRU target stop is retained" "lru: stop=target-reached evicted=1" "$out"
+  status_calls="$(wc -l <"$T/lru-status.calls")"
+  [[ "$status_calls" -eq 3 ]] && ok "only initial, eligible, and final usage probes run" || \
+    bad "only initial, eligible, and final usage probes run" "status_calls=$status_calls"
+
+  for mode in quota-change usage-unknown; do
+    use_root
+    mkdir -p "$SCRATCH_ROOT/lru-identity"
+    head -c 1048576 /dev/zero >"$SCRATCH_ROOT/lru-identity/payload.bin"
+    old_stamp "$SCRATCH_ROOT/lru-identity" 13
+    : >"$T/lru-status.calls"
+    out="$(FAKE_STATUS_MODE="$mode" lru_run bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?
+    [[ "$rc" == 75 ]] && ok "usage identity failure ($mode) fails closed" || bad "usage identity failure ($mode) fails closed" "rc=$rc"
+    [[ -e "$SCRATCH_ROOT/lru-identity" ]] && ok "candidate survives usage identity failure ($mode)" || bad "candidate survives usage identity failure ($mode)"
+    check "usage identity failure ($mode) is reported" "skipped:measurement-unavailable" "$out"
+  done
+  if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract ]]; then
+    echo "test_cleanup_scratch_top_level (lru-probe-contract): $PASS passed, $FAIL failed"
+    [[ "$FAIL" == 0 ]]
+    exit $?
+  fi
+fi
+
 if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == numeric-secret-contract ]]; then
   echo "Test: numeric manual floor never bypasses secret-like repository provenance"
   for pushed in no yes; do

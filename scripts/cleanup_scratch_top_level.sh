@@ -597,20 +597,7 @@ while IFS= read -r -d '' entry; do
   (( scanned % 25 == 0 )) && echo "progress: scanned=${scanned} kept=${kept} removable=${removable} removed=${removed}"
   if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
   if [[ ! -d "$entry" ]]; then continue; fi
-  if [[ -n "$BUDGET_PCT" ]]; then
-    # Recency was measured during LRU ordering; here re-measure usage (a preview
-    # subtracts what it would have freed) and stop as soon as the target holds.
-    if [[ "$DRY_RUN" == true ]]; then
-      budget_now=$(( budget_used - planned_kb * 1024 ))
-    else
-      budget_pair="$(scratch_usage_pair)" || { budget_stop=measurement-unavailable; break; }
-      read -r budget_now budget_quota_now <<<"$budget_pair"
-      [[ "$budget_quota_now" == "$budget_quota" ]] || { budget_stop=measurement-unavailable; break; }
-    fi
-    if (( budget_now * 100 <= budget_quota * BUDGET_PCT )); then
-      budget_stop=target-reached; break
-    fi
-  else
+  if [[ -z "$BUDGET_PCT" ]]; then
   dir_mtime="$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null)"
   if [[ "$dir_mtime" =~ ^[0-9]+$ ]] && (( dir_mtime > floor_epoch )); then
     mtime="$dir_mtime"
@@ -634,6 +621,20 @@ while IFS= read -r -d '' entry; do
   if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 && kb < 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} )); then
     kept=$(( kept + 1 ))
     continue
+  fi
+  if [[ -n "$BUDGET_PCT" ]]; then
+    # A preview subtracts what it would have freed; a clean rechecks the
+    # canonical usage/quota identity before each possible eviction.
+    if [[ "$DRY_RUN" == true ]]; then
+      budget_now=$(( budget_used - planned_kb * 1024 ))
+    else
+      budget_pair="$(scratch_usage_pair)" || { budget_stop=measurement-unavailable; break; }
+      read -r budget_now budget_quota_now <<<"$budget_pair"
+      [[ "$budget_quota_now" == "$budget_quota" ]] || { budget_stop=measurement-unavailable; break; }
+    fi
+    if (( budget_now * 100 <= budget_quota * BUDGET_PCT )); then
+      budget_stop=target-reached; break
+    fi
   fi
   if (( MAX_KB > 0 && planned_kb + removed_kb + kb > MAX_KB )); then
     echo "capped:max-gib $entry ($(( kb / 1024 )) MB) — rerun with --max-gib to raise"
