@@ -159,7 +159,7 @@ FAKE_LRU_DISKM
   [[ ! -e "$SCRATCH_ROOT/lru-large" ]] && ok "eligible candidate is evicted" || bad "eligible candidate is evicted"
   check "LRU target stop is retained" "lru: stop=target-reached evicted=1" "$out"
   status_calls="$(wc -l <"$T/lru-status.calls")"
-  [[ "$status_calls" == 3 ]] && ok "only initial, eligible, and final usage probes run" || \
+  [[ "$status_calls" -eq 3 ]] && ok "only initial, eligible, and final usage probes run" || \
     bad "only initial, eligible, and final usage probes run" "status_calls=$status_calls"
 
   for mode in quota-change usage-unknown; do
