@@ -211,7 +211,13 @@ while IFS=$'\t' read -r _gib rel; do
   # an arbitrary directory whenever git is merely slow, locked, or the timeout
   # fires. Only a probe that positively reports "not a git repository" may
   # qualify for the orphan path.
-  probe_err="$(bounded 30 git -C "$wt" rev-parse HEAD 2>&1 >/dev/null)"
+  # Capture STDERR only. The redirection ORDER matters: duplicating stdout onto
+  # fd 2 BEFORE discarding stdout leaves stderr pointing at the terminal, so the
+  # capture is EMPTY. That made the "not a git repository" match fail on any git
+  # whose message lands on stderr (seen only on the CI runner), so a genuine
+  # orphan fell through as unverified-git-state. Discard stdout FIRST, then
+  # merge stderr into the capture -- the order used on the line below.
+  probe_err="$(bounded 30 git -C "$wt" rev-parse HEAD 2>&1 1>/dev/null)"
   probe_rc=$?
 
   if (( probe_rc == 0 )); then

@@ -405,6 +405,20 @@ for f in "$WT_DEL" "$ADV_DEL" "$WT_PUSH" "$ROOT/scripts/worktree_residency_check
   has "  $name defines bounded()" "bounded()" "$(cat "$f")"
 done
 
+echo "=== Test 20b: the git probe must capture STDERR, not stdout"
+# `2>&1 >/dev/null` duplicates the ORIGINAL stdout onto fd 2, so stderr still
+# reaches the terminal and the capture is EMPTY -- the "not a git repository"
+# match then fails and a genuine orphan reads as unverified-git-state. That only
+# reproduced on CI's git. Assert the script uses the capturing form.
+if grep -q '2>&1 1>/dev/null' "$WT_DEL"; then
+  ok "git probe captures stderr (2>&1 1>/dev/null)"
+else
+  bad "git probe does not capture stderr" "found: $(grep -n 'rev-parse HEAD 2' "$WT_DEL" | head -1)"
+fi
+bad_order="$(grep -n '2>&1 >/dev/null' "$WT_DEL" || true)"
+[[ -z "$bad_order" ]] && ok "no stderr-losing redirect order (2>&1 >/dev/null)" \
+  || bad "stderr-losing redirect present" "$bad_order"
+
 echo "=== Test 21b: an explicit but missing WT_SAFETY_CHECK fails closed"
 # Falling through to an installed default would silently substitute a DIFFERENT
 # policy for the checker the operator actually named.
