@@ -348,7 +348,7 @@ declare -F act_run_bounded >/dev/null || source "$(dirname "${BASH_SOURCE[0]}")/
 # also ambiguous with a legitimate epoch-0 file. Callers MUST treat a
 # non-numeric return as "exclude from eviction", never coerce it to 0.
 scratch_budget_content_mtime() {
-  local path="$1" epoch strict="${2:-}" links stat_format
+  local path="$1" epoch strict="${2:-}" links stat_format scan_rc stat_rc
   if [[ "$strict" == --strict ]]; then
     [[ -d "$path" && ! -L "$path" ]] || return 1
     links="$(act_run_bounded find "$path" -xdev -type l -print -quit)" || return $?
@@ -373,18 +373,50 @@ scratch_budget_content_mtime() {
   # A bare failing command here previously aborted the ENTIRE cleanup script
   # instead of yielding "unmeasurable, preserve".
   if [[ -f "$path" && ! -d "$path" ]]; then
-    if [[ "$(uname -s)" == Darwin ]]; then stat -f "$stat_format" "$path" 2>/dev/null || true; else stat -c "$stat_format" "$path" 2>/dev/null || true; fi
+    stat_rc=0
+    if [[ "$(uname -s)" == Darwin ]]; then
+      epoch="$(act_run_bounded stat -f "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    else
+      epoch="$(act_run_bounded stat -c "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    fi
+    if (( stat_rc == 124 || stat_rc == 137 )); then
+      epoch=""
+    fi
+    echo "$epoch"
     return
   fi
+  # Keep the streaming find|stat|awk pipeline, but bound the producer itself.
+  # A timed-out producer invalidates all partial output and skips directory stat.
+  scan_rc=0
   if [[ "$(uname -s)" == Darwin ]]; then
-    epoch="$(find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+    epoch="$(
+      set +e
+      set -o pipefail
+      act_run_bounded find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
+        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}'
+    )" || scan_rc=$?
   else
-    epoch="$(find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+    epoch="$(
+      set +e
+      set -o pipefail
+      act_run_bounded find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
+        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}'
+    )" || scan_rc=$?
+  fi
+  if [[ "$scan_rc" == 124 || "$scan_rc" == 137 ]]; then
+    echo ""
+    return 0
   fi
   if [[ -z "$epoch" ]]; then
-    if [[ "$(uname -s)" == Darwin ]]; then epoch="$(stat -f "$stat_format" "$path" 2>/dev/null || true)"; else epoch="$(stat -c "$stat_format" "$path" 2>/dev/null || true)"; fi
+    stat_rc=0
+    if [[ "$(uname -s)" == Darwin ]]; then
+      epoch="$(act_run_bounded stat -f "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    else
+      epoch="$(act_run_bounded stat -c "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    fi
+    if (( stat_rc == 124 || stat_rc == 137 )); then
+      epoch=""
+    fi
   fi
   echo "$epoch"
 }
