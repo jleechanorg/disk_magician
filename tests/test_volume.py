@@ -98,16 +98,38 @@ class LinuxScratchTest(VolumeTestBase):
         image_id = "sha256:" + "a" * 64
         scratch = {"backend": "native", "image_path": str(self.root / "scratch.img"),
                    "mountpoint": str(self.root / "Scratch"), "trim_admin_image_id": image_id}
-        for measurement in ((43*volume.GIB, 40*volume.GIB, 25*volume.GIB),
-                            (50*volume.GIB, 40*volume.GIB, 85*volume.GIB)):
-            with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
-                 mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
-                 mock.patch.object(volume, "linux_validate_native_mount", return_value="uuid"), \
-                 mock.patch.object(volume, "linux_trim_measure", return_value=measurement), \
-                 mock.patch.object(volume, "linux_trim_native") as trim, \
-                 mock.patch("sys.stdout", new_callable=io.StringIO):
-                self.assertEqual(volume.main(["trim-auto", "scratch", "--clean"]), 0)
-                trim.assert_not_called()
+        # A small gap is not worth an ioctl. Host free is NO LONGER a gate: a
+        # healthy host used to skip every trim and let the gap grow (measured
+        # 2026-11-05: 19.5 GB gap with 127 GiB free, never trimmed).
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
+             mock.patch.object(volume, "linux_validate_native_mount", return_value="uuid"), \
+             mock.patch.object(volume, "linux_trim_measure", return_value=(43*volume.GIB, 40*volume.GIB, 25*volume.GIB)), \
+             mock.patch.object(volume, "linux_trim_native") as trim, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(volume.main(["trim-auto", "scratch", "--clean"]), 0)
+            self.assertEqual(json.loads(output.getvalue())["reason"], "no-reclaimable-gap")
+            trim.assert_not_called()
+
+    def test_trim_auto_trims_a_large_gap_even_when_host_has_plenty_free(self):
+        # Regression guard for the no-op gate: a 19.5 GB gap on a host with
+        # 127 GiB free MUST still be trimmed, because those blocks cost host
+        # space permanently and buy nothing.
+        image_id = "sha256:" + "a" * 64
+        scratch = {"backend": "native", "image_path": str(self.root / "scratch.img"),
+                   "mountpoint": str(self.root / "Scratch"), "trim_admin_image_id": image_id}
+        with mock.patch.object(volume, "cls", return_value=({}, scratch)), \
+             mock.patch.object(volume, "registry", return_value={"volumes": {"scratch": {"state": "active"}}}), \
+             mock.patch.object(volume, "linux_validate_native_mount", return_value="uuid"), \
+             mock.patch.object(volume, "linux_trim_measure", side_effect=[(160*volume.GIB, 140*volume.GIB, 127*volume.GIB),
+                                                                           (141*volume.GIB, 140*volume.GIB, 146*volume.GIB)]), \
+             mock.patch.object(volume, "linux_trim_native", return_value={"filesystem_uuid": "uuid", "trimmed_bytes": 20*volume.GIB}) as trim, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(volume.main(["trim-auto", "scratch", "--clean"]), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "trimmed")
+            self.assertEqual(receipt["image_reclaimed_bytes"], 19*volume.GIB)
+            trim.assert_called_once_with(image_id)
 
     def test_trim_dispatch_rejects_wrong_backend_and_arguments(self):
         image_id = "sha256:" + "a" * 64
