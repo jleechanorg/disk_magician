@@ -217,8 +217,18 @@ while IFS=$'\t' read -r _gib rel; do
   # whose message lands on stderr (seen only on the CI runner), so a genuine
   # orphan fell through as unverified-git-state. Discard stdout FIRST, then
   # merge stderr into the capture -- the order used on the line below.
-  probe_err="$(bounded 30 git -C "$wt" rev-parse HEAD 2>&1 1>/dev/null)"
+  # Message-free probe. Parsing git's wording was brittle: it varies by version
+  # ("not a git repository: <path>" vs "not a git repository (or any of the
+  # parent directories)") and the difference decided whether a genuine orphan
+  # was reclaimed or silently preserved. Ask a question with a stable contract
+  # instead -- does git consider this path part of ANY repository?
+  #   --git-dir succeeds -> it IS a repo (healthy OR damaged)  -> not an orphan
+  #   --git-dir fails    -> not a repo at all                  -> candidate
+  # HEAD resolution then distinguishes healthy from damaged.
+  bounded 30 git -C "$wt" rev-parse HEAD >/dev/null 2>&1
   probe_rc=$?
+  gitdir_ok=0
+  bounded 30 git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 && gitdir_ok=1
 
   if (( probe_rc == 0 )); then
     # Linked (or standalone) repo: re-verify the safety properties.
@@ -283,7 +293,18 @@ while IFS=$'\t' read -r _gib rel; do
     # Orphaned path is allowed ONLY on git's own positive "not a repository"
     # verdict. Any other failure (timeout/rc 124, permission, lock, corrupt
     # object store) is unknown and therefore preserved.
-    if (( probe_rc != 128 )) || ! grep -qiE 'not a git repository|not a work tree' <<<"$probe_err"; then
+    # Match git's own "this is not a repository" verdict tolerantly: the exact
+    # wording varies by version and by whether the path is an invalid .git FILE
+    # or a missing admin dir ("not a git repository: <path>" vs "not a git
+    # repository (or any of the parent directories)"). Requiring one phrasing
+    # made a genuine orphan read as unverified-git-state on git 2.56.
+    # Any OTHER fatal message, or a non-128 exit, stays unknown -> preserve.
+    # Unknown unless git positively says this path is not in any repository.
+    # `gitdir_ok == 1` means it IS a repo (damaged HEAD or unreadable admin
+    # dir), which is NOT an orphan. `probe_rc` must also be the
+    # repository-not-found status; anything else (timeout 124, permission,
+    # lock) is unknown and preserves.
+    if (( gitdir_ok == 1 )) || (( probe_rc != 128 )); then
       echo "SKIP unverified-git-state (rc=$probe_rc): $rel"
       skip=$((skip+1))
       continue

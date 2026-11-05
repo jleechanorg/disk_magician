@@ -399,25 +399,27 @@ echo "=== Test 21: no script may hard-require coreutils timeout"
 for f in "$WT_DEL" "$ADV_DEL" "$WT_PUSH" "$ROOT/scripts/worktree_residency_check.sh"; do
   name="$(basename "$f")"
   # Every invocation of `timeout N` must be routed through the bounded() helper.
-  raw="$(grep -nE '(^|[^_[:alnum:]])timeout [0-9]' "$f" | grep -v 'bounded' || true)"
+  raw="$(grep -nE '^[[:space:]]*[^#]*[^_[:alnum:]]timeout [0-9]' "$f" | grep -v 'bounded' || true)"
   [[ -z "$raw" ]] && ok "$name guards timeout via bounded()" \
     || bad "$name calls timeout directly" "$(printf '%s' "$raw" | head -1)"
   has "  $name defines bounded()" "bounded()" "$(cat "$f")"
 done
 
-echo "=== Test 20b: the git probe must capture STDERR, not stdout"
-# `2>&1 >/dev/null` duplicates the ORIGINAL stdout onto fd 2, so stderr still
-# reaches the terminal and the capture is EMPTY -- the "not a git repository"
-# match then fails and a genuine orphan reads as unverified-git-state. That only
-# reproduced on CI's git. Assert the script uses the capturing form.
-if grep -q '2>&1 1>/dev/null' "$WT_DEL"; then
-  ok "git probe captures stderr (2>&1 1>/dev/null)"
+echo "=== Test 20b: the orphan decision must not parse git's error wording"
+# Parsing "not a git repository..." was brittle across git versions and decided
+# whether a genuine orphan was reclaimed or silently preserved. The decision now
+# uses a message-free contract: `rev-parse --git-dir` succeeding means "is a
+# repo", anything else means "not a repo".
+if grep -q 'rev-parse --git-dir' "$WT_DEL"; then
+  ok "orphan decision uses rev-parse --git-dir"
 else
-  bad "git probe does not capture stderr" "found: $(grep -n 'rev-parse HEAD 2' "$WT_DEL" | head -1)"
+  bad "orphan decision does not use --git-dir" "message parsing is brittle"
 fi
-bad_order="$(grep -n '2>&1 >/dev/null' "$WT_DEL" || true)"
-[[ -z "$bad_order" ]] && ok "no stderr-losing redirect order (2>&1 >/dev/null)" \
-  || bad "stderr-losing redirect present" "$bad_order"
+if grep -qE "grep -qiE 'not a git repository" "$WT_DEL"; then
+  bad "orphan decision still parses git wording" "version-dependent"
+else
+  ok "orphan decision does not parse git wording"
+fi
 
 echo "=== Test 21b: an explicit but missing WT_SAFETY_CHECK fails closed"
 # Falling through to an installed default would silently substitute a DIFFERENT
