@@ -126,7 +126,7 @@ class InstallTests(unittest.TestCase):
             if args[0]=='start':raise KeyboardInterrupt()
             return original(*args,**kwargs)
         with mock.patch.object(install,'manager',side_effect=crash),self.assertRaises(KeyboardInterrupt):self.perform()
-        path=next(self.directory.glob('*.service'));content=path.read_text();path.rename(path.with_suffix('.old'));path.write_text(content)
+        path=next(self.directory.glob('*.service'));content=path.read_text();path.rename(path.with_suffix('.old'));path.write_text(content);path.chmod(0o600)
         self.calls=[]
         with self.assertRaisesRegex(ValueError,'identity'):self.perform(recover=True)
         self.assertEqual(path.read_text(),content);self.assertEqual(self.calls,[])
