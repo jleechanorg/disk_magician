@@ -443,12 +443,38 @@ fi
 # descended, depth-bounded, and .git-bearing trees are never entered.
 if (( ${#candidates[@]} )); then
   _artifact_extra=()
+  _artifact_discovery_deferred=false
+  _artifact_discovery_blocked=()
   for _candidate in "${candidates[@]}"; do
+    [[ -d "$_candidate" && ! -L "$_candidate" ]] || continue
+    if deadline_exceeded; then
+      echo "deferred:artifact-discovery-deadline (stopped before $(basename "${_candidate%%/}"))"
+      _artifact_discovery_deferred=true
+      break
+    fi
+    _artifact_output="$(scratch_budget_artifact_children "$_candidate" 3)"
+    _artifact_rc=$?
+    if (( _artifact_rc == 124 )); then
+      echo "deferred:artifact-discovery-deadline (stopped during $(basename "${_candidate%%/}"))"
+      _artifact_discovery_deferred=true
+      break
+    elif (( _artifact_rc != 0 )); then
+      echo "kept:artifact-discovery-unmeasurable $_candidate"
+      _artifact_discovery_blocked+=("$_candidate")
+      continue
+    fi
     while IFS= read -r _artifact_child; do
       [[ -n "$_artifact_child" ]] || continue
       _artifact_extra+=("$_artifact_child")
-    done < <(scratch_budget_artifact_children "$_candidate" 3 2>/dev/null)
+    done <<<"$_artifact_output"
   done
+  if [[ "$_artifact_discovery_deferred" == true ]]; then
+    echo "deferred:artifact-discovery (eligible entries not classified; rerun with a fresh deadline)"
+    # Keep the original root candidates in the queue. The main loop's existing
+    # deadline path records the exact pending item in the shared cursor before
+    # deferring, preserving automatic --cursor resume semantics.
+    _artifact_extra=()
+  fi
   for _artifact_child in ${_artifact_extra[@]+"${_artifact_extra[@]}"}; do
     candidates+=("$_artifact_child")
   done
@@ -515,9 +541,36 @@ while IFS= read -r -d '' entry; do
   [[ -e "$entry" || -L "$entry" ]] || continue
   base="${entry##*/}"
   case "$base" in .*) continue ;; esac
+  _artifact_blocked=false
+  for _blocked in ${_artifact_discovery_blocked[@]+"${_artifact_discovery_blocked[@]}"}; do
+    if [[ "$entry" == "$_blocked" ]]; then _artifact_blocked=true; break; fi
+  done
   if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true && -n "$CURSOR_RESUME_TARGET" ]]; then
     [[ "$entry" == "$CURSOR_RESUME_TARGET" ]] || continue
+    # The resume target is now VISITED, whether or not it turns out to be
+    # unmeasurable below. Clear it here, before any `continue` path, so an
+    # unreadable root cannot leave the cursor pinned to itself forever.
+    # (Previously the blocked check ran FIRST and `continue`d past this line,
+    # so an unmeasurable resume target never cleared and every later candidate
+    # was skipped by the equality gate -- the whole pass stalled.)
     CURSOR_RESUME_TARGET=""
+  fi
+  if [[ "$_artifact_blocked" == true ]]; then
+    # Complete this visit THROUGH the cursor, not merely past it. Clearing
+    # CURSOR_RESUME_TARGET in memory only fixes the current pass; the persisted
+    # cursor still points at this entry, so the next invocation resumes onto the
+    # same unreadable root and stalls again. The keep-only helper never invokes
+    # C14/quarantine, but persists the finished visit and keeps the same
+    # deferred/cursor break contract as the unproven-content branch.
+    kept=$(( kept + 1 ))
+    if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
+      outcome="$(scratch_budget_quarantine_remove "$entry" --keep-unproven-content)"
+      echo "${outcome/kept:unproven-content/kept:artifact-discovery-unmeasurable} $entry"
+      case "$outcome" in deferred:deadline-before-unit|kept:cursor-*) break ;; esac
+    else
+      echo "kept:artifact-discovery-unmeasurable $entry"
+    fi
+    continue
   fi
   if deadline_exceeded; then
     if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
