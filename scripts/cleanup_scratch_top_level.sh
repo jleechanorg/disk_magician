@@ -269,12 +269,18 @@ scratch_available_bytes() {
 DETAIL_MIB=100
 DETAIL_DEPTH=6
 report_candidate_detail() {
-  local entry="$1" kb="$2" rows bytes files newest flag path
-  (( kb >= DETAIL_MIB * 1024 )) || return 0
+  local entry="$1" rows bytes files newest flag path metadata
+  # The caller supplies allocated du KiB; only the measurement can decide
+  # the apparent-size threshold (sparse files may have almost no allocation).
   rows="$(scratch_budget_measure_files "$entry" "$DETAIL_MIB" "$DETAIL_DEPTH" 2>/dev/null)" || :
   while IFS=$'\t' read -r bytes files newest flag path; do
     [[ -n "${flag:-}" ]] || continue
-    printf 'detail:%s bytes=%s files=%s newest=%s %s\n' "$flag" "$bytes" "$files" "$newest" "$path"
+    [[ "$flag" == A && "$path" == "$entry" ]] && continue
+    metadata="size_method=file-summed-apparent threshold_mib=$DETAIL_MIB"
+    if [[ "$flag" == G || "$flag" == E ]]; then
+      metadata="size_method=unmeasured size_known=false age_known=false threshold_mib=$DETAIL_MIB"
+    fi
+    printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path"
   done <<<"$rows"
 }
 

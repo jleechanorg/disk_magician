@@ -688,6 +688,7 @@ PY
 #     T  truncated: directory at max_depth whose total is still >= threshold
 #        (raise max_depth for detail; reported rather than aggregated silently)
 #     L  symlink, never followed (bytes = the link itself, not its target)
+#     G  opaque Git boundary; zero fields mean unmeasured, not empty or old
 #     E  unreadable: the subtree could not be measured
 # <bytes> is APPARENT size (stat), never block usage, so the threshold is exact
 # at the boundary and a sparse file counts its full length. Symlinks are never
@@ -707,11 +708,13 @@ _dm_mf_subtree() {
   local dir="$1" out agg rc
   _DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
   if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
-    if out="$(act_run_bounded find "$dir" -xdev \( -type f -o -type l \) -exec stat -f '%z %m' {} + 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
+    if out="$(act_run_bounded find "$dir" -xdev \( -type d -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune -exec printf 'G\n' \; \) -o \( \( -type f -o -type l \) -exec stat -f '%z %m' {} + \) 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
   else
-    if out="$(act_run_bounded find "$dir" -xdev \( -type f -o -type l \) -exec stat -c '%s %Y' {} + 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
+    if out="$(act_run_bounded find "$dir" -xdev \( -type d -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune -exec printf 'G\n' \; \) -o \( \( -type f -o -type l \) -exec stat -c '%s %Y' {} + \) 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
   fi
   (( rc == 0 )) || return "$rc"
+  # A G marker makes this subtree non-aggregatable, so the walker descends
+  # to emit the opaque boundary and ordinary siblings without scanning Git.
   # A filename containing a newline cannot disturb this: stat prints one line
   # per file and the name is never printed, so the line count is the file count.
   agg="$(printf '%s\n' "$out" | awk '
@@ -767,6 +770,10 @@ _dm_mf_emit_leaf() {
 _dm_mf_walk() {
   local dir="$1" depth="$2" threshold_bytes="$3" max_depth="$4"
   local bytes files newest child rc
+  if [[ -e "$dir/.git" || -L "$dir/.git" ]]; then
+    printf '0\t0\t0\tG\t%s\n' "$dir"
+    return 0
+  fi
   if _dm_mf_subtree "$dir"; then
     bytes=$_DM_MF_BYTES files=$_DM_MF_FILES newest=$_DM_MF_NEWEST
     if (( bytes < threshold_bytes )); then
