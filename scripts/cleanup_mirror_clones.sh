@@ -41,6 +41,23 @@ source "$SCRIPT_DIR/lib/worktree_ignored.sh"
 source "$SCRIPT_DIR/worktree_remove_hook.sh" # wrh_ao_skip_reason
 
 DRY_RUN=true
+# --archive-to DIR: move a clone onto DIR (typically a non-POSIX volume such as
+# NTFS) as <name>-<sha>.tar.zst instead of destroying it, and remove the source
+# only after the archive verifies when read back FROM DIR.
+ARCHIVE_TO=""
+# --archive-relaxed-content-gates: with --archive-to, stop treating the gates
+# whose only purpose is to prove the content exists elsewhere (dirty, untracked,
+# hidden state, stash, unpushed refs) as preservation gates — the tar IS the
+# copy. Gates that protect identity or prove the tree is not in use stay hard.
+# OFF by default: enabling it is a data-safety decision, not a flag default.
+RELAX_CONTENT_GATES=false
+# Test seam: the verify test needs a tar that produces a wrong archive. Replacing
+# this binary exercises the real verify path instead of bypassing it.
+TAR_BIN="${DISK_MAGICIAN_ARCHIVE_TAR_BIN:-tar}"
+ZSTD_BIN="${DISK_MAGICIAN_ARCHIVE_ZSTD_BIN:-zstd}"
+ARCHIVE_KB=0
+ARCHIVED=0
+ARCHIVE_FAILURES=0
 MAX_GIB="${DISK_MAGICIAN_MIRROR_CLONE_MAX_GIB:-25}"
 MAX_DEPTH="${DISK_MAGICIAN_MIRROR_CLONE_MAX_DEPTH:-3}"
 ROOTS_RAW="${DISK_MAGICIAN_MIRROR_CLONE_ROOTS:-$HOME/mirror:$HOME/projects}"
@@ -80,6 +97,19 @@ Options:
   --max-depth N      Maximum find depth of a candidate's .git entry below a
                      root (default 3, i.e. root/<a>/<b>/.git;
                      env DISK_MAGICIAN_MIRROR_CLONE_MAX_DEPTH).
+  --archive-to DIR   Archive each eligible clone to DIR/<name>-<sha>.tar.zst and
+                     remove the source ONLY after the archive verifies when read
+                     back from DIR. DIR must be an existing directory outside
+                     every scan root. tar keeps symlinks and exec bits intact,
+                     so DIR may be a filesystem that cannot (NTFS).
+  --archive-relaxed-content-gates
+                     With --archive-to, also archive clones preserved only
+                     because their content might not exist elsewhere (dirty,
+                     untracked, hidden-state, stash, unpushed). The archive is
+                     the copy, so those gates stop blocking. Identity and
+                     in-use gates (self-repo, safety, AO, registered/live
+                     worktrees, live-cwd, open-file, origin unreachable) still
+                     preserve. DEFAULT OFF.
   -h, --help         Show this help.
 
 Environment:
@@ -111,6 +141,12 @@ while [[ $# -gt 0 ]]; do
     --max-depth)
       [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { echo "Error: --max-depth requires an integer" >&2; exit 2; }
       MAX_DEPTH="$2"; shift 2 ;;
+    --archive-to)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "Error: --archive-to requires a directory" >&2; exit 2; }
+      ARCHIVE_TO="${2%/}"; shift 2 ;;
+    --archive-to=*)
+      ARCHIVE_TO="${1#*=}"; ARCHIVE_TO="${ARCHIVE_TO%/}"; shift ;;
+    --archive-relaxed-content-gates) RELAX_CONTENT_GATES=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -174,7 +210,27 @@ if [[ "$DRY_RUN" == false ]]; then
   fi
 fi
 
-log "=== MIRROR CLONE SWEEP ($([[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo CLEAN)) — roots: ${CANONICAL_ROOTS[*]:-none}, max-depth: ${MAX_DEPTH}, cap: ${MAX_GIB} GiB ==="
+if [[ -n "$ARCHIVE_TO" ]]; then
+  [[ -d "$ARCHIVE_TO" ]] || { echo "Error: --archive-to '$ARCHIVE_TO' is not a directory" >&2; exit 2; }
+  command -v "$TAR_BIN" >/dev/null 2>&1 || { echo "Error: tar not found: $TAR_BIN" >&2; exit 2; }
+  command -v "$ZSTD_BIN" >/dev/null 2>&1 || { echo "Error: zstd not found: $ZSTD_BIN" >&2; exit 2; }
+  ARCHIVE_REAL="$(cd "$ARCHIVE_TO" && pwd -P)" || exit 2
+  # An archive written inside a swept root would be scanned as a candidate, and
+  # a root inside the archive target would archive its own output.
+  for r in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
+    case "$ARCHIVE_REAL/" in
+      "$r"/*) echo "Error: --archive-to '$ARCHIVE_REAL' is inside scan root '$r'" >&2; exit 2 ;;
+    esac
+    case "$r/" in
+      "$ARCHIVE_REAL"/*) echo "Error: scan root '$r' is inside --archive-to '$ARCHIVE_REAL'" >&2; exit 2 ;;
+    esac
+  done
+elif [[ "$RELAX_CONTENT_GATES" == true ]]; then
+  echo "Error: --archive-relaxed-content-gates requires --archive-to" >&2
+  exit 2
+fi
+
+log "=== MIRROR CLONE SWEEP ($([[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo CLEAN)) — roots: ${CANONICAL_ROOTS[*]:-none}, max-depth: ${MAX_DEPTH}, cap: ${MAX_GIB} GiB$( [[ -n "$ARCHIVE_TO" ]] && printf ', archive-to: %s%s' "$ARCHIVE_TO" "$( [[ "$RELAX_CONTENT_GATES" == true ]] && printf ' (relaxed content gates)' || true )" ) ==="
 
 if ((${#CANONICAL_ROOTS[@]} == 0)); then
   log "nothing to do: no scan root exists (${DISK_MAGICIAN_MIRROR_CLONE_ROOTS:-$ROOTS_RAW})"
@@ -278,10 +334,24 @@ mirror_sha_on_origin_tips() {
   [[ -z "$unp" ]]
 }
 
+# gated_reason <reason>: rc 0 = content gate relaxed, keep evaluating;
+# rc 1 (reason printed) = preserve the clone. Only used by --archive-to's
+# relaxed mode, where the archive is the copy that proves the content survives.
+gated_reason() {
+  if [[ "$RELAX_CONTENT_GATES" == true ]]; then
+    CONTENT_GATED=true
+    return 0
+  fi
+  echo "$1"
+  return 1
+}
+
 # candidate_reason <dir>: prints a preserve reason, or nothing when <dir> is
 # eligible.
 candidate_reason() {
   local dir="$1" reason wts p head_sha tips shas sh origin_url rc=0
+
+  CONTENT_GATED=false
 
   # This script's own checkout (or an ancestor of it) must never be a candidate.
   case "$REPO_ROOT/" in
@@ -305,19 +375,18 @@ candidate_reason() {
   fi
   if [[ -n "$status_porcelain" ]]; then
     if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
-      echo "untracked"
+      gated_reason untracked || return 0
     else
-      echo "dirty"
+      gated_reason dirty || return 0
     fi
-    return 0
   fi
 
   # Shared c14_probe.py rules: assume-unchanged/skip-worktree entries and
   # ignored secret-like files; anything unprovable keeps the clone.
-  has_hidden_state "$dir" && { echo "hidden-state"; return 0; }
+  has_hidden_state "$dir" && { gated_reason hidden-state || return 0; }
 
   if [[ -n "$(git -C "$dir" stash list 2>/dev/null || echo '?stash-error')" ]]; then
-    echo "stash-present"; return 0
+    gated_reason stash-present || return 0
   fi
 
   if ! wts="$(git -C "$dir" worktree list --porcelain 2>/dev/null)"; then
@@ -359,9 +428,11 @@ candidate_reason() {
   while IFS= read -r sh; do
     [[ -n "$sh" ]] || continue
     mirror_sha_on_origin_tips "$dir" "$tips" "$sh" && continue
-    rm -f "$tips" "$shas"
-    if [[ "$sh" == "$head_sha" ]]; then echo "unpushed-head"; else echo "unpushed-branch"; fi
-    return 0
+    if [[ "$sh" == "$head_sha" ]]; then
+      gated_reason unpushed-head || { rm -f "$tips" "$shas"; return 0; }
+    else
+      gated_reason unpushed-branch || { rm -f "$tips" "$shas"; return 0; }
+    fi
   done <"$shas"
   rm -f "$tips" "$shas"
 
@@ -372,13 +443,99 @@ candidate_reason() {
   return 0
 }
 
-# ── Sweep ─────────────────────────────────────────────────────────────────
+# ── Verified archiving (--archive-to) ─────────────────────────────────────
+# ntfs_safe_name <name>: replace characters NTFS/Windows reject and strip
+# trailing dots or spaces, so an archive name cannot fail to land on the target
+# volume. Case collisions are handled separately by archive_target_available.
+ntfs_safe_name() {
+  local n="$1"
+  n="${n//[<>:\"/\\|?*]/_}"
+  n="$(printf '%s' "$n" | tr -d '\000-\037')"
+  while [[ "$n" == *[.\ ] ]]; do n="${n%?}"; done
+  [[ -n "$n" ]] || n="_"
+  printf '%s' "$n"
+}
+
+# lower <s>: portable lowercase (macOS bash 3.2 has no ${s,,}).
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# archive_target_available <basename>: rc 1 when an existing archive entry
+# matches case-insensitively. NTFS is case-insensitive, so `Foo-abc` and
+# `foo-abc` are the same file and the second would silently replace the first.
+archive_target_available() {
+  local base existing
+  base="$(lower "$1")"
+  for existing in ${ARCHIVE_NAMES[@]+"${ARCHIVE_NAMES[@]}"}; do
+    [[ "$(lower "$existing")" == "$base" ]] && return 1
+  done
+  return 0
+}
+
+# archive_and_verify <dir>: write <ARCHIVE_REAL>/<name>-<sha>.tar.zst, prove it
+# by reading it back FROM ARCHIVE_REAL, and print the target path on success.
+# Every failure path prints a reason on stderr and leaves <dir> untouched.
+archive_and_verify() {
+  local dir="$1" base sha target part node counts avail_kb detail
+  base="$(ntfs_safe_name "$(basename "$dir")")"
+  sha="$(git -C "$dir" rev-parse --short=12 HEAD 2>/dev/null)" || return 1
+  target="$ARCHIVE_REAL/$base-$sha.tar.zst"
+  archive_target_available "$(basename "$target")" || { echo "archive-name-collision" >&2; return 1; }
+
+  avail_kb="$(df -Pk "$ARCHIVE_REAL" 2>/dev/null | awk 'NR==2 {print $4}')"
+  [[ "$avail_kb" =~ ^[0-9]+$ ]] || { echo "archive-space-unknown" >&2; return 1; }
+  node="$(deletion_size_kb "$dir")"
+  [[ "$node" =~ ^[0-9]+$ ]] || node=0
+  (( avail_kb > node )) || { echo "archive-space-insufficient" >&2; return 1; }
+
+  part="$target.part-$$"
+  # tar is required rather than a plain copy: it is what preserves POSIX
+  # symlinks and exec bits onto a volume that cannot hold either.
+  # --hard-dereference keeps each hardlink an independent regular file so the
+  # manifest comparison is exact; --one-file-system matches the source manifest.
+  # Names are stored as `./<path>` (tar -C <clone> .) so they compare directly
+  # against the source manifest, which is root-relative.
+  if ! "$TAR_BIN" -C "$dir" --zstd --hard-dereference --one-file-system \
+      -cf "$part" -- . 2>"$RUN_TMP/tar.err"; then
+    rm -f "$part"; echo "tar-failed" >&2; return 1
+  fi
+  sync 2>/dev/null || true
+
+  if ! "$PYTHON" "$SCRIPT_DIR/lib/mirror_archive_manifest.py" source "$dir" \
+      "$RUN_TMP/manifest.src.$$" >/dev/null 2>&1; then
+    rm -f "$part"; echo "source-manifest-failed" >&2; return 1
+  fi
+  if ! "$ZSTD_BIN" -dc -- "$part" 2>"$RUN_TMP/zstd.err" \
+      | "$PYTHON" "$SCRIPT_DIR/lib/mirror_archive_manifest.py" archive - \
+          "$RUN_TMP/manifest.arc.$$" >/dev/null 2>&1; then
+    rm -f "$part"; echo "archive-unreadable" >&2; return 1
+  fi
+  if ! cmp -s "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"; then
+    detail="$(diff -u "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$" 2>/dev/null \
+      | sed -n '3,5p' | tr '\n' ' ')"
+    rm -f "$part" "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"
+    echo "archive-mismatch:${detail:- manifest differs}" >&2
+    return 1
+  fi
+  rm -f "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"
+  mv -f -- "$part" "$target" || { rm -f "$part"; echo "archive-publish-failed" >&2; return 1; }
+  ARCHIVE_NAMES+=("$(basename "$target")")
+  printf '%s\n' "$target"
+}
+
+# ── Sweep ──────────────────────────────────────────────────────────────────
 CANDIDATES=0
 ELIGIBLE=0
 REMOVED=0
 CAPPED=0
 REMOVED_KB=0
 REAL_KB=0
+ARCHIVE_NAMES=()
+if [[ -n "$ARCHIVE_TO" ]]; then
+  # Seed the case-collision index from what is already on the volume.
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && ARCHIVE_NAMES+=("$line")
+  done < <("$FIND_BIN" "$ARCHIVE_REAL" -mindepth 1 -maxdepth 1 -name '*.tar.zst' -exec basename {} \; 2>/dev/null)
+fi
 
 for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
   [[ -d "$root" ]] || continue
@@ -400,11 +557,43 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     dir_kb="$(DM_DELETION_LOGGED=0 deletion_size_kb "$dir")"
     [[ "$dir_kb" =~ ^[0-9]+$ ]] || dir_kb=0
     origin="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
+    # --archive-to with --clean would otherwise need a live re-clone to recover;
+    # record what the clone was so the archive name and log line stay truthful.
+    dir_sha="$(git -C "$dir" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
     ELIGIBLE=$(( ELIGIBLE + 1 ))
 
     if (( MAX_KB > 0 )) && (( REAL_KB + dir_kb > MAX_KB )); then
       CAPPED=$(( CAPPED + 1 ))
       log "capped:max-gib $dir ($(( dir_kb / 1024 )) MB) — rerun with --max-gib to raise"
+      continue
+    fi
+
+    if [[ -n "$ARCHIVE_TO" ]]; then
+      if [[ "$DRY_RUN" == true ]]; then
+        log "DRY RUN: would archive: $dir ($(( dir_kb / 1024 )) MB -> $ARCHIVE_TO, sha=$dir_sha)"
+        ARCHIVE_KB=$(( ARCHIVE_KB + dir_kb ))
+        REAL_KB=$(( REAL_KB + dir_kb ))
+        ARCHIVED=$(( ARCHIVED + 1 ))
+        continue
+      fi
+      if ! archive_target="$(archive_and_verify "$dir")"; then
+        printf '%s\n' "archive-failed" >>"$REASONS_FILE"
+        log "KEEP [archive-failed] $dir (source left intact)"
+        ARCHIVE_FAILURES=$(( ARCHIVE_FAILURES + 1 ))
+        continue
+      fi
+      if DM_DELETION_LOGGED=1 rm_logged "$dir" && [[ ! -e "$dir" ]]; then
+        deletion_log_removal "$dir" "$dir_kb" remove \
+          "mirror-clone-archived archive=$archive_target origin=$origin"
+        log "archived $dir ($(( dir_kb / 1024 )) MB) -> $archive_target"
+        ARCHIVE_KB=$(( ARCHIVE_KB + dir_kb ))
+        ARCHIVED=$(( ARCHIVED + 1 ))
+        REAL_KB=$(( REAL_KB + dir_kb ))
+        REMOVED=$(( REMOVED + 1 ))
+      else
+        printf '%s\n' "remove-failed" >>"$REASONS_FILE"
+        log "KEEP [remove-failed] $dir (verified archive retained: $archive_target)"
+      fi
       continue
     fi
 
@@ -434,11 +623,22 @@ if (( CANDIDATES == 0 )); then
 fi
 
 PRESERVED=$(( CANDIDATES - ELIGIBLE ))
-log "$(dry_prefix)Done. Candidates: ${CANDIDATES}  eligible: ${ELIGIBLE}  $([[ "$DRY_RUN" == true ]] && echo would-remove || echo removed): ${REMOVED}  preserved: ${PRESERVED}  capped: ${CAPPED}"
+if [[ -n "$ARCHIVE_TO" ]]; then
+  log "$(dry_prefix)Done. Candidates: ${CANDIDATES}  eligible: ${ELIGIBLE}  $([[ "$DRY_RUN" == true ]] && echo would-archive || echo archived): ${ARCHIVED}  archive-failures: ${ARCHIVE_FAILURES}  preserved: ${PRESERVED}  capped: ${CAPPED}"
+else
+  log "$(dry_prefix)Done. Candidates: ${CANDIDATES}  eligible: ${ELIGIBLE}  $([[ "$DRY_RUN" == true ]] && echo would-remove || echo removed): ${REMOVED}  preserved: ${PRESERVED}  capped: ${CAPPED}"
+fi
 if [[ "$DRY_RUN" == true ]]; then
   awk -v kb="$REAL_KB" 'BEGIN { printf "Reclaimable now: %.2f GiB\n", kb / 1048576 }'
+  if [[ -n "$ARCHIVE_TO" ]]; then
+    awk -v kb="$ARCHIVE_KB" 'BEGIN { printf "Would archive: %.2f GiB (measured from source tree)\n", kb / 1048576 }'
+  fi
 else
-  awk -v kb="$REMOVED_KB" 'BEGIN { printf "Freed: %.2f GiB\n", kb / 1048576 }'
+  if [[ -n "$ARCHIVE_TO" ]]; then
+    awk -v kb="$ARCHIVE_KB" 'BEGIN { printf "Archived and verified: %.2f GiB\n", kb / 1048576 }'
+  else
+    awk -v kb="$REMOVED_KB" 'BEGIN { printf "Freed: %.2f GiB\n", kb / 1048576 }'
+  fi
 fi
 
 if [[ -s "$REASONS_FILE" ]]; then
@@ -449,5 +649,9 @@ if [[ -s "$REASONS_FILE" ]]; then
 fi
 
 if [[ "$DRY_RUN" == true ]] && (( ELIGIBLE > 0 )); then
-  log "Re-run with WORKTREE_APPROVED=1 $(basename "$0") --clean to remove them."
+  if [[ -n "$ARCHIVE_TO" ]]; then
+    log "Re-run with WORKTREE_APPROVED=1 $(basename "$0") --clean --archive-to $ARCHIVE_TO to archive them."
+  else
+    log "Re-run with WORKTREE_APPROVED=1 $(basename "$0") --clean to remove them."
+  fi
 fi

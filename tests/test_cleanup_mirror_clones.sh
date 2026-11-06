@@ -161,5 +161,88 @@ check "deletion log records the projects clone" \
 check "deletion log carries the origin note" \
   'grep -q "mirror-clone origin=" "$DISK_MAGICIAN_DELETION_LOG"'
 
+echo "Test 8: --archive-to archives, and the archive restores what was removed"
+# A fixture that proves the archive carries what NTFS cannot: an exec bit and a
+# relative symlink.
+ARCHIVE_DIR="$WORK/archive"
+mkdir -p "$ARCHIVE_DIR"
+printf '#!/bin/sh\necho hi\n' >"$SEED/tool.sh"
+chmod 755 "$SEED/tool.sh"
+ln -sfn README.md "$SEED/readme-link"
+git -C "$SEED" add -A
+git -C "$SEED" commit -qm "add exec bit and symlink"
+git -C "$SEED" push -q origin HEAD:main
+ARCH_MIRROR="$HOME/mirror/archive-mirror"
+clone_into "$ARCH_MIRROR"
+rm -f "$DISK_MAGICIAN_DELETION_LOG"
+rc=0
+arch_out="$(WORKTREE_APPROVED=1 bash "$SCRIPT" --clean --root "$HOME/mirror" \
+  --archive-to "$ARCHIVE_DIR" 2>&1)" || rc=$?
+check "archive run exits 0" '[[ "$rc" -eq 0 ]]'
+check "archive run removed the source clone" '[[ ! -e "$ARCH_MIRROR" ]]'
+arch_file="$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'archive-mirror-*.tar.zst' | head -1)"
+check "archive file landed on the target volume" '[[ -f "$arch_file" ]]'
+check "archive name carries the short sha" \
+  '[[ "$(basename "$arch_file")" == "archive-mirror-$(git -C "$SEED" rev-parse --short=12 HEAD).tar.zst" ]]'
+check "deletion log records the archive path" \
+  'grep -qF "mirror-clone-archived archive=$arch_file" "$DISK_MAGICIAN_DELETION_LOG"'
+check "archive reports GiB archived" 'grep -q "Archived and verified:" <<<"$arch_out"'
+RESTORE="$WORK/restore"
+mkdir -p "$RESTORE"
+tar --zstd -xf "$arch_file" -C "$RESTORE"
+check "restore yields the tracked file content" \
+  '[[ "$(cat "$RESTORE/README.md")" == "one" ]]'
+check "restore yields the git metadata" '[[ -d "$RESTORE/.git" ]]'
+check "restore yields the git object for HEAD" \
+  '([[ "$(git -C "$RESTORE" rev-parse HEAD 2>/dev/null)" == "$(git -C "$SEED" rev-parse HEAD)" ]])'
+check "restore preserves the exec bit" '[[ -x "$RESTORE/tool.sh" ]]'
+check "restore preserves the symlink as a symlink" '[[ -L "$RESTORE/readme-link" ]]'
+check "restore preserves the symlink target" \
+  '[[ "$(readlink "$RESTORE/readme-link")" == "README.md" ]]'
+
+echo "Test 9: a verify failure keeps the source and leaves no archive behind"
+FAIL_MIRROR="$HOME/mirror/verifyfail-mirror"
+clone_into "$FAIL_MIRROR"
+printf 'local work\n' >>"$FAIL_MIRROR/README.md"
+# A tar that silently drops a member: the archive is readable and well-formed,
+# so only the manifest comparison can catch it. This exercises the real verify
+# path instead of bypassing it.
+FAKE_TAR="$WORK/bin/fake-tar"
+printf '#!/usr/bin/env bash\nexec %s --exclude=README.md "$@"\n' "$(command -v tar)" >"$FAKE_TAR"
+chmod 755 "$FAKE_TAR"
+rm -f "$DISK_MAGICIAN_DELETION_LOG"
+rc=0
+fail_out="$(WORKTREE_APPROVED=1 DISK_MAGICIAN_ARCHIVE_TAR_BIN="$FAKE_TAR" bash "$SCRIPT" \
+  --clean --root "$HOME/mirror" --archive-to "$ARCHIVE_DIR" \
+  --archive-relaxed-content-gates 2>&1)" || rc=$?
+check "verify-failure run exits 0" '[[ "$rc" -eq 0 ]]'
+check "verify failure keeps the source clone intact" '[[ -d "$FAIL_MIRROR" ]]'
+check "verify failure keeps the dirty content" 'grep -qx "local work" <(tail -1 "$FAIL_MIRROR/README.md")'
+check "verify failure is reported as archive-failed" \
+  'grep -qF "KEEP [archive-failed] $FAIL_MIRROR" <<<"$fail_out"'
+check "verify failure leaves no partial archive" \
+  '[[ -z "$(find "$ARCHIVE_DIR" -maxdepth 1 -name "verifyfail-mirror-*" -o -name "*.part-*" | head -1)" ]]'
+check "verify failure writes no deletion-log entry" \
+  '! grep -qF "$FAIL_MIRROR" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || [[ ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]'
+
+echo "Test 10: relaxed content gates are off by default and require --archive-to"
+RELAX_MIRROR="$HOME/mirror/relax-mirror"
+clone_into "$RELAX_MIRROR"
+printf 'uncommitted\n' >>"$RELAX_MIRROR/README.md"
+rc=0
+strict_out="$(bash "$SCRIPT" --dry-run --root "$HOME/mirror" --archive-to "$ARCHIVE_DIR" 2>&1)" || rc=$?
+check "strict archive dry-run preserves the dirty clone" \
+  'grep -qF "KEEP [dirty] $RELAX_MIRROR" <<<"$strict_out"'
+rc=0
+relaxed_out="$(bash "$SCRIPT" --dry-run --root "$HOME/mirror" --archive-to "$ARCHIVE_DIR" \
+  --archive-relaxed-content-gates 2>&1)" || rc=$?
+check "relaxed dry-run announces the dirty clone for archiving" \
+  'grep -qF "would archive: $RELAX_MIRROR" <<<"$relaxed_out"'
+rc=0
+bad_out="$(bash "$SCRIPT" --dry-run --root "$HOME/mirror" --archive-relaxed-content-gates 2>&1)" || rc=$?
+check "relaxed gates without --archive-to is an error" '[[ "$rc" -eq 2 ]]'
+check "correctly rejects relaxation without an archive target" \
+  'grep -q "requires --archive-to" <<<"$bad_out"'
+
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
