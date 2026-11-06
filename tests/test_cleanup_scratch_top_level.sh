@@ -63,7 +63,7 @@ make_managed_tree() { # <name> <age_hours> [content-file]
 }
 
 run() { # run with a clean env so ambient settings cannot leak in
-  env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" \
+  env -i HOME="$T/home" PATH="${RUN_PATH:-/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin}" \
     TMPDIR="$T" \
     DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$SANDBOX" \
     DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="$SCRATCH_ROOT" \
@@ -75,6 +75,7 @@ run() { # run with a clean env so ambient settings cannot leak in
     "${@}"
 }
 mkdir -p "$T/home"
+chmod 700 "$T/home"
 
 # Each test gets its own Scratch root: the cleaner rescans every candidate on
 # each run, so sharing one root makes the suite quadratic and risks the runner's
@@ -113,6 +114,96 @@ PY
   python3 -c 'import sys; from unittest.mock import patch; sys.path.insert(0, sys.argv[1]); import volume; patch.object(sys, "platform", "linux").start(); raise SystemExit(volume.create_cmd("scratch", True))' "$ROOT/scripts"
 }
 use_root
+
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract ]]; then
+  echo "Test: manual LRU skips sub-threshold probes but keeps fresh usage identity"
+  LRU_DISKM="$T/lru-diskm"
+  cat >"$LRU_DISKM" <<'FAKE_LRU_DISKM'
+#!/usr/bin/env bash
+[[ "$1 $2" == "volume status" ]] || exit 2
+calls_file="${FAKE_STATUS_CALLS:?}"
+count=0
+[[ -f "$calls_file" ]] && count="$(wc -l <"$calls_file")"
+count=$((count + 1))
+printf '%s\n' "$count" >>"$calls_file"
+[[ "${FAKE_STATUS_MODE:-}" == usage-unknown && "$count" -ge 2 ]] && exit 3
+used_kb="$(du -sk "$FAKE_SCRATCH_ROOT" | awk '{print $1}')"
+quota_kb=10240
+if [[ "${FAKE_STATUS_MODE:-}" == quota-change && "$count" -ge 2 ]]; then
+  quota_kb=10241
+fi
+printf '{"volumes":[{"class":"scratch","allocated_bytes":%s,"quota_bytes":%s}]}\n' \
+  "$((used_kb * 1024))" "$((quota_kb * 1024))"
+FAKE_LRU_DISKM
+  chmod +x "$LRU_DISKM"
+  lru_run() {
+    env -i HOME="$T/home" PATH="${RUN_PATH:-/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin}" \
+      TMPDIR="$T" \
+      DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$SANDBOX" \
+      DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="$SCRATCH_ROOT" \
+      DISK_MAGICIAN_STATE_DIR="$STATE" DISK_MAGICIAN_DELETION_LOG="$LOG" \
+      DISK_MAGICIAN_DISKM_BIN="$LRU_DISKM" FAKE_SCRATCH_ROOT="$SCRATCH_ROOT" \
+      SCRATCH_TOP_LEVEL_APPROVED=1 \
+      FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" DISK_MAGICIAN_SCRATCH_MIN_KB=512 "$@"
+  }
+  use_root
+  make_tree lru-small 14 >/dev/null
+  mkdir -p "$SCRATCH_ROOT/lru-large"
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/lru-large/payload.bin"
+  old_stamp "$SCRATCH_ROOT/lru-large" 13
+  make_tree lru-small-after 12 >/dev/null
+  : >"$T/lru-status.calls"
+  out="$(lru_run bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "LRU threshold regression exits 0" || bad "LRU threshold regression exits 0" "rc=$rc"
+  [[ -d "$SCRATCH_ROOT/lru-small" && -d "$SCRATCH_ROOT/lru-small-after" ]] && ok "sub-threshold candidate is preserved" || bad "sub-threshold candidate is preserved"
+  [[ ! -e "$SCRATCH_ROOT/lru-large" ]] && ok "eligible candidate is evicted" || bad "eligible candidate is evicted"
+  check "LRU target stop is retained" "lru: stop=target-reached evicted=1" "$out"
+  status_calls="$(wc -l <"$T/lru-status.calls")"
+  [[ "$status_calls" -eq 3 ]] && ok "only initial, eligible, and final usage probes run" || \
+    bad "only initial, eligible, and final usage probes run" "status_calls=$status_calls"
+
+  echo "Test: manual LRU filters sub-threshold entries before slow age ordering"
+  use_root
+  mkdir -p "$SCRATCH_ROOT/aaa-small-slow" "$SCRATCH_ROOT/zzz-large-eligible"
+  printf 'tiny\n' >"$SCRATCH_ROOT/aaa-small-slow/payload.bin"
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/zzz-large-eligible/payload.bin"
+  old_stamp "$SCRATCH_ROOT/aaa-small-slow" 13
+  old_stamp "$SCRATCH_ROOT/zzz-large-eligible" 13
+  SLOW_FIND_BIN="$T/lru-slow-find-bin"
+  mkdir -p "$SLOW_FIND_BIN"
+  cat >"$SLOW_FIND_BIN/find" <<'FAKE_FIND'
+#!/usr/bin/env bash
+case "$1" in
+  *aaa-small-slow*) sleep 2 ;;
+esac
+exec /usr/bin/find "$@"
+FAKE_FIND
+  chmod +x "$SLOW_FIND_BIN/find"
+  : >"$T/lru-status.calls"
+  deadline="$(python3 -c 'import time; print(time.monotonic()+1)')"
+  out="$(RUN_PATH="$SLOW_FIND_BIN:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" lru_run bash "$SCRIPT" --clean --budget-pct 5 --deadline-at "$deadline" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "minimum-size prefilter regression exits 0" || bad "minimum-size prefilter regression exits 0" "rc=$rc"
+  [[ -d "$SCRATCH_ROOT/aaa-small-slow" ]] && ok "slow sub-threshold candidate is preserved" || bad "slow sub-threshold candidate is preserved"
+  [[ ! -e "$SCRATCH_ROOT/zzz-large-eligible" ]] && ok "eligible candidate is evicted despite slow small sibling" || bad "eligible candidate is evicted despite slow small sibling" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-400)"
+  check "minimum-size prefilter still reaches target" "lru: stop=target-reached evicted=1" "$out"
+
+  for mode in quota-change usage-unknown; do
+    use_root
+    mkdir -p "$SCRATCH_ROOT/lru-identity"
+    head -c 1048576 /dev/zero >"$SCRATCH_ROOT/lru-identity/payload.bin"
+    old_stamp "$SCRATCH_ROOT/lru-identity" 13
+    : >"$T/lru-status.calls"
+    out="$(FAKE_STATUS_MODE="$mode" lru_run bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?
+    [[ "$rc" == 75 ]] && ok "usage identity failure ($mode) fails closed" || bad "usage identity failure ($mode) fails closed" "rc=$rc"
+    [[ -e "$SCRATCH_ROOT/lru-identity" ]] && ok "candidate survives usage identity failure ($mode)" || bad "candidate survives usage identity failure ($mode)"
+    check "usage identity failure ($mode) is reported" "skipped:measurement-unavailable" "$out"
+  done
+  if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract ]]; then
+    echo "test_cleanup_scratch_top_level (lru-probe-contract): $PASS passed, $FAIL failed"
+    [[ "$FAIL" == 0 ]]
+    exit $?
+  fi
+fi
 
 if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == numeric-secret-contract ]]; then
   echo "Test: numeric manual floor never bypasses secret-like repository provenance"
@@ -164,7 +255,7 @@ printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s
   fi
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract ]]; then
 # Earlier numeric-secret contract cases include a pushed control that is
 # correctly removed and logged; start this independent suite with a fresh log.
 : > "$LOG"
@@ -199,7 +290,7 @@ check "deletion log records the removal" "plain-old" "$(cat "$LOG" 2>/dev/null)"
 check "deletion log names the cleaner" "scratch-prune" "$(cat "$LOG" 2>/dev/null)"
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract ]]; then
 echo "Test 4: automatic mode uses a 24 h default and does not bypass C14 safety"
 use_root
 register_test_volume
@@ -287,7 +378,7 @@ kill "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true; wait "$e8_lease_pid" "$e
 [[ -L "$E8_ROOT/e8-link-26h" ]] && ok "a symlinked top-level entry is never followed or reclaimed" || bad "a symlinked top-level entry is never followed or reclaimed"
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract ]]; then
 echo "Test 4b: a deadline deferral preserves the exact candidate cursor for the next scheduled pass"
 use_root
 register_test_volume
@@ -311,6 +402,78 @@ if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract || "${SCRATCH_PRUNE_TEST_
   echo "test_cleanup_scratch_top_level (${SCRATCH_PRUNE_TEST_FILTER}): $PASS passed, $FAIL failed"
   [[ "$FAIL" == 0 ]]
   exit $?
+fi
+
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == discovery-cursor-contract ]]; then
+  echo "Test: discovery failure on the resume item completes its keep and reaches the next eligible child"
+  use_root
+  register_test_volume
+  make_tree discovery-failed 2880 >/dev/null
+  make_tree isolated-discovery-eligible 25 >/dev/null
+  make_managed_tree isolated-discovery-recent 1 >/dev/null
+  discovery_eligible="$SCRATCH_ROOT/isolated-discovery-eligible"
+  discovery_recent="$SCRATCH_ROOT/worldai_frontend/build/isolated-discovery-recent"
+  [[ -d "$discovery_eligible" ]] && ok "discovery eligible fixture exists before injection" || bad "discovery eligible fixture exists before injection"
+  [[ -d "$discovery_recent" ]] && ok "fresh sibling fixture exists before injection" || bad "fresh sibling fixture exists before injection"
+  discovery_verdict="$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$discovery_eligible")"
+  assert_eq "$discovery_verdict" remove "discovery eligible fixture is independently C14-removable"
+  SHIM="$T/discovery-shim"; mkdir -p "$SHIM"
+  REAL_PYTHON="$(command -v python3)"
+  cat >"$SHIM/python3" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == - && "\${2:-}" == *"$SCRATCH_ROOT/discovery-failed"* ]]; then exit 1; fi
+exec "$REAL_PYTHON" "\$@"
+EOF
+  chmod 700 "$SHIM/python3"
+  CURSOR="$T/discovery-cursor.json"
+  python3 - "$CURSOR" "$SCRATCH_ROOT" <<'PY'
+import json,sys
+root=sys.argv[2]
+json.dump({"schema":1,"source":f"scratch_prune:v1:{root}","items":[f"{root}/discovery-failed",f"{root}/isolated-discovery-eligible"],"next_index":0}, open(sys.argv[1],"w"))
+PY
+  out="$(RUN_PATH="$SHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "discovery-error pass exits cleanly" || bad "discovery-error pass exits cleanly" "rc=$rc"
+  [[ -e "$SCRATCH_ROOT/discovery-failed/payload.bin" ]] && ok "discovery-failed candidate is preserved" || bad "discovery-failed candidate is preserved"
+  [[ ! -e "$discovery_eligible" ]] && ok "later eligible child is removed" || bad "later eligible child is removed" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-400)"
+  [[ -e "$discovery_recent" && -d "$SCRATCH_ROOT/worldai_frontend" ]] && ok "fresh sibling and parent are preserved" || bad "fresh sibling and parent are preserved"
+  check "old artifact removal is reported" "removed:" "$out"
+  check "discovery failure is explicitly reported" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/discovery-failed" "$out"
+  if python3 - "$CURSOR" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); assert d["next_index"] >= len(d["items"])
+PY
+  then ok "cursor advances past the failed discovery visit"; else bad "cursor advances past the failed discovery visit" "$(cat "$CURSOR")"; fi
+  echo "Test: discovery failure as the final cursor item persists completion without a sibling"
+  use_root
+  register_test_volume
+  make_tree discovery-final 2880 >/dev/null
+  SHIM="$T/discovery-final-shim"; mkdir -p "$SHIM"
+  REAL_PYTHON="$(command -v python3)"
+  cat >"$SHIM/python3" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == - && "\${2:-}" == *"$SCRATCH_ROOT/discovery-final"* ]]; then exit 1; fi
+exec "$REAL_PYTHON" "\$@"
+EOF
+  chmod 700 "$SHIM/python3"
+  CURSOR="$T/discovery-final-cursor.json"
+  python3 - "$CURSOR" "$SCRATCH_ROOT" <<'PY'
+import json,sys
+root=sys.argv[2]
+json.dump({"schema":1,"source":f"scratch_prune:v1:{root}","items":[f"{root}/discovery-final"],"next_index":0}, open(sys.argv[1],"w"))
+PY
+  out="$(RUN_PATH="$SHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean --cursor "$CURSOR" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "final discovery-error pass exits cleanly" || bad "final discovery-error pass exits cleanly" "rc=$rc"
+  [[ -e "$SCRATCH_ROOT/discovery-final/payload.bin" ]] && ok "final discovery-failed candidate is preserved" || bad "final discovery-failed candidate is preserved"
+  check "final discovery failure is explicitly reported" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/discovery-final" "$out"
+  if python3 - "$CURSOR" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); assert d["next_index"] == len(d["items"]) == 1
+PY
+  then ok "final failed discovery persists cursor completion"; else bad "final failed discovery persists cursor completion" "$(cat "$CURSOR")"; fi
+  if [[ -n "${SCRATCH_PRUNE_TEST_FILTER:-}" ]]; then
+    echo "test_cleanup_scratch_top_level (discovery-cursor-contract): $PASS passed, $FAIL failed"
+    [[ "$FAIL" == 0 ]]; exit $?
+  fi
 fi
 
 if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == unknown-deadline-contract ]]; then

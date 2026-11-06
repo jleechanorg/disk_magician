@@ -348,7 +348,7 @@ declare -F act_run_bounded >/dev/null || source "$(dirname "${BASH_SOURCE[0]}")/
 # also ambiguous with a legitimate epoch-0 file. Callers MUST treat a
 # non-numeric return as "exclude from eviction", never coerce it to 0.
 scratch_budget_content_mtime() {
-  local path="$1" epoch strict="${2:-}" links stat_format
+  local path="$1" epoch strict="${2:-}" links stat_format scan_rc stat_rc
   if [[ "$strict" == --strict ]]; then
     [[ -d "$path" && ! -L "$path" ]] || return 1
     links="$(act_run_bounded find "$path" -xdev -type l -print -quit)" || return $?
@@ -373,18 +373,50 @@ scratch_budget_content_mtime() {
   # A bare failing command here previously aborted the ENTIRE cleanup script
   # instead of yielding "unmeasurable, preserve".
   if [[ -f "$path" && ! -d "$path" ]]; then
-    if [[ "$(uname -s)" == Darwin ]]; then stat -f "$stat_format" "$path" 2>/dev/null || true; else stat -c "$stat_format" "$path" 2>/dev/null || true; fi
+    stat_rc=0
+    if [[ "$(uname -s)" == Darwin ]]; then
+      epoch="$(act_run_bounded stat -f "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    else
+      epoch="$(act_run_bounded stat -c "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    fi
+    if (( stat_rc == 124 || stat_rc == 137 )); then
+      epoch=""
+    fi
+    echo "$epoch"
     return
   fi
+  # Keep the streaming find|stat|awk pipeline, but bound the producer itself.
+  # A timed-out producer invalidates all partial output and skips directory stat.
+  scan_rc=0
   if [[ "$(uname -s)" == Darwin ]]; then
-    epoch="$(find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+    epoch="$(
+      set +e
+      set -o pipefail
+      act_run_bounded find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
+        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}'
+    )" || scan_rc=$?
   else
-    epoch="$(find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+    epoch="$(
+      set +e
+      set -o pipefail
+      act_run_bounded find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
+        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}'
+    )" || scan_rc=$?
+  fi
+  if [[ "$scan_rc" == 124 || "$scan_rc" == 137 ]]; then
+    echo ""
+    return 0
   fi
   if [[ -z "$epoch" ]]; then
-    if [[ "$(uname -s)" == Darwin ]]; then epoch="$(stat -f "$stat_format" "$path" 2>/dev/null || true)"; else epoch="$(stat -c "$stat_format" "$path" 2>/dev/null || true)"; fi
+    stat_rc=0
+    if [[ "$(uname -s)" == Darwin ]]; then
+      epoch="$(act_run_bounded stat -f "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    else
+      epoch="$(act_run_bounded stat -c "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    fi
+    if (( stat_rc == 124 || stat_rc == 137 )); then
+      epoch=""
+    fi
   fi
   echo "$epoch"
 }
@@ -566,22 +598,248 @@ scratch_budget_artifact_children() {
   # root before walking, then prune every marked directory in this one bounded
   # walk so a shallower Git ancestor cannot be bypassed by a later depth pass.
   [[ -e "$dir/.git" || -L "$dir/.git" ]] && return 0
-  local child base
-  while IFS= read -r -d '' child; do
-    [[ -d "$child" && ! -L "$child" ]] || continue
-    base="${child##*/}"
-    case "$base" in
-      .*|node_modules) : ;;   # node_modules itself is a strip target, not a descent root
-    esac
-    case "$base" in
-      build|dist|out|target|coverage|artifacts|gradle|.gradle|android-sdk|avd\
-      |isolated-*|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods)
-        printf '%s\n' "$child" ;;
-    esac
-  done < <(
-    find "$dir" -mindepth 1 -maxdepth "$max_depth" -type d \
-      \( -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune \) -o \
-      -type d ! -name '.*' -print0 2>/dev/null
-  )
+  (( max_depth > 0 )) || return 0
+  # One Python stdlib walker avoids a shell process for every visited directory.
+  # It checks the actuator deadline before each directory expansion and returns
+  # 124 when expansion is deferred; callers must report that explicitly rather
+  # than treating an incomplete list as "no eligible entries".
+  local deadline="${ACT_DEADLINE_AT:-}"
+  python3 - "$dir" "$max_depth" "$deadline" <<'PY'
+import fnmatch
+import os
+import sys
+import time
+
+root, max_depth, deadline = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+try:
+    deadline_value = float(deadline) if deadline else None
+except ValueError:
+    raise SystemExit(1)
+
+def expired():
+    return deadline_value is not None and time.monotonic() >= deadline_value
+
+def has_git_marker(path):
+    try:
+        os.lstat(os.path.join(path, ".git"))
+    except FileNotFoundError:
+        return False
+    return True
+
+def is_artifact_name(name):
+    return name in {
+        "build", "dist", "out", "target", "coverage", "artifacts", "gradle",
+        ".gradle", "android-sdk", "avd", ".next", ".cache", ".turbo",
+        ".parcel-cache", "__pycache__", "DerivedData", "Pods",
+    } or fnmatch.fnmatchcase(name, "isolated-*")
+
+def walk(path, depth):
+    if expired():
+        raise TimeoutError
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if expired():
+                    raise TimeoutError
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    child = entry.path
+                    # Match find's -exec marker check followed by -prune: the
+                    # marked directory itself is not emitted and is never
+                    # descended into.
+                    if has_git_marker(child):
+                        continue
+                    # find's `! -name '.*' -print0` filters hidden output
+                    # basenames, while still traversing hidden parents.
+                    if not entry.name.startswith(".") and is_artifact_name(entry.name):
+                        print(child, flush=True)
+                    if depth < max_depth:
+                        walk(child, depth + 1)
+                except OSError:
+                    raise
+    except OSError:
+        raise
+
+try:
+    walk(root, 1)
+except TimeoutError:
+    raise SystemExit(124)
+except (OSError, ValueError):
+    raise SystemExit(1)
+PY
+}
+
+# scratch_budget_measure_files <path> [threshold_mib]
+# Measurement counterpart to scratch_budget_artifact_children. Reporting used to
+# print ONE `du` total per candidate, which hides exactly what the per-child age
+# rule above exists to expose: measured 2026-11-03, a 35 GiB Scratch build root
+# whose 23.7 GiB of stale Android build dirs never appeared in any report line.
+# This walks <path> with a stopping rule instead:
+#   - a directory whose total apparent file size is BELOW <threshold_mib>
+#     (default 100) is reported as ONE aggregated row;
+#   - at or above it the directory is descended, so the caller sees which child
+#     holds the bytes. A row at or above the threshold is NEVER aggregated --
+#     that would hide the same detail a `du` total hides.
+# Output is one row per line, tab-separated, depth-first in sorted path order:
+#   <bytes>\t<files>\t<newest_epoch>\t<flag>\t<path>
+#     A  aggregated directory (total below the threshold)
+#     F  single file, measured on its own
+#     L  symlink, never followed (bytes = the link itself, not its target)
+#     G  opaque Git boundary; zero fields mean unmeasured, not empty or old
+#     E  unreadable: the subtree could not be measured
+# <bytes> is APPARENT size (stat), never block usage, so the threshold is exact
+# at the boundary and a sparse file counts its full length. Symlinks are never
+# followed. Size is the only aggregation stop; Git boundaries remain opaque.
+# Returns 0 when every subtree was measured, 1 for measurement errors,
+# 124 when the shared deadline expires, and 2 on usage error. Nonzero means
+# callers must not read partial rows as a complete total.
+_DM_MF_ERR="" _DM_MF_LIST="" _DM_MF_WORK="" _DM_MF_SEQ=0
+_DM_MF_RC=0 _DM_MF_DIALECT=""
+_DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
+
+# One batched find|stat pass per subtree (same idiom as
+# scratch_budget_content_mtime --strict: one process fan-out, not one stat fork
+# per file). Sets the _DM_MF_BYTES/_DM_MF_FILES/_DM_MF_NEWEST globals; returns
+# 1 when find could not read some part of the subtree.
+_dm_mf_subtree() {
+  local dir="$1" out agg rc
+  _DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
+  if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
+    if out="$(act_run_bounded find "$dir" -xdev \( -type d -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune -exec printf 'G\n' \; \) -o \( \( -type f -o -type l \) -exec stat -f '%z %m' {} + \) 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
+  else
+    if out="$(act_run_bounded find "$dir" -xdev \( -type d -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune -exec printf 'G\n' \; \) -o \( \( -type f -o -type l \) -exec stat -c '%s %Y' {} + \) 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
+  fi
+  (( rc == 0 )) || return "$rc"
+  # A G marker makes this subtree non-aggregatable, so the walker descends
+  # to emit the opaque boundary and ordinary siblings without scanning Git.
+  # A filename containing a newline cannot disturb this: stat prints one line
+  # per file and the name is never printed, so the line count is the file count.
+  agg="$(printf '%s\n' "$out" | awk '
+    NF == 0 { next }
+    NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      bytes += $1; files += 1; if ($2 + 0 > newest) newest = $2 + 0; next
+    }
+    { exit 3 }
+    END { printf "%d %d %d\n", bytes, files, newest }')" || return 1
+  read -r _DM_MF_BYTES _DM_MF_FILES _DM_MF_NEWEST <<<"$agg"
   return 0
+}
+
+# _dm_mf_list <dir> — write the NUL-separated, sorted direct children of <dir>
+# to a per-call file (recursion must never share one list path: a child level
+# would clobber the parent's enumeration mid-read). Sets $_DM_MF_LIST. Returns 1
+# when the directory could not be listed.
+_dm_mf_list() {
+  _DM_MF_LIST="$_DM_MF_WORK/list.$(( ++_DM_MF_SEQ ))"
+  act_run_bounded find "$1" -xdev -mindepth 1 -maxdepth 1 -print0 2>"$_DM_MF_ERR" >"$_DM_MF_LIST" || return $?
+  act_run_bounded sort -z -o "$_DM_MF_LIST" "$_DM_MF_LIST" || return $?
+  return 0
+}
+
+_dm_mf_report_err() {
+  local msg
+  msg="$(head -n 3 "$_DM_MF_ERR" 2>/dev/null | tr '\n' ' ')"
+  printf 'scratch_budget_measure_files: unreadable: %s: %s\n' "${1}" "${msg:-measurement failed}" >&2
+  _DM_MF_RC=1
+}
+
+# _dm_mf_stat <path> — lstat size and mtime of <path> (never its target).
+_dm_mf_stat() {
+  if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
+    act_run_bounded stat -f '%z %m' "$1" 2>/dev/null
+  else
+    act_run_bounded stat -c '%s %Y' "$1" 2>/dev/null
+  fi
+}
+
+_dm_mf_emit_leaf() {
+  local path="$1" flag="$2" out rc=0
+  out="$(_dm_mf_stat "$path")" || rc=$?
+  if [[ ! "$out" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
+    printf '0\t0\t0\tE\t%s\n' "$path"
+    _dm_mf_report_err "$path"
+    if (( rc == 124 )); then _DM_MF_RC=124; fi
+    return 0
+  fi
+  printf '%s\t1\t%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$flag" "$path"
+}
+
+_dm_mf_walk() {
+  local dir="$1" threshold_bytes="$2"
+  local bytes files newest child rc
+  if [[ -e "$dir/.git" || -L "$dir/.git" ]]; then
+    printf '0\t0\t0\tG\t%s\n' "$dir"
+    return 0
+  fi
+  if _dm_mf_subtree "$dir"; then
+    bytes=$_DM_MF_BYTES files=$_DM_MF_FILES newest=$_DM_MF_NEWEST
+    if (( bytes < threshold_bytes )); then
+      printf '%s\t%s\t%s\tA\t%s\n' "$bytes" "$files" "$newest" "$dir"
+      return 0
+    fi
+  else
+    rc=$?
+    if (( rc == 124 )); then
+      printf '0\t0\t0\tE\t%s\n' "$dir"
+      _dm_mf_report_err "$dir"
+      _DM_MF_RC=124
+      return 0
+    fi
+  fi
+  # At or above the threshold: descend so the caller sees where the bytes are.
+  # An unmeasurable subtree is descended too (it cannot be aggregated), which
+  # reports the failure at the path that could not be read instead of claiming
+  # an aggregate for it.
+  if _dm_mf_list "$dir"; then
+    :
+  else
+    rc=$?
+    printf '0\t0\t0\tE\t%s\n' "$dir"
+    _dm_mf_report_err "$dir"
+    if (( rc == 124 )); then _DM_MF_RC=124; fi
+    return 0
+  fi
+  while IFS= read -r -d '' child; do
+    if [[ -L "$child" ]]; then
+      _dm_mf_emit_leaf "$child" L
+    elif [[ -d "$child" ]]; then
+      _dm_mf_walk "$child" "$threshold_bytes"
+    else
+      _dm_mf_emit_leaf "$child" F
+    fi
+    if (( _DM_MF_RC == 124 )); then return 0; fi
+  done <"$_DM_MF_LIST"
+  return 0
+}
+
+scratch_budget_measure_files() {
+  local path="${1:-}" threshold_mib="${2:-100}" work rc
+  if [[ -z "$path" ]]; then
+    echo 'scratch_budget_measure_files: usage: scratch_budget_measure_files <path> [threshold_mib]' >&2
+    return 2
+  fi
+  [[ "$threshold_mib" =~ ^[0-9]+$ ]] || threshold_mib=100
+  _DM_MF_RC=0
+  if [[ "$(uname -s)" == Darwin ]]; then _DM_MF_DIALECT=Darwin; else _DM_MF_DIALECT=GNU; fi
+  _DM_MF_ERR="" _DM_MF_LIST=""
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    printf '0\t0\t0\tE\t%s\n' "$path"
+    printf 'scratch_budget_measure_files: unreadable: %s: no such file\n' "$path" >&2
+    return 1
+  fi
+  if [[ -L "$path" ]]; then
+    _dm_mf_emit_leaf "$path" L
+    return $_DM_MF_RC
+  fi
+  if [[ ! -d "$path" ]]; then
+    _dm_mf_emit_leaf "$path" F
+    return $_DM_MF_RC
+  fi
+  work="$(mktemp -d "${TMPDIR:-/tmp}/dm-mf.XXXXXX")" || return 2
+  _DM_MF_WORK="$work" _DM_MF_ERR="$work/err" _DM_MF_LIST="" _DM_MF_SEQ=0
+  _dm_mf_walk "$path" "$(( threshold_mib * 1024 * 1024 ))"
+  rc=$_DM_MF_RC
+  rm -rf "$work"
+  return $rc
 }

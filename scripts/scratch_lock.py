@@ -8,6 +8,7 @@ import fcntl
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import time
@@ -82,6 +83,32 @@ def parse_wait(raw: str | None) -> float:
     return max(0.0, value) if math.isfinite(value) else 20.0
 
 
+def disable_implicit_git_fsmonitor() -> None:
+    """Keep incidental Git probes from spawning long-lived flock owners.
+
+    The lock must remain inheritable for real cleanup descendants. Git's
+    process-scoped config disables its implicit fsmonitor hook/daemon instead,
+    without changing repository or user config or dropping caller entries.
+    Leave malformed counts untouched so Git retains its own error behavior.
+    """
+    raw = os.environ.get("GIT_CONFIG_COUNT", "")
+    # Git accepts an empty count as zero, otherwise strtol-style decimal input
+    # (leading ASCII whitespace/sign but no trailing characters).
+    if raw and not re.fullmatch(r"[ \t\n\r\v\f]*[+-]?[0-9]+", raw):
+        return
+    normalized = raw.lstrip(" \t\n\r\v\f")
+    digits = normalized.lstrip("+-").lstrip("0") or "0"
+    # Avoid Python's integer-string limit for valid, zero-padded Git counts.
+    if len(digits) > 10:
+        return
+    count = int(digits) * (-1 if normalized.startswith("-") else 1)
+    if not 0 <= count < 2147483647:
+        return
+    os.environ[f"GIT_CONFIG_KEY_{count}"] = "core.fsmonitor"
+    os.environ[f"GIT_CONFIG_VALUE_{count}"] = "false"
+    os.environ["GIT_CONFIG_COUNT"] = str(count + 1)
+
+
 def run(caller: str, script: str, args: list[str]) -> int:
     path = lock_path()
     try:
@@ -111,6 +138,7 @@ def run(caller: str, script: str, args: list[str]) -> int:
     os.set_inheritable(fd, True)
     os.environ[ENV_FD] = str(fd)
     os.environ[ENV_PID] = str(os.getpid())
+    disable_implicit_git_fsmonitor()
     os.execvpe(script, [script, *args], os.environ)
     return 127
 
