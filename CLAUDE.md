@@ -450,6 +450,77 @@ Verify the deployed tree and scheduled receipts before claiming production behav
 (stale-deploy incident 2026-07-11: v2 code was committed for hours while
 production ran v1).
 
+## Reclaim eligibility is per-file, never per-directory (hard)
+
+**A directory's "newest content mtime" is an AGGREGATE, and using it as the
+staleness test silently shelters stale data.** Measured 2026-11-03 on Jeff-Ubuntu:
+`Scratch/worldai_frontend/build` held **23.7 GiB of 39-41 h old Android build
+dirs** (`isolated-b506`, `isolated-cbdcd704`, `isolated-c68b06d`) plus a 6.9 GiB
+39 h-old `android-sdk` -- and the entire 35 GiB tree read as **"0 h old"** because
+one sibling (`isolated-02ea`) had been written minutes earlier. Consequence: a
+35 GiB build root was never eligible no matter which floor or trigger was set,
+and the operator's first instinct ("aren't there older files in there?") was
+right while the tool said no.
+
+Rules that follow, and that any new reclaim code must obey:
+
+- Evaluate eligibility **per child**, not on a parent aggregate. Enumerate
+  artifact-shaped descendants (`scratch_budget_artifact_children`, depth-bounded)
+  and judge each on **its own** newest-file age.
+- The descent is **name-scoped to build outputs** (`build|dist|out|target|coverage|
+  artifacts|gradle|android-sdk|avd|isolated-*|.next|.cache|DerivedData|Pods|…`),
+  depth-bounded, never follows a symlink, and **never enters a directory that
+  contains `.git`** -- a working tree is not a build artifact and deleting a
+  nested source directory would be data loss.
+- Size reporting must sum **file sizes**, not stop at directory entries: `du` on a
+  parent cannot tell you that 23.7 of 35 GiB is stale while 7 GiB is live. The
+  measurement rule below is how this is applied and checked.
+- Do not special-case directory names in a hardcoded list to reach nested
+  content. The previous code had exactly that (`evidence|worldai_frontend|…` plus
+  a fixed extra depth) and it still could not reach `build/android-native-*/isolated-*`.
+- Tests live in `tests/test_scratch_budget_artifact_children.sh`: stale sibling
+  discovered beside a fresh one, `.git` tree not descended, symlink not followed,
+  ordinary directory ignored, depth bound respected.
+
+### The measurement rule — measure every file, 100 MiB stop floor (hard)
+
+**Never stop measuring at directory granularity.** A directory's aggregate — the
+newest file anywhere beneath it, or one `du` total — is not a valid answer to
+"how big is this" or "how old is this": one fresh child shelters stale siblings,
+and one stale child hides a live one. The tree above is the counter-example, not
+a hypothetical: reported as a directory, `Scratch/worldai_frontend/build` was
+35 GiB and "0 h old"; measured as files, 23.7 GiB of that same tree was 39-41 h
+old while 7 GiB was live.
+
+There is exactly one permitted stop, on size: **100 MiB**.
+
+- A directory **smaller than 100 MiB** MAY be treated as one unit — reported,
+  aged, and judged as a single entry on its own newest-file age.
+- A directory **at or above 100 MiB** MUST be itemised into its children, and
+  each child recursed by the same test, until every entry reported is either a
+  file or a directory under 100 MiB. A `du` total, a bare child list, or "the
+  parent is 35 GiB" is not an itemisation.
+- Descending never follows a symlink and never enters a directory that contains
+  `.git` (see the bullet above); content behind those boundaries is reported as
+  an opaque unit with that fact stated.
+- The floor governs age claims too: an age is only reported for the unit the
+  size rule allowed you to stop at, so a 35 GiB directory never gets an age.
+
+Every reported size states its method and its threshold:
+
+- Say whether the figure is **file-summed** (summed file sizes measured inside)
+  or **directory-aggregate** (a filesystem or `du` total, an apparent size, a
+  parent's number), and name the threshold it was measured to, e.g. "file-summed,
+  itemised to 100 MiB".
+- A directory-aggregate figure is a place to descend from, never evidence of
+  age, staleness, or reclaimability.
+
+**Never claim "nothing to reclaim" from a directory-level scan.** That claim
+requires the opposite proof: name the largest individual files you examined,
+with sizes, and the threshold you measured them to. "The directories are fresh"
+or "the tree is 0 h old" is not that proof — it is the aggregate this section
+exists to forbid.
+
 ## Operational gotchas (learned the hard way — details in roadmap/ and beads)
 
 ### Why scratch reclaim "reports success" and frees nothing (2026-10-29 → 11-03)
@@ -463,7 +534,12 @@ contradicted it. Check them in this order before proposing a reclaim change:
   names (`relocated-tmp`, `test-loc-review`, `advice-primary-pair-*`) are not in
   that class map, so ~118 GiB of unleased, no-live-owner orphan stays put under
   *any* trigger/floor/shape/rate setting. Widening the class map is the change
-  that matters; tuning the trigger is not.
+  that matters; tuning the trigger is not. Row **E8** now exists for the Scratch
+  volume: a direct child of the registered `scratch`-class root (real directory,
+  non-dot, never a symlink, one path component) is declared ephemeral at 1440 min,
+  the same retention as the other volume rows. Deeper paths and top-level files
+  stay `kept:unproven-content`, and lease / live-cwd / open-file / secret /
+  repository / recency gates all still run first.
 - **`scratch_budget_content_mtime --strict` returns 1 for any tree containing a
   symlink.** Moved-`/tmp` and checkout scratch are full of them, so the largest
   orphans were never candidates at all (a 32 GiB directory silently excluded).

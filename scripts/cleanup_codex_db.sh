@@ -498,9 +498,25 @@ check_active_open_clients() {
   rm -f "$lsof_err"
 
   if [[ -n "$err_content" ]]; then
-    log "WARNING: lsof inspection warning/error for $target (rc=$rc, stderr: $err_content) — fail-closed, skipping" >&2
-    rm -f "$lsof_out"
-    return 1
+    # lsof warns about filesystems it cannot stat that have nothing to do with the
+    # target database -- on Linux, `can't stat() tracefs ... /sys/kernel/debug/tracing`
+    # is printed for every invocation by an unprivileged user, with rc=0 and correct
+    # PIDs. Treating that as a failure disabled vacuuming for state_5.sqlite (741M),
+    # logs_2.sqlite (79M) and the memory/goal/queue DBs, and stopped the script from
+    # ever reaching its safe online path. Drop only that exact stanza; any other
+    # stderr still fails closed.
+    local err_residual=""
+    err_residual="$(printf '%s\n' "$err_content" | awk '
+      /can.t stat\(\) tracefs|\/sys\/kernel\/debug\/tracing/ { skip_incomplete=1; next }
+      /^[[:space:]]*Output information may be incomplete\.[[:space:]]*$/ && skip_incomplete { skip_incomplete=0; next }
+      { skip_incomplete=0; print }
+    ')"
+    if [[ -n "$err_residual" ]]; then
+      log "WARNING: lsof inspection warning/error for $target (rc=$rc, stderr: $err_residual) — fail-closed, skipping" >&2
+      rm -f "$lsof_out"
+      return 1
+    fi
+    log "lsof inspection for $target printed only the benign tracefs stat warning; continuing" >&2
   fi
 
   if [[ $rc -ne 0 && $rc -ne 1 ]]; then

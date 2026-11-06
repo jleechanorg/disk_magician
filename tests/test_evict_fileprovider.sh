@@ -132,5 +132,33 @@ fi
 n_dup="$(awk -F'\t' '$2=="evict_fileprovider.sh" && $3=="prune_unuploaded_duplicate"' "$DISK_MAGICIAN_DELETION_LOG" | wc -l | tr -d ' ')"
 [[ "$n_dup" == "$expected_dups" ]] && ok "pruned duplicates logged to deletion log ($n_dup)" || bad "dup deletion log count=$n_dup, expected=$expected_dups"
 
+# SQLite is not an append-only transcript: a strict byte prefix is not an exact
+# duplicate. Use real SQLite databases and isolated HOME for top-level discovery.
+SQL_HOME="$T/sqlite-home"
+SQL_BACKUPS="$T/sqlite-backups/codex_conversations"
+mkdir -p "$SQL_HOME/.codex" "$SQL_BACKUPS"
+# Host rm shims (~/.local/bin/rm -> $HOME/.local/bin/guards/rm) resolve via $HOME; keep them reachable under the fixture HOME.
+if [[ -d "$HOME/.local/bin/guards" ]]; then mkdir -p "$SQL_HOME/.local/bin"; ln -s "$HOME/.local/bin/guards" "$SQL_HOME/.local/bin/guards"; fi
+python3 - "$SQL_HOME/.codex" "$SQL_BACKUPS" <<'PYSQL'
+import os, shutil, sqlite3, sys
+primary, backups = sys.argv[1:]
+for name in ("pending_exact.sqlite", "pending_prefix.sqlite"):
+    path = os.path.join(primary, name)
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE records (value TEXT)")
+        connection.execute("INSERT INTO records VALUES ('retained content')")
+    shutil.copyfile(path, os.path.join(backups, name))
+with open(os.path.join(primary, "pending_prefix.sqlite"), "ab") as stream:
+    stream.write(b"additional primary bytes")
+PYSQL
+touch -t 202601010000 "$SQL_BACKUPS"/*.sqlite
+out="$(HOME="$SQL_HOME" bash "$ROOT/scripts/evict_fileprovider.sh" --root "$T/sqlite-backups" --prune-unuploaded-local-duplicates 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && grep -q 'would prune unuploaded duplicate (verified in local primary): 1 files' <<<"$out" && ok "SQLite dry-run counts only exact duplicate, not strict prefix" || bad "SQLite dry-run prefix gate rc=$rc: $out"
+[[ -f "$SQL_BACKUPS/pending_prefix.sqlite" && -f "$SQL_BACKUPS/pending_exact.sqlite" ]] && ok "SQLite dry-run preserves both backups" || bad "SQLite dry-run changed backups"
+out="$(HOME="$SQL_HOME" FILEPROVIDER_EVICT_APPROVED=1 bash "$ROOT/scripts/evict_fileprovider.sh" --root "$T/sqlite-backups" --prune-unuploaded-local-duplicates --clean 2>&1)"; rc=$?
+[[ $rc -eq 0 && -f "$SQL_BACKUPS/pending_prefix.sqlite" ]] && ok "SQLite clean preserves strict-prefix backup" || bad "SQLite strict-prefix backup removed rc=$rc: $out"
+[[ ! -e "$SQL_BACKUPS/pending_exact.sqlite" ]] && ok "SQLite clean prunes byte-identical positive control" || bad "SQLite identical positive control not pruned: $out"
+[[ -f "$SQL_HOME/.codex/pending_prefix.sqlite" && -f "$SQL_HOME/.codex/pending_exact.sqlite" ]] && ok "SQLite primaries preserved" || bad "SQLite primary changed"
+
 echo "evict_fileprovider: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

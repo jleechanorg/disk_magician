@@ -35,6 +35,20 @@ act_mono_now() {
   python3 -c 'import time; print(f"{time.monotonic():.6f}")'
 }
 
+# act_run_bounded <cmd...> -- run cmd under the monotonic ACT_DEADLINE_AT,
+# killing its process group on expiry and returning 124. An already-expired
+# deadline returns 124 without starting cmd. Unbounded when no deadline is set.
+act_run_bounded() {
+  python3 -c 'import os,signal,subprocess,sys,time
+dl,*cmd=sys.argv[1:]
+rem=float(dl)-time.monotonic() if dl else None
+if rem is not None and rem<=0: sys.exit(124)
+p=subprocess.Popen(cmd,stderr=subprocess.DEVNULL,start_new_session=True)
+try: sys.exit(p.wait(timeout=rem))
+except subprocess.TimeoutExpired:
+ os.killpg(p.pid,signal.SIGKILL); p.wait(); sys.exit(124)' "${ACT_DEADLINE_AT:-}" "$@"
+}
+
 # Returns success only if one full unit fits before the soft deadline.
 act_unit_fits() {
   local unit_budget="$1" deadline="${ACT_DEADLINE_AT:-}"

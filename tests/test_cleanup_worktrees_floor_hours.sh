@@ -30,12 +30,16 @@ git -C "$REPO" add README.md; git -C "$REPO" commit -q -m base
 git -C "$REPO" remote add origin "$TMP_ROOT/origin.git"
 git -C "$REPO" push -q origin main
 git -C "$REPO" checkout -q -b ahead; printf 'ahead\n' >> "$REPO/README.md"; git -C "$REPO" commit -q -am ahead
-AHEAD_SHA=$(git -C "$REPO" rev-parse HEAD); git -C "$REPO" checkout -q main
+AHEAD_SHA=$(git -C "$REPO" rev-parse HEAD)
+# A commit on no origin ref: the on-origin proof is oid-scoped, so the unpushed
+# fixture must not share its oid with any branch the test pushes.
+git -C "$REPO" checkout -q -b d2local main; printf 'd2local\n' >> "$REPO/README.md"; git -C "$REPO" commit -q -am d2local
+D2_LOCAL_SHA=$(git -C "$REPO" rev-parse HEAD); git -C "$REPO" checkout -q main
 add_wt() { git -C "$REPO" worktree add -q -B "$1" "$2" "$3"; }
 add_wt h13 "$WT/wt-h13" "$AHEAD_SHA";     git -C "$REPO" push -q origin h13
 add_wt h11 "$WT/wt-h11" "$AHEAD_SHA";     git -C "$REPO" push -q origin h11
 add_wt d2dirty "$WT/wt-d2dirty" "$AHEAD_SHA"; git -C "$REPO" push -q origin d2dirty
-add_wt d2unpushed "$WT/wt-d2unpushed" "$AHEAD_SHA"
+add_wt d2unpushed "$WT/wt-d2unpushed" "$D2_LOCAL_SHA"
 add_wt unmeas "$WT/wt-unmeas" "$AHEAD_SHA";   git -C "$REPO" push -q origin unmeas
 add_wt locked13 "$WT/wt-locked13" "$AHEAD_SHA"; git -C "$REPO" push -q origin locked13
 git -C "$REPO" worktree lock "$WT/wt-locked13"

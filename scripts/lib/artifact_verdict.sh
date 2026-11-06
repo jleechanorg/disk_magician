@@ -135,8 +135,17 @@ c14_repo_pushed_ok() (
 
 # c14_repos_ok <root> [--outer-certificate <receipt>]: validate the outer copy
 # certificate, then run ordinary content and remote checks on every nested repository.
+# C14_OVERRIDABLE ("|"-separated kept: tokens, budget mode only): every repository
+# gets both checks; a listed keep is recorded and the walk continues, any other
+# keep or a `.git` file (linked worktree or submodule) returns rc 1 at once. rc 2
+# with the first recorded token means every keep was listed, so the decision does
+# not depend on discovery order.
+_c14_keep() {  # records into the caller's `soft`
+    if [[ -n "${C14_OVERRIDABLE:-}" && "|$C14_OVERRIDABLE|" == *"|$1|"* ]]; then soft=${soft:-$1}; return 0; fi
+    echo "${1:-kept:check-failed}"; return 1
+}
 c14_check_repo_list() {
-    local root=$1 deadline=${2:-} outer_receipt=${3:-} r v done= canon
+    local root=$1 deadline=${2:-} outer_receipt=${3:-} r v done= canon soft=
     canon="$(cd "$root" 2>/dev/null && pwd -P)" || { echo kept:check-failed; return 1; }
     if [[ -n "$outer_receipt" ]]; then
         v="$(python3 "$_AV_DIR/../c14_probe.py" outer-certificate "$canon" "$outer_receipt")" || { echo "${v:-kept:check-failed}"; return 1; }
@@ -146,10 +155,12 @@ c14_check_repo_list() {
         [[ "$r" == OK ]] && { done=1; continue; }
         [[ "$r" == kept:* ]] && { echo "$r"; return 1; }
         if [[ -n "$outer_receipt" && "$r" == "$canon" ]]; then continue; fi
-        v="$(c14_repo_content_ok "$r")" || { echo "$v"; return 1; }
-        v="$(c14_repo_pushed_ok "$r" "$root" "$deadline")" || { echo "$v"; return 1; }
+        [[ -n "${C14_OVERRIDABLE:-}" && -f "$r/.git" ]] && { echo kept:linked-worktree; return 1; }
+        v="$(c14_repo_content_ok "$r")" || _c14_keep "$v" || return 1
+        v="$(c14_repo_pushed_ok "$r" "$root" "$deadline")" || _c14_keep "$v" || return 1
     done
     [[ -n "$done" ]] || { echo kept:check-failed; return 1; }
+    [[ -z "$soft" ]] || { echo "$soft"; return 2; }
     echo ok
 }
 
@@ -169,10 +180,11 @@ c14_repos_ok() {
 }
 
 # c14_ephemeral_retention <canonical path> [<archived content path>] [--archive-origin]: minutes of
-# the declared-ephemeral row E2-E7 it matches (§7.2; longest wins), rc 1 for
-# none. --archive-origin restricts classification to the E2/E3 scratch-root
-# rows. When validating a receipt, path selects the row and archived content
-# supplies the source-shape check without probing a recreated original path.
+# the declared-ephemeral row E2-E8 it matches (§7.2; longest wins), rc 1 for
+# none. --archive-origin restricts classification to the E1-E3 scratch-root and
+# scratch-volume rows, never E8. When validating a receipt, path selects the row
+# and archived content supplies the source-shape check without probing a
+# recreated original path.
 c14_ephemeral_retention() {
     local p=$1 content=${2:-$1} archive_origin=${3:-} r rel
     while IFS= read -r r; do
@@ -188,6 +200,15 @@ c14_ephemeral_retention() {
         [[ "$archive_origin" != --archive-origin ]] || return 1
         if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 1440; return 0; fi
         if [[ "$rel" =~ ^[^./][^/]*$ && ( -d "$content/.git" || -f "$content/.git" ) ]]; then echo 1440; return 0; fi
+        # E8: a direct child of the registered scratch-VOLUME root is ephemeral
+        # at 1440 min whatever its name. Name shapes cannot enumerate agent
+        # scratch, and the volume's own class already declares its contents
+        # disposable. This row supplies only the missing retention: lease, live
+        # cwd, open file, secret, repository and recency gates all run before it
+        # (see _av_artifact_removal_verdict), so it bypasses nothing. Depth stays
+        # one component, the OS-owned basenames the tmp-root loop excludes (:179)
+        # stay excluded, and a symlink is never followed.
+        if [[ "$rel" =~ ^[^./][^/]*$ && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) && -d "$content" && ! -L "$p" ]]; then echo 1440; return 0; fi
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
