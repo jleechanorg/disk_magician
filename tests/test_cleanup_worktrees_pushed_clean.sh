@@ -31,11 +31,15 @@ BASE_SHA=$(git -C "$REPO" rev-parse HEAD)
 git -C "$REPO" remote add origin "$TMP_ROOT/origin.git"
 git -C "$REPO" push -q origin main
 git -C "$REPO" checkout -q -b ahead; printf 'ahead\n' >> "$REPO/README.md"; git -C "$REPO" commit -q -am ahead
-AHEAD_SHA=$(git -C "$REPO" rev-parse HEAD); git -C "$REPO" checkout -q main
+AHEAD_SHA=$(git -C "$REPO" rev-parse HEAD)
+# A commit that is on NO origin ref: the on-origin proof is oid-scoped, so the
+# preserved cases below must not share an oid with a branch that was pushed.
+git -C "$REPO" checkout -q -b localonly main; printf 'localonly\n' >> "$REPO/README.md"; git -C "$REPO" commit -q -am localonly
+LOCAL_SHA=$(git -C "$REPO" rev-parse HEAD); git -C "$REPO" checkout -q main
 add_wt() { git -C "$REPO" worktree add -q -B "$1" "$2" "$3"; }
 add_wt pushed "$WT/wt-pushed" "$AHEAD_SHA";   git -C "$REPO" push -q origin pushed
-add_wt unpushed "$WT/wt-unpushed" "$AHEAD_SHA"
-add_wt diverged "$WT/wt-diverged" "$AHEAD_SHA"; git -C "$REPO" push -q origin "$BASE_SHA:refs/heads/diverged"
+add_wt unpushed "$WT/wt-unpushed" "$LOCAL_SHA"
+add_wt diverged "$WT/wt-diverged" "$LOCAL_SHA"; git -C "$REPO" push -q origin "$BASE_SHA:refs/heads/diverged"
 add_wt pdirty "$WT/wt-pdirty" "$AHEAD_SHA";   git -C "$REPO" push -q origin pdirty; printf 'x\n' >> "$WT/wt-pdirty/README.md"
 add_wt psecret "$WT/wt-psecret" "$AHEAD_SHA"; git -C "$REPO" push -q origin psecret; printf 'T=1\n' > "$WT/wt-psecret/.env.local"
 add_wt pdata "$WT/wt-pdata" "$AHEAD_SHA";     git -C "$REPO" push -q origin pdata; mkdir -p "$WT/wt-pdata/.testmondata"; printf 'only copy\n' > "$WT/wt-pdata/.testmondata/notes.db"
@@ -48,7 +52,7 @@ add_wt pyoung "$WT/wt-pyoung" "$AHEAD_SHA";   git -C "$REPO" push -q origin pyou
 # sqdiffreach: the exact worktree HEAD is the live tip on origin -> removable.
 # sqdiffunreach: no origin copy of that HEAD -> must stay preserved.
 add_wt sqdiffreach "$WT/wt-sqdiffreach" "$AHEAD_SHA"; git -C "$REPO" push -q origin sqdiffreach
-add_wt sqdiffunreach "$WT/wt-sqdiffunreach" "$AHEAD_SHA"
+add_wt sqdiffunreach "$WT/wt-sqdiffunreach" "$LOCAL_SHA"
 for n in pushed unpushed diverged pdirty psecret pdata pdeps pcache pbuild ppyc; do age_days_ago "$WT/wt-$n" 4; done
 age_days_ago "$WT/wt-sqdiffreach" 4
 age_days_ago "$WT/wt-sqdiffunreach" 8
