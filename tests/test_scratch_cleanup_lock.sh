@@ -249,5 +249,238 @@ rc=$?
 set -e
 [[ $rc -eq 37 ]] && record pass "exec wrapper propagates child exit status" || record fail "exec wrapper propagates child exit status (rc=$rc)"
 
+# Real Git hook regression: Git's background hook child inherits the flock FD.
+# A socket handshake keeps it alive past Git exit, then releases it explicitly.
+if python3 - "$REPO_ROOT" "$ROOT" <<'PY'
+import os
+from pathlib import Path
+import select
+import signal
+import shutil
+import socket
+import subprocess
+import sys
+
+repo, root = map(Path, sys.argv[1:])
+case = root / "fsmonitor"
+case.mkdir()
+home = case / "home"
+home.mkdir(mode=0o700)
+work = case / "repo"
+git = shutil.which("git")
+assert git, "real Git is required for fsmonitor regression"
+env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_")}
+env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), GIT_CONFIG_NOSYSTEM="1",
+           GIT_CONFIG_GLOBAL=str(home / ".gitconfig"),
+           DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS="0")
+helper = str(repo / "scripts/scratch_lock.py")
+
+def command(argv, overrides=None):
+    return subprocess.run(argv, env={**env, **(overrides or {})},
+                          capture_output=True, text=True, timeout=15)
+
+def locked(argv, overrides=None):
+    return command([sys.executable, helper, "run", "--caller", "fsmonitor-test",
+                    "--script", argv[0], "--args", "--", *argv[1:]], overrides)
+
+assert command([git, "init", "-q", str(work)]).returncode == 0
+(work / "tracked").write_text("fixture\n")
+assert command([git, "-C", str(work), "add", "tracked"]).returncode == 0
+# TCP loopback avoids Unix-socket pathname limits on macOS temporary directories.
+with socket.socket() as server:
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(10)
+    hook = case / "fsmonitor-hook"
+    hook.write_text('''#!/usr/bin/env python3
+import os, socket, sys
+ready_r, ready_w = os.pipe()
+if os.fork() == 0:
+    os.close(ready_r)
+    # Do not keep subprocess.run's captured output pipes open.
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    os.close(null)
+    try:
+        if "DELAY_HOOK_PORT" in os.environ:
+            with socket.create_connection(("127.0.0.1", int(os.environ["DELAY_HOOK_PORT"])), 10) as gate:
+                gate.sendall(b"waiting")
+                gate.recv(1)
+        with socket.create_connection(("127.0.0.1", int(os.environ["HOOK_PORT"])), 10) as peer:
+            peer.settimeout(15)
+            peer.sendall(b"ready")
+            os.write(ready_w, b"1")
+            os.close(ready_w)
+            peer.recv(1)
+            os.close(int(os.environ["DISK_MAGICIAN_SCRATCH_LOCK_FD"]))
+            peer.sendall(b"released")
+    finally:
+        os._exit(0)
+os.close(ready_w)
+assert os.read(ready_r, 1) == b"1"
+os.close(ready_r)
+sys.stdout.buffer.write(b"test-token\\0/\\0")
+''')
+    hook.chmod(0o700)
+    env["HOOK_PORT"] = str(server.getsockname()[1])
+    assert command([git, "-C", str(work), "config", "core.fsmonitor", str(hook)]).returncode == 0
+    assert command([git, "-C", str(work), "config", "core.fsmonitorHookVersion", "2"]).returncode == 0
+    config = work / ".git/config"
+    before = config.read_bytes()
+    wrapper = case / "status.sh"
+    wrapper.write_text('#!/usr/bin/env bash\nset -e\nsource "$LOCK_LIB"\n'
+                       'scratch_lock_acquire fsmonitor-test "$@"\n'
+                       'scratch_lock_acquire fsmonitor-test "$@"\n'
+                       '"$REAL_GIT" -C "$HOOK_REPO" "$@" status --porcelain\n'
+                       'exit "${TEST_GIT_EXIT_STATUS:-0}"\n')
+    wrapper.chmod(0o700)
+    env.update(LOCK_LIB=str(repo / "scripts/lib/scratch_lock.sh"), REAL_GIT=git,
+               HOOK_REPO=str(work))
+
+    def receive(peer, size):
+        data = b""
+        while len(data) < size:
+            chunk = peer.recv(size - len(data))
+            assert chunk, "hook disconnected before acknowledgement"
+            data += chunk
+        return data
+
+    def status(extra, timeout=15, before_wait=None):
+        peer = None
+        # Every fixture process, including a hook not yet connected, belongs to
+        # this new session. Never discover or signal unrelated host processes.
+        process = subprocess.Popen([str(wrapper), *extra], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        try:
+            if before_wait is not None:
+                before_wait()
+            _, stderr = process.communicate(timeout=timeout)
+            assert process.returncode == 0, stderr
+            # Hook parent waits for child's connection before returning to Git.
+            started = bool(select.select([server], [], [], 0)[0])
+            if started:
+                peer, _ = server.accept()
+                peer.settimeout(10)
+                assert receive(peer, 5) == b"ready"
+            probe = locked(["/usr/bin/true"])
+            return started, probe.returncode
+        finally:
+            try:
+                if peer is None and select.select([server], [], [], 0)[0]:
+                    peer, _ = server.accept()
+                    peer.settimeout(10)
+                    assert receive(peer, 5) == b"ready"
+                if peer is not None:
+                    with peer:
+                        peer.sendall(b"x")
+                        assert receive(peer, 8) == b"released"
+            finally:
+                if peer is not None:
+                    peer.close()
+                # Covers timeouts before connection and all assertion failures.
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        if process.poll() is None:
+                            raise
+                        try:
+                            os.killpg(process.pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        else:
+                            raise
+                process.communicate(timeout=10)
+            assert locked(["/usr/bin/true"], {"DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS": "5"}).returncode == 0, "owned hook did not release lock"
+
+    # Positive control: explicit CLI config still overrides process config.
+    # Proves this Git runs hooks and the background child really retains flock.
+    control = status(["-c", "core.fsmonitor=" + str(hook)])
+    assert control == (True, 75), control
+    print("  PASS  real Git hook child holds flock after Git exits; IPC release reacquires", flush=True)
+    env["TEST_GIT_EXIT_STATUS"] = "37"
+    try:
+        try:
+            status(["-c", "core.fsmonitor=" + str(hook)])
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("failed wrapper unexpectedly succeeded")
+    finally:
+        env.pop("TEST_GIT_EXIT_STATUS")
+    assert not select.select([server], [], [], 0)[0]
+    assert locked(["/usr/bin/true"]).returncode == 0
+    print("  PASS  failed wrapper explicitly releases its pending hook child", flush=True)
+    # A separate handshake proves the hook is blocked before its main socket
+    # connection. Timeout teardown must kill only this fixture's process group.
+    with socket.socket() as delayed:
+        delayed.bind(("127.0.0.1", 0))
+        delayed.listen()
+        delayed.settimeout(10)
+        env["DELAY_HOOK_PORT"] = str(delayed.getsockname()[1])
+        gates = []
+
+        def wait_for_delayed_hook():
+            gate, _ = delayed.accept()
+            gates.append(gate)
+            gate.settimeout(10)
+            assert receive(gate, 7) == b"waiting"
+
+        try:
+            try:
+                status(["-c", "core.fsmonitor=" + str(hook)],
+                       timeout=0.1, before_wait=wait_for_delayed_hook)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                raise AssertionError("blocked hook unexpectedly finished")
+            assert gates[0].recv(1) == b"", "timed-out hook is still alive"
+            assert locked(["/usr/bin/true"]).returncode == 0
+        finally:
+            env.pop("DELAY_HOOK_PORT")
+            for gate in gates:
+                gate.close()
+    print("  PASS  timeout before hook connection tears down owned process group", flush=True)
+    actual = status([])
+    print(f"  INFO  implicit fsmonitor hook started={actual[0]}, fresh lock rc={actual[1]}", flush=True)
+    assert actual == (False, 0), "implicit Git fsmonitor leaked scratch lock"
+    assert config.read_bytes() == before and not (home / ".gitconfig").exists()
+    print("  PASS  implicit fsmonitor suppressed, reentrancy and persistent config preserved", flush=True)
+
+# Append after caller entries, preserving unrelated and repeated config values.
+caller = {"GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "test.keep", "GIT_CONFIG_VALUE_0": "first",
+          "GIT_CONFIG_KEY_1": "core.fsmonitor", "GIT_CONFIG_VALUE_1": "true",
+          "GIT_CONFIG_KEY_2": "test.keep", "GIT_CONFIG_VALUE_2": "second"}
+assert locked([git, "config", "--get-all", "test.keep"], caller).stdout == "first\nsecond\n"
+assert locked([git, "config", "--get", "core.fsmonitor"], caller).stdout == "false\n"
+for count in ("", "0", "00", "+0", " 0", "-0", "0" * 5000):
+    assert locked([git, "config", "--get", "core.fsmonitor"], {"GIT_CONFIG_COUNT": count}).stdout == "false\n", repr(count)
+padded = {**caller, "GIT_CONFIG_COUNT": "0" * 5000 + "3"}
+assert locked([git, "config", "--get-all", "test.keep"], padded).stdout == "first\nsecond\n"
+assert locked([git, "config", "--get", "core.fsmonitor"], padded).stdout == "false\n"
+# Git must keep diagnosing malformed caller configuration, not silently repair it.
+for bad in ({"GIT_CONFIG_COUNT": value} for value in ("garbage", "-1", "1 ", "2147483648", "1")):
+    direct = command([git, "config", "--list"], bad)
+    wrapped = locked([git, "config", "--list"], bad)
+    assert direct.returncode != 0
+    assert (wrapped.returncode, wrapped.stderr) == (direct.returncode, direct.stderr), bad
+for bad in ({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "test.keep"},
+            {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "invalid", "GIT_CONFIG_VALUE_0": "x"}):
+    direct = command([git, "config", "--list"], bad)
+    wrapped = locked([git, "config", "--list"], bad)
+    assert direct.returncode != 0
+    assert (wrapped.returncode, wrapped.stderr) == (direct.returncode, direct.stderr), bad
+print("  PASS  caller config appended and malformed Git diagnostics preserved", flush=True)
+PY
+then
+  record pass "real Git fsmonitor and process config regressions"
+else
+  record fail "real Git fsmonitor and process config regressions"
+fi
+
 echo "=== Results: $PASS pass, $FAIL fail ==="
 (( FAIL == 0 ))
