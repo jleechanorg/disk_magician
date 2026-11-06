@@ -239,8 +239,8 @@ DEFERRED_DEADLINE_SKIP=false
 if (( SCHEDULER_SIGNAL != 0 )); then
   VOLUME_OUTPUT="skipped:scheduler-interrupted"
   VOLUME_RC=0
-elif [[ "$SCRATCH_PRUNE_OUTCOME" == partial ]] && grep -q '^deferred:' <<<"$SCRATCH_PRUNE_OUTPUT" && ! act_unit_fits 0; then
-  # The shared deadline is exhausted after cooperative Scratch deferral.
+elif [[ "$SCRATCH_PRUNE_OUTCOME" == partial ]] && ! act_unit_fits 0; then
+  # The shared deadline is exhausted after a partial Scratch pass.
   # Do not start the next phase with an already-expired deadline.
   DEFERRED_DEADLINE_SKIP=true
   VOLUME_OUTPUT="skipped:deadline-after-deferred"
