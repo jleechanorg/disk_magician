@@ -608,8 +608,9 @@ scratch_budget_artifact_children() {
 # <bytes> is APPARENT size (stat), never block usage, so the threshold is exact
 # at the boundary and a sparse file counts its full length. Symlinks are never
 # followed. max_depth defaults to 6 (depth 0 = <path> itself).
-# Returns 0 when every subtree was measured, 1 if any E row was emitted (a
-# caller must not read partial rows as a complete total), 2 on usage error.
+# Returns 0 when every subtree was measured, 1 for measurement errors,
+# 124 when the shared deadline expires, and 2 on usage error. Nonzero means
+# callers must not read partial rows as a complete total.
 _DM_MF_ERR="" _DM_MF_LIST="" _DM_MF_WORK="" _DM_MF_SEQ=0
 _DM_MF_RC=0 _DM_MF_DIALECT=""
 _DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
@@ -622,11 +623,11 @@ _dm_mf_subtree() {
   local dir="$1" out agg rc
   _DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
   if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
-    if out="$(find "$dir" -xdev -type f -exec stat -f '%z %m' {} + 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
+    if out="$(act_run_bounded find "$dir" -xdev \( -type f -o -type l \) -exec stat -f '%z %m' {} + 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
   else
-    if out="$(find "$dir" -xdev -type f -exec stat -c '%s %Y' {} + 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
+    if out="$(act_run_bounded find "$dir" -xdev \( -type f -o -type l \) -exec stat -c '%s %Y' {} + 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
   fi
-  (( rc == 0 )) || return 1
+  (( rc == 0 )) || return "$rc"
   # A filename containing a newline cannot disturb this: stat prints one line
   # per file and the name is never printed, so the line count is the file count.
   agg="$(printf '%s\n' "$out" | awk '
@@ -646,8 +647,8 @@ _dm_mf_subtree() {
 # when the directory could not be listed.
 _dm_mf_list() {
   _DM_MF_LIST="$_DM_MF_WORK/list.$(( ++_DM_MF_SEQ ))"
-  find "$1" -xdev -mindepth 1 -maxdepth 1 -print0 2>"$_DM_MF_ERR" >"$_DM_MF_LIST" || return 1
-  sort -z -o "$_DM_MF_LIST" "$_DM_MF_LIST" || return 1
+  act_run_bounded find "$1" -xdev -mindepth 1 -maxdepth 1 -print0 2>"$_DM_MF_ERR" >"$_DM_MF_LIST" || return $?
+  act_run_bounded sort -z -o "$_DM_MF_LIST" "$_DM_MF_LIST" || return $?
   return 0
 }
 
@@ -661,18 +662,19 @@ _dm_mf_report_err() {
 # _dm_mf_stat <path> — lstat size and mtime of <path> (never its target).
 _dm_mf_stat() {
   if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
-    stat -f '%z %m' "$1" 2>/dev/null
+    act_run_bounded stat -f '%z %m' "$1" 2>/dev/null
   else
-    stat -c '%s %Y' "$1" 2>/dev/null
+    act_run_bounded stat -c '%s %Y' "$1" 2>/dev/null
   fi
 }
 
 _dm_mf_emit_leaf() {
-  local path="$1" flag="$2" out
-  out="$(_dm_mf_stat "$path")"
+  local path="$1" flag="$2" out rc=0
+  out="$(_dm_mf_stat "$path")" || rc=$?
   if [[ ! "$out" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
     printf '0\t0\t0\tE\t%s\n' "$path"
     _dm_mf_report_err "$path"
+    if (( rc == 124 )); then _DM_MF_RC=124; fi
     return 0
   fi
   printf '%s\t1\t%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$flag" "$path"
@@ -680,7 +682,7 @@ _dm_mf_emit_leaf() {
 
 _dm_mf_walk() {
   local dir="$1" depth="$2" threshold_bytes="$3" max_depth="$4"
-  local bytes files newest child
+  local bytes files newest child rc
   if _dm_mf_subtree "$dir"; then
     bytes=$_DM_MF_BYTES files=$_DM_MF_FILES newest=$_DM_MF_NEWEST
     if (( bytes < threshold_bytes )); then
@@ -691,19 +693,32 @@ _dm_mf_walk() {
       printf '%s\t%s\t%s\tT\t%s\n' "$bytes" "$files" "$newest" "$dir"
       return 0
     fi
-  elif (( depth >= max_depth )); then
-    # Unmeasurable and unable to descend: an explicit error row, never a total.
-    printf '0\t0\t0\tE\t%s\n' "$dir"
-    _dm_mf_report_err "$dir"
-    return 0
+  else
+    rc=$?
+    if (( rc == 124 )); then
+      printf '0\t0\t0\tE\t%s\n' "$dir"
+      _dm_mf_report_err "$dir"
+      _DM_MF_RC=124
+      return 0
+    fi
+    if (( depth >= max_depth )); then
+      # Unmeasurable and unable to descend: an explicit error row, never a total.
+      printf '0\t0\t0\tE\t%s\n' "$dir"
+      _dm_mf_report_err "$dir"
+      return 0
+    fi
   fi
   # At or above the threshold: descend so the caller sees where the bytes are.
   # An unmeasurable subtree is descended too (it cannot be aggregated), which
   # reports the failure at the path that could not be read instead of claiming
   # an aggregate for it.
-  if ! _dm_mf_list "$dir"; then
+  if _dm_mf_list "$dir"; then
+    :
+  else
+    rc=$?
     printf '0\t0\t0\tE\t%s\n' "$dir"
     _dm_mf_report_err "$dir"
+    if (( rc == 124 )); then _DM_MF_RC=124; fi
     return 0
   fi
   while IFS= read -r -d '' child; do
@@ -714,6 +729,7 @@ _dm_mf_walk() {
     else
       _dm_mf_emit_leaf "$child" F
     fi
+    if (( _DM_MF_RC == 124 )); then return 0; fi
   done <"$_DM_MF_LIST"
   return 0
 }

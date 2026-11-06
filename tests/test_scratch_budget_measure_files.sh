@@ -5,14 +5,14 @@
 # threshold the walker must itemise, and only below it may it aggregate.
 #
 # Fixtures use sparse files (apparent size, so `truncate -s 120M` costs no disk)
-# and live under $HOME: the repo's scratch-routing guard refuses /tmp workspaces.
+# and live under caller-supplied admitted TMPDIR.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib/scratch_budget.sh"
 
-T="$(mktemp -d "${HOME:?}/.dm-mf-test.XXXXXX")"
+T="$(mktemp -d "${TMPDIR:?admitted Scratch TMPDIR required}/.dm-mf-test.XXXXXX")"
 trap 'chmod -R u+rwX "$T" 2>/dev/null; rm -rf "$T"' EXIT
 PASS=0; FAIL=0
 ok()  { echo "  PASS: $1"; PASS=$((PASS+1)); }
