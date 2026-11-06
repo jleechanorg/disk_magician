@@ -174,6 +174,45 @@ INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGIC
 set -e
 assert_receipt_field "unmet budget target is not a success receipt" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
 
+echo "Test 0e: an expired shared deadline stops after a deferred Scratch phase without inventing zero counts"
+: > "$INVOCATION_LOG"
+EXPIRED_DEADLINE="$(python3 -c 'import time; print(time.monotonic()-1)')"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  SCRATCH_PRUNE_MOCK_EXIT=0 SCRATCH_PRUNE_MOCK_LINE="deferred:deadline expired before scratch summary" \
+  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$EXPIRED_DEADLINE" \
+  --cursor "$TMP_ROOT/deferred.cursor" >"$TMP_ROOT/deferred.out" 2>&1
+set -e
+assert_receipt_field "expired deferred Scratch phase is partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "expired deferred Scratch phase records one deferral" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('deferred_count'))" "1"
+assert_receipt_field "expired deferred Scratch phase keeps aggregate removal unknown" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('removed_count'))" "None"
+assert_receipt_field "expired deferred Scratch phase keeps Scratch removal unknown" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_removed'))" "None"
+if grep -q '^disk_magician volume reclaim' "$INVOCATION_LOG"; then
+  echo "  FAIL  expired deferred Scratch phase launched volume reclaim"
+  FAIL=$((FAIL+1))
+else
+  echo "  PASS  expired deferred Scratch phase skipped volume reclaim"
+  PASS=$((PASS+1))
+fi
+echo "Test 0f: an expired shared deadline skips volume after a valid partial-4 summary"
+: > "$INVOCATION_LOG"
+EXPIRED_DEADLINE="$(python3 -c 'import time; print(time.monotonic()-1)')"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  SCRATCH_PRUNE_MOCK_EXIT=4 SCRATCH_PRUNE_MOCK_LINE=$'scanned=0 kept=1 removable=0 removed=0 planned_mb=0\npartial:budget-target-unmet' \
+  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$EXPIRED_DEADLINE" \
+  --cursor "$TMP_ROOT/partial4.cursor" >"$TMP_ROOT/partial4.out" 2>&1
+set -e
+assert_receipt_field "expired partial-4 Scratch phase is partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "expired partial-4 keeps summary aggregate zero" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('removed_count'))" "0"
+assert_receipt_field "expired partial-4 keeps Scratch summary zero" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_removed'))" "0"
+if grep -q '^disk_magician volume reclaim' "$INVOCATION_LOG"; then
+  echo "  FAIL  expired partial-4 Scratch phase launched volume reclaim"
+  FAIL=$((FAIL+1))
+else
+  echo "  PASS  expired partial-4 Scratch phase skipped volume reclaim"
+  PASS=$((PASS+1))
+fi
 echo "Test 1: --clean invokes cleanup_tmp.sh with LARGE_TMP_APPROVED=1"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" /bin/bash "$SCRIPT" --clean

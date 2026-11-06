@@ -1543,10 +1543,21 @@ def linux_trim_auto_cmd(arguments: list[str]) -> int:
         raise ValueError("native Scratch trim admin image is missing or unpinned")
     image_before, scratch_used, host_before = linux_trim_measure(image, mountpoint)
     gap = max(0, image_before - scratch_used)
-    # Reclaim host blocks only when there is a meaningful image/guest gap and
-    # the host is below the capacity needed for a full runner burst.
-    if gap < 4 * GIB or host_before >= 80 * GIB:
-        print(json.dumps({"status": "skipped", "reason": "no-host-reclaim-pressure",
+    # Reclaim host blocks whenever the backing image holds a meaningful gap.
+    #
+    # The old gate also required host_free < 80 GiB, which made this a NO-OP on
+    # a healthy host: measured 2026-11-05 on jeff-ubuntu, image_gap_bytes was
+    # 19.5 GB with 127 GiB free, so every invocation reported
+    # "no-host-reclaim-pressure" and skipped. The gap then grew again the moment
+    # agents churned, and nothing trimmed it until the weekly systemd timer.
+    #
+    # A gap means the image is carrying blocks the guest no longer uses. Holding
+    # them costs host space permanently and buys nothing, so the only condition
+    # that matters is whether the gap is worth the ioctl. Host free is still
+    # reported in the receipt as context, and the pressure-driven reclaim path
+    # keeps its own separate free-space trigger.
+    if gap < 4 * GIB:
+        print(json.dumps({"status": "skipped", "reason": "no-reclaimable-gap",
                           "filesystem_uuid": fs_uuid, "image_gap_bytes": gap,
                           "host_free_bytes": host_before}, sort_keys=True))
         return 0
@@ -3341,6 +3352,22 @@ def pressure_process(arguments, state, env=None, recovery=False):
                 if process.poll() is None:
                     try: os.killpg(process.pid, signal.SIGTERM)
                     except ProcessLookupError: pass
+                    except PermissionError as forward_error:
+                        # The owned leader may have exited between poll() and
+                        # killpg(). Ignore EPERM only when the exact process
+                        # group is also proven absent by a read-only probe.
+                        if process.poll() is None:
+                            raise
+                        try:
+                            os.killpg(process.pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        except PermissionError:
+                            raise forward_error
+                        except OSError:
+                            raise
+                        else:
+                            raise forward_error
                 forwarded = True
             try:
                 return subprocess.CompletedProcess(arguments, process.wait(timeout=.1))

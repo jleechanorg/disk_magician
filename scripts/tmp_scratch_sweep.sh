@@ -209,6 +209,12 @@ PY
     rc=1
   elif grep -qE '^(deferred:|skipped:measurement-unavailable)' <<<"$SCRATCH_PRUNE_OUTPUT"; then
     SCRATCH_PRUNE_OUTCOME=partial
+    # A deferred child without a terminal summary cannot establish zero counts.
+    # Preserve any accurate summary emitted before the cooperative deferral.
+    if [[ -z "$SCRATCH_PRUNE_SUMMARY" ]]; then
+      SCRATCH_PRUNE_REMOVED=null
+      SCRATCH_PRUNE_SCANNED=null
+    fi
   elif grep -qE '^skipped:(available-floor|budget-target-met)' <<<"$SCRATCH_PRUNE_OUTPUT"; then
     SCRATCH_PRUNE_OUTCOME=success_noop
   else
@@ -255,8 +261,15 @@ VOLUME_CURSOR=""
 VOLUME_OUTPUT=""
 VOLUME_RC=0
 VOLUME_COMMAND_STARTED=false
+DEFERRED_DEADLINE_SKIP=false
 if (( SCHEDULER_SIGNAL != 0 )); then
   VOLUME_OUTPUT="skipped:scheduler-interrupted"
+  VOLUME_RC=0
+elif [[ "$SCRATCH_PRUNE_OUTCOME" == partial ]] && ! act_unit_fits 0; then
+  # The shared deadline is exhausted after a partial Scratch pass.
+  # Do not start the next phase with an already-expired deadline.
+  DEFERRED_DEADLINE_SKIP=true
+  VOLUME_OUTPUT="skipped:deadline-after-deferred"
   VOLUME_RC=0
 elif [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" || "$VOLUME_TIMEOUT_SEC" == 0 ]]; then
   VOLUME_OUTPUT="skipped:bounded-runtime-unavailable"
@@ -327,6 +340,8 @@ elif "scratch lock held" in sys.argv[4]:
  print(json.dumps({"valid":True,"outcome":"skipped_lock","skip_reason":"scratch-lock-held","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scratch-lock-held"},separators=(",",":")))
 elif sys.argv[4].strip() == "skipped:scheduler-interrupted":
  print(json.dumps({"valid":True,"outcome":"timeout","skip_reason":"scheduler-interrupted","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scheduler-interrupted"},separators=(",",":")))
+elif sys.argv[4].strip() == "skipped:deadline-after-deferred":
+ print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":"deadline-after-deferred","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"deadline-after-deferred"},separators=(",",":")))
 else:
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"bound-receipt-unavailable"},separators=(",",":")))
 PYV
@@ -424,7 +439,7 @@ if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && "$DF_DELTA" != null ]]; then
   REMOVED_COUNT=0
   DEFERRED_COUNT=0
   INTERRUPTED_COUNT=0
-elif [[ "$REMOVED_COUNT" == null || "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]]; then
+elif [[ "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]] || [[ "$REMOVED_COUNT" == null && "$DEFERRED_DEADLINE_SKIP" != true ]]; then
   rc=1
   OUTCOME="error"
   REASON="adapter receipt or df postcondition unavailable"
