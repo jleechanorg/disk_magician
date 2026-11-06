@@ -348,7 +348,7 @@ declare -F act_run_bounded >/dev/null || source "$(dirname "${BASH_SOURCE[0]}")/
 # also ambiguous with a legitimate epoch-0 file. Callers MUST treat a
 # non-numeric return as "exclude from eviction", never coerce it to 0.
 scratch_budget_content_mtime() {
-  local path="$1" epoch strict="${2:-}" links stat_format
+  local path="$1" epoch strict="${2:-}" links stat_format scan_rc stat_rc
   if [[ "$strict" == --strict ]]; then
     [[ -d "$path" && ! -L "$path" ]] || return 1
     links="$(act_run_bounded find "$path" -xdev -type l -print -quit)" || return $?
@@ -373,18 +373,50 @@ scratch_budget_content_mtime() {
   # A bare failing command here previously aborted the ENTIRE cleanup script
   # instead of yielding "unmeasurable, preserve".
   if [[ -f "$path" && ! -d "$path" ]]; then
-    if [[ "$(uname -s)" == Darwin ]]; then stat -f "$stat_format" "$path" 2>/dev/null || true; else stat -c "$stat_format" "$path" 2>/dev/null || true; fi
+    stat_rc=0
+    if [[ "$(uname -s)" == Darwin ]]; then
+      epoch="$(act_run_bounded stat -f "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    else
+      epoch="$(act_run_bounded stat -c "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    fi
+    if (( stat_rc == 124 || stat_rc == 137 )); then
+      epoch=""
+    fi
+    echo "$epoch"
     return
   fi
+  # Keep the streaming find|stat|awk pipeline, but bound the producer itself.
+  # A timed-out producer invalidates all partial output and skips directory stat.
+  scan_rc=0
   if [[ "$(uname -s)" == Darwin ]]; then
-    epoch="$(find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+    epoch="$(
+      set +e
+      set -o pipefail
+      act_run_bounded find "$path" -xdev -type f -exec stat -f "$stat_format" {} + 2>/dev/null \
+        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}'
+    )" || scan_rc=$?
   else
-    epoch="$(find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
-        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}' || true)"
+    epoch="$(
+      set +e
+      set -o pipefail
+      act_run_bounded find "$path" -xdev -type f -exec stat -c "$stat_format" {} + 2>/dev/null \
+        | awk '$1+0>m{m=$1+0} END{if (m>0) print m}'
+    )" || scan_rc=$?
+  fi
+  if [[ "$scan_rc" == 124 || "$scan_rc" == 137 ]]; then
+    echo ""
+    return 0
   fi
   if [[ -z "$epoch" ]]; then
-    if [[ "$(uname -s)" == Darwin ]]; then epoch="$(stat -f "$stat_format" "$path" 2>/dev/null || true)"; else epoch="$(stat -c "$stat_format" "$path" 2>/dev/null || true)"; fi
+    stat_rc=0
+    if [[ "$(uname -s)" == Darwin ]]; then
+      epoch="$(act_run_bounded stat -f "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    else
+      epoch="$(act_run_bounded stat -c "$stat_format" "$path" 2>/dev/null)" || stat_rc=$?
+    fi
+    if (( stat_rc == 124 || stat_rc == 137 )); then
+      epoch=""
+    fi
   fi
   echo "$epoch"
 }
@@ -566,24 +598,76 @@ scratch_budget_artifact_children() {
   # root before walking, then prune every marked directory in this one bounded
   # walk so a shallower Git ancestor cannot be bypassed by a later depth pass.
   [[ -e "$dir/.git" || -L "$dir/.git" ]] && return 0
-  local child base
-  while IFS= read -r -d '' child; do
-    [[ -d "$child" && ! -L "$child" ]] || continue
-    base="${child##*/}"
-    case "$base" in
-      .*|node_modules) : ;;   # node_modules itself is a strip target, not a descent root
-    esac
-    case "$base" in
-      build|dist|out|target|coverage|artifacts|gradle|.gradle|android-sdk|avd\
-      |isolated-*|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods)
-        printf '%s\n' "$child" ;;
-    esac
-  done < <(
-    find "$dir" -mindepth 1 -maxdepth "$max_depth" -type d \
-      \( -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune \) -o \
-      -type d ! -name '.*' -print0 2>/dev/null
-  )
-  return 0
+  (( max_depth > 0 )) || return 0
+  # One Python stdlib walker avoids a shell process for every visited directory.
+  # It checks the actuator deadline before each directory expansion and returns
+  # 124 when expansion is deferred; callers must report that explicitly rather
+  # than treating an incomplete list as "no eligible entries".
+  local deadline="${ACT_DEADLINE_AT:-}"
+  python3 - "$dir" "$max_depth" "$deadline" <<'PY'
+import fnmatch
+import os
+import sys
+import time
+
+root, max_depth, deadline = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+try:
+    deadline_value = float(deadline) if deadline else None
+except ValueError:
+    raise SystemExit(1)
+
+def expired():
+    return deadline_value is not None and time.monotonic() >= deadline_value
+
+def has_git_marker(path):
+    try:
+        os.lstat(os.path.join(path, ".git"))
+    except FileNotFoundError:
+        return False
+    return True
+
+def is_artifact_name(name):
+    return name in {
+        "build", "dist", "out", "target", "coverage", "artifacts", "gradle",
+        ".gradle", "android-sdk", "avd", ".next", ".cache", ".turbo",
+        ".parcel-cache", "__pycache__", "DerivedData", "Pods",
+    } or fnmatch.fnmatchcase(name, "isolated-*")
+
+def walk(path, depth):
+    if expired():
+        raise TimeoutError
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if expired():
+                    raise TimeoutError
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    child = entry.path
+                    # Match find's -exec marker check followed by -prune: the
+                    # marked directory itself is not emitted and is never
+                    # descended into.
+                    if has_git_marker(child):
+                        continue
+                    # find's `! -name '.*' -print0` filters hidden output
+                    # basenames, while still traversing hidden parents.
+                    if not entry.name.startswith(".") and is_artifact_name(entry.name):
+                        print(child, flush=True)
+                    if depth < max_depth:
+                        walk(child, depth + 1)
+                except OSError:
+                    raise
+    except OSError:
+        raise
+
+try:
+    walk(root, 1)
+except TimeoutError:
+    raise SystemExit(124)
+except (OSError, ValueError):
+    raise SystemExit(1)
+PY
 }
 
 # scratch_budget_measure_files <path> [threshold_mib] [max_depth]

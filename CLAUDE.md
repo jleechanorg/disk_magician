@@ -473,13 +473,53 @@ Rules that follow, and that any new reclaim code must obey:
   contains `.git`** -- a working tree is not a build artifact and deleting a
   nested source directory would be data loss.
 - Size reporting must sum **file sizes**, not stop at directory entries: `du` on a
-  parent cannot tell you that 23.7 of 35 GiB is stale while 7 GiB is live.
+  parent cannot tell you that 23.7 of 35 GiB is stale while 7 GiB is live. The
+  measurement rule below is how this is applied and checked.
 - Do not special-case directory names in a hardcoded list to reach nested
   content. The previous code had exactly that (`evidence|worldai_frontend|…` plus
   a fixed extra depth) and it still could not reach `build/android-native-*/isolated-*`.
 - Tests live in `tests/test_scratch_budget_artifact_children.sh`: stale sibling
   discovered beside a fresh one, `.git` tree not descended, symlink not followed,
   ordinary directory ignored, depth bound respected.
+
+### The measurement rule — measure every file, 100 MiB stop floor (hard)
+
+**Never stop measuring at directory granularity.** A directory's aggregate — the
+newest file anywhere beneath it, or one `du` total — is not a valid answer to
+"how big is this" or "how old is this": one fresh child shelters stale siblings,
+and one stale child hides a live one. The tree above is the counter-example, not
+a hypothetical: reported as a directory, `Scratch/worldai_frontend/build` was
+35 GiB and "0 h old"; measured as files, 23.7 GiB of that same tree was 39-41 h
+old while 7 GiB was live.
+
+There is exactly one permitted stop, on size: **100 MiB**.
+
+- A directory **smaller than 100 MiB** MAY be treated as one unit — reported,
+  aged, and judged as a single entry on its own newest-file age.
+- A directory **at or above 100 MiB** MUST be itemised into its children, and
+  each child recursed by the same test, until every entry reported is either a
+  file or a directory under 100 MiB. A `du` total, a bare child list, or "the
+  parent is 35 GiB" is not an itemisation.
+- Descending never follows a symlink and never enters a directory that contains
+  `.git` (see the bullet above); content behind those boundaries is reported as
+  an opaque unit with that fact stated.
+- The floor governs age claims too: an age is only reported for the unit the
+  size rule allowed you to stop at, so a 35 GiB directory never gets an age.
+
+Every reported size states its method and its threshold:
+
+- Say whether the figure is **file-summed** (summed file sizes measured inside)
+  or **directory-aggregate** (a filesystem or `du` total, an apparent size, a
+  parent's number), and name the threshold it was measured to, e.g. "file-summed,
+  itemised to 100 MiB".
+- A directory-aggregate figure is a place to descend from, never evidence of
+  age, staleness, or reclaimability.
+
+**Never claim "nothing to reclaim" from a directory-level scan.** That claim
+requires the opposite proof: name the largest individual files you examined,
+with sizes, and the threshold you measured them to. "The directories are fresh"
+or "the tree is 0 h old" is not that proof — it is the aggregate this section
+exists to forbid.
 
 ## Operational gotchas (learned the hard way — details in roadmap/ and beads)
 
