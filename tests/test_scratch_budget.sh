@@ -102,6 +102,97 @@ test_keep_only_cursor() {
   assert_missing "Test26: keep-only visit never invokes quarantine" "$calls"
 }
 
+test_regression_mac_autoclean_20261105_mtime_deadline() {
+  local fixture="$TMP_TEST_ROOT/mtime-deadline"
+  mkdir -p "$fixture/bin" "$fixture/candidate" "$fixture/linked"
+  cat >"$fixture/bin/find" <<'PY'
+#!/usr/bin/env python3
+import os, sys, time
+if os.environ.get("SLOW_FIND") == "1":
+    with open(os.environ["FIND_PIDS"], "a") as stream:
+        stream.write(str(os.getpid()) + "\n")
+    time.sleep(3)
+os.execv(os.environ["REAL_FIND"], [os.environ["REAL_FIND"], *sys.argv[1:]])
+PY
+  chmod +x "$fixture/bin/find"
+  cat >"$fixture/probe.py" <<'PY'
+import os, pathlib, signal, subprocess, sys, time
+
+repo, fixture, real_find = sys.argv[1:]
+root = pathlib.Path(fixture)
+pids = root / "find.pids"
+old_epoch = 1600000000
+for name in ("candidate", "linked"):
+    payload = root / name / "payload"
+    payload.write_text("preserve me\n")
+    os.utime(payload, (old_epoch, old_epoch))
+outside = root / "fresh-outside"
+outside.write_text("do not follow\n")
+(root / "linked" / "external-link").symlink_to(outside)
+env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+           REAL_FIND=real_find, FIND_PIDS=str(pids))
+script = '''source "$1/scripts/lib/scratch_budget.sh"
+ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+0.5)')"
+scratch_budget_content_mtime "$2" "$3"
+'''
+
+def probe(label, candidate, strict="", slow=False):
+    started = time.monotonic()
+    proc = subprocess.Popen(["bash", "-c", script, "probe", repo,
+                             str(root / candidate), strict],
+                            env=dict(env, SLOW_FIND="1" if slow else "0"),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=8)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise RuntimeError("test supervisor expired; not a behavioral RED")
+    elapsed = time.monotonic() - started
+    print(f"{label}: rc={proc.returncode} elapsed_s={elapsed:.3f} "
+          f"deadline_s=0.5 stdout={out.strip()!r} stderr={err.strip()!r}", flush=True)
+    return proc.returncode, out.strip(), elapsed
+
+try:
+    fast = probe("fast-symlink-positive-control", "linked")
+    assert fast[0] == 0 and fast[1] == str(old_epoch), "fast best-effort control failed"
+    strict = probe("strict-bounded-control", "candidate", "--strict", slow=True)
+    assert strict[0] == 124 and not strict[1] and strict[2] < 2, "existing bounded control failed"
+    slow = probe("best-effort-slow-candidate", "candidate", slow=True)
+    assert (root / "candidate" / "payload").read_text() == "preserve me\n"
+    assert (root / "linked" / "external-link").is_symlink() and outside.exists()
+    assert slow[2] < 2 and not slow[1], (
+        "DEADLINE_OVERRUN: best-effort age probe must stop within caller deadline "
+        "(0.5s plus supervisor grace), returning no usable age for unmeasured data; "
+        f"got elapsed_s={slow[2]:.3f} rc={slow[0]} age={slow[1]!r}")
+finally:
+    leaked = []
+    for raw in pids.read_text().splitlines() if pids.exists() else []:
+        pid = int(raw)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        leaked.append(pid)
+        os.kill(pid, signal.SIGKILL)
+    print(f"test-owned find processes remaining={len(leaked)} (killed if any)", flush=True)
+    assert not leaked, f"test-owned find processes leaked: {leaked}"
+PY
+  if python3 "$fixture/probe.py" "$REPO_ROOT" "$fixture" "$(command -v find)"; then
+    record_pass "mac-autoclean best-effort age probe honors caller deadline"
+  else
+    record_fail "mac-autoclean best-effort age probe honors caller deadline" "see behavioral assertion above"
+  fi
+}
+
+if [[ "${SCRATCH_BUDGET_TEST_FILTER:-}" == mtime-deadline-contract ]]; then
+  test_regression_mac_autoclean_20261105_mtime_deadline
+  echo "test_scratch_budget (mtime-deadline-contract): $PASS passed, $FAIL failed"
+  [[ "$FAIL" -eq 0 ]]
+  exit $?
+fi
+
 if [[ "${SCRATCH_BUDGET_TEST_FILTER:-}" == keep-only-cursor ]]; then
   test_keep_only_cursor
   echo "test_scratch_budget (keep-only-cursor): $PASS passed, $FAIL failed"
@@ -644,6 +735,7 @@ set -e
 [[ $strict_symlink_rc -ne 0 ]] && record_pass "Test25: strict content mtime rejects symlink traversal" || record_fail "Test25: strict content mtime rejects symlink traversal" "rc=$strict_symlink_rc"
 [[ $strict_error_rc -ne 0 ]] && record_pass "Test25: strict content mtime preserves on traversal error" || record_fail "Test25: strict content mtime preserves on traversal error" "rc=$strict_error_rc"
 
+test_regression_mac_autoclean_20261105_mtime_deadline
 test_keep_only_cursor
 
 echo ""
