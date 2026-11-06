@@ -524,6 +524,17 @@ if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
     fi
     if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
     [[ -d "$entry" ]] || continue
+    # Manual minimum-size filtering is a prioritization control, not an
+    # automatic retention gate. Apply it before the expensive age walk so a
+    # tiny slow sibling cannot consume the entire bounded ordering pass.
+    if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 )); then
+      _pre_kb="$(deletion_size_kb "$entry" 2>/dev/null)" || _pre_kb=0
+      [[ "$_pre_kb" =~ ^[0-9]+$ ]] || _pre_kb=0
+      if (( _pre_kb < 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} )); then
+        echo "kept:below-min-size $entry (${_pre_kb} KB)"
+        kept=$(( kept + 1 )); continue
+      fi
+    fi
     mtime="$(scratch_budget_content_mtime "$entry" 2>/dev/null)"
     if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
       echo "kept:mtime-unmeasurable $entry"; kept=$(( kept + 1 )); continue

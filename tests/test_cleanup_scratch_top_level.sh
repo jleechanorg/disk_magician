@@ -162,6 +162,31 @@ FAKE_LRU_DISKM
   [[ "$status_calls" -eq 3 ]] && ok "only initial, eligible, and final usage probes run" || \
     bad "only initial, eligible, and final usage probes run" "status_calls=$status_calls"
 
+  echo "Test: manual LRU filters sub-threshold entries before slow age ordering"
+  use_root
+  mkdir -p "$SCRATCH_ROOT/aaa-small-slow" "$SCRATCH_ROOT/zzz-large-eligible"
+  printf 'tiny\n' >"$SCRATCH_ROOT/aaa-small-slow/payload.bin"
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/zzz-large-eligible/payload.bin"
+  old_stamp "$SCRATCH_ROOT/aaa-small-slow" 13
+  old_stamp "$SCRATCH_ROOT/zzz-large-eligible" 13
+  SLOW_FIND_BIN="$T/lru-slow-find-bin"
+  mkdir -p "$SLOW_FIND_BIN"
+  cat >"$SLOW_FIND_BIN/find" <<'FAKE_FIND'
+#!/usr/bin/env bash
+case "$1" in
+  *aaa-small-slow*) sleep 2 ;;
+esac
+exec /usr/bin/find "$@"
+FAKE_FIND
+  chmod +x "$SLOW_FIND_BIN/find"
+  : >"$T/lru-status.calls"
+  deadline="$(python3 -c 'import time; print(time.monotonic()+1)')"
+  out="$(RUN_PATH="$SLOW_FIND_BIN:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" lru_run bash "$SCRIPT" --clean --budget-pct 5 --deadline-at "$deadline" 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "minimum-size prefilter regression exits 0" || bad "minimum-size prefilter regression exits 0" "rc=$rc"
+  [[ -d "$SCRATCH_ROOT/aaa-small-slow" ]] && ok "slow sub-threshold candidate is preserved" || bad "slow sub-threshold candidate is preserved"
+  [[ ! -e "$SCRATCH_ROOT/zzz-large-eligible" ]] && ok "eligible candidate is evicted despite slow small sibling" || bad "eligible candidate is evicted despite slow small sibling" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-400)"
+  check "minimum-size prefilter still reaches target" "lru: stop=target-reached evicted=1" "$out"
+
   for mode in quota-change usage-unknown; do
     use_root
     mkdir -p "$SCRATCH_ROOT/lru-identity"
