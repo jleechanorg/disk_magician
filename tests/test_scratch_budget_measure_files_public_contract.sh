@@ -31,7 +31,7 @@ else
   bad "allocated du threshold hides sparse apparent200MiB detail"
 fi
 
-# Log every path actually visited by GNU find, including nodes its original
+# Log every path actually visited by find, including nodes its original
 # predicates would not print. Prepending an always-true action keeps the
 # original predicates and -prune behavior; it does not walk a second tree.
 mkdir -p "$T/bin"
@@ -42,7 +42,7 @@ cat >"$T/bin/find" <<'SH'
 #!/usr/bin/env bash
 root="$1"
 shift
-exec "$REAL_FIND" "$root" -fprint "$PR322_FIND_TRACE.$BASHPID" -a "$@"
+exec "$REAL_FIND" "$root" -exec sh -c 'printf "%s\n" "$2" >> "$1"' _ "$PR322_FIND_TRACE.$$" {} \; -a "$@"
 SH
 cat >"$T/bin/stat" <<'SH'
 #!/usr/bin/env bash

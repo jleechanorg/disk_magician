@@ -101,23 +101,24 @@ else
     || bad "rows emitted beneath an unreadable directory"
 fi
 
-# 6. max_depth is respected: at the bound the walk stops and says so (T), rather
-#    than silently aggregating a subtree above the threshold.
+# 6. A large descendant is itemised even below the former six-level stop.
 DEEP="$T/deep"
-mkdir -p "$DEEP/a/b/c"
-truncate -s 150M "$DEEP/a/b/c/payload"
-out="$(scratch_budget_measure_files "$DEEP" 100 1)"
-[[ "$(flags_of "$DEEP/a" "$out")" == "T" ]] \
-  && ok "depth-bounded directory reported as truncated (T), not aggregated" \
-  || bad "depth-bounded directory not reported as T (got '$(flags_of "$DEEP/a" "$out")')"
-grep -q "$DEEP/a/b" <<<"$out" \
-  && bad "max_depth=1 walked to depth 2" || ok "max_depth=1 respected (nothing below depth 1)"
-[[ "$(bytes_of "$DEEP/a" "$out")" == "157286400" ]] \
-  && ok "truncated row still states the real 150 MiB underneath" \
-  || bad "truncated row lost the subtree size"
-out="$(scratch_budget_measure_files "$DEEP" 100 6)"
-grep -q 'F	'"$DEEP"'/a/b/c/payload$' <<<"$out" \
-  && ok "raising max_depth reaches the payload" || bad "max_depth=6 did not reach the payload"
+PAYLOAD="$DEEP/a/b/c/d/e/f/g/h/i/payload"
+mkdir -p "$(dirname "$PAYLOAD")"
+truncate -s 150M "$PAYLOAD"
+out="$(scratch_budget_measure_files "$DEEP" 100)"
+[[ "$(flags_of "$PAYLOAD" "$out")" == "F" ]] \
+  && ok "deep large payload reported as a file" \
+  || bad "deep large payload not itemised"
+[[ "$(awk -F'\t' '$4 == "T" {n++} END {print n+0}' <<<"$out")" == "0" ]] \
+  && ok "no depth-truncated row substitutes for itemisation" \
+  || bad "depth-truncated row remains"
+[[ "$(bytes_of "$PAYLOAD" "$out")" == "157286400" ]] \
+  && ok "deep file row carries the real 150 MiB" \
+  || bad "deep file row lost the payload size"
+[[ "$(wc -l <<<"$out")" -eq 1 ]] \
+  && ok "only the payload is reported, not ancestor aggregates" \
+  || bad "unexpected ancestor or duplicate rows"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

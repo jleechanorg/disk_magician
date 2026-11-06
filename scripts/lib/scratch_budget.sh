@@ -670,7 +670,7 @@ except (OSError, ValueError):
 PY
 }
 
-# scratch_budget_measure_files <path> [threshold_mib] [max_depth]
+# scratch_budget_measure_files <path> [threshold_mib]
 # Measurement counterpart to scratch_budget_artifact_children. Reporting used to
 # print ONE `du` total per candidate, which hides exactly what the per-child age
 # rule above exists to expose: measured 2026-11-03, a 35 GiB Scratch build root
@@ -685,14 +685,12 @@ PY
 #   <bytes>\t<files>\t<newest_epoch>\t<flag>\t<path>
 #     A  aggregated directory (total below the threshold)
 #     F  single file, measured on its own
-#     T  truncated: directory at max_depth whose total is still >= threshold
-#        (raise max_depth for detail; reported rather than aggregated silently)
 #     L  symlink, never followed (bytes = the link itself, not its target)
 #     G  opaque Git boundary; zero fields mean unmeasured, not empty or old
 #     E  unreadable: the subtree could not be measured
 # <bytes> is APPARENT size (stat), never block usage, so the threshold is exact
 # at the boundary and a sparse file counts its full length. Symlinks are never
-# followed. max_depth defaults to 6 (depth 0 = <path> itself).
+# followed. Size is the only aggregation stop; Git boundaries remain opaque.
 # Returns 0 when every subtree was measured, 1 for measurement errors,
 # 124 when the shared deadline expires, and 2 on usage error. Nonzero means
 # callers must not read partial rows as a complete total.
@@ -768,7 +766,7 @@ _dm_mf_emit_leaf() {
 }
 
 _dm_mf_walk() {
-  local dir="$1" depth="$2" threshold_bytes="$3" max_depth="$4"
+  local dir="$1" threshold_bytes="$2"
   local bytes files newest child rc
   if [[ -e "$dir/.git" || -L "$dir/.git" ]]; then
     printf '0\t0\t0\tG\t%s\n' "$dir"
@@ -780,22 +778,12 @@ _dm_mf_walk() {
       printf '%s\t%s\t%s\tA\t%s\n' "$bytes" "$files" "$newest" "$dir"
       return 0
     fi
-    if (( depth >= max_depth )); then
-      printf '%s\t%s\t%s\tT\t%s\n' "$bytes" "$files" "$newest" "$dir"
-      return 0
-    fi
   else
     rc=$?
     if (( rc == 124 )); then
       printf '0\t0\t0\tE\t%s\n' "$dir"
       _dm_mf_report_err "$dir"
       _DM_MF_RC=124
-      return 0
-    fi
-    if (( depth >= max_depth )); then
-      # Unmeasurable and unable to descend: an explicit error row, never a total.
-      printf '0\t0\t0\tE\t%s\n' "$dir"
-      _dm_mf_report_err "$dir"
       return 0
     fi
   fi
@@ -816,7 +804,7 @@ _dm_mf_walk() {
     if [[ -L "$child" ]]; then
       _dm_mf_emit_leaf "$child" L
     elif [[ -d "$child" ]]; then
-      _dm_mf_walk "$child" $(( depth + 1 )) "$threshold_bytes" "$max_depth"
+      _dm_mf_walk "$child" "$threshold_bytes"
     else
       _dm_mf_emit_leaf "$child" F
     fi
@@ -826,13 +814,12 @@ _dm_mf_walk() {
 }
 
 scratch_budget_measure_files() {
-  local path="${1:-}" threshold_mib="${2:-100}" max_depth="${3:-6}" work rc
+  local path="${1:-}" threshold_mib="${2:-100}" work rc
   if [[ -z "$path" ]]; then
-    echo 'scratch_budget_measure_files: usage: scratch_budget_measure_files <path> [threshold_mib] [max_depth]' >&2
+    echo 'scratch_budget_measure_files: usage: scratch_budget_measure_files <path> [threshold_mib]' >&2
     return 2
   fi
   [[ "$threshold_mib" =~ ^[0-9]+$ ]] || threshold_mib=100
-  [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=6
   _DM_MF_RC=0
   if [[ "$(uname -s)" == Darwin ]]; then _DM_MF_DIALECT=Darwin; else _DM_MF_DIALECT=GNU; fi
   _DM_MF_ERR="" _DM_MF_LIST=""
@@ -851,7 +838,7 @@ scratch_budget_measure_files() {
   fi
   work="$(mktemp -d "${TMPDIR:-/tmp}/dm-mf.XXXXXX")" || return 2
   _DM_MF_WORK="$work" _DM_MF_ERR="$work/err" _DM_MF_LIST="" _DM_MF_SEQ=0
-  _dm_mf_walk "$path" 0 "$(( threshold_mib * 1024 * 1024 ))" "$max_depth"
+  _dm_mf_walk "$path" "$(( threshold_mib * 1024 * 1024 ))"
   rc=$_DM_MF_RC
   rm -rf "$work"
   return $rc

@@ -267,12 +267,11 @@ scratch_available_bytes() {
 # line while 23.7 GiB of its children were 39-41 h old. Reporting only -- the
 # C14 verdict, the recency floor, the cursor and the LRU order are untouched.
 DETAIL_MIB=100
-DETAIL_DEPTH=6
 report_candidate_detail() {
   local entry="$1" rows bytes files newest flag path metadata
   # The caller supplies allocated du KiB; only the measurement can decide
   # the apparent-size threshold (sparse files may have almost no allocation).
-  rows="$(scratch_budget_measure_files "$entry" "$DETAIL_MIB" "$DETAIL_DEPTH" 2>/dev/null)" || :
+  rows="$(scratch_budget_measure_files "$entry" "$DETAIL_MIB" 2>/dev/null)" || :
   while IFS=$'\t' read -r bytes files newest flag path; do
     [[ -n "${flag:-}" ]] || continue
     [[ "$flag" == A && "$path" == "$entry" ]] && continue
