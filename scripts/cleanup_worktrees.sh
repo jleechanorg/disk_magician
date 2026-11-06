@@ -558,6 +558,11 @@ classify_content_and_merge() {
         return 0
     fi
     if [[ -n "$status_porcelain" ]]; then
+        # Rebuildable untracked output must never mask tracked index/worktree edits.
+        if grep -qvE '^(\?\?|!!)' <<<"$status_porcelain"; then
+            echo "dirty"
+            return 0
+        fi
         if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
             # Removal uses --force --force, so every untracked entry is deleted
             # with the checkout. Entries the repo's own allowlist already calls

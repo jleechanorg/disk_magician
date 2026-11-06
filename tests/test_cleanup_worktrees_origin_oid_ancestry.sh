@@ -63,13 +63,21 @@ add_wt husky         "$WT/wt-husky"     "$RENAMED_SHA"; mkdir -p "$WT/wt-husky/.
 add_wt nodemodules   "$WT/wt-nodemodules" "$RENAMED_SHA"; mkdir -p "$WT/wt-nodemodules/node_modules/x"; printf 'x\n' > "$WT/wt-nodemodules/node_modules/x/i.js"
 # must stay preserved
 add_wt dirty         "$WT/wt-dirty"     "$RENAMED_SHA"; printf 'edit\n' >> "$WT/wt-dirty/README.md"
+# Mixed porcelain must retain the tracked-edit veto even when untracked output is rebuildable.
+for mixed in mixedunstaged mixedstaged; do
+  add_wt "$mixed" "$WT/wt-$mixed" "$RENAMED_SHA"
+  printf 'edit\n' >> "$WT/wt-$mixed/README.md"
+  mkdir -p "$WT/wt-$mixed/node_modules/x"
+  printf 'generated\n' > "$WT/wt-$mixed/node_modules/x/i.js"
+done
+git -C "$WT/wt-mixedstaged" add README.md
 add_wt hidden        "$WT/wt-hidden"    "$RENAMED_SHA"; printf 'edit\n' >> "$WT/wt-hidden/README.md"; git -C "$WT/wt-hidden" update-index --assume-unchanged README.md
 add_wt srcuntracked  "$WT/wt-srcuntracked" "$RENAMED_SHA"; mkdir -p "$WT/wt-srcuntracked/src"; printf 'real source\n' > "$WT/wt-srcuntracked/src/module.py"
 add_wt builduntracked "$WT/wt-builduntracked" "$RENAMED_SHA"; mkdir -p "$WT/wt-builduntracked/build"; printf 'hand-made evidence\n' > "$WT/wt-builduntracked/build/manual.db"
 add_wt agentstate    "$WT/wt-agentstate" "$RENAMED_SHA"; mkdir -p "$WT/wt-agentstate/.agents/logs"; printf 'session\n' > "$WT/wt-agentstate/.agents/logs/s.jsonl"
 add_wt livecwd       "$WT/wt-livecwd"   "$RENAMED_SHA"
 add_wt unpushed      "$WT/wt-unpushed"  "$LOCAL_SHA"
-for n in renamed ancestry husky nodemodules dirty hidden srcuntracked builduntracked agentstate livecwd unpushed; do age_days_ago "$WT/wt-$n" 4; done
+for n in renamed ancestry husky nodemodules dirty mixedunstaged mixedstaged hidden srcuntracked builduntracked agentstate livecwd unpushed; do age_days_ago "$WT/wt-$n" 4; done
 mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/bin"
 LIVE_REAL="$(cd "$WT/wt-livecwd" && pwd -P)"
 cat > "$TMP_ROOT/bin/lsof" <<SH
@@ -98,6 +106,8 @@ check "tip that is an ancestor of a live origin tip is ELIGIBLE" "ELIGIBLE  $WT/
 check "untracked .husky/_ only is ELIGIBLE" "ELIGIBLE  $WT/wt-husky |" "$OUT"
 check "untracked node_modules only is ELIGIBLE" "ELIGIBLE  $WT/wt-nodemodules |" "$OUT"
 check "real tracked edit still preserved as dirty" "wt-dirty | dirty" "$OUT"
+check "unstaged tracked edit plus rebuildable untracked output stays dirty" "wt-mixedunstaged | dirty" "$OUT"
+check "staged tracked edit plus rebuildable untracked output stays dirty" "wt-mixedstaged | dirty" "$OUT"
 check "assume-unchanged index state still preserved" "wt-hidden | hidden-state" "$OUT"
 check "untracked non-rebuildable source still preserved" "wt-srcuntracked | untracked" "$OUT"
 check "untracked ambiguous build/ dir still preserved" "wt-builduntracked | untracked" "$OUT"
