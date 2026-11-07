@@ -296,7 +296,7 @@ PY_TRASH
     log "user Trash: SAFETY-SKIP ($_safety_reason)"
   fi
 done
-# 3c. Hugging Face model caches. src/disk_magician/scripts/disk_report_html.py:215
+# 3b-hf. Hugging Face model caches. src/disk_magician/scripts/disk_report_html.py:215
 # advertises huggingface cleanup, but this script had no such section, so
 # ~/.cache/huggingface and ~/.cache/hy3dgen were unreachable (measured 11 GiB and
 # 6.9 GiB on 2026-11-03). These are model downloads a running job may be using, so a
@@ -319,9 +319,10 @@ clean_hf_cache_if_idle() {
   fi
   clean_dir_contents "$label" "$path" true rebuildable
 }
-log "=== Section 3c: Hugging Face caches ==="
+log "=== Section 3b-hf: Hugging Face caches ==="
 clean_hf_cache_if_idle "huggingface cache" "$HOME/.cache/huggingface"
 clean_hf_cache_if_idle "hy3dgen cache" "$HOME/.cache/hy3dgen"
+
 # 3c. Rotated dated log dirs (YYYY.MM.DD or YYYY/MM/DD) older than 7 days. Only
 # dated leaf dirs are candidates, so a year/month parent holding this week's
 # logs is never removed on its own (older) mtime.
