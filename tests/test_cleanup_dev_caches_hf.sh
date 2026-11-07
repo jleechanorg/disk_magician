@@ -18,17 +18,23 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 run() { HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state" timeout 300 bash "$SCRIPT" "$@" 2>&1; }
 
 # ---- Case 1: old cache, dry-run default removes nothing
-mkdir -p "$T/home/.cache/huggingface/models--old/snapshots"
-echo payload >"$T/home/.cache/huggingface/models--old/snapshots/blob"
-touch -d '4 days ago' "$T/home/.cache/huggingface/models--old/snapshots/blob" 2>/dev/null \
-  || touch -t "$(date -d '4 days ago' +%Y%m%d%H%M 2>/dev/null || echo 202601010000)" "$T/home/.cache/huggingface/models--old/snapshots/blob"
+mkdir -p "$T/home/.cache/huggingface/hub/models--old/snapshots"
+mkdir -p "$T/home/.cache/huggingface/stored_tokens"
+echo payload >"$T/home/.cache/huggingface/hub/models--old/snapshots/blob"
+echo secret_notes >"$T/home/.cache/huggingface/stored_tokens/notes.txt"
+touch -d '4 days ago' "$T/home/.cache/huggingface/hub/models--old/snapshots/blob" 2>/dev/null \
+  || touch -t "$(date -d '4 days ago' +%Y%m%d%H%M 2>/dev/null || echo 202601010000)" "$T/home/.cache/huggingface/hub/models--old/snapshots/blob"
+touch -d '4 days ago' "$T/home/.cache/huggingface/stored_tokens/notes.txt" 2>/dev/null \
+  || touch -t "$(date -d '4 days ago' +%Y%m%d%H%M 2>/dev/null || echo 202601010000)" "$T/home/.cache/huggingface/stored_tokens/notes.txt"
 
 out="$(run)"
 [[ "$out" == *"huggingface cache: [dry-run] would delete contents"* ]] \
   && ok "old huggingface cache is reported in dry-run" \
   || bad "old huggingface cache not reported in dry-run"
-[[ -f "$T/home/.cache/huggingface/models--old/snapshots/blob" ]] \
+[[ -f "$T/home/.cache/huggingface/hub/models--old/snapshots/blob" ]] \
   && ok "dry-run deleted nothing" || bad "dry-run deleted a file"
+[[ -f "$T/home/.cache/huggingface/stored_tokens/notes.txt" ]] \
+  && ok "dry-run preserved stored_tokens" || bad "dry-run deleted stored_tokens"
 
 # ---- Case 2: young cache is preserved even under --clean
 mkdir -p "$T/home/.cache/hy3dgen/recent"
@@ -45,6 +51,18 @@ out="$(run --clean)"
 out="$(run --clean)"
 [[ "$out" != *"huggingface cache: recently written"* ]] \
   && ok "old huggingface cache not treated as young" || bad "old cache misclassified as young"
+
+# ---- Case 4: the old entry is actually reclaimed -- C14's cache-root table must answer
+# `rebuildable` for a model-cache entry under its registered root, not
+# kept:unproven-content, or this sweep frees nothing.
+[[ ! -e "$T/home/.cache/huggingface/hub/models--old" ]] \
+  && ok "old huggingface entry removed under --clean" \
+  || bad "old huggingface entry survived --clean (C14 kept it)"
+
+# ---- Case 5: undeclared directory under huggingface root is preserved under --clean
+[[ -f "$T/home/.cache/huggingface/stored_tokens/notes.txt" ]] \
+  && ok "undeclared huggingface directory stored_tokens survived --clean" \
+  || bad "undeclared huggingface directory stored_tokens was deleted"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

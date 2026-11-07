@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import disk_budget  # noqa: E402
@@ -563,6 +564,107 @@ class GovernSchedulerTest(unittest.TestCase):
         self.assertFalse(result["orphan_survivors"])
         child_pid, pgid = map(int, result["output"].split())
         self.assertFalse(disk_budget._process_group_has_live_members(pgid))
+
+
+class DfMeasureTargetTest(unittest.TestCase):
+    """The govern receipt's df evidence must measure the volume the actuator prunes.
+
+    Regression (verified live 2026-11-03): dispatch_actuators called
+    ``_df_free_bytes(state)`` for every class, so tmpdir_scratch — whose actuator
+    (tmp_scratch_sweep.sh) prunes the Scratch volume — recorded a df delta for
+    the host data volume instead. The stamp said free_bytes_before=30005886976
+    (27.9 GiB) and df_delta_bytes=-530817024 while /Volumes/diskm-scratch
+    actually had 3.82 GB free.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="df-measure-target-")
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.state = self.base / "state"
+        self.state.mkdir()
+        self.scratch = self.base / "scratch-volume"
+        self.scratch.mkdir()
+        # Two distinguishable volumes so a wrong target cannot silently pass.
+        self.measure_log = self.base / "df-paths.log"
+        self.fake_df = self.base / "df"
+        self.fake_df.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> {str(self.measure_log)!r}\n'
+            "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+            'case "$*" in\n'
+            f'  *{self.scratch}*) printf \'/dev/scratch 4000 1000 786432 25% {self.scratch}\\n\' ;;\n'
+            "  *) printf '/dev/data 8000 4000 2883584 50% /\\n' ;;\n"
+            "esac\n"
+        )
+        self.fake_df.chmod(0o755)
+        saved = {k: os.environ.get(k) for k in ("DISK_MAGICIAN_DF_BIN", "DISK_MAGICIAN_STATE_DIR")}
+        os.environ["DISK_MAGICIAN_DF_BIN"] = str(self.fake_df)
+        os.environ["DISK_MAGICIAN_STATE_DIR"] = str(self.state)
+        self.addCleanup(lambda: [(os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v))
+                                 for k, v in saved.items()])
+
+    def measured_paths(self):
+        if not self.measure_log.exists():
+            return []
+        return [line.split()[-1] for line in self.measure_log.read_text().splitlines() if line.strip()]
+
+    def test_scratch_volume_class_measures_the_scratch_mount(self):
+        with patch.object(disk_budget, "_scratch_mountpoint", return_value=self.scratch):
+            self.assertEqual(disk_budget._df_measure_target("tmpdir_scratch", self.state), str(self.scratch))
+
+    def test_other_classes_keep_their_existing_host_data_volume_target(self):
+        self.assertEqual(disk_budget._df_measure_target("tmp_containers", self.state), str(self.state))
+
+    def test_legacy_host_without_a_scratch_volume_keeps_the_state_target(self):
+        with patch.object(disk_budget, "_scratch_mountpoint", return_value=None):
+            self.assertEqual(disk_budget._df_measure_target("tmpdir_scratch", self.state), str(self.state))
+
+    def test_damaged_scratch_config_keeps_the_state_target(self):
+        with patch.object(disk_budget, "_scratch_mountpoint", return_value=False):
+            self.assertEqual(disk_budget._df_measure_target("tmpdir_scratch", self.state), str(self.state))
+
+    def test_dispatch_measures_the_scratch_mount_not_the_state_dir(self):
+        scripts = self.base / "scripts"
+        (scripts / "lib").mkdir(parents=True)
+        (scripts / "job_receipt.py").write_text(
+            (Path(disk_budget.__file__).parent / "job_receipt.py").read_text())
+        (scripts / "lib" / "artifact_verdict.sh").write_text(
+            'artifact_removal_verdict() { [[ "$1" == --self-test ]] && echo ok; }\n')
+        adapter = scripts / "tmp_scratch_sweep.sh"
+        adapter.write_text(
+            "#!/bin/bash\n"
+            "python3 - \"$(cd \"$(dirname \"$0\")\" && pwd)\" <<'PY'\n"
+            "import os,sys\n"
+            "sys.path.insert(0,sys.argv[1])\n"
+            "import job_receipt\n"
+            "s=job_receipt.JobReceiptStore(state_dir=os.environ['DISK_MAGICIAN_STATE_DIR'])\n"
+            "r=s.begin('tmp_scratch_sweep',trigger='act')\n"
+            "s.finish('tmp_scratch_sweep',run_id=r,outcome='success_noop',"
+            "candidates={'removed_count':0,'deferred_count':0,'interrupted_count':0},"
+            "postcondition={'df_delta_bytes':0,'freed_bytes':0})\n"
+            "PY\n"
+        )
+        adapter.chmod(0o755)
+        row = {"class": "tmpdir_scratch", "act": "tmpdir_scratch", "job": "tmp_scratch_sweep",
+               "kind": "unit", "unit_budget_s": 10}
+        metrics = {"outcome": "success_noop", "reason": "test", "df_delta_bytes": 0,
+                   "removed_count": 0, "deferred_count": 0, "interrupted_count": 0}
+        with patch.object(disk_budget, "eligible_actuators", return_value=([row], [])), \
+             patch.object(disk_budget, "_c14_complete", return_value=True), \
+             patch.object(disk_budget, "_adapter_command", return_value=["/bin/true"]), \
+             patch.object(disk_budget, "_scratch_mountpoint", return_value=self.scratch), \
+             patch.object(disk_budget, "supervise_actuator",
+                          return_value={"rc": 0, "output": "", "hard_stop": False,
+                                        "orphan_survivors": []}), \
+             patch.object(disk_budget, "_receipt_data", return_value={}), \
+             patch.object(disk_budget, "_write_govern_receipt", return_value=metrics):
+            disk_budget.dispatch_actuators(
+                scripts, self.state, {"classes": {}}, {}, "RED",
+                time.time(), time.monotonic() + 200, {"classes": {}})
+        paths = self.measured_paths()
+        self.assertEqual(paths, [str(self.scratch), str(self.scratch)])
+        self.assertNotIn(str(self.state), paths)
 
 
 if __name__ == "__main__":
