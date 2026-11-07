@@ -59,6 +59,7 @@ Commands:
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk
                          (use --native-docker for the verified Linux daemon).
+  cleanup-xcode          Clean rebuildable Xcode DerivedData and simulator caches.
   cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
   cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
   cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
@@ -567,6 +568,9 @@ case "$CMD" in
     ;;
   cleanup_colima|cleanup-colima)
     "$SCRIPT_DIR/scripts/cleanup_colima.sh" "$@"
+    ;;
+  cleanup_xcode|cleanup-xcode)
+    "$SCRIPT_DIR/scripts/cleanup_xcode.sh" "$@"
     ;;
   cleanup_worktrees|cleanup-worktrees|prune_worktrees|prune-worktrees)
     "$SCRIPT_DIR/scripts/cleanup_worktrees.sh" "$@"
