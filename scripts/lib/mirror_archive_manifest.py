@@ -15,11 +15,13 @@ member is read to the end on the archive side, so a truncated or corrupt zstd
 stream fails here rather than later.
 
 Line format (sorted by path, tabs, trailing components "-" when not applicable):
-  <path> TAB <kind> TAB <mode> TAB <size> TAB <linkname>
+  <path> TAB <kind> TAB <mode> TAB <size> TAB <sha256> TAB <linkname>
 kind is f (regular), d (directory), l (symlink), o (other).
 mode is compared for f and d only: symlink modes are not portable.
+sha256 is the hex digest for f, or "-" for d, l, and o.
 Final line: "total<TAB><count><TAB><total-bytes>".
 """
+import hashlib
 import os
 import sys
 import tarfile
@@ -33,7 +35,7 @@ def _mode(st_mode):
 
 def _emit(rows, total_bytes, out_path):
     rows.sort(key=lambda r: r[0])
-    lines = ["\t".join([p, k, m, str(s), l]) for (p, k, m, s, l) in rows]
+    lines = ["\t".join([p, k, m, str(s), sha, l]) for (p, k, m, s, sha, l) in rows]
     lines.append("total\t%d\t%d" % (len(rows), total_bytes))
     text = "\n".join(lines) + "\n"
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
@@ -46,7 +48,7 @@ def source_manifest(root, out_path):
     dev = os.lstat(root).st_dev
     rows = []
     total = 0
-    rows.append((".", "d", _mode(os.lstat(root).st_mode), 0, "-"))
+    rows.append((".", "d", _mode(os.lstat(root).st_mode), 0, "-", "-"))
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames.sort()
         filenames.sort()
@@ -57,9 +59,9 @@ def source_manifest(root, out_path):
             rel = name if rel_dir == "." else os.path.join(rel_dir, name)
             st = os.lstat(full)
             if os.path.islink(full):
-                rows.append((rel, "l", "----", 0, os.readlink(full)))
+                rows.append((rel, "l", "----", 0, "-", os.readlink(full)))
                 continue
-            rows.append((rel, "d", _mode(st.st_mode), 0, "-"))
+            rows.append((rel, "d", _mode(st.st_mode), 0, "-", "-"))
             # Mirrors tar --one-file-system: record the mountpoint, never descend.
             if st.st_dev == dev:
                 descends.append(name)
@@ -69,14 +71,24 @@ def source_manifest(root, out_path):
             rel = name if rel_dir == "." else os.path.join(rel_dir, name)
             st = os.lstat(full)
             if os.path.islink(full):
-                rows.append((rel, "l", "----", 0, os.readlink(full)))
+                rows.append((rel, "l", "----", 0, "-", os.readlink(full)))
             elif os.path.isdir(full):
-                rows.append((rel, "d", _mode(st.st_mode), 0, "-"))
+                rows.append((rel, "d", _mode(st.st_mode), 0, "-", "-"))
             elif os.path.isfile(full):
-                rows.append((rel, "f", _mode(st.st_mode), st.st_size, "-"))
+                h = hashlib.sha256()
+                try:
+                    with open(full, "rb") as fh:
+                        while True:
+                            block = fh.read(CHUNK)
+                            if not block:
+                                break
+                            h.update(block)
+                except OSError as e:
+                    raise SystemExit("unreadable source file %r: %s" % (full, e))
+                rows.append((rel, "f", _mode(st.st_mode), st.st_size, h.hexdigest(), "-"))
                 total += st.st_size
             else:
-                rows.append((rel, "o", _mode(st.st_mode), 0, "-"))
+                rows.append((rel, "o", _mode(st.st_mode), 0, "-", "-"))
     _emit(rows, total, out_path)
 
 
@@ -101,25 +113,29 @@ def archive_manifest(out_path):
             else:
                 kind = "o"
             size = 0
+            sha = "-"
             if kind == "f":
                 fh = tf.extractfile(member)
                 if fh is None:
                     raise SystemExit("unreadable member: %r" % name)
+                h = hashlib.sha256()
                 read = 0
                 while True:
                     block = fh.read(CHUNK)
                     if not block:
                         break
                     read += len(block)
+                    h.update(block)
                 if read != member.size:
                     raise SystemExit(
                         "short read on %r: %d of %d bytes" % (name, read, member.size)
                     )
                 size = read
+                sha = h.hexdigest()
                 total += read
             mode = _mode(member.mode) if kind in ("f", "d") else "----"
             link = member.linkname if kind == "l" else "-"
-            rows.append((name, kind, mode, size, link))
+            rows.append((name, kind, mode, size, sha, link))
     _emit(rows, total, out_path)
 
 

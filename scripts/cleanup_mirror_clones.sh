@@ -15,6 +15,8 @@ set -euo pipefail
 # A caller's repository context must never leak into a clone being inspected.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
+# Prevent macOS tar (bsdtar) from writing AppleDouble metadata (._*) files into archives
+export COPYFILE_DISABLE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -53,7 +55,15 @@ ARCHIVE_TO=""
 RELAX_CONTENT_GATES=false
 # Test seam: the verify test needs a tar that produces a wrong archive. Replacing
 # this binary exercises the real verify path instead of bypassing it.
-TAR_BIN="${DISK_MAGICIAN_ARCHIVE_TAR_BIN:-tar}"
+if [[ -n "${DISK_MAGICIAN_ARCHIVE_TAR_BIN:-}" ]]; then
+  TAR_BIN="$DISK_MAGICIAN_ARCHIVE_TAR_BIN"
+elif command -v gtar >/dev/null 2>&1; then
+  TAR_BIN="gtar"
+elif [[ -x /opt/homebrew/bin/gtar ]]; then
+  TAR_BIN="/opt/homebrew/bin/gtar"
+else
+  TAR_BIN="tar"
+fi
 ZSTD_BIN="${DISK_MAGICIAN_ARCHIVE_ZSTD_BIN:-zstd}"
 ARCHIVE_KB=0
 ARCHIVED=0
@@ -459,6 +469,10 @@ ntfs_safe_name() {
 # lower <s>: portable lowercase (macOS bash 3.2 has no ${s,,}).
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+file_dev_ino() {
+  stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null || true
+}
+
 # archive_target_available <basename>: rc 1 when an existing archive entry
 # matches case-insensitively. NTFS is case-insensitive, so `Foo-abc` and
 # `foo-abc` are the same file and the second would silently replace the first.
@@ -468,6 +482,12 @@ archive_target_available() {
   for existing in ${ARCHIVE_NAMES[@]+"${ARCHIVE_NAMES[@]}"}; do
     [[ "$(lower "$existing")" == "$base" ]] && return 1
   done
+  if [[ -d "$ARCHIVE_REAL" ]]; then
+    while IFS= read -r existing; do
+      [[ -n "$existing" ]] || continue
+      [[ "$(lower "$existing")" == "$base" ]] && return 1
+    done < <("$FIND_BIN" "$ARCHIVE_REAL" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null)
+  fi
   return 0
 }
 
@@ -475,7 +495,7 @@ archive_target_available() {
 # by reading it back FROM ARCHIVE_REAL, and print the target path on success.
 # Every failure path prints a reason on stderr and leaves <dir> untouched.
 archive_and_verify() {
-  local dir="$1" base sha target part node counts avail_kb detail
+  local dir="$1" base sha target part node avail_kb detail
   base="$(ntfs_safe_name "$(basename "$dir")")"
   sha="$(git -C "$dir" rev-parse --short=12 HEAD 2>/dev/null)" || return 1
   target="$ARCHIVE_REAL/$base-$sha.tar.zst"
@@ -494,7 +514,11 @@ archive_and_verify() {
   # manifest comparison is exact; --one-file-system matches the source manifest.
   # Names are stored as `./<path>` (tar -C <clone> .) so they compare directly
   # against the source manifest, which is root-relative.
-  if ! "$TAR_BIN" -C "$dir" --zstd --hard-dereference --one-file-system \
+  local -a tar_args=( -C "$dir" --zstd --one-file-system )
+  if "$TAR_BIN" --version 2>/dev/null | grep -qi 'gnu tar'; then
+    tar_args+=( --hard-dereference )
+  fi
+  if ! "$TAR_BIN" "${tar_args[@]}" \
       -cf "$part" -- . 2>"$RUN_TMP/tar.err"; then
     rm -f "$part"; echo "tar-failed" >&2; return 1
   fi
@@ -507,7 +531,7 @@ archive_and_verify() {
   if ! "$ZSTD_BIN" -dc -- "$part" 2>"$RUN_TMP/zstd.err" \
       | "$PYTHON" "$SCRIPT_DIR/lib/mirror_archive_manifest.py" archive - \
           "$RUN_TMP/manifest.arc.$$" >/dev/null 2>&1; then
-    rm -f "$part"; echo "archive-unreadable" >&2; return 1
+    rm -f "$part" "$RUN_TMP/manifest.src.$$"; echo "archive-unreadable" >&2; return 1
   fi
   if ! cmp -s "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"; then
     detail="$(diff -u "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$" 2>/dev/null \
@@ -516,8 +540,67 @@ archive_and_verify() {
     echo "archive-mismatch:${detail:- manifest differs}" >&2
     return 1
   fi
+
+  # Atomic publish under directory mutex without clobbering
+  local lock_dir="$ARCHIVE_REAL/.archive-publish.lock"
+  local locked=false
+  local i
+  for (( i=0; i<50; i++ )); do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      locked=true
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ "$locked" != true ]]; then
+    rm -f "$part" "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"
+    echo "archive-lock-timeout" >&2
+    return 1
+  fi
+
+  # Inside the lock: re-verify target does not exist case-insensitively
+  if ! archive_target_available "$(basename "$target")" || [[ -e "$target" || -L "$target" ]]; then
+    rm -f "$part" "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"
+    rmdir "$lock_dir" 2>/dev/null || true
+    echo "archive-name-collision" >&2
+    return 1
+  fi
+
+  # Publish via hardlink with mv -n fallback (no-clobber)
+  local published=false
+  if ln -- "$part" "$target" 2>/dev/null; then
+    rm -f -- "$part"
+    published=true
+  elif [[ ! -e "$target" && ! -L "$target" ]] && mv -n -- "$part" "$target" 2>/dev/null; then
+    if [[ -f "$target" && ! -e "$part" ]]; then
+      published=true
+    fi
+  fi
+
+  if [[ "$published" != true ]]; then
+    rm -f "$part" "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"
+    rmdir "$lock_dir" 2>/dev/null || true
+    echo "archive-publish-failed" >&2
+    return 1
+  fi
+  rmdir "$lock_dir" 2>/dev/null || true
+
+  # Re-verify the archive manifest by reading back from the published $target
+  rm -f "$RUN_TMP/manifest.arc.$$"
+  if ! "$ZSTD_BIN" -dc -- "$target" 2>"$RUN_TMP/zstd.err" \
+      | "$PYTHON" "$SCRIPT_DIR/lib/mirror_archive_manifest.py" archive - \
+          "$RUN_TMP/manifest.arc.$$" >/dev/null 2>&1; then
+    rm -f "$RUN_TMP/manifest.src.$$"; echo "archive-unreadable" >&2; return 1
+  fi
+  if ! cmp -s "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"; then
+    detail="$(diff -u "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$" 2>/dev/null \
+      | sed -n '3,5p' | tr '\n' ' ')"
+    rm -f "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"
+    echo "archive-mismatch:${detail:- manifest differs}" >&2
+    return 1
+  fi
   rm -f "$RUN_TMP/manifest.src.$$" "$RUN_TMP/manifest.arc.$$"
-  mv -f -- "$part" "$target" || { rm -f "$part"; echo "archive-publish-failed" >&2; return 1; }
+
   ARCHIVE_NAMES+=("$(basename "$target")")
   printf '%s\n' "$target"
 }
@@ -560,6 +643,7 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     # --archive-to with --clean would otherwise need a live re-clone to recover;
     # record what the clone was so the archive name and log line stay truthful.
     dir_sha="$(git -C "$dir" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+    dir_dev_ino="$(file_dev_ino "$dir")"
     ELIGIBLE=$(( ELIGIBLE + 1 ))
 
     if (( MAX_KB > 0 )) && (( REAL_KB + dir_kb > MAX_KB )); then
@@ -582,6 +666,34 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
         ARCHIVE_FAILURES=$(( ARCHIVE_FAILURES + 1 ))
         continue
       fi
+
+      # Post-archive live-use/identity recheck before rm_logged
+      CWD_KNOWN=true
+      if ! lsof_snapshot_cwds; then
+        CWD_KNOWN=false
+        log "WARNING: live-cwd observation incomplete (${LSOF_CWD_REASON:-unknown}); preserving $dir"
+      fi
+
+      post_reason="$(candidate_reason "$dir")"
+      if [[ -z "$post_reason" ]]; then
+        current_dev_ino="$(file_dev_ino "$dir")"
+        if [[ -n "$dir_dev_ino" && "$current_dev_ino" != "$dir_dev_ino" ]]; then
+          post_reason="identity-changed"
+        fi
+      fi
+      if [[ -z "$post_reason" ]]; then
+        current_sha="$(git -C "$dir" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+        if [[ "$current_sha" != "$dir_sha" ]]; then
+          post_reason="head-changed"
+        fi
+      fi
+
+      if [[ -n "$post_reason" ]]; then
+        printf '%s\n' "$post_reason" >>"$REASONS_FILE"
+        log "KEEP [post-archive-${post_reason}] $dir (verified archive retained: $archive_target)"
+        continue
+      fi
+
       if DM_DELETION_LOGGED=1 rm_logged "$dir" && [[ ! -e "$dir" ]]; then
         deletion_log_removal "$dir" "$dir_kb" remove \
           "mirror-clone-archived archive=$archive_target origin=$origin"

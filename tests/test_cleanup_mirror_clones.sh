@@ -36,6 +36,7 @@ export DISK_MAGICIAN_MIRROR_REGISTRY_REPOS="$WORK/registry-repo"
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
+export COPYFILE_DISABLE=1
 unset DISK_MAGICIAN_AO_CONFIG DISK_MAGICIAN_MIRROR_CLONE_ROOTS
 
 mkdir -p "$HOME/mirror" "$HOME/projects" "$HOME/.config/disk-magician"
@@ -189,7 +190,9 @@ check "deletion log records the archive path" \
 check "archive reports GiB archived" 'grep -q "Archived and verified:" <<<"$arch_out"'
 RESTORE="$WORK/restore"
 mkdir -p "$RESTORE"
-tar --zstd -xf "$arch_file" -C "$RESTORE"
+if [[ -n "$arch_file" && -f "$arch_file" ]]; then
+  tar --zstd -xf "$arch_file" -C "$RESTORE"
+fi
 check "restore yields the tracked file content" \
   '[[ "$(cat "$RESTORE/README.md")" == "one" ]]'
 check "restore yields the git metadata" '[[ -d "$RESTORE/.git" ]]'
@@ -243,6 +246,122 @@ bad_out="$(bash "$SCRIPT" --dry-run --root "$HOME/mirror" --archive-relaxed-cont
 check "relaxed gates without --archive-to is an error" '[[ "$rc" -eq 2 ]]'
 check "correctly rejects relaxation without an archive target" \
   'grep -q "requires --archive-to" <<<"$bad_out"'
+
+echo "Test 11: Regression A: same-length archive corruption fails verification and preserves source"
+CORRUPT_MIRROR="$HOME/mirror/corrupt-mirror"
+clone_into "$CORRUPT_MIRROR"
+CORRUPT_TAR="$WORK/bin/corrupt-tar"
+cat >"$CORRUPT_TAR" <<'EOF'
+#!/usr/bin/env bash
+args=("$@")
+dir=""
+for ((i=0; i<${#args[@]}; i++)); do
+  if [[ "${args[i]}" == "-C" && $((i+1)) -lt ${#args[@]} ]]; then
+    dir="${args[i+1]}"
+    break
+  fi
+done
+if [[ -n "$dir" && -f "$dir/README.md" ]]; then
+  shadow="$dir.shadow.$$"
+  cp -a "$dir" "$shadow"
+  printf 'two\n' >"$shadow/README.md"
+  for ((i=0; i<${#args[@]}; i++)); do
+    if [[ "${args[i]}" == "-C" ]]; then
+      args[i+1]="$shadow"
+      break
+    fi
+  done
+  if command -v gtar >/dev/null 2>&1; then
+    gtar "${args[@]}"
+  else
+    tar "${args[@]}"
+  fi
+  rc=$?
+  rm -rf "$shadow"
+  exit $rc
+fi
+if command -v gtar >/dev/null 2>&1; then
+  exec gtar "$@"
+else
+  exec tar "$@"
+fi
+EOF
+chmod 755 "$CORRUPT_TAR"
+rm -f "$DISK_MAGICIAN_DELETION_LOG"
+rc=0
+corrupt_out="$(WORKTREE_APPROVED=1 DISK_MAGICIAN_ARCHIVE_TAR_BIN="$CORRUPT_TAR" bash "$SCRIPT" \
+  --clean --root "$HOME/mirror" --archive-to "$ARCHIVE_DIR" 2>&1)" || rc=$?
+check "same-length corruption run exits 0" '[[ "$rc" -eq 0 ]]'
+check "same-length corruption keeps source clone intact" '[[ -d "$CORRUPT_MIRROR" ]]'
+check "same-length corruption keeps uncorrupted content" '[[ "$(cat "$CORRUPT_MIRROR/README.md")" == "one" ]]'
+check "same-length corruption reports archive-failed" \
+  'grep -qF "KEEP [archive-failed] $CORRUPT_MIRROR" <<<"$corrupt_out"'
+check "same-length corruption writes no deletion-log entry" \
+  '! grep -qF "$CORRUPT_MIRROR" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || [[ ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]'
+
+echo "Test 12: Regression B: concurrent archive collision prevents overwrite and retains source"
+COLLIDE_MIRROR="$HOME/mirror/collide-mirror"
+clone_into "$COLLIDE_MIRROR"
+collide_sha="$(git -C "$COLLIDE_MIRROR" rev-parse --short=12 HEAD)"
+collide_target="$ARCHIVE_DIR/collide-mirror-$collide_sha.tar.zst"
+COLLIDE_TAR="$WORK/bin/collide-tar"
+cat >"$COLLIDE_TAR" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"collide-mirror"* ]]; then
+  printf 'PRE-EXISTING-WINNER-ARCHIVE\n' >"$collide_target"
+fi
+if command -v gtar >/dev/null 2>&1; then
+  exec gtar "\$@"
+else
+  exec tar "\$@"
+fi
+EOF
+chmod 755 "$COLLIDE_TAR"
+rm -f "$DISK_MAGICIAN_DELETION_LOG"
+rc=0
+collide_out="$(WORKTREE_APPROVED=1 DISK_MAGICIAN_ARCHIVE_TAR_BIN="$COLLIDE_TAR" bash "$SCRIPT" \
+  --clean --root "$HOME/mirror" --archive-to "$ARCHIVE_DIR" 2>&1)" || rc=$?
+check "concurrent collision run exits 0" '[[ "$rc" -eq 0 ]]'
+check "concurrent collision retains existing archive content" \
+  '[[ "$(cat "$collide_target" 2>/dev/null)" == "PRE-EXISTING-WINNER-ARCHIVE" ]]'
+check "concurrent collision retains loser source clone" '[[ -d "$COLLIDE_MIRROR" ]]'
+check "concurrent collision writes no deletion log for loser" \
+  '! grep -qF "$COLLIDE_MIRROR" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || [[ ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]'
+
+echo "Test 13: Regression C: consumer entering during archive prevents deletion and retains source"
+ENTER_MIRROR="$HOME/mirror/enter-mirror"
+clone_into "$ENTER_MIRROR"
+SLEEP_PID_FILE="$WORK/enter_sleeper.pid"
+ENTER_TAR="$WORK/bin/enter-tar"
+cat >"$ENTER_TAR" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"enter-mirror"* ]]; then
+  (
+    cd "$ENTER_MIRROR"
+    nohup sleep 300 </dev/null >/dev/null 2>&1 &
+    echo "\$!" >"$SLEEP_PID_FILE"
+  )
+  sleep 0.5
+fi
+if command -v gtar >/dev/null 2>&1; then
+  exec gtar "\$@"
+else
+  exec tar "\$@"
+fi
+EOF
+chmod 755 "$ENTER_TAR"
+rm -f "$DISK_MAGICIAN_DELETION_LOG"
+rc=0
+enter_out="$(WORKTREE_APPROVED=1 DISK_MAGICIAN_ARCHIVE_TAR_BIN="$ENTER_TAR" bash "$SCRIPT" \
+  --clean --root "$HOME/mirror" --archive-to "$ARCHIVE_DIR" 2>&1)" || rc=$?
+if [[ -f "$SLEEP_PID_FILE" ]]; then
+  kill "$(cat "$SLEEP_PID_FILE")" 2>/dev/null || true
+  rm -f "$SLEEP_PID_FILE"
+fi
+check "consumer entering during archive run exits 0" '[[ "$rc" -eq 0 ]]'
+check "consumer entering during archive keeps source clone intact" '[[ -d "$ENTER_MIRROR" ]]'
+check "consumer entering during archive writes no deletion log entry" \
+  '! grep -qF "$ENTER_MIRROR" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || [[ ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]'
 
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
