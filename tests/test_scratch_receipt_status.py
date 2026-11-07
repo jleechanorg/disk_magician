@@ -17,7 +17,8 @@ class ScratchReceiptStatus(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.scripts = self.root / 'scripts'
         (self.scripts / 'lib').mkdir(parents=True)
-        for name in ('tmp_scratch_sweep.sh', 'lib/actuator_deadline.sh', 'lib/actuator_receipt.sh'):
+        for name in ('tmp_scratch_sweep.sh', 'lib/actuator_deadline.sh', 'lib/actuator_receipt.sh',
+                     'lib/scratch_roots.sh'):
             shutil.copy2(ROOT / 'scripts' / name, self.scripts / name)
         self.env = dict(os.environ, PATH=f'{self.scripts}:{os.environ["PATH"]}',
                         CAPTURE=str(self.root / 'receipt.json'))
@@ -28,7 +29,7 @@ class ScratchReceiptStatus(unittest.TestCase):
         # In this dry-run contract test, report the supported no-volume skip;
         # never invoke the host disk_magician dispatcher or touch a real volume.
         dispatcher = self.root / 'disk_magician.sh'
-        dispatcher.write_text('#!/bin/bash\nprintf \"skipped:unavailable\\n\"\n')
+        dispatcher.write_text('#!/bin/bash\nif [[ "$*" == "volume path scratch --for-reclaim" ]]; then exit 3; fi\nprintf \"skipped:unavailable\\n\"\n')
         dispatcher.chmod(0o755)
         self.write('job_receipt.py', '''import json, os, sys
 args=sys.argv[1:]

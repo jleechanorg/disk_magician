@@ -450,7 +450,8 @@ def dispatch_actuators(script_dir, state, budgets, budget_state, zone_name, now,
                 _write_govern_skip(state, row["class"], "activation_blocked:worktree_cleanup", "blocked_safety")
                 continue
             os.environ["WORKTREE_APPROVED"] = "1"
-        before = _df_free_bytes(state)
+        measure_target = _df_measure_target(row["class"], state)
+        before = _df_free_bytes(measure_target)
         prior = _receipt_data(state, row["job"])
         old_trigger = os.environ.get("DISK_MAGICIAN_ACTUATOR_TRIGGER")
         old_ledger = os.environ.get("DISK_MAGICIAN_C14_LEDGER")
@@ -473,7 +474,7 @@ def dispatch_actuators(script_dir, state, budgets, budget_state, zone_name, now,
             else: os.environ["DISK_MAGICIAN_C14_LEDGER"] = old_ledger
             if old_owner is None: os.environ.pop("DISK_MAGICIAN_C14_LEDGER_OWNER", None)
             else: os.environ["DISK_MAGICIAN_C14_LEDGER_OWNER"] = old_owner
-        after = _df_free_bytes(state)
+        after = _df_free_bytes(measure_target)
         current = _receipt_data(state, row["job"])
         adapter_receipt = current if current.get("id") != prior.get("id") else {}
         # No owning terminal receipt -> fold the raw scoped ledger once into the
@@ -507,6 +508,28 @@ def _df_free_bytes(path):
                              capture_output=True, text=True, timeout=5, check=True).stdout
         return int(out.splitlines()[-1].split()[3]) * 1024
     except (OSError, ValueError, IndexError, subprocess.SubprocessError): return None
+
+# Classes whose actuator reclaims the Scratch volume rather than the host data
+# volume: tmpdir_scratch drives tmp_scratch_sweep.sh, which prunes the resolved
+# Scratch mount (scratch-prune) and then runs pressure-gated volume reclaim.
+SCRATCH_VOLUME_CLASSES = {"tmpdir_scratch"}
+
+def _df_measure_target(class_name, state):
+    """Path on the volume this class's actuator actually deletes from.
+
+    The govern receipt used to measure ``state`` (the scheduler's own state dir,
+    always on the host data volume), so a class reclaiming the Scratch volume
+    recorded a df delta for a filesystem its actuator never touched -- live
+    2026-11-03 the Scratch mount had 3.82 GB free while the receipt reported
+    ~28-70 GB from /System/Volumes/Data. Only the scratch-volume classes change
+    target; every other actuator prunes the host data volume, where ``state``
+    already is. A legacy host with no registered Scratch volume keeps ``state``.
+    """
+    if class_name in SCRATCH_VOLUME_CLASSES:
+        mountpoint = _scratch_mountpoint()
+        if mountpoint:  # False = damaged config, None = legacy host, no volume
+            return str(mountpoint)
+    return str(state)
 
 def _measure_lock(state):
     """Non-blocking daily-measure lock; None means the daily job owns measurement."""
