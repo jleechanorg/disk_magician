@@ -180,7 +180,8 @@ for s in cleanup_worktrees.sh worktree_remove_hook.sh worktree_reap.sh cleanup_w
          cleanup_worktree_venvs.sh reclaim_worktree_venvs.sh cleanup_colima.sh cleanup_codex_db.sh \
          cleanup_antigravity_brain.sh cleanup_sessions.sh prune_aside_sessions.sh prune_aside_sessions.py \
          cleanup_uv_cache.sh cleanup_downloads_evidence.sh cleanup_llm_inspector.sh \
-         cleanup_supervisor_logs.sh cleanup_agent_artifacts.sh cleanup_apfs_snapshots.sh; do
+         cleanup_supervisor_logs.sh cleanup_agent_artifacts.sh cleanup_apfs_snapshots.sh \
+         cleanup_mirror_clones.sh; do
   f="$ROOT/scripts/$s"
   [[ -f "$f" ]] || { bad "$s missing (update the list if it was folded)"; continue; }
   if grep -Eq "$marker" "$f"; then ok "$s routes through a logging primitive"
