@@ -50,9 +50,11 @@ MOCK_BIN="$TMP_ROOT/scripts"
 STATE_DIR="$TMP_ROOT/state"
 HOME_DIR="$TMP_ROOT/home"
 SCRATCH_MOUNT="$TMP_ROOT/scratch-volume"
+VALID_TMP_DIR="$TMP_ROOT/valid-tmp"
 PACKAGE_FREE_BYTES=$(( 11 * 1024 * 1024 * 1024 ))   # 11 GiB — the pre-fix wrong answer
 SCRATCH_FREE_BYTES=$(( 3 * 1024 * 1024 * 1024 ))    # 3 GiB — the volume actually pruned
-mkdir -p "$MOCK_BIN/lib" "$STATE_DIR" "$HOME_DIR" "$SCRATCH_MOUNT"
+TMP_FREE_BYTES=$(( 7 * 1024 * 1024 * 1024 ))        # 7 GiB — distinguishable from 3 and 11 GiB
+mkdir -p "$MOCK_BIN/lib" "$STATE_DIR" "$HOME_DIR" "$SCRATCH_MOUNT" "$VALID_TMP_DIR"
 
 PASS=0
 FAIL=0
@@ -74,6 +76,7 @@ target="${*: -1}"
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
 case "$target" in
   "${SCRATCH_MOUNT:?}") printf '/dev/scratch 4000 1000 %s 25%% %s\n' "$(( SCRATCH_FREE_BYTES / 1024 ))" "$target" ;;
+  "${VALID_TMP_DIR:?}") printf '/dev/tmp 6000 1000 %s 16%% %s\n' "$(( TMP_FREE_BYTES / 1024 ))" "$target" ;;
   *) printf '/dev/data 8000 4000 %s 50%% %s\n' "$(( PACKAGE_FREE_BYTES / 1024 ))" "$target" ;;
 esac
 MOCK_DF
@@ -99,8 +102,11 @@ chmod +x "$MOCK_BIN/cleanup_tmp.sh" "$MOCK_BIN/cleanup_claude_state.sh"
 cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK_DISKM'
 #!/bin/bash
 if [[ "$*" == "volume path scratch --for-reclaim" ]]; then
-  printf '%s\n' "${SCRATCH_MOUNT:?}"
-  exit 0
+  case "${MOCK_VOL_PATH_RC:-0}" in
+    3) exit 3 ;;
+    75) exit 75 ;;
+    *) printf '%s\n' "${SCRATCH_MOUNT:?}"; exit 0 ;;
+  esac
 fi
 if [[ "$*" == "volume ballast recover scratch" ]]; then exit 0; fi
 helper="${DISK_MAGICIAN_RECEIPT_HELPER:?}"
@@ -124,12 +130,18 @@ run_sweep() {
     PATH="$MOCK_BIN:/usr/bin:/bin" \
     TMPDIR="$TMP_ROOT" \
     SCRATCH_MOUNT="$SCRATCH_MOUNT" \
+    VALID_TMP_DIR="$VALID_TMP_DIR" \
     PACKAGE_FREE_BYTES="$PACKAGE_FREE_BYTES" \
     SCRATCH_FREE_BYTES="$SCRATCH_FREE_BYTES" \
+    TMP_FREE_BYTES="$TMP_FREE_BYTES" \
+    MOCK_VOL_PATH_RC="${MOCK_VOL_PATH_RC:-0}" \
     DF_ARGUMENT_LOG="$DF_ARGUMENT_LOG" \
     DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
     DISK_MAGICIAN_RECEIPT_HELPER="$MOCK_BIN/job_receipt.py" \
     DISK_MAGICIAN_DISKM_BIN="$TMP_ROOT/disk_magician.sh" \
+    DISK_MAGICIAN_TMP_ROOT_OVERRIDE="${DISK_MAGICIAN_TMP_ROOT_OVERRIDE:-$VALID_TMP_DIR}" \
+    DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-$VALID_TMP_DIR}" \
+    DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="${DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE:-$VALID_TMP_DIR}" \
     /bin/bash "$MOCK_BIN/tmp_scratch_sweep.sh" "$@" >"$TMP_ROOT/sweep.out" 2>&1
 }
 
@@ -184,11 +196,11 @@ else
   pass "df was never asked for the package dir"
 fi
 
-echo "Test 3: the two volumes are distinguishable, so this test can fail"
-if [[ "$SCRATCH_FREE_BYTES" == "$PACKAGE_FREE_BYTES" ]]; then
-  fail "fixture volumes carry the same free-space value; the assertion proves nothing"
+echo "Test 3: the fixture volumes are distinguishable, so this test can fail"
+if [[ "$SCRATCH_FREE_BYTES" == "$PACKAGE_FREE_BYTES" || "$SCRATCH_FREE_BYTES" == "$TMP_FREE_BYTES" || "$PACKAGE_FREE_BYTES" == "$TMP_FREE_BYTES" ]]; then
+  fail "fixture volumes carry colliding free-space values; the assertion proves nothing"
 else
-  pass "fixture volumes differ ($SCRATCH_FREE_BYTES vs $PACKAGE_FREE_BYTES)"
+  pass "fixture volumes differ ($SCRATCH_FREE_BYTES vs $PACKAGE_FREE_BYTES vs $TMP_FREE_BYTES)"
 fi
 
 echo "Test 4: an unresolvable prune target leaves the free-space fields empty"
@@ -215,9 +227,11 @@ env -i \
   TMPDIR="$TMP_ROOT/nonexistent-tmp" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMP_ROOT/nonexistent-private-tmp" \
   DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$TMP_ROOT/nonexistent-tmp" \
+  DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMP_ROOT/nonexistent-tmp" \
   SCRATCH_MOUNT="$TMP_ROOT/nonexistent-scratch" \
   PACKAGE_FREE_BYTES="$PACKAGE_FREE_BYTES" \
   SCRATCH_FREE_BYTES="$SCRATCH_FREE_BYTES" \
+  TMP_FREE_BYTES="$TMP_FREE_BYTES" \
   DF_ARGUMENT_LOG="$DF_ARGUMENT_LOG" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_RECEIPT_HELPER="$MOCK_BIN/job_receipt.py" \
@@ -232,6 +246,77 @@ if grep -qE 'df -kP|/dev/data' "$DF_ARGUMENT_LOG" 2>/dev/null && [[ -s "$DF_ARGU
   fail "unresolvable target still ran df: $(tr '\n' ';' <"$DF_ARGUMENT_LOG")"
 else
   pass "unresolvable target performed no df measurement"
+fi
+
+echo "Test 5: --scratch-only with rc=3 Scratch resolver keeps df receipt fields null (no tmp fallback)"
+rm -f "$RECEIPT_FILE"
+MOCK_VOL_PATH_RC=3 run_sweep --scratch-only --dry-run || true
+BEFORE="$(receipt_field free_bytes_before 2>/dev/null)"
+AFTER="$(receipt_field free_bytes_after 2>/dev/null)"
+DELTA="$(receipt_field df_delta_bytes 2>/dev/null)"
+RECLAIMED_DF="$(receipt_field reclaimed_bytes_df 2>/dev/null)"
+if [[ "$BEFORE" == "None" && "$AFTER" == "None" && "$DELTA" == "None" && "$RECLAIMED_DF" == "None" ]]; then
+  pass "receipt df fields are null in --scratch-only mode when rc=3"
+else
+  fail "receipt df fields populated in --scratch-only mode when rc=3: before=$BEFORE after=$AFTER delta=$DELTA reclaimed_df=$RECLAIMED_DF"
+fi
+if grep -qxF -- "-kP $VALID_TMP_DIR" "$DF_ARGUMENT_LOG"; then
+  fail "df was invoked for tmp root in --scratch-only mode when rc=3"
+else
+  pass "df was never invoked for tmp root in --scratch-only mode when rc=3"
+fi
+
+echo "Test 6: --scratch-only with rc=75 Scratch resolver keeps df receipt fields null"
+rm -f "$RECEIPT_FILE"
+MOCK_VOL_PATH_RC=75 run_sweep --scratch-only --dry-run || true
+BEFORE="$(receipt_field free_bytes_before 2>/dev/null)"
+AFTER="$(receipt_field free_bytes_after 2>/dev/null)"
+DELTA="$(receipt_field df_delta_bytes 2>/dev/null)"
+RECLAIMED_DF="$(receipt_field reclaimed_bytes_df 2>/dev/null)"
+if [[ "$BEFORE" == "None" && "$AFTER" == "None" && "$DELTA" == "None" && "$RECLAIMED_DF" == "None" ]]; then
+  pass "receipt df fields are null in --scratch-only mode when rc=75"
+else
+  fail "receipt df fields populated in --scratch-only mode when rc=75: before=$BEFORE after=$AFTER delta=$DELTA reclaimed_df=$RECLAIMED_DF"
+fi
+if grep -qxF -- "-kP $VALID_TMP_DIR" "$DF_ARGUMENT_LOG"; then
+  fail "df was invoked for tmp root in --scratch-only mode when rc=75"
+else
+  pass "df was never invoked for tmp root in --scratch-only mode when rc=75"
+fi
+
+echo "Test 7: full mode with rc=3 falls back to tmp root and populates integer df fields"
+rm -f "$RECEIPT_FILE"
+MOCK_VOL_PATH_RC=3 run_sweep --dry-run || true
+BEFORE="$(receipt_field free_bytes_before 2>/dev/null)"
+AFTER="$(receipt_field free_bytes_after 2>/dev/null)"
+DELTA="$(receipt_field df_delta_bytes 2>/dev/null)"
+if [[ "$BEFORE" == "$TMP_FREE_BYTES" && "$AFTER" == "$TMP_FREE_BYTES" && "$DELTA" == "0" ]]; then
+  pass "full mode with rc=3 measured tmp root free space ($BEFORE)"
+else
+  fail "full mode with rc=3 did not measure tmp root: before=$BEFORE after=$AFTER delta=$DELTA (expected $TMP_FREE_BYTES)"
+fi
+if grep -qxF -- "-kP $VALID_TMP_DIR" "$DF_ARGUMENT_LOG"; then
+  pass "df was invoked for tmp root in full mode when rc=3"
+else
+  fail "df was not invoked for tmp root in full mode when rc=3: $(tr '\n' ';' <"$DF_ARGUMENT_LOG")"
+fi
+
+echo "Test 8: full mode with rc=75 keeps df receipt fields null (no tmp fallback on unverified Scratch config)"
+rm -f "$RECEIPT_FILE"
+MOCK_VOL_PATH_RC=75 run_sweep --dry-run || true
+BEFORE="$(receipt_field free_bytes_before 2>/dev/null)"
+AFTER="$(receipt_field free_bytes_after 2>/dev/null)"
+DELTA="$(receipt_field df_delta_bytes 2>/dev/null)"
+RECLAIMED_DF="$(receipt_field reclaimed_bytes_df 2>/dev/null)"
+if [[ "$BEFORE" == "None" && "$AFTER" == "None" && "$DELTA" == "None" && "$RECLAIMED_DF" == "None" ]]; then
+  pass "receipt df fields are null in full mode when rc=75"
+else
+  fail "receipt df fields populated in full mode when rc=75: before=$BEFORE after=$AFTER delta=$DELTA reclaimed_df=$RECLAIMED_DF"
+fi
+if grep -qxF -- "-kP $VALID_TMP_DIR" "$DF_ARGUMENT_LOG"; then
+  fail "df was invoked for tmp root in full mode when rc=75"
+else
+  pass "df was never invoked for tmp root in full mode when rc=75"
 fi
 
 echo ""

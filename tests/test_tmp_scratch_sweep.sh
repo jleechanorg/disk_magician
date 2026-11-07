@@ -70,12 +70,12 @@ cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK'
 #!/bin/bash
 echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-} deadline=${ACT_DEADLINE_AT:-} cursor=${ACT_CURSOR:-}" >> "${INVOCATION_LOG:?}"
 if [[ "$*" == "volume path scratch --for-reclaim" ]]; then
-  # This fixture host has no registered Scratch volume, so the sweep's
-  # free-space receipt falls back to the tmp roots it prunes. Modeling the
-  # real 3/75 "no volume" answer keeps this a stub instead of a synthetic
-  # volume_reclaim run (see tests/test_tmp_scratch_sweep_df_target.sh for the
-  # volume-present case).
-  exit 75
+  # This fixture host has no registered Scratch volume (rc=3 confirmed absence),
+  # so the full sweep's free-space receipt falls back to the tmp roots it prunes.
+  # Modeling the canonical rc=3 no-volume answer keeps this a stub instead of a
+  # synthetic volume_reclaim run (see tests/test_tmp_scratch_sweep_df_target.sh
+  # for the volume-present and unverified-rc75 cases).
+  exit 3
 fi
 if [[ "$1" == "scratch-prune" ]]; then
   echo "scratch_prune_mode automatic=${DISK_MAGICIAN_SCRATCH_AUTOMATIC:-0} approval=${SCRATCH_TOP_LEVEL_APPROVED:-0}" >> "${INVOCATION_LOG:?}"

@@ -15,8 +15,10 @@ act_parse_deadline_args "$@" || exit 2
 # Bash 3.2 with nounset treats an empty array expansion as an unbound variable.
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 SWEEP_MODE=full
+SCRATCH_ONLY=false
 if [[ "${1:-}" == --scratch-only ]]; then
   SWEEP_MODE=scratch-only
+  SCRATCH_ONLY=true
   shift
 fi
 clean_flag="${1:---dry-run}"
@@ -52,17 +54,20 @@ RECEIPT_HELPER="${DISK_MAGICIAN_RECEIPT_HELPER:-$SCRIPT_DIR/job_receipt.py}"
 # back to the tmp scratch roots cleanup_tmp.sh prunes only when this host has no
 # Scratch volume at all — never to the package dir.
 resolve_sweep_measure_target() {
-  local diskm="${DISK_MAGICIAN_DISKM_BIN:-$SCRIPT_DIR/../disk_magician.sh}" root
-  if root="$("$diskm" volume path scratch --for-reclaim 2>/dev/null)" && [[ -n "$root" && -d "$root" ]]; then
+  local diskm="${DISK_MAGICIAN_DISKM_BIN:-$SCRIPT_DIR/../disk_magician.sh}" root vol_rc=0
+  root="$("$diskm" volume path scratch --for-reclaim 2>/dev/null)" || vol_rc=$?
+  if [[ $vol_rc -eq 0 && -n "$root" && -d "$root" ]]; then
     printf '%s' "$root"
     return 0
   fi
-  while IFS= read -r root; do
-    if [[ -n "$root" && -d "$root" ]]; then
-      printf '%s' "$root"
-      return 0
-    fi
-  done < <(scratch_roots_get_unique 2>/dev/null || true)
+  if [[ "$SCRATCH_ONLY" != true && $vol_rc -eq 3 ]]; then
+    while IFS= read -r root; do
+      if [[ -n "$root" && -d "$root" ]]; then
+        printf '%s' "$root"
+        return 0
+      fi
+    done < <(scratch_roots_get_unique 2>/dev/null || true)
+  fi
   return 1
 }
 SWEEP_MEASURE_TARGET="$(resolve_sweep_measure_target)" || SWEEP_MEASURE_TARGET=""
@@ -439,7 +444,7 @@ if [[ "$TMP_LOCK_SKIPPED" == true && $rc -eq 0 && "$DF_DELTA" != null ]]; then
   REMOVED_COUNT=0
   DEFERRED_COUNT=0
   INTERRUPTED_COUNT=0
-elif [[ "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || "$DF_DELTA" == null ]] || [[ "$REMOVED_COUNT" == null && "$DEFERRED_DEADLINE_SKIP" != true ]]; then
+elif [[ "$DEFERRED_COUNT" == null || "$INTERRUPTED_COUNT" == null || ( -n "$SWEEP_MEASURE_TARGET" && "$DF_DELTA" == null ) ]] || [[ "$REMOVED_COUNT" == null && "$DEFERRED_DEADLINE_SKIP" != true ]]; then
   rc=1
   OUTCOME="error"
   REASON="adapter receipt or df postcondition unavailable"
