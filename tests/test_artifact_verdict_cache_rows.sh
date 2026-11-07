@@ -81,6 +81,10 @@ assert_eq "$(av "$T/scratch/tencent" --kind rebuildable)" kept:unproven-content 
     "a \`tencent\` dir outside \$HOME"
 assert_eq "$(av "$HOME/.cache/huggingface" --kind rebuildable)" kept:unproven-content \
     "the cache root itself is not an entry"
+mkdir -p "$HOME/.cache/huggingface/stored_tokens/x" && printf 'payload' >"$HOME/.cache/huggingface/stored_tokens/x/blob"
+age "$HOME/.cache/huggingface/stored_tokens" 120
+assert_eq "$(av "$HOME/.cache/huggingface/stored_tokens" --kind rebuildable)" kept:unproven-content \
+    "an undeclared dir under huggingface cache root stays unproven"
 
 echo "== credential files and secret-like content =="
 printf 'hf_token=abc' >"$HOME/.cache/huggingface/token"

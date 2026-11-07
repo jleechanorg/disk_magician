@@ -274,7 +274,7 @@ _av_rebuildable() (
     # only a DIRECTORY: a client can drop credential material beside the cache
     # (huggingface_hub's older `token` file), which no secret-name pattern covers
     # and which must never be classified by its parent's name.
-    if [[ -d "$1" && "${1#"$h"/}" =~ ^\.cache/(huggingface|hy3dgen)/[^/] ]]; then return 0; fi
+    if [[ -d "$1" && "${1#"$h"/}" =~ ^\.cache/(huggingface/(hub|modules|xet)|hy3dgen/tencent)(/|$) ]]; then return 0; fi
     [[ "${1#"$h"/}" =~ $re ]] && return 0
     local app_root="${DISK_MAGICIAN_XCODE_APP_ROOT:-/Applications}"
     app_root="$(cd "$app_root" 2>/dev/null && pwd -P)" && [[ -n "$app_root" && "$1" == "$app_root"/Xcode*.app ]] && return 0
