@@ -1850,28 +1850,26 @@ class StatusAndBallastTest(VolumeTestBase):
 
     def test_pressure_process_propagates_eperm_when_completed_leader_group_remains(self):
         import signal
-        import threading
-        import time
 
         real_popen = volume.subprocess.Popen
         real_killpg = os.killpg
         leader = self.root / "leader-with-grandchild.py"
-        child_pid_file = self.root / "grandchild.pid"
         leader.write_text(
-            "import pathlib, subprocess, sys, time\n"
+            "import subprocess, sys\n"
             "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])\n"
-            "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
-            "time.sleep(0.2)\n"
+            "print(child.pid, flush=True)\n"
+            "sys.stdin.read()\n"
         )
         owned = []
-        signal_thread = None
+        grandchild_pids = []
 
         def spawn(*args, **kwargs):
-            nonlocal signal_thread
+            kwargs["stdin"] = volume.subprocess.PIPE
+            kwargs["stdout"] = volume.subprocess.PIPE
+            kwargs["text"] = True
             process = real_popen(*args, **kwargs)
             owned.append(process)
-            signal_thread = threading.Timer(0.02, signals.__setitem__, args=("signal", signal.SIGTERM))
-            signal_thread.start()
+            signals["signal"] = signal.SIGTERM
             return process
 
         def killpg(pid, signum):
@@ -1882,11 +1880,14 @@ class StatusAndBallastTest(VolumeTestBase):
                 # the grandchild after the owned Popen leader exits.
                 return real_killpg(pid, 0)
             self.assertEqual(signum, signal.SIGTERM)
-            while process.poll() is None:
-                time.sleep(0.01)
-            child_pid = int(child_pid_file.read_text())
+            # The leader prints only after the grandchild has joined its
+            # process group, then blocks on stdin until this seam releases it.
+            child_pid = int(process.stdout.readline())
+            grandchild_pids.append(child_pid)
             self.assertEqual(os.getpgid(child_pid), pid)
             self.assertEqual(os.getsid(child_pid), pid)
+            process.stdin.close()
+            process.wait(timeout=5)
             raise PermissionError(errno.EPERM, "completed leader has live group member")
 
         try:
@@ -1895,17 +1896,18 @@ class StatusAndBallastTest(VolumeTestBase):
                 with mock.patch.object(volume.subprocess, "Popen", side_effect=spawn), \
                      mock.patch.object(volume.os, "killpg", side_effect=killpg) as forward:
                     with self.assertRaises(PermissionError):
-                        volume.pressure_process(
-                            [sys.executable, str(leader), str(child_pid_file)], signals)
+                        volume.pressure_process([sys.executable, str(leader)], signals)
                     forward.assert_any_call(owned[0].pid, signal.SIGTERM)
                     forward.assert_any_call(owned[0].pid, 0)
         finally:
-            if signal_thread is not None:
-                signal_thread.join(timeout=1)
             process = owned[0]
+            if process.stdin and not process.stdin.closed:
+                process.stdin.close()
             process.wait(timeout=5)
-            if child_pid_file.exists():
-                child_pid = int(child_pid_file.read_text())
+            if process.stdout:
+                process.stdout.close()
+            if grandchild_pids:
+                child_pid = grandchild_pids[0]
                 try:
                     # Prove the cleanup target is the fixture's original
                     # process group/session before sending the real signal.
