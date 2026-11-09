@@ -581,93 +581,25 @@ scratch_budget_evict_root() {
 }
 
 # scratch_budget_artifact_children <dir> [max_depth]
-# Print artifact-shaped descendant directories of <dir>, one per line, deepest
-# useful unit first-encountered order. Purpose: a directory's "newest content"
-# is an AGGREGATE, so one freshly-written child shelters every stale sibling in
-# the tree -- measured 2026-11-03 on Scratch: worldai_frontend/build held 23.7
-# GiB of 39-41 h old Android build dirs, yet the whole 35 GiB read as 0 h old
-# because a single sibling had been written minutes earlier. Callers must be able
-# to evaluate each child on its own age, so this enumerates them.
-# Refuses to descend into symlinks or into any directory containing .git (a
-# working tree is never a build artifact), and is depth-bounded.
+# Emit NUL-delimited artifact children. NUL framing preserves arbitrary POSIX
+# path bytes other than NUL and is safe for callers under Bash 3.2.
 scratch_budget_artifact_children() {
-  local dir="$1" max_depth="${2:-3}"
+  local dir="$1" max_depth="${2:-3}" deadline="${ACT_DEADLINE_AT:-}" script_dir
   [[ -d "$dir" && ! -L "$dir" ]] || return 1
   [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=3
-  # A .git marker can be a directory, a file, or a dangling link. Check the
-  # root before walking, then prune every marked directory in this one bounded
-  # walk so a shallower Git ancestor cannot be bypassed by a later depth pass.
-  [[ -e "$dir/.git" || -L "$dir/.git" ]] && return 0
-  (( max_depth > 0 )) || return 0
-  # One Python stdlib walker avoids a shell process for every visited directory.
-  # It checks the actuator deadline before each directory expansion and returns
-  # 124 when expansion is deferred; callers must report that explicitly rather
-  # than treating an incomplete list as "no eligible entries".
-  local deadline="${ACT_DEADLINE_AT:-}"
-  python3 - "$dir" "$max_depth" "$deadline" <<'PY'
-import fnmatch
-import os
-import sys
-import time
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 "$script_dir/scratch_budget_artifact_children.py" single "$dir" "$max_depth" "$deadline"
+}
 
-root, max_depth, deadline = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-try:
-    deadline_value = float(deadline) if deadline else None
-except ValueError:
-    raise SystemExit(1)
-
-def expired():
-    return deadline_value is not None and time.monotonic() >= deadline_value
-
-def has_git_marker(path):
-    try:
-        os.lstat(os.path.join(path, ".git"))
-    except FileNotFoundError:
-        return False
-    return True
-
-def is_artifact_name(name):
-    return name in {
-        "build", "dist", "out", "target", "coverage", "artifacts", "gradle",
-        ".gradle", "android-sdk", "avd", ".next", ".cache", ".turbo",
-        ".parcel-cache", "__pycache__", "DerivedData", "Pods",
-    } or fnmatch.fnmatchcase(name, "isolated-*")
-
-def walk(path, depth):
-    if expired():
-        raise TimeoutError
-    try:
-        with os.scandir(path) as entries:
-            for entry in entries:
-                if expired():
-                    raise TimeoutError
-                try:
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                    child = entry.path
-                    # Match find's -exec marker check followed by -prune: the
-                    # marked directory itself is not emitted and is never
-                    # descended into.
-                    if has_git_marker(child):
-                        continue
-                    # find's `! -name '.*' -print0` filters hidden output
-                    # basenames, while still traversing hidden parents.
-                    if not entry.name.startswith(".") and is_artifact_name(entry.name):
-                        print(child, flush=True)
-                    if depth < max_depth:
-                        walk(child, depth + 1)
-                except OSError:
-                    raise
-    except OSError:
-        raise
-
-try:
-    walk(root, 1)
-except TimeoutError:
-    raise SystemExit(124)
-except (OSError, ValueError):
-    raise SystemExit(1)
-PY
+# scratch_budget_artifact_children_batch <max_depth> < NUL-delimited paths
+# Emits an all-or-nothing versioned NUL protocol: marker, pair count, then
+# candidate/child pairs. A deadline or unreadable path returns nonzero with no
+# partial stdout, so callers must never treat failure as an empty result.
+scratch_budget_artifact_children_batch() {
+  local max_depth="${1:-3}" script_dir
+  [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=3
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 "$script_dir/scratch_budget_artifact_children.py" batch "$max_depth" "${ACT_DEADLINE_AT:-}"
 }
 
 # scratch_budget_measure_files <path> [threshold_mib]

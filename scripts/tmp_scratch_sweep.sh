@@ -197,9 +197,19 @@ PY
   if grep -qE '^skipped:(unavailable|measurement-unavailable)' <<<"$SCRATCH_PRUNE_OUTPUT"; then
     SCRATCH_PRUNE_OUTCOME=error
     rc=1
-  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] || grep -q '^skipped:lease-busy' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+  elif grep -q '^deferred:artifact-discovery-' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+    SCRATCH_PRUNE_OUTCOME=partial
+    SCRATCH_PRUNE_REMOVED=null
+    SCRATCH_PRUNE_SCANNED=null
+    rc=1
+  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && { grep -q '\[scratch_prune\] skipped, scratch lock held' <<<"$SCRATCH_PRUNE_OUTPUT" || grep -q '^skipped:lease-busy' <<<"$SCRATCH_PRUNE_OUTPUT"; }; then
     SCRATCH_PRUNE_LOCK_SKIPPED=true
     SCRATCH_PRUNE_OUTCOME=skipped_lock
+  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && grep -q '^partial:budget-target-unmet' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+    SCRATCH_PRUNE_OUTCOME=partial
+  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]]; then
+    SCRATCH_PRUNE_OUTCOME=error
+    rc=1
   elif [[ "$SCRATCH_PRUNE_RC" == 124 || "$SCRATCH_PRUNE_RC" == 137 || "$SCRATCH_PRUNE_RC" == 143 ]]; then
     SCRATCH_PRUNE_OUTCOME=timeout
     # Interrupted discovery/removal can mutate without emitting a summary.
