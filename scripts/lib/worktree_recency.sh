@@ -92,7 +92,8 @@ worktree_last_activity_epoch() {
     local mtimes
     if mtimes="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
         -o -type f -exec "${stat_mtime[@]}" {} + 2>/dev/null)"; then
-        candidate="$(awk '$1+0>m{m=$1+0} END{if (m>0) print m}' <<<"$mtimes")"
+        # A large here-string can block on Bash 5.3.3/macOS; stream it to awk.
+        candidate="$(printf '%s\n' "$mtimes" | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')"
     else
         candidate=""
     fi

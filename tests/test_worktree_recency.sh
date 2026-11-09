@@ -32,7 +32,7 @@ touch_at() {
 # mtime_of <path> -> epoch (portable; GNU `stat -f` prints fs info instead)
 mtime_of() { python3 -c 'import os,sys; print(int(os.lstat(sys.argv[1]).st_mtime))' "$1"; }
 
-TMPROOT="$(mktemp -d)"
+TMPROOT="$(mktemp -d "${CLAUDE_CODE_TMPDIR:-/tmp}/wt-recency.XXXXXX")"
 trap 'rm -rf "$TMPROOT"' EXIT
 
 # mk_worktree <name> — a linked-worktree shape: .git is a pointer FILE into a
@@ -148,6 +148,23 @@ if worktree_is_recently_active_minutes "$WT" notanumber; then
 else
     bad "invalid floor read as eligible — fails open"
 fi
+
+echo "== case 10: large timestamp list completes through awk pipe =="
+WT="$(mk_worktree large_timestamp_list)"
+for ((i = 0; i < 4000; i++)); do : > "$WT/timestamp-$i"; done
+touch_at "$(days_ago 30)" "$WT"/timestamp-*
+touch "$WT/timestamp-3999"
+EXPECTED_EPOCH="$(mtime_of "$WT/timestamp-3999")"
+LARGE_EPOCH="$(python3 -c 'import subprocess, sys; print(subprocess.run(["bash", "-c", '\''source "$1"; worktree_last_activity_epoch "$2"'\'', "_", *sys.argv[1:]], capture_output=True, text=True, check=True, timeout=15).stdout.strip())' \
+    "$REPO_ROOT/scripts/lib/worktree_recency.sh" "$WT")"
+assert_eq "$LARGE_EPOCH" "$EXPECTED_EPOCH" "4,000 timestamps return the newest file's epoch"
+
+echo "== case 11: default seven-day floor is unchanged =="
+WT="$(mk_worktree seven_day_boundary)"
+touch_at "$(days_ago 6)" "$WT/README.md" "$WT/src/deep/nested/code.py"
+if worktree_is_recently_active "$WT"; then ok "six-day-old worktree remains protected by default seven-day floor"; else bad "default seven-day floor changed"; fi
+touch_at "$(days_ago 8)" "$WT/README.md" "$WT/src/deep/nested/code.py"
+if worktree_is_recently_active "$WT"; then bad "eight-day-old worktree remains protected by default seven-day floor"; else ok "eight-day-old worktree is beyond default seven-day floor"; fi
 
 echo
 echo "=== $PASS passed, $FAIL failed ==="

@@ -92,8 +92,12 @@ while IFS= read -r wt; do
     [[ -f "$gd/locked" ]] && locked="yes"
   fi
 
-  livecwd="no"
-  grep -Fq -- "$wt" "$LIVE" 2>/dev/null && livecwd="YES"
+  # Assign both normal match outcomes explicitly.
+  if grep -Fq -- "$wt" "$LIVE" 2>/dev/null; then
+    livecwd="YES"
+  else
+    livecwd="no"
+  fi
 
   ngits="$(find "$wt" -xdev -maxdepth 3 -type d -name .git 2>/dev/null | wc -l)"
   ngits="${ngits//[!0-9]/}"
