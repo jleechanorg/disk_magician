@@ -1,3 +1,15 @@
+---
+title: 2026-10-27 wave 3 all-time low: SQLite vacuum, Hermes FTS5, git alternates, and SimRender cleanup
+hostname: jeffreys-macbook-pro
+date: 2026-10-27
+status: active
+paths:
+  - /System/Volumes/Data
+  - /Users/jleechan/.codex/thread_history_1.sqlite
+  - /Users/jleechan/projects_other/worktree_disk_trim
+  - /Users/jleechan/.claude/projects
+---
+
 # 2026-10-27: Wave 3 All-Time Low `540 GiB Used` (`-105.55 GiB` Wave 3 / `-267 GiB` Cumulative) — SQLite `btreeIncrVacuum` $O(N^2)$ Fast `VACUUM`, Hermes v23 External-Content FTS5, `.git/objects/info/alternates` Dedup & Non-`.git` C14 Recency, and `SimRenderServer` Raw Video Sweep
 
 - **Date**: 2026-10-27

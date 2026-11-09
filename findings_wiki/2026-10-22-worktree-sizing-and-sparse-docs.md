@@ -1,3 +1,13 @@
+---
+title: Worktree sizing on jeff-ubuntu: what actually shrinks a checkout
+hostname: jeff-ubuntu
+date: 2026-10-22
+status: active
+paths:
+  - ~/projects/worldarchitect.ai
+  - docs/user-stories-ui
+---
+
 # 2026-10-22 — worktree sizing on jeff-ubuntu: what actually shrinks a checkout
 
 Machine: Jeff-Ubuntu (Linux, `/dev/nvme0n1p6`). Measured during a 91%→77 G free recovery.

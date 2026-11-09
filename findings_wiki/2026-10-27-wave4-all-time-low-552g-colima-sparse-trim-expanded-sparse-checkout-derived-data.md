@@ -1,3 +1,14 @@
+---
+title: 2026-10-27 wave 4 all-time low: Colima trim, DerivedData, sparse checkouts, and video pruning
+hostname: jeffreys-macbook-pro
+date: 2026-10-27
+status: active
+paths:
+  - /System/Volumes/Data
+  - /Users/jleechan/.colima/_lima/_disks/colima/datadisk
+  - /Users/jleechan/Library/Developer/Xcode/DerivedData
+---
+
 # 2026-10-27: Wave 4 All-Time Low `552 GiB Used` (`-26 GiB` net `df` / `52.67 GiB` physical / `-255 GiB` Cumulative) — Colima Datadisk Re-anchor & Sparse Trim, Custom DerivedData Sweeps, Expanded Sparse-Checkout Exclusions, and C14 Intermediate Video Capture Pruning
 
 - **Date**: 2026-10-27
