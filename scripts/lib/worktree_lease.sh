@@ -731,7 +731,7 @@ PYUNLOCK
     rmdir "$1.reuse-lock" 2>/dev/null
 }
 lease_mutation_lock_enter() {
-    local lease="$1" mode="${2:-}" attempt=0 max_attempts=50 registry_lock saw_busy=0
+    local lease="$1" mode="${2:-}" attempt=0 max_attempts=120 registry_lock saw_busy=0
     if [[ "$mode" == --lock-held ]]; then
         [[ -d "$lease.reuse-lock" && -d "$(lease_dir)/.owner-mutation.reuse-lock" ]]
         return $?
@@ -747,7 +747,7 @@ lease_mutation_lock_enter() {
             fi
             attempt=$((attempt + 1))
             (( attempt < max_attempts )) || return 1
-            sleep 0.1 2>/dev/null || return 1
+            sleep 0.25 2>/dev/null || return 1
         done
     else
         lease_registry_mutation_lock_enter || return 1

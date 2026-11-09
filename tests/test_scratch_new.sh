@@ -148,27 +148,42 @@ done
 [[ -e "$REGISTRY_HELD" ]] && ok "test holder owns the real filesystem registry lock" || bad "test holder did not acquire registry lock"
 LOCK_OUT="$T/registry-lock-wait.out"
 LOCK_ERR="$T/registry-lock-wait.err"
+LOCK_STARTED=$SECONDS
 bash "$DISKM" scratch-new "$T/myrepo" registry-lock-wait --kind build >"$LOCK_OUT" 2>"$LOCK_ERR" &
 LOCK_PID=$!
 for attempt in {1..100}; do
-    LOCK_PATH="$(find "$T/tmp/myrepo/build" -mindepth 1 -maxdepth 1 -type d -name 'registry-lock-wait-*' -print -quit 2>/dev/null)"
+    LOCK_PATH="$(find "$T/tmp/myrepo/build" -mindepth 1 -maxdepth 1 -type d -name "registry-lock-wait-*" -print -quit 2>/dev/null)"
     [[ -n "$LOCK_PATH" ]] && break
     kill -0 "$LOCK_PID" 2>/dev/null || break
     sleep 0.01
 done
 [[ -n "$LOCK_PATH" ]] && ok "scratch-new created its candidate before lease registration" || bad "scratch-new candidate was not created"
-sleep 1
-if kill -0 "$LOCK_PID" 2>/dev/null; then
-    ok "scratch-new remains pending while the live holder owns the lock"
+LOCK_EXITED=0
+LOCK_EXIT_SECONDS=""
+while (( SECONDS - LOCK_STARTED < 12 )); do
+    if ! kill -0 "$LOCK_PID" 2>/dev/null; then
+        LOCK_EXITED=1
+        LOCK_EXIT_SECONDS=$((SECONDS - LOCK_STARTED))
+        break
+    fi
+    sleep 0.05
+done
+while (( SECONDS - LOCK_STARTED < 12 )); do sleep 0.05; done
+LOCK_HOLD_SECONDS=$((SECONDS - LOCK_STARTED))
+if [[ "$LOCK_EXITED" == 0 ]] && kill -0 "$LOCK_PID" 2>/dev/null; then
+    ok "scratch-new remains pending for the 12s live-holder window"
 else
-    bad "scratch-new returned before the live holder released the lock"
+    bad "scratch-new returned before holder release after ${LOCK_EXIT_SECONDS}s"
 fi
 : > "$REGISTRY_RELEASE"
 wait "$HOLDER_PID"; HOLDER_RC=$?
 assert_eq "$HOLDER_RC" 0 "test holder releases its own filesystem lock"
 wait "$LOCK_PID"; LOCK_RC=$?
 [[ "$LOCK_RC" -eq 0 ]] || cat "$LOCK_ERR" >&2
+if [[ "$LOCK_EXITED" == 0 ]]; then LOCK_TOTAL_SECONDS=$((SECONDS - LOCK_STARTED)); else LOCK_TOTAL_SECONDS="$LOCK_EXIT_SECONDS"; fi
+printf "scratch-new held_lock=%ss cli_elapsed=%ss exit=%s\\n" "$LOCK_HOLD_SECONDS" "$LOCK_TOTAL_SECONDS" "$LOCK_RC"
 assert_eq "$LOCK_RC" 0 "scratch-new succeeds after transient lock release"
+(( LOCK_TOTAL_SECONDS < 30 )) && ok "scratch-new handoff completes within 30s" || bad "scratch-new exceeded bounded wait"
 assert_contains "$(cat "$LOCK_OUT")" "$T/tmp/myrepo/build/registry-lock-wait-" "scratch-new returns the allocated path"
 [[ -d "$(cat "$LOCK_OUT")" ]] && ok "scratch-new leaves its test directory" || bad "scratch-new output directory missing"
 
