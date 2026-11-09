@@ -155,11 +155,8 @@ for ((i = 0; i < 4000; i++)); do : > "$WT/timestamp-$i"; done
 touch_at "$(days_ago 30)" "$WT"/timestamp-*
 touch "$WT/timestamp-3999"
 EXPECTED_EPOCH="$(mtime_of "$WT/timestamp-3999")"
-if command -v timeout >/dev/null 2>&1; then
-    LARGE_EPOCH="$(timeout 15 bash -c 'source "$1"; worktree_last_activity_epoch "$2"' _ "$REPO_ROOT/scripts/lib/worktree_recency.sh" "$WT")"
-else
-    LARGE_EPOCH="$(bash -c 'source "$1"; worktree_last_activity_epoch "$2"' _ "$REPO_ROOT/scripts/lib/worktree_recency.sh" "$WT")"
-fi
+LARGE_EPOCH="$(python3 -c 'import subprocess, sys; print(subprocess.run(["bash", "-c", '\''source "$1"; worktree_last_activity_epoch "$2"'\'', "_", *sys.argv[1:]], capture_output=True, text=True, check=True, timeout=15).stdout.strip())' \
+    "$REPO_ROOT/scripts/lib/worktree_recency.sh" "$WT")"
 assert_eq "$LARGE_EPOCH" "$EXPECTED_EPOCH" "4,000 timestamps return the newest file's epoch"
 
 echo "== case 11: default seven-day floor is unchanged =="
