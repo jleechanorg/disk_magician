@@ -107,11 +107,47 @@ deleted, >14 d session pruning (16.1 GiB Mac + 17.9 GiB Linux), and rootless FIT
 ## Why this finding exists
 
 The floor **was not discoverable** in one place. The ledger was 19 days stale
-(`topdown-5g.status.json` → `reason=coverage_incomplete`, `age_hours=339`), the frontier scan was
-`mode=partial` because `disk_frontier_scan.py` has no `EDEADLK`/`SF_DATALESS` handling, and the
-authoritative number therefore had to be reconstructed from git history. This doc records both the
-number and the retrieval commands so the next session starts from 789.1 GiB rather than from a fresh
-`du` sweep that stalls.
+(`topdown-5g.status.json` → `reason=coverage_incomplete`, `age_hours=339`) and the frontier scan was
+`mode=partial`, so the authoritative number had to be reconstructed from git history. This doc records
+both the number and the retrieval commands so the next session starts from 789.1 GiB rather than from a
+fresh `du` sweep that stalls.
+
+### Why the frontier scan is partial — two different causes, in order
+
+**Current cause (2026-11-09 evening): Full Disk Access was revoked.**
+
+```
+fda_preflight_status: partial          ← was "granted" earlier the same day
+fda_hint: grant_full_disk_access_to_the_snapshot_frontier_executable
+measured_top_level_roots: 0 / 20
+unfinished_top_level_roots: 18
+frontier_unfinished entries: 195,031
+```
+
+Zero of twenty roots measured. `partial` here does **not** mean "nearly complete with a tail of gaps" —
+it means *nothing was enumerated*. Without TCC Full Disk Access the scanner cannot read the system
+paths, so every root lands in `unfinished`. This is a GUI action (System Settings → Privacy & Security
+→ Full Disk Access) with no CLI grant path; `install-root-frontier-runner.sh` also needs `sudo`.
+
+**Earlier cause (superseded): missing errno handling.** `disk_frontier_scan.py` had no
+`EDEADLK`/`SF_DATALESS` handling for iCloud placeholder files. That was a real defect and blocked
+completion on its own, but **fixing it will not help while FDA is revoked** — a scanner that cannot read
+the disk cannot enumerate it regardless of errno handling. Fix FDA first, then re-check whether the
+errno path still blocks.
+
+### Freshness reporting is misleading
+
+`diskm ledger-freshness` returns **`OK`** while the same output line carries
+`published_age_hours=474` and `canonical_publication=stale`, because it accepts a fresh *partial* as
+sufficient:
+
+```
+OK  published_age_hours=474  status=partial  partial_age_hours=9  \
+    label=PARTIAL  canonical_publication=stale  scan_measured_roots=0/20
+```
+
+A freshness check that reports OK against a 19.8-day-old published ledger will keep hiding this. Treat
+`canonical_publication=stale` and `scan_measured_roots=0/*` as failures regardless of the leading token.
 
 ## How to apply
 
