@@ -126,17 +126,18 @@ coverage before publishing a new complete ledger; retain partial observations se
 
 ### Freshness reporting is misleading
 
-`diskm ledger-freshness` returns **`OK`** while the same output line carries
-`published_age_hours=474` and `canonical_publication=stale`, because it accepts a fresh *partial* as
-sufficient:
+On November 9, `diskm ledger-freshness` returned **`OK`** for partial freshness while also reporting
+a stale complete publication. Selected fields from that receipt:
 
 ```
-OK  published_age_hours=474  status=partial  partial_age_hours=9  \
-    label=PARTIAL  canonical_publication=stale  scan_measured_roots=0/20
+OK  published_age_hours=475  status=partial  partial_age_hours=9
+label=PARTIAL  canonical_publication=stale
+scan_measured_roots=0  scan_reachable_roots=20
 ```
 
-A freshness check that reports OK against a 19.8-day-old published ledger will keep hiding this. Treat
-`canonical_publication=stale` and `scan_measured_roots=0/*` as failures regardless of the leading token.
+The leading token alone cannot establish a fresh complete ledger. Inspect `canonical_publication`
+and both root-count fields; the fleet and disk-alert callers already check the stale-publication
+field. A partial-freshness result does not make incomplete observations eligible for floor math.
 
 ## How to apply
 
