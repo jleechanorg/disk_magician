@@ -1,5 +1,5 @@
 ---
-title: Disk-space floor is 789.1 GiB (2026-10-20 ledger); record it here so it is not re-derived
+title: Historical disk baseline and ledger paths; October 20 is outside the November 9 14-day window
 hostname: jeffreys-macbook-pro
 date: 2026-11-09
 status: active
@@ -19,121 +19,110 @@ safety_rule: none
 
 ## What
 
-The 14-day rolling **floor** for this host, and the exact files that hold it. Written down so a
-future session can recall the baseline in one read instead of re-deriving it — this session burned
-hours re-measuring because the floor was not recorded anywhere findable.
+The last published complete ledger records **789.1 GiB used on October 20**. This is a historical
+observation. On November 9, a 14-day window starts October 26, so that sample cannot establish the
+14-day floor. The host's ledger history has no eligible capture in that window.
 
 | quantity | value | source |
 |---|---|---|
-| **Floor (lowest `df used` in the window)** | **789.1 GiB used** | `~/.disk_magician_backup/ledger/topdown-5g.json` @ commit `b4ff54a0`, captured **2026-10-20T14:04:01Z** |
-| Used at 2026-11-09 | **710.6 GiB** | live `df -m /System/Volumes/Data` |
-| **Gap to floor** | **−78.5 GiB (below floor)** | derived |
-| Free at 2026-11-09 (post-reclaim) | **122.9 GiB (85%)** | live `df` |
+| Historical used space (`df`, filesystem aggregate) | **789.1 GiB used** | `~/.disk_magician_backup/ledger/topdown-5g.json` @ commit `b4ff54a0e5f213a81ded326eaf158883cf8f9ca5`, captured **2026-10-20T14:04:01Z**; `disk_used_kb=827387344` |
+| 14-day ledger floor at 2026-11-09 | **Unavailable** | No eligible captures since October 26 |
+| Gap to a 14-day floor | **Unavailable** | Requires an eligible floor and a current observation of the same filesystem |
 
-## Where the floor lives — the authoritative paths
+The historical value is a filesystem aggregate, with no file-itemization threshold. It establishes
+used space at that capture, not the age or reclaimability of any directory. Selecting the newest
+commit does not select a minimum. A new observation below 789.1 GiB also does not prove the host is
+below its rolling floor.
+
+## Where the measurements live
 
 These are the files to read. **Do not run a fresh whole-disk `du`** to answer "what is the floor";
 read the ledger (repo `CLAUDE.md` mandates this and warns `du` stalls >60 s on this box).
 
 ```
-~/.disk_magician_backup/ledger/topdown-5g.json          ← THE floor ledger (authoritative)
+~/.disk_magician_backup/ledger/topdown-5g.json          ← last published complete ledger
 ~/.disk_magician_backup/ledger/topdown-5g.md            ← human-readable render of the same
-~/.disk_magician_backup/ledger/topdown-5g.partial.json  ← partial-scan ledger (coverage-gated)
-~/.disk_magician_backup/ledger/topdown-5g.status.json   ← status/coverage envelope + age_hours
+~/.disk_magician_backup/ledger/topdown-5g.partial.json  ← partial-scan observations
+~/.disk_magician_backup/ledger/topdown-5g.status.json   ← current publication/coverage status
 ~/.disk_magician_backup/snapshots/disk_snapshot.json    ← live snapshot (needs coverage >= 70%)
-/var/db/disk-magician/frontier_last.json                ← root-owned frontier scan (30 MB)
+/var/db/disk-magician/frontier_last.json                ← root-owned frontier scan
 ~/.disk_magician_state/frontier_last.json               ← user-owned frontier mirror
 ```
 
-Retrieve the floor and any historical floor with:
+Retrieve the historical sample with:
 
 ```bash
-# newest floor commit + its value
+# Recent publication history; newest does not mean lowest.
 git -C ~/.disk_magician_backup log --oneline -3 -- ledger/topdown-5g.json
-git -C ~/.disk_magician_backup show -s --format=%ci <sha>
-python3 -c "import json,subprocess;d=json.loads(subprocess.run(['git','-C','$HOME/.disk_magician_backup','show','<sha>:ledger/topdown-5g.json'],capture_output=True,text=True).stdout);print(round(d['disk_used_kb']/1048576,1))"
+git -C ~/.disk_magician_backup show b4ff54a0e5f213a81ded326eaf158883cf8f9ca5:ledger/topdown-5g.json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["captured_at"], d["disk_used_kb"], round(d["disk_used_kb"]/1048576, 1), d["mode"])'
+```
 
-# or, one command:
+The sample prints `2026-10-20T14:04:01Z 827387344 789.1 complete`. For a rolling comparison:
+
+```bash
 diskm history diff --days 14
 ```
+
+On the reviewed host this reports `no valid ledger snapshots in the last 14 days`. Use the fallback
+below. Also check the command's selected reference: when the selected floor is HEAD, the current
+implementation substitutes `HEAD~1` to show movement (`scripts/history_diff.py`, `main`). That
+comparison must not be reported as the window minimum without checking the capture selection.
 
 **Coverage gate (hard):** never treat `snapshots/disk_snapshot.json`'s `disk_used_gb` as a floor when
 `snapshot_coverage_pct` < 70 %. A low-coverage minimum is bogus.
 
-## The measured floor curve at 2026-11-09
+## Historical ledger observations
 
-Recent ledger commits, used-GiB, for the 14-day window:
+These October captures all precede the 14-day window ending November 9:
 
 | date | used GiB | commit |
 |---|---|---|
-| 2026-10-20 | **789.1** ← floor | `b4ff54a0` |
+| 2026-10-20 | **789.1** | `b4ff54a0` |
 | 2026-10-19 | 830.6 | `83c31699` |
 | 2026-10-18 | 867.7 | `9ef7ac82` |
 | 2026-10-17 | 836.2 | `480db551` |
 | 2026-10-15 | 861.2 | `e1fd0a56` |
 | 2026-10-14 | 780.9 | `e7bd2559` |
 
-Note 2026-10-14 (780.9) is *lower* than 10-20 but falls outside the 14-day window as of 2026-11-09;
-recompute the window rather than reusing 789.1 blindly once 10-20 ages out.
+October 14's 780.9 GiB is lower than October 20's value. Both are already outside the window;
+neither establishes a November 9 14-day floor.
 
-## The reclaimable buckets, with paths
+## Cleanup safety
 
-Per this repo's "per-file, never per-directory aggregate" rule (100 MiB stop floor), the buckets that
-were actually reclaimed 2026-11-08/09:
-
-| bucket | path | GiB before | notes |
-|---|---|---|---|
-| Scratch top-level | `/Volumes/diskm-scratch/<name>` | 102.4 used | shared APFS container `disk3` with `Data` — freeing here raises `Data` free immediately on macOS |
-| Worktrees | `~/.worktrees/<repo>/<name>` | 121–160 | floor is env-var driven, 3-day hard minimum |
-| Codex sessions | `~/.codex/sessions` | 53.3 | never-delete list; >14 d was 6.6 GiB |
-| Claude projects | `~/.claude/projects` | 22.1 | never-delete list; >14 d was 9.5 GiB |
-| Codex archive | `~/.codex/sessions_archive` | 10.6 | never-delete list |
-| Simulators | `~/Library/Developer/CoreSimulator/Devices` | 66 → 4.6 | erase shutdown devices only; keep booted |
-| Caches | `~/Library/Caches` | 17.1 | canonical sweeper frees ~0; live app cache |
-| Linux scratch image | `~/.local/share/disk-magician/volumes/scratch.ext4` | 176 → 104 | **loop-mounted ext4**: freeing inside returns NOTHING to the host until FITRIM |
-
-## Result achieved 2026-11-09
-
-| host | before | after |
-|---|---|---|
-| Mac `Data` free | 12.8 GiB (99%) | **122.9 GiB (85%)** |
-| Mac scratch free | 2.1 GiB (99%) | 107 GiB (29%) |
-| Linux `/` free | 9.1 GiB (95%) | 67.8 GiB (92%) |
-
-Methods: manual 6 h-floor sweep of scratch (1,139 dirs / 62.1 GiB, 0 failures), 26 shutdown simulators
-deleted, >14 d session pruning (16.1 GiB Mac + 17.9 GiB Linux), and rootless FITRIM on Linux via
-`diskm volume trim-auto scratch --clean` (25.6 GB, no sudo).
+`~/.codex/sessions*` and `~/.claude/projects` are on the repository's hard never-delete list.
+They are protected regardless of age. This finding grants no cleanup exception. Use the canonical
+`diskm` cleaners and their live safety checks for eligible data; preserve their recency and lease
+gates. A directory total cannot prove that its contents are stale or reclaimable. Itemize files and
+child directories to the repository's 100 MiB stop threshold before making those claims.
 
 ## Why this finding exists
 
-The floor **was not discoverable** in one place. The ledger was 19 days stale
-(`topdown-5g.status.json` → `reason=coverage_incomplete`, `age_hours=339`) and the frontier scan was
-`mode=partial`, so the authoritative number had to be reconstructed from git history. This doc records
-both the number and the retrieval commands so the next session starts from 789.1 GiB rather than from a
-fresh `du` sweep that stalls.
+The last complete ledger capture was over 19 days old on November 9. The status envelope describes
+the newer partial scan: the inspected `topdown-5g.status.json` records `captured_at=2026-11-08T23:43:48Z`,
+`reason=coverage_incomplete`, and `age_hours=9.222`. Its age is separate from the complete ledger's age.
+Read both capture timestamps before using history.
 
-### Why the frontier scan is partial — two different causes, in order
+### Partial frontier coverage and Full Disk Access
 
-**Current cause (2026-11-09 evening): Full Disk Access was revoked.**
+The partial scan captured **2026-11-08T23:43:48Z**, inspected November 9, reports:
 
 ```
-fda_preflight_status: partial          ← was "granted" earlier the same day
+fda_preflight_status: partial
+fda_user_preflight_status: granted
 fda_hint: grant_full_disk_access_to_the_snapshot_frontier_executable
 measured_top_level_roots: 0 / 20
 unfinished_top_level_roots: 18
 frontier_unfinished entries: 195,031
 ```
 
-Zero of twenty roots measured. `partial` here does **not** mean "nearly complete with a tail of gaps" —
-it means *nothing was enumerated*. Without TCC Full Disk Access the scanner cannot read the system
-paths, so every root lands in `unfinished`. This is a GUI action (System Settings → Privacy & Security
-→ Full Disk Access) with no CLI grant path; `install-root-frontier-runner.sh` also needs `sudo`.
+Zero of twenty top-level roots completed measurement. The executable's Full Disk Access preflight
+needs investigation even though the user preflight is granted. Those fields establish incomplete
+coverage; they do not establish that permission was revoked or that no child paths were enumerated.
 
-**Earlier cause (superseded): missing errno handling.** `disk_frontier_scan.py` had no
-`EDEADLK`/`SF_DATALESS` handling for iCloud placeholder files. That was a real defect and blocked
-completion on its own, but **fixing it will not help while FDA is revoked** — a scanner that cannot read
-the disk cannot enumerate it regardless of errno handling. Fix FDA first, then re-check whether the
-errno path still blocks.
+The earlier attribution to missing `EDEADLK`/`SF_DATALESS` handling requires an error receipt linked
+to the failed scan. Absence of a handler alone does not prove the cause. Restore and verify complete
+coverage before publishing a new complete ledger; retain partial observations separately.
 
 ### Freshness reporting is misleading
 
@@ -151,11 +140,18 @@ A freshness check that reports OK against a 19.8-day-old published ledger will k
 
 ## How to apply
 
-1. **Before any disk proposal**, read the floor from `ledger/topdown-5g.json` and state the gap.
-   Do not propose cleanup without the gap.
-2. **If the ledger is older than 48 h**, say so and use `diskm history diff --days N`; do not invent
-   bucket deltas from a stale HEAD.
-3. **On macOS**, prefer reclaiming inside `/Volumes/diskm-scratch` — it is the same APFS container as
-   `Data`, so freed blocks help the main volume with no trim step.
-4. **On Linux**, deleting inside Scratch returns nothing until FITRIM; use the rootless
-   `diskm volume trim-auto scratch --clean`, never `sudo fstrim` by hand.
+1. Follow the repository's fleet check and existing reclaim-ledger sequence before a live disk
+   investigation. Compute the requested 7-day and 30-day minima from eligible captures; report each
+   capture window, coverage, typical daily minimum, and current-minus-floor for the same filesystem.
+2. If the complete ledger is older than 48 hours, state the gap. If no eligible ledger exists,
+   fall back to daily minima of `host_disk.used_kb` in
+   `~/.disk_magician_state/disk_observer.jsonl{,.1,.2}`. State the earliest available date and the
+   median daily minimum alongside the minimum; report missing observations explicitly. Use committed
+   `snapshots/disk_snapshot.json` captures with coverage at least 70% for bucket comparisons. Never
+   manufacture a bucket delta from stale or partial measurements.
+3. On macOS, verify that Scratch and Data share an APFS container before attributing changes in
+   available space. On Linux, deleting inside a loop image can leave allocated host blocks until
+   discard/trim. `diskm volume trim-auto scratch --clean` supports native Scratch with a pinned local
+   admin image and rootful Docker transport; its helper uses container root and `CAP_SYS_ADMIN`.
+   It skips non-native Scratch and image gaps below 4 GiB. Read the trim receipt and measure host
+   free space before claiming reclamation.
