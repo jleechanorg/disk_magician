@@ -970,5 +970,54 @@ assert_eq "$rc" "0" "LFS-objects worktree-new exit"
 assert_eq "$(git -C "$withlfsobj_wt" config --get lfs.locksverify 2>/dev/null || true)" "" "LFS-objects repo does not force lfs.locksverify=false"
 
 echo
+echo "== case 2b: transient registry lock is waited out and the new worktree is leased =="
+REGISTRY_LOCK="$DISK_MAGICIAN_STATE_DIR/worktree_leases/.owner-mutation"
+REGISTRY_HELD="$TMPROOT/registry-lock-held"
+REGISTRY_RELEASE="$TMPROOT/registry-lock-release"
+cat > "$TMPROOT/hold-registry-lock" <<EOF
+#!/usr/bin/env bash
+unset BASH_ENV
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+lease_registry_mutation_lock_enter || exit 1\n[[ -d "$REGISTRY_LOCK.reuse-lock" ]] || exit 1
+: > "$REGISTRY_HELD"
+while [[ ! -e "$REGISTRY_RELEASE" ]]; do sleep 0.01; done
+lease_registry_mutation_lock_exit
+EOF
+chmod +x "$TMPROOT/hold-registry-lock"
+"$TMPROOT/hold-registry-lock" &
+HOLDER_PID=$!
+for attempt in {1..100}; do
+    [[ -e "$REGISTRY_HELD" ]] && break
+    kill -0 "$HOLDER_PID" 2>/dev/null || break
+    sleep 0.01
+done
+[[ -e "$REGISTRY_HELD" ]] && ok "test holder owns the worktree registry lock" || bad "test holder failed to acquire the registry lock"
+LOCK_OUT="$TMPROOT/registry-lock-worktree.out"
+LOCK_ERR="$TMPROOT/registry-lock-worktree.err"
+bash "$SCRIPT" "$REPO" feat/registry-lock-wait --base "$ORIGIN_SHA" --name registry-lock-wait >"$LOCK_OUT" 2>"$LOCK_ERR" &
+LOCK_PID=$!
+for attempt in {1..100}; do
+    [[ -d "$WTROOT/registry-lock-wait" ]] && break
+    kill -0 "$LOCK_PID" 2>/dev/null || break
+    sleep 0.01
+done
+[[ -d "$WTROOT/registry-lock-wait" ]] && ok "worktree is created before lease registration" || bad "worktree candidate was not created"
+sleep 1
+if kill -0 "$LOCK_PID" 2>/dev/null; then
+    ok "worktree-new remains pending while the holder owns the lock"
+else
+    bad "worktree-new returned before the holder released the lock"
+fi
+: > "$REGISTRY_RELEASE"
+wait "$HOLDER_PID"; HOLDER_RC=$?
+assert_eq "$HOLDER_RC" 0 "test holder releases the worktree registry lock"
+wait "$LOCK_PID"; LOCK_RC=$?
+[[ "$LOCK_RC" -eq 0 ]] || cat "$LOCK_ERR" >&2
+assert_eq "$LOCK_RC" 0 "worktree-new succeeds after transient lock release"
+assert_eq "$(cat "$LOCK_OUT")" "$WTROOT/registry-lock-wait" "worktree-new prints the new path"
+LEASE_PATH="$(bash -c 'source "$1"; lease_path_for "$2"' _ "$REPO_ROOT/scripts/lib/worktree_lease.sh" "$WTROOT/registry-lock-wait")"
+[[ -f "$LEASE_PATH" ]] && ok "worktree-new registers the new lease" || bad "worktree-new left the new checkout unleased"
+
+
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

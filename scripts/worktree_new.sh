@@ -610,7 +610,7 @@ wtn_main() {
     # Record the owner lease; a failure is logged but never blocks creation
     # (stdout must stay exactly the path).
     if declare -F lease_write >/dev/null 2>&1; then
-        lease_write "$path" "$repo" "$branch" "worktree-new" >/dev/null 2>&1 ||
+        lease_write "$path" "$repo" "$branch" "worktree-new" --bounded-registry-lock-wait >/dev/null 2>&1 ||
             echo "worktree-new: lease write failed: $path${LEASE_REGISTRATION_FAILURE:+ ($LEASE_REGISTRATION_FAILURE)}" >&2
     fi
 }

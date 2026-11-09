@@ -124,6 +124,54 @@ assert_eq "$RC" 0 "explicit detached owner scratch-new succeeds"
 assert_eq "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(any(int(o.get("pid",-1)) == int(sys.argv[2]) for o in d.get("owners",[])))' "$(python3 -c 'import json,glob,os,sys; print(next(p for p in glob.glob(os.path.join(os.environ["DISK_MAGICIAN_STATE_DIR"],"worktree_leases","*.json")) if json.load(open(p)).get("path")==sys.argv[1]))' "$OUT")" "$DETACHED_OWNER")" True "explicit detached owner is persisted"
 kill "$DETACHED_OWNER" 2>/dev/null || true
 
+echo "== scratch-new waits for a live registry lock, then registers =="
+REGISTRY_LOCK="$DISK_MAGICIAN_STATE_DIR/worktree_leases/.owner-mutation"
+REGISTRY_HELD="$T/registry-lock-held"
+REGISTRY_RELEASE="$T/registry-lock-release"
+cat > "$T/bin/hold-registry-lock" <<EOF
+#!/usr/bin/env bash
+unset BASH_ENV
+source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+lease_registry_mutation_lock_enter || exit 1\n[[ -d "$REGISTRY_LOCK.reuse-lock" ]] || exit 1
+: > "$REGISTRY_HELD"
+while [[ ! -e "$REGISTRY_RELEASE" ]]; do sleep 0.01; done
+lease_registry_mutation_lock_exit
+EOF
+chmod +x "$T/bin/hold-registry-lock"
+"$T/bin/hold-registry-lock" &
+HOLDER_PID=$!
+for attempt in {1..100}; do
+    [[ -e "$REGISTRY_HELD" ]] && break
+    kill -0 "$HOLDER_PID" 2>/dev/null || break
+    sleep 0.01
+done
+[[ -e "$REGISTRY_HELD" ]] && ok "test holder owns the real filesystem registry lock" || bad "test holder did not acquire registry lock"
+LOCK_OUT="$T/registry-lock-wait.out"
+LOCK_ERR="$T/registry-lock-wait.err"
+bash "$DISKM" scratch-new "$T/myrepo" registry-lock-wait --kind build >"$LOCK_OUT" 2>"$LOCK_ERR" &
+LOCK_PID=$!
+for attempt in {1..100}; do
+    LOCK_PATH="$(find "$T/tmp/myrepo/build" -mindepth 1 -maxdepth 1 -type d -name 'registry-lock-wait-*' -print -quit 2>/dev/null)"
+    [[ -n "$LOCK_PATH" ]] && break
+    kill -0 "$LOCK_PID" 2>/dev/null || break
+    sleep 0.01
+done
+[[ -n "$LOCK_PATH" ]] && ok "scratch-new created its candidate before lease registration" || bad "scratch-new candidate was not created"
+sleep 1
+if kill -0 "$LOCK_PID" 2>/dev/null; then
+    ok "scratch-new remains pending while the live holder owns the lock"
+else
+    bad "scratch-new returned before the live holder released the lock"
+fi
+: > "$REGISTRY_RELEASE"
+wait "$HOLDER_PID"; HOLDER_RC=$?
+assert_eq "$HOLDER_RC" 0 "test holder releases its own filesystem lock"
+wait "$LOCK_PID"; LOCK_RC=$?
+[[ "$LOCK_RC" -eq 0 ]] || cat "$LOCK_ERR" >&2
+assert_eq "$LOCK_RC" 0 "scratch-new succeeds after transient lock release"
+assert_contains "$(cat "$LOCK_OUT")" "$T/tmp/myrepo/build/registry-lock-wait-" "scratch-new returns the allocated path"
+[[ -d "$(cat "$LOCK_OUT")" ]] && ok "scratch-new leaves its test directory" || bad "scratch-new output directory missing"
+
 echo "== lease failure: scratch-new fails closed without handing out path =="
 OUT="$(DISK_MAGICIAN_LEASE_TTL_HOURS=bad bash "$DISKM" scratch-new "$T/myrepo" lease-fail --detach HEAD 2>"$T/err")"; RC=$?
 [[ "$RC" != 0 ]] && ok "lease failure is non-zero" || bad "lease failure returned success"
