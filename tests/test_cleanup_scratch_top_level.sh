@@ -113,6 +113,74 @@ PY
   rmdir "$SCRATCH_ROOT"
   python3 -c 'import sys; from unittest.mock import patch; sys.path.insert(0, sys.argv[1]); import volume; patch.object(sys, "platform", "linux").start(); raise SystemExit(volume.create_cmd("scratch", True))' "$ROOT/scripts"
 }
+
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == timeout-lock-contract || -z "${SCRATCH_PRUNE_TEST_FILTER:-}" ]]; then
+  echo "Test: public scratch-prune GNU timeout TERM releases its registry lock"
+  use_root
+  register_test_volume
+  timeout_candidate="$(make_tree timeout-term-25h 25)"
+  git -C "$timeout_candidate" init -q
+  old_stamp "$timeout_candidate" 25
+  timeout_shim="$T/timeout-python"; mkdir -p "$timeout_shim"
+  timeout_ready="$T/timeout-python-ready"; timeout_go="$T/timeout-python-go"
+  timeout_out="$T/timeout-prune.out"
+  timeout_bin="$(command -v timeout || command -v gtimeout || true)"
+  if [[ -z "$timeout_bin" ]]; then
+    bad "GNU timeout executable is available (timeout or gtimeout)"
+    echo "test_cleanup_scratch_top_level (timeout-lock-contract): $PASS passed, $FAIL failed"
+    exit 1
+  fi
+  cat >"$timeout_shim/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "$*" == *"/c14_probe.py inventory "* ]]; then
+  : >"$TIMEOUT_TEST_READY"
+  while [[ ! -e "$TIMEOUT_TEST_GO" ]]; do /bin/sleep 0.02; done
+fi
+exec "$TIMEOUT_TEST_REAL_PYTHON" "$@"
+SH
+  chmod 700 "$timeout_shim/python3"
+  export TIMEOUT_TEST_READY="$timeout_ready" TIMEOUT_TEST_GO="$timeout_go" TIMEOUT_TEST_REAL_PYTHON="$REAL_PYTHON3"
+  RUN_PATH="$timeout_shim:/usr/bin:/bin:/usr/sbin" run env SCRATCH_TOP_LEVEL_APPROVED=1 \
+    TIMEOUT_TEST_READY="$timeout_ready" \
+    TIMEOUT_TEST_GO="$timeout_go" TIMEOUT_TEST_REAL_PYTHON="$REAL_PYTHON3" \
+    "$timeout_bin" --signal=TERM --kill-after=2s 5s \
+    bash "$ROOT/disk_magician.sh" scratch-prune --clean >"$timeout_out" 2>&1 &
+  timeout_pid=$!
+  deadline=$((SECONDS + 15))
+  while [[ ! -e "$timeout_ready" ]] && kill -0 "$timeout_pid" 2>/dev/null; do
+    (( SECONDS < deadline )) || break
+    sleep 0.02
+  done
+  timeout_leases="$DISK_MAGICIAN_STATE_DIR/worktree_leases"
+  timeout_lock="$timeout_leases/.owner-mutation.reuse-lock"
+  if [[ -e "$timeout_ready" && -d "$timeout_lock" && -f "$timeout_lock/pid" && -f "$timeout_lock/acquired_at" ]]; then
+    [[ "$(find "$timeout_lock" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" == 2 ]] && \
+      ok "public CLI reaches C14 with the fully populated registry lock held" || bad "public CLI reaches C14 with the fully populated registry lock held"
+  else
+    bad "public CLI reaches C14 with the fully populated registry lock held" "$(cat "$timeout_out" 2>/dev/null | tail -4 | tr '\n' ' ')"
+  fi
+  timeout_rc=0; wait "$timeout_pid" || timeout_rc=$?
+  [[ "$timeout_rc" == 124 ]] && ok "GNU timeout reports TERM interruption (rc 124)" || bad "GNU timeout reports TERM interruption (rc 124)" "rc=$timeout_rc"
+  for _wait in {1..30}; do [[ -e "$timeout_lock" ]] || break; sleep 0.1; done
+  if [[ -d "$timeout_lock" ]]; then
+    holder_pid="$(cat "$timeout_lock/pid" 2>/dev/null)"
+    echo "timeout-lock-diagnostic: pid=$holder_pid acquired_at=$(cat "$timeout_lock/acquired_at" 2>/dev/null)"
+    if ps -p "$holder_pid" -o pid=,ppid=,stat=,comm= >"$T/timeout-holder.ps" 2>&1; then
+      echo "timeout-lock-holder=live $(cat "$T/timeout-holder.ps")"
+    else
+      probe_rc=$?
+      echo "timeout-lock-holder=absent ps_rc=$probe_rc output=$(cat "$T/timeout-holder.ps")"
+    fi
+  fi
+  [[ ! -e "$timeout_lock" ]] && ok "catchable timeout TERM releases the populated registry lock" || bad "catchable timeout TERM releases the populated registry lock"
+  [[ -d "$timeout_candidate/.git" ]] && ok "repository fixture remains untouched after interrupted prune" || bad "repository fixture remains untouched after interrupted prune"
+  touch "$timeout_go"
+  if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == timeout-lock-contract ]]; then
+    echo "test_cleanup_scratch_top_level (timeout-lock-contract): $PASS passed, $FAIL failed"
+    [[ "$FAIL" == 0 ]]
+    exit $?
+  fi
+fi
 use_root
 
 if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract ]]; then

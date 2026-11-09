@@ -296,9 +296,10 @@ floor_epoch=$(( now - MIN_HOURS * 3600 ))
 scanned=0 kept=0 removable=0 removed=0 planned_kb=0 removed_kb=0 capped=0 busy_streak=0
 
 # verdict_and_maybe_remove <entry> — C14 gate plus the operator-approved content
-# override. Prints the outcome token only: it runs in a command-substitution
-# subshell, so no caller-visible state can travel back out of it.
-verdict_and_maybe_remove() {
+# override. The caller captures this function's output, so its lease scope must
+# live in that command-substitution shell across verdict and quarantine rename.
+verdict_and_maybe_remove() { _lease_lock_scope release _verdict_and_maybe_remove "$@"; }
+_verdict_and_maybe_remove() {
   local entry="$1" inv binding verdict_path verdict override="" out
   inv="$(mktemp "${TMPDIR:-/tmp}/dm-sp-inv.XXXXXX")" || { echo kept:check-failed; return 0; }
   binding="$(mktemp "${TMPDIR:-/tmp}/dm-sp-parent.XXXXXX")" || { rm -f "$inv"; echo kept:check-failed; return 0; }
