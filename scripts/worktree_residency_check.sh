@@ -92,14 +92,7 @@ while IFS= read -r wt; do
     [[ -f "$gd/locked" ]] && locked="yes"
   fi
 
-  # `grep ... && assignment` returns grep's EXIT STATUS. When there is no
-  # match (the common case) that is 1, and under `set -o pipefail` inside a
-  # `while read` loop fed by a process substitution, bash can re-enter the
-  # command substitution rather than simply continuing -- observed on macOS as
-  # a self-reproducing chain of worktree_residency_check.sh processes all
-  # blocked in heredoc_write on a full pipe, emitting one header line and then
-  # never finishing. An explicit if/else has no such trap: the branch body's
-  # status cannot leak into the loop condition.
+  # Assign both normal match outcomes explicitly.
   if grep -Fq -- "$wt" "$LIVE" 2>/dev/null; then
     livecwd="YES"
   else

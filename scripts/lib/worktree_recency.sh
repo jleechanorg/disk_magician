@@ -92,14 +92,7 @@ worktree_last_activity_epoch() {
     local mtimes
     if mtimes="$(find "$wt" \( "${prune_expr[@]}" \) -prune \
         -o -type f -exec "${stat_mtime[@]}" {} + 2>/dev/null)"; then
-        # Pipe through awk; do NOT use an awk here-string (`<<<"$mtimes"`).
-        # On this host's bash 5.3.3 a here-string carrying a few thousand lines
-        # blocks forever in heredoc_write() on a full pipe: measured
-        # 2026-11-08 on a 3,778-file worktree, the here-string form hung past a
-        # 30s timeout at 0.05s CPU while `printf '%s\n' "$mtimes" | awk`
-        # completed in 0.19s. That single construct is why
-        # worktree_residency_check.sh emitted one header line and then stalled
-        # indefinitely on macOS while working fine on Linux.
+        # A large here-string can block on Bash 5.3.3/macOS; stream it to awk.
         candidate="$(printf '%s\n' "$mtimes" | awk '$1+0>m{m=$1+0} END{if (m>0) print m}')"
     else
         candidate=""
