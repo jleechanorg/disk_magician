@@ -1,5 +1,5 @@
 ---
-title: Worktree sizing on jeff-ubuntu: what actually shrinks a checkout
+title: "Worktree sizing on jeff-ubuntu: what actually shrinks a checkout"
 hostname: jeff-ubuntu
 date: 2026-10-22
 status: active

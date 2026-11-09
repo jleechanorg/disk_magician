@@ -1,5 +1,5 @@
 ---
-title: 2026-10-27 wave 4 all-time low: Colima trim, DerivedData, sparse checkouts, and video pruning
+title: "2026-10-27 wave 4 all-time low: Colima trim, DerivedData, sparse checkouts, and video pruning"
 hostname: jeffreys-macbook-pro
 date: 2026-10-27
 status: active

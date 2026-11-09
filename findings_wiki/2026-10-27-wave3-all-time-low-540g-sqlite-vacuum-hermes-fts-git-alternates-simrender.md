@@ -1,5 +1,5 @@
 ---
-title: 2026-10-27 wave 3 all-time low: SQLite vacuum, Hermes FTS5, git alternates, and SimRender cleanup
+title: "2026-10-27 wave 3 all-time low: SQLite vacuum, Hermes FTS5, git alternates, and SimRender cleanup"
 hostname: jeffreys-macbook-pro
 date: 2026-10-27
 status: active

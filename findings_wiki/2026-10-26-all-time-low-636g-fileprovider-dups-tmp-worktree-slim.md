@@ -1,5 +1,5 @@
 ---
-title: 2026-10-26 all-time low: FileProvider duplicates, temporary files, and worktree slimming
+title: "2026-10-26 all-time low: FileProvider duplicates, temporary files, and worktree slimming"
 hostname: jeffreys-macbook-pro
 date: 2026-10-26
 status: active
