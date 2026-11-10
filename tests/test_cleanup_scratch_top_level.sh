@@ -115,11 +115,12 @@ PY
 }
 use_root
 
-if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract ]]; then
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == budget-preserve-contract ]]; then
   echo "Test: manual LRU skips sub-threshold probes but keeps fresh usage identity"
   LRU_DISKM="$T/lru-diskm"
   cat >"$LRU_DISKM" <<'FAKE_LRU_DISKM'
 #!/usr/bin/env bash
+if [[ "$1 $2" == "volume verify-mount" ]]; then exit 0; fi
 [[ "$1 $2" == "volume status" ]] || exit 2
 calls_file="${FAKE_STATUS_CALLS:?}"
 count=0
@@ -142,10 +143,15 @@ FAKE_LRU_DISKM
       DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$SANDBOX" \
       DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="$SCRATCH_ROOT" \
       DISK_MAGICIAN_STATE_DIR="$STATE" DISK_MAGICIAN_DELETION_LOG="$LOG" \
+      DISK_MAGICIAN_CONFIG="${DISK_MAGICIAN_CONFIG:-}" \
+      DISK_MAGICIAN_DISKUTIL_BIN="${DISK_MAGICIAN_DISKUTIL_BIN:-}" \
+      FAKE_DISKUTIL_STATE="${FAKE_DISKUTIL_STATE:-}" FAKE_DISKUTIL_CALLS="${FAKE_DISKUTIL_CALLS:-}" \
+      FAKE_DISKUTIL_MOUNTPOINT="${FAKE_DISKUTIL_MOUNTPOINT:-}" \
       DISK_MAGICIAN_DISKM_BIN="$LRU_DISKM" FAKE_SCRATCH_ROOT="$SCRATCH_ROOT" \
       SCRATCH_TOP_LEVEL_APPROVED=1 \
       FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" DISK_MAGICIAN_SCRATCH_MIN_KB=512 "$@"
   }
+  if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
   use_root
   make_tree lru-small 14 >/dev/null
   mkdir -p "$SCRATCH_ROOT/lru-large"
@@ -196,8 +202,10 @@ FAKE_FIND
     out="$(FAKE_STATUS_MODE="$mode" lru_run bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?
     [[ "$rc" == 75 ]] && ok "usage identity failure ($mode) fails closed" || bad "usage identity failure ($mode) fails closed" "rc=$rc"
     [[ -e "$SCRATCH_ROOT/lru-identity" ]] && ok "candidate survives usage identity failure ($mode)" || bad "candidate survives usage identity failure ($mode)"
-    check "usage identity failure ($mode) is reported" "skipped:measurement-unavailable" "$out"
+    check "usage identity failure ($mode) reports an unknown post-measurement result" "budget_unmet=unknown" "$out"
+    check "usage identity failure ($mode) is deferred explicitly" "deferred:budget-result-unmeasurable" "$out"
   done
+  fi
   if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract ]]; then
     echo "test_cleanup_scratch_top_level (lru-probe-contract): $PASS passed, $FAIL failed"
     [[ "$FAIL" == 0 ]]
@@ -255,7 +263,7 @@ printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s
   fi
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
 # Earlier numeric-secret contract cases include a pushed control that is
 # correctly removed and logged; start this independent suite with a fresh log.
 : > "$LOG"
@@ -290,7 +298,7 @@ check "deletion log records the removal" "plain-old" "$(cat "$LOG" 2>/dev/null)"
 check "deletion log names the cleaner" "scratch-prune" "$(cat "$LOG" 2>/dev/null)"
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
 echo "Test 4: automatic mode uses a 24 h default and does not bypass C14 safety"
 use_root
 register_test_volume
@@ -378,22 +386,24 @@ kill "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true; wait "$e8_lease_pid" "$e
 [[ -L "$E8_ROOT/e8-link-26h" ]] && ok "a symlinked top-level entry is never followed or reclaimed" || bad "a symlinked top-level entry is never followed or reclaimed"
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract ]]; then
-echo "Test 4b: a deadline deferral preserves the exact candidate cursor for the next scheduled pass"
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
+echo "Test 4b: an expired batch deadline leaves the existing cursor retryable"
 use_root
 register_test_volume
 make_managed_tree resume-25h 25 >/dev/null
 CURSOR="$T/scratch-prune.cursor"
 EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"
+rc=$?
+[[ "$rc" == 75 ]] && ok "expired batch deadline returns deferred status 75" || bad "expired batch deadline returns deferred status 75" "rc=$rc"
 [[ -d "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "expired deadline does not delete the pending candidate" || bad "expired deadline does not delete the pending candidate"
-if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/worldai_frontend" <<'PY'
+check "expired batch deadline is explicit" "deferred:artifact-discovery-deadline" "$out"
+if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT" <<'PY'
 import json,sys
-cursor=json.load(open(sys.argv[1])); assert cursor["schema"] == 1
-assert 0 <= cursor["next_index"] < len(cursor["items"])
-assert cursor["items"][cursor["next_index"]] == sys.argv[2]
+d=json.load(open(sys.argv[1])); assert d["source"] == f"scratch_prune:v1:{sys.argv[2]}"
+assert d["items"] == [] and d["next_index"] == 0
 PY
-then ok "deadline deferral persists the exact resume item"; else bad "deadline deferral persists the exact resume item"; fi
+then ok "expired batch leaves a zero-progress cursor that retries discovery"; else bad "expired batch leaves a zero-progress cursor that retries discovery"; fi
 FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"
 [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "the next scheduled pass resumes and removes the eligible item" || bad "the next scheduled pass resumes and removes the eligible item" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
@@ -405,7 +415,7 @@ if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract || "${SCRATCH_PRUNE_TEST_
 fi
 
 if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == discovery-cursor-contract ]]; then
-  echo "Test: discovery failure on the resume item completes its keep and reaches the next eligible child"
+  echo "Test: any batch discovery failure aborts before deleting candidates and leaves the cursor retryable"
   use_root
   register_test_volume
   make_tree discovery-failed 2880 >/dev/null
@@ -421,7 +431,7 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
   REAL_PYTHON="$(command -v python3)"
   cat >"$SHIM/python3" <<EOF
 #!/usr/bin/env bash
-if [[ "\${1:-}" == - && "\${2:-}" == *"$SCRATCH_ROOT/discovery-failed"* ]]; then exit 1; fi
+if [[ "\${1:-}" == *scratch_budget_artifact_children.py ]]; then exit 1; fi
 exec "$REAL_PYTHON" "\$@"
 EOF
   chmod 700 "$SHIM/python3"
@@ -432,18 +442,17 @@ root=sys.argv[2]
 json.dump({"schema":1,"source":f"scratch_prune:v1:{root}","items":[f"{root}/discovery-failed",f"{root}/isolated-discovery-eligible"],"next_index":0}, open(sys.argv[1],"w"))
 PY
   out="$(RUN_PATH="$SHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean --cursor "$CURSOR" 2>&1)"; rc=$?
-  [[ "$rc" == 0 ]] && ok "discovery-error pass exits cleanly" || bad "discovery-error pass exits cleanly" "rc=$rc"
+  [[ "$rc" == 75 ]] && ok "batch discovery-error pass returns deferred status 75" || bad "batch discovery-error pass returns deferred status 75" "rc=$rc"
   [[ -e "$SCRATCH_ROOT/discovery-failed/payload.bin" ]] && ok "discovery-failed candidate is preserved" || bad "discovery-failed candidate is preserved"
-  [[ ! -e "$discovery_eligible" ]] && ok "later eligible child is removed" || bad "later eligible child is removed" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-400)"
+  [[ -e "$discovery_eligible" ]] && ok "separate eligible candidate is preserved after batch failure" || bad "separate eligible candidate is preserved after batch failure"
   [[ -e "$discovery_recent" && -d "$SCRATCH_ROOT/worldai_frontend" ]] && ok "fresh sibling and parent are preserved" || bad "fresh sibling and parent are preserved"
-  check "old artifact removal is reported" "removed:" "$out"
-  check "discovery failure is explicitly reported" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/discovery-failed" "$out"
+  check "discovery failure is explicitly reported" "deferred:artifact-discovery-unmeasurable" "$out"
   if python3 - "$CURSOR" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); assert d["next_index"] >= len(d["items"])
+d=json.load(open(sys.argv[1])); assert d["next_index"] == 0
 PY
-  then ok "cursor advances past the failed discovery visit"; else bad "cursor advances past the failed discovery visit" "$(cat "$CURSOR")"; fi
-  echo "Test: discovery failure as the final cursor item persists completion without a sibling"
+  then ok "cursor remains at the failed batch for retry"; else bad "cursor remains at the failed batch for retry" "$(cat "$CURSOR")"; fi
+  echo "Test: a failing batch with only one cursor item does not persist false completion"
   use_root
   register_test_volume
   make_tree discovery-final 2880 >/dev/null
@@ -451,7 +460,7 @@ PY
   REAL_PYTHON="$(command -v python3)"
   cat >"$SHIM/python3" <<EOF
 #!/usr/bin/env bash
-if [[ "\${1:-}" == - && "\${2:-}" == *"$SCRATCH_ROOT/discovery-final"* ]]; then exit 1; fi
+if [[ "\${1:-}" == *scratch_budget_artifact_children.py ]]; then exit 1; fi
 exec "$REAL_PYTHON" "\$@"
 EOF
   chmod 700 "$SHIM/python3"
@@ -462,14 +471,14 @@ root=sys.argv[2]
 json.dump({"schema":1,"source":f"scratch_prune:v1:{root}","items":[f"{root}/discovery-final"],"next_index":0}, open(sys.argv[1],"w"))
 PY
   out="$(RUN_PATH="$SHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean --cursor "$CURSOR" 2>&1)"; rc=$?
-  [[ "$rc" == 0 ]] && ok "final discovery-error pass exits cleanly" || bad "final discovery-error pass exits cleanly" "rc=$rc"
+  [[ "$rc" == 75 ]] && ok "final batch discovery-error pass returns 75" || bad "final batch discovery-error pass returns 75" "rc=$rc"
   [[ -e "$SCRATCH_ROOT/discovery-final/payload.bin" ]] && ok "final discovery-failed candidate is preserved" || bad "final discovery-failed candidate is preserved"
-  check "final discovery failure is explicitly reported" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/discovery-final" "$out"
+  check "final discovery failure is explicitly reported" "deferred:artifact-discovery-unmeasurable" "$out"
   if python3 - "$CURSOR" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); assert d["next_index"] == len(d["items"]) == 1
+d=json.load(open(sys.argv[1])); assert d["next_index"] == 0 and len(d["items"]) == 1
 PY
-  then ok "final failed discovery persists cursor completion"; else bad "final failed discovery persists cursor completion" "$(cat "$CURSOR")"; fi
+  then ok "final failed discovery preserves the pending cursor item"; else bad "final failed discovery preserves the pending cursor item" "$(cat "$CURSOR")"; fi
   if [[ -n "${SCRATCH_PRUNE_TEST_FILTER:-}" ]]; then
     echo "test_cleanup_scratch_top_level (discovery-cursor-contract): $PASS passed, $FAIL failed"
     [[ "$FAIL" == 0 ]]; exit $?
@@ -489,20 +498,20 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
   CURSOR="$T/unknown-deadline.cursor"
   EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
   out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
-  [[ "$rc" == 0 ]] && ok "expired automatic pass exits cleanly" || bad "expired automatic pass exits cleanly" "rc=$rc"
+  [[ "$rc" == 75 ]] && ok "expired automatic batch pass returns deferred status 75" || bad "expired automatic batch pass returns deferred status 75" "rc=$rc"
+  check "expired automatic batch pass reports discovery deferral" "deferred:artifact-discovery-deadline" "$out"
   if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-25h"* ]]; then
     ok "expired deadline is checked before unknown-content classification"
   else
     bad "expired deadline is checked before unknown-content classification" "unknown candidate was classified before deadline: $(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
   fi
   [[ -e "$SCRATCH_ROOT/a-unknown-25h" && -e "$SCRATCH_ROOT/b-unknown-25h" && -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-25h" ]] && ok "expired pass preserves both unknowns and the recognized candidate" || bad "expired pass preserves both unknowns and the recognized candidate"
-  if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/a-unknown-25h" <<'PY'
+  if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT" <<'PY'
 import json,sys
-cursor=json.load(open(sys.argv[1])); assert cursor["schema"] == 1
-assert cursor["next_index"] < len(cursor["items"])
-assert cursor["items"][cursor["next_index"]] == sys.argv[2]
+d=json.load(open(sys.argv[1])); assert d["source"] == f"scratch_prune:v1:{sys.argv[2]}"
+assert d["items"] == [] and d["next_index"] == 0
 PY
-  then ok "expired pass stores the exact first pending candidate"; else bad "expired pass stores the exact first pending candidate"; fi
+  then ok "expired batch leaves zero cursor progress for retry"; else bad "expired batch leaves zero cursor progress for retry"; fi
   FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
   out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
   [[ "$rc" == 0 ]] && ok "resumed automatic pass exits cleanly" || bad "resumed automatic pass exits cleanly" "rc=$rc"
@@ -528,7 +537,7 @@ with open(sys.argv[1], "w") as f:
 PY
   EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
   out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
-  [[ "$rc" == 0 ]] && ok "seeded expired pass exits cleanly" || bad "seeded expired pass exits cleanly" "rc=$rc"
+  [[ "$rc" == 75 ]] && ok "seeded expired batch pass returns deferred status 75" || bad "seeded expired batch pass returns deferred status 75" "rc=$rc"
   if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-25h"* ]]; then
     ok "seeded cursor does not reclassify the completed unknown candidate"
   else
@@ -552,6 +561,7 @@ PY
   fi
 fi
 
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" ]]; then
 echo "Test 5: a live owner lease keeps the dir even with approval"
 use_root
 make_tree live-lease 72 >/dev/null
@@ -676,6 +686,116 @@ check "symlink candidate reported" "kept:symlink" "$out"
 # it. What matters here is that the symlink never made it removable.
 [[ -L "$SCRATCH_ROOT/link-candidate" && ! -e "$SCRATCH_ROOT/link-target" ]] && ok "target was only taken as its own candidate" || \
   bad "target was only taken as its own candidate"
+fi
+
+if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == budget-preserve-contract ]]; then
+  echo "Test 13: preserving budget mode keeps all C14 content/provenance verdicts"
+  echo "Test 13a: a mid-helper discovery deadline returns 75 before any candidate deletion"
+  use_root
+  make_tree artifact-deferred 72 >/dev/null
+  mkdir -p "$T/slow-python"
+  cat >"$T/slow-python/python3" <<'PYTHON'
+#!/usr/bin/env bash
+case "${1:-}" in
+  *scratch_budget_artifact_children.py) /bin/sleep 0.05; exit 124 ;;
+esac
+exec "$REAL_PYTHON3" "$@"
+PYTHON
+  chmod +x "$T/slow-python/python3"
+  FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+10)')"
+  out="$(RUN_PATH="$T/slow-python:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env REAL_PYTHON3="$REAL_PYTHON3" \
+    SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --deadline-at "$FUTURE_DEADLINE" 2>&1)"; rc=$?
+  [[ "$rc" == 75 ]] && ok "mid-helper deferred discovery returns 75" || bad "mid-helper deferred discovery returns 75" "rc=$rc"
+  check "mid-helper deadline is reported as discovery deferral" "deferred:artifact-discovery-deadline" "$out"
+  check "mid-helper deferral reports a pending candidate" "deferred_candidates=1" "$out"
+  [[ -d "$SCRATCH_ROOT/artifact-deferred" ]] && ok "mid-helper deferral deletes no candidates" || bad "mid-helper deferral deletes no candidates"
+  temp_count="$(find "$T" -maxdepth 1 -type f -name 'dm-sp-artifacts.*' | wc -l | tr -d ' ')"
+  [[ "$temp_count" == 0 ]] && ok "mid-helper deferral removes its batch result temp" || bad "mid-helper deferral removes its batch result temp" "count=$temp_count"
+
+  echo "Test 13b: an unregistered generic directory remains an unproven C14 keep"
+  use_root
+  make_tree budget-unproven 72 '.env.example' >/dev/null
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-unproven/payload.bin"
+  old_stamp "$SCRATCH_ROOT/budget-unproven" 13
+  out="$(lru_run env -u DISK_MAGICIAN_CONFIG DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --dry-run --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "unconfigured user content dry-run completes without deletion" || bad "unconfigured user content dry-run completes without deletion" "rc=$rc"
+  check "unclassified user content remains unproven" "kept:unproven-content $SCRATCH_ROOT/budget-unproven" "$out"
+  [[ -d "$SCRATCH_ROOT/budget-unproven" ]] && ok "unclassified user content remains present" || bad "unclassified user content remains present"
+
+  use_root
+  register_test_volume
+  STATE="$DISK_MAGICIAN_STATE_DIR"
+  make_tree budget-secret 72 '.env' >/dev/null
+  mkdir -p "$SCRATCH_ROOT/budget-dirty"
+  git -C "$SCRATCH_ROOT/budget-dirty" init -q
+  git -C "$SCRATCH_ROOT/budget-dirty" config user.name fixture
+  git -C "$SCRATCH_ROOT/budget-dirty" config user.email fixture@example.invalid
+  printf 'base\n' >"$SCRATCH_ROOT/budget-dirty/tracked.txt"
+  git -C "$SCRATCH_ROOT/budget-dirty" add tracked.txt
+  git -C "$SCRATCH_ROOT/budget-dirty" commit -qm base
+  printf 'dirty\n' >>"$SCRATCH_ROOT/budget-dirty/tracked.txt"
+  mkdir -p "$SCRATCH_ROOT/budget-not-pushed"
+  git -C "$SCRATCH_ROOT/budget-not-pushed" init -q
+  git -C "$SCRATCH_ROOT/budget-not-pushed" config user.name fixture
+  git -C "$SCRATCH_ROOT/budget-not-pushed" config user.email fixture@example.invalid
+  git init -q --bare "$T/budget-not-pushed-remote.git"
+  printf 'local commit\n' >"$SCRATCH_ROOT/budget-not-pushed/tracked.txt"
+  git -C "$SCRATCH_ROOT/budget-not-pushed" add tracked.txt
+  git -C "$SCRATCH_ROOT/budget-not-pushed" commit -qm base
+  git -C "$SCRATCH_ROOT/budget-not-pushed" branch -M main
+  git -C "$SCRATCH_ROOT/budget-not-pushed" remote add origin "$T/budget-not-pushed-remote.git"
+  git -C "$SCRATCH_ROOT/budget-not-pushed" push -qu -u origin main
+  printf 'local-only\n' >>"$SCRATCH_ROOT/budget-not-pushed/tracked.txt"
+  git -C "$SCRATCH_ROOT/budget-not-pushed" commit -qam local-only
+  mkdir -p "$SCRATCH_ROOT/budget-ignored"
+  git -C "$SCRATCH_ROOT/budget-ignored" init -q
+  git -C "$SCRATCH_ROOT/budget-ignored" config user.name fixture
+  git -C "$SCRATCH_ROOT/budget-ignored" config user.email fixture@example.invalid
+  printf 'ignored.bin\n' >"$SCRATCH_ROOT/budget-ignored/.gitignore"
+  git -C "$SCRATCH_ROOT/budget-ignored" add .gitignore
+  git -C "$SCRATCH_ROOT/budget-ignored" commit -qm ignore-rule
+  printf 'ignored bytes\n' >"$SCRATCH_ROOT/budget-ignored/ignored.bin"
+  make_managed_tree budget-known-build 13 >/dev/null
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-secret/payload.bin"
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-dirty/padding.bin"
+  old_stamp "$SCRATCH_ROOT/budget-secret" 13
+  old_stamp "$SCRATCH_ROOT/budget-dirty" 13
+  old_stamp "$SCRATCH_ROOT/budget-not-pushed" 25
+  old_stamp "$SCRATCH_ROOT/budget-ignored" 25
+  old_stamp "$SCRATCH_ROOT/worldai_frontend/build/budget-known-build" 25
+  out="$(lru_run env DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --dry-run --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
+  printf '%s\n' "$out" | grep -E 'budget-(not-pushed|ignored|secret|unproven|dirty)|budget-known-build|budget_unmet=' || true
+  [[ "$rc" == 0 ]] && ok "preserving budget dry-run completes without deletion" || bad "preserving budget dry-run completes without deletion" "rc=$rc"
+  check "secret-like content remains a keep" "kept:secret-like $SCRATCH_ROOT/budget-secret" "$out"
+  check "dirty repository remains a keep" "kept:dirty $SCRATCH_ROOT/budget-dirty" "$out"
+  check "unpushed repository remains a keep" "kept:not-pushed $SCRATCH_ROOT/budget-not-pushed" "$out"
+  check "ignored data remains a keep" "kept:ignored-data $SCRATCH_ROOT/budget-ignored" "$out"
+  check "known disposable build remains eligible" "would-remove:remove $SCRATCH_ROOT/worldai_frontend/build/budget-known-build" "$out"
+  check "dry-run reports no actual budget result" "budget_unmet=not-run projected_budget_unmet=unknown" "$out"
+  [[ -d "$SCRATCH_ROOT/budget-secret" && -d "$SCRATCH_ROOT/budget-dirty" && -d "$SCRATCH_ROOT/budget-not-pushed" && -d "$SCRATCH_ROOT/budget-ignored" ]] && \
+    ok "dry-run leaves every content/provenance fixture present" || bad "dry-run leaves every content/provenance fixture present"
+  out="$(lru_run env DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --clean --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
+  [[ "$rc" == 75 ]] && ok "unmet target after safe candidates returns partial status 75" || bad "unmet target after safe candidates returns partial status 75" "rc=$rc"
+  [[ -d "$SCRATCH_ROOT/budget-secret" && -d "$SCRATCH_ROOT/budget-dirty" && -d "$SCRATCH_ROOT/budget-not-pushed" && -d "$SCRATCH_ROOT/budget-ignored" ]] && \
+    ok "clean preserving mode leaves every content/provenance fixture present" || bad "clean preserving mode leaves every content/provenance fixture present"
+  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/budget-known-build" ]] && ok "clean preserving mode removes a known disposable build" || bad "clean preserving mode removes a known disposable build"
+  check "clean reports measured unmet target and before/after gap" "budget_unmet=1" "$out"
+  check "summary reports Data free-space interval separately" "data_free_interval_delta_bytes=" "$out"
+
+  echo "Test 14: legacy budget callers retain their explicit content override"
+  use_root
+  register_test_volume
+  STATE="$DISK_MAGICIAN_STATE_DIR"
+  make_tree legacy-secret 72 '.env' >/dev/null
+  make_tree legacy-unproven 72 '.env.example' >/dev/null
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/legacy-secret/payload.bin"
+  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/legacy-unproven/payload.bin"
+  old_stamp "$SCRATCH_ROOT/legacy-secret" 13
+  old_stamp "$SCRATCH_ROOT/legacy-unproven" 13
+  out="$(lru_run env DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?
+  [[ "$rc" == 75 ]] && ok "legacy budget mode reports safe-candidate shortfall" || bad "legacy budget mode reports safe-candidate shortfall" "rc=$rc"
+  [[ ! -e "$SCRATCH_ROOT/legacy-secret" && ! -e "$SCRATCH_ROOT/legacy-unproven" ]] && ok "legacy budget mode still overrides its explicit content keeps" || bad "legacy budget mode still overrides its explicit content keeps"
+fi
 
 echo
 echo "test_cleanup_scratch_top_level: $PASS passed, $FAIL failed"

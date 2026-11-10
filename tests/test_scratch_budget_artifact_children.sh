@@ -50,7 +50,9 @@ touch -d '40 hours ago' "$B/android-native-1/isolated-stale/blob" "$B/android-na
     "$B/depth-1/depth-2/depth-3/depth-4/dist/blob" 2>/dev/null || true
 ln -s "$B/android-native-1/isolated-stale" "$B/link-to-stale"
 
-out="$(scratch_budget_artifact_children "$B" 3 2>/dev/null)"
+single_output="$T/single-output.bin"
+scratch_budget_artifact_children "$B" 3 >"$single_output" 2>/dev/null
+out="$(tr '\0' '\n' <"$single_output")"
 
 # 1. Stale artifact sibling discovered even though a fresh sibling exists
 grep -q 'isolated-stale$' <<<"$out" \
@@ -69,11 +71,15 @@ grep -q 'src-tree/dist$' <<<"$out" \
 grep -q 'file-git-tree/dist$' <<<"$out" \
   && bad "descended into a file-form .git worktree" || ok "file-form .git tree not descended"
 # 6. A root containing a directory-form .git is never entered
-root_git_dir_out="$(scratch_budget_artifact_children "$B/root-git-dir" 3 2>/dev/null)"
+root_git_dir_file="$T/root-git-dir.bin"
+scratch_budget_artifact_children "$B/root-git-dir" 3 >"$root_git_dir_file" 2>/dev/null
+root_git_dir_out="$(tr '\0' '\n' <"$root_git_dir_file")"
 grep -q 'root-git-dir/dist$' <<<"$root_git_dir_out" \
   && bad "entered a root containing a directory-form .git" || ok "root directory-form .git preserved"
 # 7. A root containing a file-form .git is never entered
-root_git_file_out="$(scratch_budget_artifact_children "$B/root-git-file" 3 2>/dev/null)"
+root_git_file_file="$T/root-git-file.bin"
+scratch_budget_artifact_children "$B/root-git-file" 3 >"$root_git_file_file" 2>/dev/null
+root_git_file_out="$(tr '\0' '\n' <"$root_git_file_file")"
 grep -q 'root-git-file/dist$' <<<"$root_git_file_out" \
   && bad "entered a root containing a file-form .git" || ok "root file-form .git preserved"
 # 8. A dangling .git link also preserves the whole subtree
@@ -98,8 +104,9 @@ grep -q '/.cache$' <<<"$out" \
 grep -q '/.cache/build$' <<<"$out" \
   && ok "non-hidden artifact under hidden parent is emitted" || bad "hidden parent was not traversed"
 # 14. max_depth=0 preserves the prior empty result.
-zero_depth_out="$(scratch_budget_artifact_children "$B" 0 2>/dev/null)"
-[[ -z "$zero_depth_out" ]] && ok "zero depth emits no children" || bad "zero depth emitted children"
+zero_depth_file="$T/zero-depth.bin"
+scratch_budget_artifact_children "$B" 0 >"$zero_depth_file" 2>/dev/null
+[[ ! -s "$zero_depth_file" ]] && ok "zero depth emits no children" || bad "zero depth emitted children"
 # 15. An unreadable marker check fails closed rather than treating the marker as absent.
 chmod 000 "$B/unreadable-parent"
 scratch_budget_artifact_children "$B" 3 >/dev/null 2>&1
@@ -114,9 +121,38 @@ else
 fi
 # 16. Expansion reports an expired actuator deadline distinctly from an empty list.
 expired_deadline="$(python3 -c 'import time; print(time.monotonic()-1)')"
-ACT_DEADLINE_AT="$expired_deadline" scratch_budget_artifact_children "$B" 3 >/dev/null 2>&1
+expired_file="$T/expired.bin"
+ACT_DEADLINE_AT="$expired_deadline" scratch_budget_artifact_children "$B" 3 >"$expired_file" 2>/dev/null
 rc=$?
-[[ "$rc" == 124 ]] && ok "expired discovery deadline returns deferred status" || bad "expired discovery deadline returns deferred status (rc=$rc)"
+[[ "$rc" == 124 && ! -s "$expired_file" ]] && ok "expired discovery deadline returns 124 with no partial output" || bad "expired discovery deadline returns 124 with no partial output (rc=$rc)"
+
+# Batch protocol preserves arbitrary filename bytes and emits one complete header.
+P1="$T/candidate-one"
+P2="$T/candidate-$'line\nname\tpart'"
+mkdir -p "$P1/dist" "$P2/build"
+candidate_input="$T/candidates.bin"
+batch_output="$T/batch.bin"
+expected_batch="$T/expected-batch.bin"
+printf '%s\0' "$P1" "$P2" >"$candidate_input"
+scratch_budget_artifact_children_batch 3 <"$candidate_input" >"$batch_output"
+printf 'diskm-artifact-children-v1\0' >"$expected_batch"
+printf '2\0%s\0%s\0%s\0%s\0' "$P1" "$P1/dist" "$P2" "$P2/build" >>"$expected_batch"
+cmp -s "$batch_output" "$expected_batch" && ok "batch protocol preserves order and newline/tab paths byte-for-byte" || bad "batch protocol framing mismatch"
+single_special="$T/single-special.bin"
+scratch_budget_artifact_children "$P2" 3 >"$single_special"
+printf '%s\0' "$P2/build" >"$T/expected-single-special.bin"
+cmp -s "$single_special" "$T/expected-single-special.bin" && ok "single-candidate NUL output round-trips newline/tab paths" || bad "single-candidate NUL output mismatch"
+empty_batch="$T/empty-batch.bin"
+empty_expected="$T/empty-expected.bin"
+scratch_budget_artifact_children_batch 3 </dev/null >"$empty_batch"
+printf 'diskm-artifact-children-v1\0' >"$empty_expected"
+printf '0\0' >>"$empty_expected"
+cmp -s "$empty_batch" "$empty_expected" && ok "empty input emits a valid zero-pair header" || bad "empty batch framing mismatch"
+unterminated_batch="$T/unterminated-batch.bin"
+printf '%s' "$P1" >"$unterminated_batch"
+scratch_budget_artifact_children_batch 3 <"$unterminated_batch" >"$T/unterminated-output.bin" 2>/dev/null
+rc=$?
+[[ "$rc" == 1 && ! -s "$T/unterminated-output.bin" ]] && ok "unterminated input fails with no partial output" || bad "unterminated input not rejected (rc=$rc)"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

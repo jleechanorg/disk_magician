@@ -356,6 +356,75 @@ print_category_summary() {
     fi
 }
 
+# Resolve explicit operator policy and live pressure independently. Pressure
+# can trigger an authorized budget policy, but never creates policy or approval.
+scratch_clean_dispatch() {
+    local clean_arg="$1" status_json status_rc=0 policy reason="" mode="fallback"
+    local floor_hours floor_minutes measurements host_free scratch_used scratch_quota
+    local diskm_bin="${DISK_MAGICIAN_DISKM_BIN:-$REPO_ROOT/disk_magician.sh}"
+    local cleaner="$SCRIPT_DIR/cleanup_scratch_top_level.sh"
+    local -a args env_args
+    policy="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
+
+    # Match the cleaner's default and 24-hour floor before converting to minutes.
+    # Reject malformed and overflowing values before launching any cleanup.
+    floor_hours="${SCRATCH_PRUNE_MIN_HOURS:-24}"
+    floor_minutes="$(python3 -c 'import re,sys
+s=sys.argv[1]
+if not re.fullmatch(r"[0-9]+", s): raise SystemExit(1)
+h=max(24,int(s,10))
+if h > ((2**63-1)//60): raise SystemExit(1)
+print(max(1440,h*60))' "$floor_hours" 2>/dev/null)" || {
+        echo "scratch-budget: reason=invalid-floor; cleaner not launched"
+        CATEGORY_TOTAL=$(( CATEGORY_TOTAL + 1 ))
+        CATEGORY_FAILED=$(( CATEGORY_FAILED + 1 ))
+        FAILED_CATEGORIES+=("Scratch top-level (invalid SCRATCH_PRUNE_MIN_HOURS)")
+        return 0
+    }
+
+    [[ -x "$cleaner" ]] || return 0
+    status_json="$("$diskm_bin" volume status --json --snapshot 2>/dev/null)" || status_rc=$?
+    measurements=""
+    if (( status_rc <= 1 )) && [[ -n "$status_json" ]]; then
+        measurements="$(python3 -c 'import json,sys
+try:
+ d=json.loads(sys.stdin.read()); c=d["container"]; r=next(v for v in d["volumes"] if v.get("class")=="scratch")
+ vals=(c["free_bytes"],r["allocated_bytes"],r["quota_bytes"])
+ if any(type(v) is not int or v < 0 for v in vals) or vals[2] <= 0 or r.get("available") is not True: raise ValueError()
+ print(*vals)
+except Exception: raise SystemExit(1)' <<<"$status_json" 2>/dev/null)" || measurements=""
+    fi
+
+    if [[ -n "$measurements" ]]; then
+        read -r host_free scratch_used scratch_quota <<<"$measurements"
+        if (( host_free < 40 * 1024 * 1024 * 1024 || scratch_used * 100 >= scratch_quota * 70 )); then
+            if [[ "$policy" =~ ^[1-9][0-9]?$ ]]; then
+                mode="budget"
+                reason="operator-policy"
+            elif [[ -n "$policy" ]]; then
+                reason="policy-invalid"
+            else
+                reason="policy-unconfigured"
+            fi
+        else
+            reason="healthy"
+        fi
+    else
+        reason="measurement-unavailable"
+    fi
+
+    args=("$clean_arg")
+    if [[ "$mode" == budget ]]; then
+        args+=(--budget-pct "$policy" --budget-floor-minutes "$floor_minutes" --budget-preserve-content-keeps)
+        env_args=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=0 SCRATCH_TOP_LEVEL_APPROVED=1)
+    else
+        args+=(--available-floor)
+        env_args=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 SCRATCH_TOP_LEVEL_APPROVED=0)
+    fi
+    echo "scratch-budget: reason=$reason mode=$mode${policy:+ configured_pct=$policy} floor=${floor_minutes}m"
+    run_category "Scratch top-level & tmp (C14-safe)" env "${env_args[@]}" "$cleaner" "${args[@]}"
+}
+
 if [[ "$LIVE" != true ]]; then
     _load_snapshot || true
 fi
@@ -581,9 +650,9 @@ if [[ "$MODE" == "clean" ]]; then
         run_category "PR scratch & analyzers" "$SCRIPT_DIR/cleanup_pr_scratch.sh" $clean_arg
     fi
 
-    # Top-level Scratch volume & tmp/ prune (>=24h floor, C14 live-PID + lease + ballast gated)
+    # Scratch budget mode requires an explicit operator policy and a live pressure trigger.
     if [[ -f "$SCRIPT_DIR/cleanup_scratch_top_level.sh" ]]; then
-        run_category "Scratch top-level & tmp (>=24h)" "$SCRIPT_DIR/cleanup_scratch_top_level.sh" $clean_arg
+        scratch_clean_dispatch "$clean_arg"
     fi
 
     # Rebuildable Xcode DerivedData & simulator caches (Tier 2: Xcode, bead disk_magician-wgo)

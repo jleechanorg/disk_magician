@@ -28,6 +28,9 @@ HEAVY_PRIORITY: dict[str, tuple[int, int]] = {
     "tests/test_worktree_hygiene_preserve_wip.sh": (3, 300),
     "tests/test_cleanup_worktree_venvs.sh": (4, 600),
     "tests/test_cleanup_worktrees_single_age_walk.sh": (4, 600),
+    # 347s measured locally (macOS, 2026-11-09) after the LRU-budget suite grew;
+    # the 300s default timed it out on CI while every assertion passed.
+    "tests/test_cleanup_scratch_top_level.sh": (5, 900),
     "tests/test_cleanup_tmp_pressure_budget.sh": (5, 300),
     "tests/test_cleanup_codex_documents.sh": (6, 300),
     "tests/test_snapshot_freshness.sh": (7, 300),

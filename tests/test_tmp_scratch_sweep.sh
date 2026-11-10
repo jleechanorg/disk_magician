@@ -169,7 +169,7 @@ echo "Test 0d: an unmet LRU budget target is recorded as partial, never success"
 : > "$INVOCATION_LOG"
 set +e
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 \
-  SCRATCH_PRUNE_MOCK_EXIT=4 SCRATCH_PRUNE_MOCK_LINE="partial:budget-target-unmet" \
+  SCRATCH_PRUNE_MOCK_EXIT=75 SCRATCH_PRUNE_MOCK_LINE="partial:budget-target-unmet" \
   /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1
 set -e
 assert_receipt_field "unmet budget target is not a success receipt" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
@@ -425,7 +425,9 @@ assert_receipt_field "lock plus volume mutation avoids no-mutation reason" "$STA
 echo "Test 11: both Scratch children blocked by an external lock holder"
 : > "$INVOCATION_LOG"
 set +e
-INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 VOLUME_MOCK_MODE=lock /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  SCRATCH_PRUNE_MOCK_LINE="[scratch_prune] skipped, scratch lock held" VOLUME_MOCK_MODE=lock \
+  /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
 BOTH_LOCK_RC=$?
 set -e
 if [[ "$BOTH_LOCK_RC" -eq 0 ]]; then
@@ -440,6 +442,39 @@ assert_receipt_field "dual lock contention records skipped_lock" "$R" "d.get('la
 assert_receipt_field "dual lock contention clears false lock.acquired" "$R" "str(d.get('last_terminal', {}).get('lock', {}).get('acquired'))" "False"
 assert_receipt_field "dual lock contention attributes zero freed bytes" "$R" "str(d.get('last_terminal', {}).get('postcondition', {}).get('freed_bytes'))" "0"
 assert_receipt_field "dual lock contention records zero volume removals" "$R" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "0"
+
+echo "Test 11b: discovery deferral at rc 75 is not classified as a lock skip"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  SCRATCH_PRUNE_MOCK_LINE="deferred:artifact-discovery-deadline" VOLUME_MOCK_MODE=skip \
+  /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+DEFERRED_DISCOVERY_RC=$?
+set -e
+assert_receipt_field "artifact discovery deferral is never a lock skip" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+if [[ "$DEFERRED_DISCOVERY_RC" -ne 0 ]]; then
+  echo "  PASS  deferred discovery propagates a nonzero status"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  deferred discovery propagates a nonzero status"
+  FAIL=$(( FAIL + 1 ))
+fi
+
+echo "Test 11c: an unknown scratch-prune rc 75 is an error"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+UNKNOWN_75_RC=$?
+set -e
+assert_receipt_field "unknown rc 75 is recorded as error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+if [[ "$UNKNOWN_75_RC" -ne 0 ]]; then
+  echo "  PASS  unknown rc 75 propagates a nonzero status"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  unknown rc 75 propagates a nonzero status"
+  FAIL=$(( FAIL + 1 ))
+fi
 
 echo "Test 11a: volume-only lock contention after a scratch-prune no-op is skipped_lock, not available-floor"
 : > "$INVOCATION_LOG"

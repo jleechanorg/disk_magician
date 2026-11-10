@@ -20,6 +20,9 @@ kept() { [[ -d "$SCRATCH_ROOT/$1" ]] && ok "$1 kept" || bad "$1 kept"; }
 
 LOG="$T/deletions.log"
 mkdir -p "$T/home" "$T/state"
+# scratch_lock.py rejects a group/world-writable HOME; a 0002 umask would make this
+# 0775 and fail the lock on Linux. Harden it the same way the sibling suite does.
+chmod 700 "$T/home"
 
 FAKE_DISKM="$T/fake-diskm"
 cat >"$FAKE_DISKM" <<'FAKE'
@@ -102,6 +105,17 @@ c_line="$(printf '%s\n' "$out" | grep -n "^removed:.*/c " | cut -d: -f1)"
 check "clean reports the target stop" "lru: stop=target-reached evicted=2" "$out"
 check "deletion log records the prior C14 verdict" "scratch-lru:kept:unproven-content" "$(cat "$LOG")"
 check "summary tallies prior verdicts" "lru: prior_verdict kept:unproven-content=2" "$out"
+# Field-position guard: every value in this fixture is distinct and non-zero, so
+# a duplicated or dropped printf argument (which silently shifts removable=,
+# removed= and eligible_estimate= into each other) fails here. A fixture of all
+# zeros cannot detect that shift - tests/test_scratch_prune_302_integration.sh
+# pins scanned=1 kept=1 removable=0 removed=0 and stayed green through fd73f2b.
+summary_line="$(printf '%s\n' "$out" | grep -m1 '^scanned=')"
+removed_events="$(printf '%s\n' "$out" | grep -c '^removed:')"
+summary_removed="$(printf '%s\n' "$summary_line" | grep -o ' removed=[0-9]*' | cut -d= -f2)"
+[[ -n "$removed_events" && "$summary_removed" == "$removed_events" ]] \
+  && ok "summary removed= matches the removals actually performed ($removed_events)" \
+  || bad "summary removed= matches the removals actually performed ($removed_events)" "$summary_line"
 
 echo "Test 4: under target is a no-op"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 90 2>&1)"; rc=$?
@@ -134,10 +148,10 @@ gone plain; kept leased; kept cwd-held; kept open-held
 check "live lease is the keep reason" "kept:live-owner $SCRATCH_ROOT/leased" "$out"
 check "live cwd is the keep reason" "kept:live-cwd $SCRATCH_ROOT/cwd-held" "$out"
 check "open file is the keep reason" "kept:open-file $SCRATCH_ROOT/open-held" "$out"
-check "candidates ran out before the target" "lru: stop=candidates-exhausted" "$out"
-[[ "$rc" == 4 ]] && ok "unmet target exits 4, not 0" || bad "unmet target exits 4, not 0" "rc=$rc"
-check "unmet target is reported with target, achieved and reason" "budget: target_pct=1 achieved_pct=" "$out"
-check "unmet target states target_reached=false and the reason" "target_reached=false reason=candidates-exhausted" "$out"
+check "candidates ran out before the target" "lru: stop=safe-candidates-exhausted" "$out"
+[[ "$rc" == 75 ]] && ok "unmet target exits 75 (partial), not 0" || bad "unmet target exits 75 (partial), not 0" "rc=$rc"
+check "unmet target reports target and reason" "target_pct=1 floor=120m gap_before_bytes=" "$out"
+check "unmet target states target_reached=false and the reason" "target_reached=false reason=safe-candidates-exhausted" "$out"
 check "unmet target emits the partial marker" "partial:budget-target-unmet" "$out"
 
 echo "Test 7: unmeasurable recency is kept"
@@ -288,7 +302,7 @@ for kind in build evidence; do
     out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
     [[ -f "$outside/$kind/old-unit/payload.bin" ]] && ok "$parent $kind symlink target survives" || bad "$parent $kind symlink target survives"
     [[ "$out" != *"removed:"* ]] && ok "$parent $kind symlink is not traversed for removal" || bad "$parent $kind symlink is not traversed for removal" "$out"
-    [[ "$rc" == 4 ]] && ok "$parent $kind preserves unmet target" || bad "$parent $kind preserves unmet target" "rc=$rc"
+    [[ "$rc" == 75 ]] && ok "$parent $kind preserves unmet target (75 partial)" || bad "$parent $kind preserves unmet target (75 partial)" "rc=$rc"
   done
 done
 
