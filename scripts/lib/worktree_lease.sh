@@ -653,15 +653,28 @@ _lease_lock_scope() {
 lease_reuse_lock_acquire() {
     _lease_lock_scope keep _lease_reuse_lock_acquire "$@"
 }
+# Preserve mkdir's EEXIST result for the bounded registry caller. A later stat
+# cannot distinguish contention from a real error after the holder has left.
+_lease_registry_mkdir() {
+    python3 - "$1" <<'PYREGISTRYMKDIR'
+import os, sys
+try:
+    os.mkdir(sys.argv[1])
+except FileExistsError:
+    sys.exit(2)
+except OSError:
+    sys.exit(1)
+PYREGISTRYMKDIR
+}
 _lease_reuse_lock_acquire() {
-    local lease="$1" lock="$1.reuse-lock" attempt identity slot stamp
+    local lease="$1" lock="$1.reuse-lock" attempt identity slot stamp mkdir_rc
     [[ -z "$_lease_scope_signals" ]] || return 1
     for attempt in 0 1; do
-        if mkdir "$lock" 2>/dev/null; then break; fi
-        # The bounded registry caller owns this dynamically scoped hint.
-        # Preserve observed contention before recovery can race with release.
-        if [[ ${_lease_registry_wait_contention+x} && -d "$lock" && ! -L "$lock" ]]; then
-            _lease_registry_wait_contention=1
+        if [[ "${_lease_registry_wait_path:-}" == "$lock" ]]; then
+            if _lease_registry_mkdir "$lock"; then break; else mkdir_rc=$?; fi
+            if (( mkdir_rc == 2 )); then _lease_registry_wait_contention=1; fi
+        else
+            if mkdir "$lock" 2>/dev/null; then break; fi
         fi
         [[ -z "$_lease_scope_signals" && "$attempt" == 0 ]] || return 1
         lease_reuse_lock_recover "$lease" || return 1
@@ -743,11 +756,13 @@ lease_mutation_lock_enter() {
     fi
     if [[ "$mode" == --bounded-registry-lock-wait ]]; then
         registry_lock="$(lease_dir)/.owner-mutation.reuse-lock"
-        local _lease_registry_wait_contention=0
+        local _lease_registry_wait_contention=0 _lease_registry_wait_path="$registry_lock"
         while true; do
             _lease_registry_wait_contention=0
             if lease_registry_mutation_lock_enter; then break; fi
             [[ -z "${_lease_scope_signals:-}" ]] || return 1
+            # EEXIST is not permission to wait on a symlink or non-directory.
+            if [[ -L "$registry_lock" || ( -e "$registry_lock" && ! -d "$registry_lock" ) ]]; then return 1; fi
             if (( _lease_registry_wait_contention )) || [[ -d "$registry_lock" && ! -L "$registry_lock" ]]; then
                 saw_busy=1
             elif (( attempt > 0 && ! saw_busy )); then

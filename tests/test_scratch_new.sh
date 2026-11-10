@@ -230,6 +230,43 @@ echo "== consecutive registry holders release inside recovery =="
     [[ "$recovery_count" == 2 ]]
 ); assert_eq "$?" 0 "bounded wait survives consecutive releases inside recovery"
 
+echo "== registry holders release immediately after failed mkdir =="
+(
+    source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+    race_lease="$DISK_MAGICIAN_STATE_DIR/worktree_leases/acquisition-release"
+    race_registry="$(lease_dir)/.owner-mutation.reuse-lock"
+    command mkdir "$race_registry" || exit 1
+    release_count=0
+    # Remove each real holder after the atomic mkdir result, before any Bash
+    # directory observation. Cover both the shell and errno-aware mkdir path.
+    mkdir() {
+        local rc=0
+        command mkdir "$@" || rc=$?
+        if [[ "$#" == 1 && "$1" == "$race_registry" && "$rc" != 0 ]]; then
+            command rmdir "$race_registry" || return 1
+            release_count=$((release_count + 1))
+        fi
+        return "$rc"
+    }
+    python3() {
+        local rc=0
+        command python3 "$@" || rc=$?
+        if [[ "$#" == 2 && "$1" == - && "$2" == "$race_registry" && "$rc" == 2 ]]; then
+            command rmdir "$race_registry" || return 1
+            release_count=$((release_count + 1))
+        fi
+        return "$rc"
+    }
+    lease_reuse_lock_recover() { return 1; }
+    sleep() {
+        if (( release_count == 1 )); then command mkdir "$race_registry" || return 1; fi
+        return 0
+    }
+    lease_mutation_lock_enter "$race_lease" --bounded-registry-lock-wait || exit 1
+    lease_mutation_lock_exit "$race_lease" || exit 1
+    [[ "$release_count" == 2 ]]
+); assert_eq "$?" 0 "atomic contention survives consecutive releases before directory checks"
+
 echo "== bounded registry wait stops on genuine errors and keeps its limit =="
 (
     source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
@@ -272,6 +309,27 @@ echo "== bounded registry wait stops on genuine errors and keeps its limit =="
     lease_mutation_lock_enter "$T/fail-fast-lease"
     [[ "$?" != 0 && "$calls" == 1 ]]
 ); assert_eq "$?" 0 "ordinary lease callers remain fail-fast"
+
+echo "== bounded wait rejects non-directory registry objects without sleeping =="
+for registry_kind in file symlink; do
+    (
+        source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+        registry="$(lease_dir)/.owner-mutation.reuse-lock"
+        if [[ "$registry_kind" == file ]]; then
+            : > "$registry"
+        else
+            mkdir "$T/registry-target" || exit 1
+            ln -s "$T/registry-target" "$registry" || exit 1
+        fi
+        sleeps=0
+        sleep() { sleeps=$((sleeps + 1)); return 0; }
+        lease_mutation_lock_enter "$T/invalid-registry-lease" --bounded-registry-lock-wait
+        rc=$?
+        [[ -e "$registry" || -L "$registry" ]] || exit 1
+        rm "$registry" || exit 1
+        [[ "$rc" != 0 && "$sleeps" == 0 ]]
+    ); assert_eq "$?" 0 "bounded wait preserves and rejects registry $registry_kind immediately"
+done
 
 echo "== lease failure: scratch-new fails closed without handing out path =="
 OUT="$(DISK_MAGICIAN_LEASE_TTL_HOURS=bad bash "$DISKM" scratch-new "$T/myrepo" lease-fail --detach HEAD 2>"$T/err")"; RC=$?
