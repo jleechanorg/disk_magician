@@ -20,6 +20,9 @@ kept() { [[ -d "$SCRATCH_ROOT/$1" ]] && ok "$1 kept" || bad "$1 kept"; }
 
 LOG="$T/deletions.log"
 mkdir -p "$T/home" "$T/state"
+# scratch_lock.py rejects a group/world-writable HOME; a 0002 umask would make this
+# 0775 and fail the lock on Linux. Harden it the same way the sibling suite does.
+chmod 700 "$T/home"
 
 FAKE_DISKM="$T/fake-diskm"
 cat >"$FAKE_DISKM" <<'FAKE'
@@ -136,7 +139,7 @@ check "live cwd is the keep reason" "kept:live-cwd $SCRATCH_ROOT/cwd-held" "$out
 check "open file is the keep reason" "kept:open-file $SCRATCH_ROOT/open-held" "$out"
 check "candidates ran out before the target" "lru: stop=safe-candidates-exhausted" "$out"
 [[ "$rc" == 75 ]] && ok "unmet target exits 75 (partial), not 0" || bad "unmet target exits 75 (partial), not 0" "rc=$rc"
-check "unmet target reports target and reason" "budget: target_pct=1" "$out"
+check "unmet target reports target and reason" "target_pct=1 floor=120m gap_before_bytes=" "$out"
 check "unmet target states target_reached=false and the reason" "target_reached=false reason=safe-candidates-exhausted" "$out"
 check "unmet target emits the partial marker" "partial:budget-target-unmet" "$out"
 
