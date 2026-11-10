@@ -509,7 +509,17 @@ fi
 if (( ${#candidates[@]} )); then
   candidate_dirs=()
   for _candidate in ${candidates[@]+"${candidates[@]}"}; do
-    [[ -d "$_candidate" && ! -L "$_candidate" ]] && candidate_dirs+=("$_candidate")
+    [[ -d "$_candidate" && ! -L "$_candidate" ]] || continue
+    # The discovery helper fails closed for the entire batch when ANY candidate
+    # subtree is unreadable (documented in scratch_budget_artifact_children.py
+    # and pinned by tests/test_scratch_budget_artifact_children.sh case 15).
+    # A single root-owned top-level entry therefore voided every pass: measured
+    # 2026-11-10 on Linux, Scratch/lost+found (root:root 0700, 16K) made
+    # scratch-prune report scanned=0 and reclaim nothing on a 163 GiB volume,
+    # and /Volumes/diskm-scratch/.Spotlight-V100 did the same on macOS.
+    # Skip candidates this process cannot read and keep the batch contract.
+    [[ -r "$_candidate" && -x "$_candidate" ]] || continue
+    candidate_dirs+=("$_candidate")
   done
   _artifact_extra=()
   if (( ${#candidate_dirs[@]} )); then
