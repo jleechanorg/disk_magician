@@ -207,6 +207,29 @@ echo "== registry holder releases during failed-acquisition recovery =="
 ); RACE_RC=$?
 assert_eq "$RACE_RC" 0 "bounded wait acquires after release inside recovery"
 
+echo "== consecutive registry holders release inside recovery =="
+(
+    source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+    race_lease="$DISK_MAGICIAN_STATE_DIR/worktree_leases/consecutive-release"
+    race_registry="$(lease_dir)/.owner-mutation.reuse-lock"
+    mkdir "$race_registry" || exit 1
+    recovery_count=0
+    # Each failed mkdir observed a real holder. Both holders release during
+    # recovery, before the bounded caller's directory check can see them.
+    lease_reuse_lock_recover() {
+        recovery_count=$((recovery_count + 1))
+        rmdir "$race_registry" || return 1
+        return 1
+    }
+    sleep() {
+        if (( recovery_count == 1 )); then mkdir "$race_registry" || return 1; fi
+        return 0
+    }
+    lease_mutation_lock_enter "$race_lease" --bounded-registry-lock-wait || exit 1
+    lease_mutation_lock_exit "$race_lease" || exit 1
+    [[ "$recovery_count" == 2 ]]
+); assert_eq "$?" 0 "bounded wait survives consecutive releases inside recovery"
+
 echo "== bounded registry wait stops on genuine errors and keeps its limit =="
 (
     source "$REPO_ROOT/scripts/lib/worktree_lease.sh"

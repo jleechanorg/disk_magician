@@ -658,6 +658,11 @@ _lease_reuse_lock_acquire() {
     [[ -z "$_lease_scope_signals" ]] || return 1
     for attempt in 0 1; do
         if mkdir "$lock" 2>/dev/null; then break; fi
+        # The bounded registry caller owns this dynamically scoped hint.
+        # Preserve observed contention before recovery can race with release.
+        if [[ ${_lease_registry_wait_contention+x} && -d "$lock" && ! -L "$lock" ]]; then
+            _lease_registry_wait_contention=1
+        fi
         [[ -z "$_lease_scope_signals" && "$attempt" == 0 ]] || return 1
         lease_reuse_lock_recover "$lease" || return 1
     done
@@ -738,9 +743,12 @@ lease_mutation_lock_enter() {
     fi
     if [[ "$mode" == --bounded-registry-lock-wait ]]; then
         registry_lock="$(lease_dir)/.owner-mutation.reuse-lock"
-        while ! lease_registry_mutation_lock_enter; do
+        local _lease_registry_wait_contention=0
+        while true; do
+            _lease_registry_wait_contention=0
+            if lease_registry_mutation_lock_enter; then break; fi
             [[ -z "${_lease_scope_signals:-}" ]] || return 1
-            if [[ -d "$registry_lock" && ! -L "$registry_lock" ]]; then
+            if (( _lease_registry_wait_contention )) || [[ -d "$registry_lock" && ! -L "$registry_lock" ]]; then
                 saw_busy=1
             elif (( attempt > 0 && ! saw_busy )); then
                 return 1
