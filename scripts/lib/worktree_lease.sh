@@ -264,7 +264,14 @@ lease_write() {
     while [[ $# -gt 0 && "$1" != --* ]]; do pos+=("$1"); shift; done
     local repo="${pos[0]:-}" branch="${pos[1]:-}" creator="${pos[2]:-}"
     while [[ $# -gt 0 ]]; do
-        if [[ "$1" == --lock-held ]]; then lock_mode=--lock-held; shift; continue; fi
+        case "$1" in
+            --lock-held|--bounded-registry-lock-wait)
+                [[ -z "$lock_mode" ]] || return 2
+                lock_mode="$1"
+                shift
+                continue
+                ;;
+        esac
         [[ $# -ge 2 ]] || return 2
         case "$1" in
             --kind) prov[0]="$2" ;; --producer) prov[1]="$2" ;;
@@ -646,11 +653,29 @@ _lease_lock_scope() {
 lease_reuse_lock_acquire() {
     _lease_lock_scope keep _lease_reuse_lock_acquire "$@"
 }
+# Preserve mkdir's EEXIST result for the bounded registry caller. A later stat
+# cannot distinguish contention from a real error after the holder has left.
+_lease_registry_mkdir() {
+    python3 - "$1" <<'PYREGISTRYMKDIR'
+import os, sys
+try:
+    os.mkdir(sys.argv[1])
+except FileExistsError:
+    sys.exit(2)
+except OSError:
+    sys.exit(1)
+PYREGISTRYMKDIR
+}
 _lease_reuse_lock_acquire() {
-    local lease="$1" lock="$1.reuse-lock" attempt identity slot stamp
+    local lease="$1" lock="$1.reuse-lock" attempt identity slot stamp mkdir_rc
     [[ -z "$_lease_scope_signals" ]] || return 1
     for attempt in 0 1; do
-        if mkdir "$lock" 2>/dev/null; then break; fi
+        if [[ "${_lease_registry_wait_path:-}" == "$lock" ]]; then
+            if _lease_registry_mkdir "$lock"; then break; else mkdir_rc=$?; fi
+            if (( mkdir_rc == 2 )); then _lease_registry_wait_contention=1; fi
+        else
+            if mkdir "$lock" 2>/dev/null; then break; fi
+        fi
         [[ -z "$_lease_scope_signals" && "$attempt" == 0 ]] || return 1
         lease_reuse_lock_recover "$lease" || return 1
     done
@@ -724,16 +749,41 @@ PYUNLOCK
     rmdir "$1.reuse-lock" 2>/dev/null
 }
 lease_mutation_lock_enter() {
-    local lease="$1" mode="${2:-}"
+    local lease="$1" mode="${2:-}" attempt=0 max_attempts=120 registry_lock saw_busy=0
     if [[ "$mode" == --lock-held ]]; then
         [[ -d "$lease.reuse-lock" && -d "$(lease_dir)/.owner-mutation.reuse-lock" ]]
+        return $?
+    fi
+    if [[ "$mode" == --bounded-registry-lock-wait ]]; then
+        registry_lock="$(lease_dir)/.owner-mutation.reuse-lock"
+        local _lease_registry_wait_contention=0 _lease_registry_wait_path="$registry_lock"
+        while true; do
+            _lease_registry_wait_contention=0
+            if lease_registry_mutation_lock_enter; then break; fi
+            [[ -z "${_lease_scope_signals:-}" ]] || return 1
+            # EEXIST is not permission to wait on a symlink or non-directory.
+            if [[ -L "$registry_lock" || ( -e "$registry_lock" && ! -d "$registry_lock" ) ]]; then return 1; fi
+            if (( _lease_registry_wait_contention )) || [[ -d "$registry_lock" && ! -L "$registry_lock" ]]; then
+                saw_busy=1
+            elif (( attempt > 0 && ! saw_busy )); then
+                return 1
+            else
+                # A holder may release during the failed acquisition. Give
+                # that observed contention one acquisition with a clear lock;
+                # a repeated non-contention failure still stops promptly.
+                saw_busy=0
+            fi
+            attempt=$((attempt + 1))
+            (( attempt < max_attempts )) || return 1
+            sleep 0.25 2>/dev/null || return 1
+        done
     else
         lease_registry_mutation_lock_enter || return 1
-        lease_reuse_lock_acquire "$lease" || {
-            lease_registry_mutation_lock_exit
-            return 1
-        }
     fi
+    lease_reuse_lock_acquire "$lease" || {
+        lease_registry_mutation_lock_exit
+        return 1
+    }
 }
 lease_mutation_lock_exit() {
     [[ "${2:-}" == --lock-held ]] && return 0
