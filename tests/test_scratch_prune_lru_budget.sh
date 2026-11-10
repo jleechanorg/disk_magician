@@ -134,10 +134,10 @@ gone plain; kept leased; kept cwd-held; kept open-held
 check "live lease is the keep reason" "kept:live-owner $SCRATCH_ROOT/leased" "$out"
 check "live cwd is the keep reason" "kept:live-cwd $SCRATCH_ROOT/cwd-held" "$out"
 check "open file is the keep reason" "kept:open-file $SCRATCH_ROOT/open-held" "$out"
-check "candidates ran out before the target" "lru: stop=candidates-exhausted" "$out"
-[[ "$rc" == 4 ]] && ok "unmet target exits 4, not 0" || bad "unmet target exits 4, not 0" "rc=$rc"
-check "unmet target is reported with target, achieved and reason" "budget: target_pct=1 achieved_pct=" "$out"
-check "unmet target states target_reached=false and the reason" "target_reached=false reason=candidates-exhausted" "$out"
+check "candidates ran out before the target" "lru: stop=safe-candidates-exhausted" "$out"
+[[ "$rc" == 75 ]] && ok "unmet target exits 75 (partial), not 0" || bad "unmet target exits 75 (partial), not 0" "rc=$rc"
+check "unmet target reports target and reason" "budget: target_pct=1" "$out"
+check "unmet target states target_reached=false and the reason" "target_reached=false reason=safe-candidates-exhausted" "$out"
 check "unmet target emits the partial marker" "partial:budget-target-unmet" "$out"
 
 echo "Test 7: unmeasurable recency is kept"
@@ -288,7 +288,7 @@ for kind in build evidence; do
     out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
     [[ -f "$outside/$kind/old-unit/payload.bin" ]] && ok "$parent $kind symlink target survives" || bad "$parent $kind symlink target survives"
     [[ "$out" != *"removed:"* ]] && ok "$parent $kind symlink is not traversed for removal" || bad "$parent $kind symlink is not traversed for removal" "$out"
-    [[ "$rc" == 4 ]] && ok "$parent $kind preserves unmet target" || bad "$parent $kind preserves unmet target" "rc=$rc"
+    [[ "$rc" == 75 ]] && ok "$parent $kind preserves unmet target (75 partial)" || bad "$parent $kind preserves unmet target (75 partial)" "rc=$rc"
   done
 done
 

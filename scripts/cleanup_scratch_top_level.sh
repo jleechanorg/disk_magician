@@ -321,8 +321,8 @@ emit_discovery_deferred_summary() {
   DEFERRED_CANDIDATES=$(( DEFERRED_CANDIDATES + 1 ))
   after="$(data_volume_free_bytes 2>/dev/null || echo unknown)"
   if [[ "$data_free_before_bytes" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ ]]; then delta=$(( after - data_free_before_bytes )); else delta=unknown; fi
-  printf 'scanned=%s kept=%s eligible_estimate=%s removed=%s candidate_size_estimate_kb=0 deletion_size_estimate_kb=0 deferred_candidates=%s data_free_before_bytes=%s data_free_after_bytes=%s data_free_interval_delta_bytes=%s\n' \
-    "$scanned" "$kept" "$removable" "$removed" "$DEFERRED_CANDIDATES" "$data_free_before_bytes" "$after" "$delta"
+  printf 'scanned=%s kept=%s removable=%s removed=%s eligible_estimate=%s candidate_size_estimate_kb=0 deletion_size_estimate_kb=0 deferred_candidates=%s data_free_before_bytes=%s data_free_after_bytes=%s data_free_interval_delta_bytes=%s\n' \
+    "$scanned" "$kept" "$removable" "$removable" "$removed" "$DEFERRED_CANDIDATES" "$data_free_before_bytes" "$after" "$delta"
   echo "deferred:artifact-discovery-${reason}"
   if [[ -n "$BUDGET_PCT" && "$DRY_RUN" != true ]]; then
     echo "budget_unmet=unknown projected_budget_unmet=unknown reason=artifact-discovery-${reason}"
@@ -858,8 +858,8 @@ if [[ "$data_free_before_bytes" =~ ^[0-9]+$ && "$data_free_after_bytes" =~ ^[0-9
 else
   data_free_delta_bytes=unknown
 fi
-printf 'scanned=%s kept=%s eligible_estimate=%s removed=%s candidate_size_estimate_kb=%s deletion_size_estimate_kb=%s deferred_candidates=%s data_free_before_bytes=%s data_free_after_bytes=%s data_free_interval_delta_bytes=%s\n' \
-  "$scanned" "$kept" "$removable" "$removed" "$(( planned_kb + removed_kb ))" "$removed_kb" "$DEFERRED_CANDIDATES" \
+printf 'scanned=%s kept=%s removable=%s removed=%s eligible_estimate=%s candidate_size_estimate_kb=%s deletion_size_estimate_kb=%s deferred_candidates=%s data_free_before_bytes=%s data_free_after_bytes=%s data_free_interval_delta_bytes=%s\n' \
+  "$scanned" "$kept" "$removable" "$removable" "$removed" "$(( planned_kb + removed_kb ))" "$removed_kb" "$DEFERRED_CANDIDATES" \
   "$data_free_before_bytes" "$data_free_after_bytes" "$data_free_delta_bytes"
 echo "keep_count=$kept"
 (( capped )) && echo "capped: at least one candidate skipped by --max-gib ${MAX_GIB}"
