@@ -284,6 +284,29 @@ out="$(run bash "$SCRIPT" --dry-run --available-floor --budget-pct 50 2>&1)"; rc
 out="$(run bash "$SCRIPT" --dry-run --budget-pct 100 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "budget percent above 99 refuses" || bad "budget percent above 99 refuses" "rc=$rc"
 
+echo "Test 10b: one unreadable top-level entry does not void the whole scan"
+# Reproduces the 2026-11-10 Linux field failure: Scratch/lost+found is root:root
+# 0700, the batched discovery helper fails closed for the ENTIRE batch on an
+# unreadable subtree, and scratch-prune therefore reported scanned=0 and
+# reclaimed nothing on a 163 GiB volume. The cleaner must skip candidates it
+# cannot read and keep scanning the rest.
+use_root
+make_tree plain 2880
+mkdir -p "$SCRATCH_ROOT/locked" && head -c 1024000 /dev/urandom >"$SCRATCH_ROOT/locked/payload.bin"
+age "$SCRATCH_ROOT/locked" 2880
+chmod 000 "$SCRATCH_ROOT/locked"
+out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
+chmod 700 "$SCRATCH_ROOT/locked"
+if [[ "$(id -u)" == 0 ]]; then
+  ok "unreadable-candidate case skipped under privileged test user"
+else
+  [[ "$out" == *"deferred:artifact-discovery"* ]] \
+    && bad "unreadable candidate does not defer the whole discovery pass" "$(printf '%s' "$out" | tail -1)" \
+    || ok "unreadable candidate does not defer the whole discovery pass"
+  gone plain
+  [[ -d "$SCRATCH_ROOT/locked" ]] && ok "unreadable candidate is preserved" || bad "unreadable candidate is preserved"
+fi
+
 echo "Test 11: managed discovery never follows top-level or intermediate symlink parents"
 for kind in build evidence; do
   for parent in top intermediate; do
