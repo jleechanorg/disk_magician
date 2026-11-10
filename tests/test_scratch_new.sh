@@ -187,6 +187,69 @@ assert_eq "$LOCK_RC" 0 "scratch-new succeeds after transient lock release"
 assert_contains "$(cat "$LOCK_OUT")" "$T/tmp/myrepo/build/registry-lock-wait-" "scratch-new returns the allocated path"
 [[ -d "$(cat "$LOCK_OUT")" ]] && ok "scratch-new leaves its test directory" || bad "scratch-new output directory missing"
 
+echo "== registry holder releases during failed-acquisition recovery =="
+(
+    source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+    race_lease="$DISK_MAGICIAN_STATE_DIR/worktree_leases/release-window"
+    race_registry="$(lease_dir)/.owner-mutation.reuse-lock"
+    mkdir "$race_registry" || exit 1
+    recovery_count=0
+    # Deterministic filesystem interleaving: the holder leaves on the second
+    # failed acquisition, before the bounded caller can inspect the directory.
+    lease_reuse_lock_recover() {
+        recovery_count=$((recovery_count + 1))
+        if (( recovery_count == 2 )); then rmdir "$race_registry" || return 1; fi
+        return 1
+    }
+    lease_mutation_lock_enter "$race_lease" --bounded-registry-lock-wait || exit 1
+    lease_mutation_lock_exit "$race_lease" || exit 1
+    [[ "$recovery_count" == 2 ]]
+); RACE_RC=$?
+assert_eq "$RACE_RC" 0 "bounded wait acquires after release inside recovery"
+
+echo "== bounded registry wait stops on genuine errors and keeps its limit =="
+(
+    source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+    calls=0
+    sleep() { return 0; }
+    lease_registry_mutation_lock_enter() { calls=$((calls + 1)); return 1; }
+    lease_mutation_lock_enter "$T/error-lease" --bounded-registry-lock-wait
+    [[ "$?" != 0 && "$calls" == 2 ]]
+); assert_eq "$?" 0 "persistent acquisition error stops after two attempts"
+(
+    source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+    calls=0
+    sleep() { return 0; }
+    registry="$(lease_dir)/.owner-mutation.reuse-lock"
+    lease_registry_mutation_lock_enter() {
+        calls=$((calls + 1))
+        if (( calls == 1 )); then mkdir "$registry"; fi
+        if (( calls == 2 )); then rmdir "$registry"; fi
+        return 1
+    }
+    lease_mutation_lock_enter "$T/error-after-busy" --bounded-registry-lock-wait
+    [[ "$?" != 0 && "$calls" == 3 ]]
+); assert_eq "$?" 0 "a real error after contention cannot consume the full wait budget"
+(
+    source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+    calls=0
+    sleep() { return 0; }
+    registry="$(lease_dir)/.owner-mutation.reuse-lock"
+    mkdir "$registry" || exit 1
+    lease_registry_mutation_lock_enter() { calls=$((calls + 1)); return 1; }
+    lease_mutation_lock_enter "$T/limit-lease" --bounded-registry-lock-wait
+    rc=$?
+    rmdir "$registry" || exit 1
+    [[ "$rc" != 0 && "$calls" == 120 ]]
+); assert_eq "$?" 0 "persistent contention remains bounded to 120 attempts"
+(
+    source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
+    calls=0
+    lease_registry_mutation_lock_enter() { calls=$((calls + 1)); return 1; }
+    lease_mutation_lock_enter "$T/fail-fast-lease"
+    [[ "$?" != 0 && "$calls" == 1 ]]
+); assert_eq "$?" 0 "ordinary lease callers remain fail-fast"
+
 echo "== lease failure: scratch-new fails closed without handing out path =="
 OUT="$(DISK_MAGICIAN_LEASE_TTL_HOURS=bad bash "$DISKM" scratch-new "$T/myrepo" lease-fail --detach HEAD 2>"$T/err")"; RC=$?
 [[ "$RC" != 0 ]] && ok "lease failure is non-zero" || bad "lease failure returned success"

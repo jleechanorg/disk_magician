@@ -742,8 +742,13 @@ lease_mutation_lock_enter() {
             [[ -z "${_lease_scope_signals:-}" ]] || return 1
             if [[ -d "$registry_lock" && ! -L "$registry_lock" ]]; then
                 saw_busy=1
-            elif (( attempt > 0 || saw_busy )); then
+            elif (( attempt > 0 && ! saw_busy )); then
                 return 1
+            else
+                # A holder may release during the failed acquisition. Give
+                # that observed contention one acquisition with a clear lock;
+                # a repeated non-contention failure still stops promptly.
+                saw_busy=0
             fi
             attempt=$((attempt + 1))
             (( attempt < max_attempts )) || return 1
