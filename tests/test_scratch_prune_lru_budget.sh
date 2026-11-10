@@ -105,6 +105,17 @@ c_line="$(printf '%s\n' "$out" | grep -n "^removed:.*/c " | cut -d: -f1)"
 check "clean reports the target stop" "lru: stop=target-reached evicted=2" "$out"
 check "deletion log records the prior C14 verdict" "scratch-lru:kept:unproven-content" "$(cat "$LOG")"
 check "summary tallies prior verdicts" "lru: prior_verdict kept:unproven-content=2" "$out"
+# Field-position guard: every value in this fixture is distinct and non-zero, so
+# a duplicated or dropped printf argument (which silently shifts removable=,
+# removed= and eligible_estimate= into each other) fails here. A fixture of all
+# zeros cannot detect that shift - tests/test_scratch_prune_302_integration.sh
+# pins scanned=1 kept=1 removable=0 removed=0 and stayed green through fd73f2b.
+summary_line="$(printf '%s\n' "$out" | grep -m1 '^scanned=')"
+removed_events="$(printf '%s\n' "$out" | grep -c '^removed:')"
+summary_removed="$(printf '%s\n' "$summary_line" | grep -o ' removed=[0-9]*' | cut -d= -f2)"
+[[ -n "$removed_events" && "$summary_removed" == "$removed_events" ]] \
+  && ok "summary removed= matches the removals actually performed ($removed_events)" \
+  || bad "summary removed= matches the removals actually performed ($removed_events)" "$summary_line"
 
 echo "Test 4: under target is a no-op"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 90 2>&1)"; rc=$?
