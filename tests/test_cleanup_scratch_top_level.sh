@@ -131,6 +131,24 @@ if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == generic-nested-contract || "${SCRATCH_
   ln -s "$generic/stale-unit" "$generic/symlink-unit"
   old_stamp "$SCRATCH_ROOT/arbitrary-container" 26
   touch "$generic/fresh-unit/payload"
+  active_workspace="$generic/active-workspace"
+  active_package="$active_workspace/node_modules/stale-package"
+  mkdir -p "$active_package"
+  printf 'stale package fixture\n' >"$active_package/payload"
+  old_stamp "$active_package" 26
+  (cd "$active_workspace" && exec sleep 300) & ancestor_cwd_pid=$!
+  (cd "$SCRATCH_ROOT" && exec sleep 300) & scratch_root_cwd_pid=$!
+  trap 'kill "$ancestor_cwd_pid" "$scratch_root_cwd_pid" 2>/dev/null || true; wait "$ancestor_cwd_pid" "$scratch_root_cwd_pid" 2>/dev/null || true; rm -rf "${T:?}"' EXIT
+  for _attempt in {1..100}; do
+    [[ -d "/proc/$ancestor_cwd_pid" && -d "/proc/$scratch_root_cwd_pid" ]] && break
+    sleep .02
+  done
+  [[ "$(readlink "/proc/$ancestor_cwd_pid/cwd" 2>/dev/null)" == "$active_workspace" ]] || {
+    echo 'FAIL: ancestor cwd fixture did not start'; exit 1;
+  }
+  [[ "$(readlink "/proc/$scratch_root_cwd_pid/cwd" 2>/dev/null)" == "$SCRATCH_ROOT" ]] || {
+    echo 'FAIL: scratch-root cwd fixture did not start'; exit 1;
+  }
   if [[ "$SCRATCH_PRUNE_TEST_FILTER" == generic-safety-contract ]]; then
     mkdir -p "$generic/leased-parent/stale-child" "$generic/cwd-unit" "$generic/open-unit" "$generic/dangling-git/nested-unit" "$generic/.hidden/stale-child"
     printf 'open fixture\n' >"$generic/open-unit/payload"
@@ -145,6 +163,11 @@ source "$1/scripts/lib/worktree_lease.sh"
 lease_write "$2" "$2" "" nested-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$generic/leased-parent" "$nested_lease_pid"
   fi
   preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$ROOT/disk_magician.sh" scratch-prune --dry-run 2>&1)"; rc=$?
+  if [[ "$preview" == *"would-remove:remove $active_package"* ]]; then
+    echo "FAIL: stale package under live workspace cwd was eligible: $active_package"
+    exit 1
+  fi
+  check "live ancestor workspace cwd protects stale descendant package" "kept:live-cwd $active_package" "$preview"
   check "generic deep stale child is discovered and eligible" "would-remove:remove $generic/stale-unit" "$preview"
   check "fresh sibling remains recent" "kept:recent-activity $generic/fresh-unit" "$preview"
   check "nested secret remains protected" "kept:secret-like $generic/secret-unit" "$preview"
@@ -154,6 +177,10 @@ lease_write "$2" "$2" "" nested-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$ge
   out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$ROOT/disk_magician.sh" scratch-prune --clean 2>&1)"; rc=$?
   [[ "$rc" == 0 ]] && ok "public cleanup exits 0" || bad "public cleanup rc=$rc"
   [[ ! -e "$generic/stale-unit" ]] && ok "generic stale child removed" || bad "generic stale child remains"
+  [[ -e "$active_package/payload" ]] && ok "active workspace descendant remains after clean" || bad "active workspace descendant was deleted"
+  kill "$ancestor_cwd_pid" "$scratch_root_cwd_pid" 2>/dev/null || true
+  wait "$ancestor_cwd_pid" "$scratch_root_cwd_pid" 2>/dev/null || true
+  ancestor_cwd_pid="" scratch_root_cwd_pid=""
   for keep in fresh-unit/payload secret-unit/placeholder.pem git-dir/nested-unit git-file/nested-unit bare.git/nested-unit; do
     [[ -e "$generic/$keep" ]] && ok "preserved $keep" || bad "lost $keep"
   done

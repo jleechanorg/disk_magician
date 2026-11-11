@@ -550,7 +550,7 @@ _av_owner_null_relax_reason() {
 # Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
 _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' volume_root='' volume_match=0
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -591,7 +591,6 @@ if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kep
     # archive copy) must fall through to the ordinary C14 checks.
     scratch_roots_is_protected_path "$p" "$q" && { echo kept:protected; return 0; }
     if [[ "$kind" == ephemeral ]]; then
-        local volume_root volume_match=0
         while IFS= read -r volume_root; do [[ "$p" == "$volume_root/"* ]] && { volume_match=1; break; }; done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-$q}" scratch)
         if [[ "$volume_match" == 1 ]] && ! python3 "$_AV_DIR/../volume.py" verify-mount "$volume_root" >/dev/null 2>&1; then echo kept:volume-identity; return 0; fi
     fi
@@ -654,7 +653,11 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
         esac
     done < <(_av_lease_scope "$p" "$inv" && printf 'OK\0')
     [[ -n "$done" ]] || { echo kept:check-failed; return 0; }
-    wrh_live_cwd_reason "$p"
+    if [[ "$volume_match" == 1 ]]; then
+        wrh_live_cwd_reason "$p" "$volume_root"
+    else
+        wrh_live_cwd_reason "$p"
+    fi
     [[ -z "$WRH_LIVE_CWD_REASON" ]] || { echo "kept:$WRH_LIVE_CWD_REASON"; return 0; }
     st="$(_av_open_file "$p" "$deadline")"
     [[ "$st" == deferred:* ]] && { echo "$st"; return 0; }
