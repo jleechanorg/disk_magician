@@ -678,7 +678,6 @@ _lease_reuse_lock_acquire() {
             if (( mkdir_rc == 2 )); then _lease_registry_wait_contention=1; fi
         else
             if _lease_registry_mkdir "$lock"; then break; else mkdir_rc=$?; fi
-            if (( mkdir_rc == 2 )); then _lease_registry_wait_contention=1; fi
         fi
         [[ -z "$_lease_scope_signals" && "$attempt" == 0 ]] || return 1
         lease_reuse_lock_recover "$lease" || return 1
@@ -696,10 +695,7 @@ _lease_reuse_lock_acquire() {
         _lease_scope_paths[slot]=""
         return 1
     fi
-    umask "$saved_umask"
     stamp="$(date +%s 2>/dev/null)" || stamp=""
-    saved_umask="$(umask)" || return 1
-    umask 0022
     if [[ ! "$stamp" =~ ^[0-9]+$ || -n "$_lease_scope_signals" ]] || ! printf '%s\n' "$stamp" > "$lock/acquired_at" 2>/dev/null; then
         umask "$saved_umask"
         rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true

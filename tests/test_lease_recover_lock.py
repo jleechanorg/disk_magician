@@ -533,9 +533,18 @@ case "$mode" in
   umask)
     umask 0002
     lease_reuse_lock_acquire "$lease"
-    [[ "$(stat -c %a "$lease.reuse-lock")" == 755 ]]
-    [[ "$(stat -c %a "$lease.reuse-lock/pid")" == 644 ]]
-    [[ "$(stat -c %a "$lease.reuse-lock/acquired_at")" == 644 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock")" == 493 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock/pid")" == 420 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock/acquired_at")" == 420 ]]
+    [[ "$(umask)" == 0002 ]]
+    lease_reuse_lock_release "$lease"
+    [[ ! -e "$lease.reuse-lock" ]]
+    _lease_registry_wait_path="$lease.reuse-lock"
+    lease_reuse_lock_acquire "$lease"
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock")" == 493 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock/pid")" == 420 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock/acquired_at")" == 420 ]]
+    [[ "$(umask)" == 0002 ]]
     lease_reuse_lock_release "$lease"
     [[ ! -e "$lease.reuse-lock" ]]
     ;;
