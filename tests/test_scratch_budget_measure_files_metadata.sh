@@ -14,20 +14,20 @@ mkdir -p "$T/files" "$T/repository/.git"
 truncate -s 200M "$T/files/payload"
 printf 'protected\n' >"$T/repository/sentinel"
 PASS=0 FAIL=0
-for kind in measured opaque; do
-  if [[ "$kind" == measured ]]; then entry="$T/files"; else entry="$T/repository"; fi
-  kb="$(du -sk "$entry" | awk '{print $1}')"
+for kind in measured unreadable; do
+  if [[ "$kind" == measured ]]; then entry="$T/files"; else entry="$T/missing"; fi
+  kb="$(du -sk "$entry" 2>/dev/null | awk '{print $1}')"
   rows="$(report_candidate_detail "$entry" "$kb")"; rc=$?
   printf 'case=%s rc=%s\n%s\n' "$kind" "$rc" "$rows"
   if python3 - "$kind" "$entry" "$rows" "$rc" <<'PY'
 import re, sys
 kind, entry, output, rc = sys.argv[1:]
 lines = output.splitlines()
-flag = "F" if kind == "measured" else "G"
+flag = "F" if kind == "measured" else "E"
 path = entry + "/payload" if kind == "measured" else entry
 matches = [line for line in lines if line.startswith("detail:" + flag + " ")
            and path in line]
-assert rc == "0" and len(matches) == 1, (rc, matches)
+assert rc == ("0" if kind == "measured" else "1") and len(matches) == 1, (rc, matches)
 fields = dict(re.findall(r"(?:^|\s)([a-z_]+)=([^\s]+)", matches[0]))
 assert fields.get("threshold_mib") == "100", fields
 if kind == "measured":

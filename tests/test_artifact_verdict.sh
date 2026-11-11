@@ -130,6 +130,9 @@ assert_eq "$(content "$TMPROOT/plain2/node_modules/inner")" ok "clean nested rep
 assert_eq "$(content "$TMPROOT/plain2/node_modules/backup.git")" ok "bare repo under a non-git root"
 v="$(c14_repos_ok "$TMPROOT/plain2")"
 [[ "$v" == kept:* ]] && ok "unpushed, unbaselined nested repos are kept ($v)" || bad "nested repos with no remote: $v"
+# The bare-repository discovery/keep checks above are complete. Isolate the
+# dirty traversal assertion from its unrelated unbaselined short-circuit.
+mv "$TMPROOT/plain2/node_modules/backup.git" "$TMPROOT/plain2-backup.git"
 printf 'edit\n' >>"$TMPROOT/plain2/node_modules/inner/tracked.txt"
 assert_eq "$(c14_repos_ok "$TMPROOT/plain2")" kept:dirty \
     "dirty repo nested under allowlisted node_modules is checked"
@@ -460,7 +463,25 @@ export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVER
 export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMPROOT/utmp"
 NOW="$(date +%s)"
 # age <path> <minutes>: every entry under <path> last modified <minutes> ago.
-age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
+age() {
+    # Match find's physical traversal and touch -h without BSD date -r, which
+    # means "reference file" on GNU/Linux rather than "epoch seconds".
+    python3 - "$1" "$((NOW - $2 * 60))" <<'PY_AGE'
+import os
+import stat
+import sys
+
+stamp = int(sys.argv[2])
+pending = [sys.argv[1]]
+while pending:
+    path = pending.pop()
+    info = os.lstat(path)
+    if stat.S_ISDIR(info.st_mode):
+        with os.scandir(path) as entries:
+            pending.extend(entry.path for entry in entries)
+    os.utime(path, (stamp, stamp), follow_symlinks=False)
+PY_AGE
+}
 eph() { artifact_removal_verdict "$1" --kind ephemeral; }
 index_candidate="$PT/pr-index-inventory-check"
 git clone -q "$TMPROOT/remotes/ctl.git" "$index_candidate" && baseline "$index_candidate"
@@ -851,9 +872,19 @@ x_thesis="$HOME/Documents/thesis"
 mkdir -p "$x_thesis" && printf 'unique' >"$x_thesis/chapter.txt" && age "$x_thesis" 43200
 assert_eq "$(av "$x_thesis" --kind os_clone)" kept:check-failed "os_clone flag cannot authorize arbitrary ~/Documents/thesis"
 x_clone="$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1"
-x_id="$(stat -f '%d:%i:%u' "$PT/X" 2>/dev/null || stat -c '%d:%i:%u' "$PT/X")"
-x_parent_id="$(stat -f '%d:%i:%u' "${x_clone%/*}" 2>/dev/null || stat -c '%d:%i:%u' "${x_clone%/*}")"
-x_candidate_id="$(stat -f '%d:%i:%u' "$x_clone" 2>/dev/null || stat -c '%d:%i:%u' "$x_clone")"
+# GNU stat -f may emit filesystem metadata before failing; never concatenate
+# that output with a fallback identity. These are the same frozen stat fields.
+fixture_identity() {
+    python3 - "$1" <<'PY_IDENTITY'
+import os
+import sys
+s = os.stat(sys.argv[1])
+print(f"{s.st_dev}:{s.st_ino}:{s.st_uid}")
+PY_IDENTITY
+}
+x_id="$(fixture_identity "$PT/X")"
+x_parent_id="$(fixture_identity "${x_clone%/*}")"
+x_candidate_id="$(fixture_identity "$x_clone")"
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" remove "os_clone with matching frozen candidate, parent and X-root identities"
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_parent_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone identity mismatch is kept"
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_thesis" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone proof outside the frozen X scan root is kept"

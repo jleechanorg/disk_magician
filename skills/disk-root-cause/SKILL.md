@@ -30,9 +30,18 @@ Audit itself prints fleet health and the existing reclaim report synchronously
 before starting any deeper lane. It never automatically regenerates the report;
 `diskm reclaim-ledger --stdout` is a regeneration preview, not a read-existing alias.
 
+Every complete size inventory follows the 100 MiB leaf rule in CLAUDE.md:
+recursively descend every real directory at or above 100 MiB, including Git
+directories for read-only measurement, until leaves are files or directories
+strictly under 100 MiB. Never follow symlinks; measure each link as a leaf. Any
+access error, identity boundary, deadline, depth limit, or cross-device boundary
+that prevents descent through a real directory at or above 100 MiB stays on the
+unfinished frontier and makes coverage incomplete. Measurement does not change
+deletion protections.
+
 This is the mandatory three-lane diagnostic. It launches in parallel:
 
-1. top-down whole-disk accounting from physical/APFS capacity through the Data volume and non-overlapping path buckets at or below 5 GiB;
+1. top-down whole-disk accounting from physical/APFS capacity through itemised leaves;
 2. coverage-validated snapshot deltas, so a coverage change cannot masquerade as physical growth; and
 3. safe quick wins and obvious outliers, with cleanup commands still behind repository safety gates.
 
@@ -40,7 +49,17 @@ Read the whole report before drilling down. Keep permission/TCC denial, time bud
 
 The 900-second wall-clock cap is the infinite-process guard; live whole-volume runs on this host vary from about 6.5 minutes to more than 8 minutes under I/O load, so 480 seconds was empirically insufficient. Separately, the 100,000,000-record ceiling is a deliberately remote post-scan parser/ledger sanity guard (or a visited-path guard in the legacy fallback), not a normal coverage budget. GNU `du` stdout is spooled to a temporary file rather than retained in memory before that validation. The human-readable report must show the backend, records/paths processed, and this ceiling.
 
-The displayed Data equation must use one accepted leaf ledger: `<=5 GiB bounded path buckets + indivisible files above 5 GiB + measured tail + purgeable estimate + residual = Data used`. Recursively subdivide every directory above 5 GiB; roll accepted descendants up only when their combined size stays at or below 5 GiB. Never display a larger directory as a normal bucket. Permission, time, node, depth, and cross-device limits stay on the named unfinished frontier and inside residual rather than masquerading as a large bucket. An indivisible file above 5 GiB is a separately labeled final path-level explanation, not a directory bucket. Never reuse an earlier parent observation. A hidden measured-total equation does not validate the displayed buckets. Capture Data used before and after the namespace walk; when it changes, report the residual interval and mark the measurement non-atomic.
+The displayed Data equation must use one accepted leaf ledger whose directory
+leaves are strictly under 100 MiB and whose other leaves are individual files:
+measured leaves + measured tail + purgeable estimate + residual = Data used.
+Recursively itemise every real directory at or above 100 MiB. Never present a
+larger directory as a terminal leaf. Access, identity, time, node, depth, and
+cross-device limits stay on the named unfinished frontier and inside residual
+rather than masquerading as measured leaves. An indivisible file of any size is
+a separate file leaf. Never reuse an earlier parent observation. A hidden
+measured-total equation does not validate the displayed leaves. Capture Data
+used before and after the namespace walk; when it changes, report the residual
+interval and mark the measurement non-atomic.
 
 ## System Residual Triage & `/private/var/dirs_cleaner` Protocol
 
@@ -74,12 +93,12 @@ Trigger when the user asks any of:
 - "Show me the delta between then and now"
 - "Reclaim X GB / how do I reclaim more" (skill is read-only forensics; safe-cleanup commands below)
 
-Do **not** use this skill for one-off size queries — `du -sh <path>` answers those directly.
+A du -sh directory total answers only its aggregate size; whenever a full inventory or reclaimability claim is needed, descend every directory at or above 100 MiB.
 
 ## Hard rules (skill-wide)
 
 1. **Never delete anything without explicit user OK.** Every deletion goes through `./disk_magician.sh <script> --clean`, `cleanup-ao-sessions.sh --drop-bak --days N`, etc. — never `rm -rf` directly. The repo's scripts encode mtime filters and the never-delete list.
-2. **Never-delete list** (hard-stop): `~/.codex/sessions*`, `~/.codex/state*.sqlite`, `~/.codex/log`, `~/.claude/projects`. Probe these paths only via `du -sh`, never with destructive verbs.
+2. **Never-delete list** (hard-stop): `~/.codex/sessions*`, `~/.codex/state*.sqlite`, `~/.codex/log`, `~/.claude/projects`. Never use destructive verbs on these paths. For measurement, descend each real directory at or above 100 MiB to the required leaves; a denied or unfinished descent is incomplete coverage, not a measured total.
 3. **Symlink gotcha — always realpath-verify:** `~/.hermes_prod` and `~/.openclaw.bak` are symlinks to `~/.hermes`; `/tmp`, `/var`, `/etc` are volume-root symlinks to `/private/*`. Naive `du` over args triples-counts them. Use `du -P` (no-follow) and dedup by realpath when comparing totals.
 4. **No VACATE-without-name.** When a user says "vacate / pause / stop the CI runners", there is **no** `ez-mac-runner` launchd job on this host — `ez-mac-runner-b-{1,2,3}` are GitHub Actions runner **processes** under `~/actions-runner/`. Stopping the wrong thing (e.g. `com.jleechanorg.disk-magician`) is harmless but accomplishes nothing; stopping the GH Actions runners pauses live CI. Always `launchctl list | grep <hint>` and `ps aux | grep <hint>` before any destructive action, and report the candidate names back to the user verbatim.
 5. **Read-first, deduce-later.** Do not assert "X grew 5 GB" from one `du`; cross-check against snapshot history (a committed git repo on disk) and the live `df -k /System/Volumes/Data`. If two sources disagree, attribute honestly.
@@ -218,7 +237,7 @@ Single-pass `du` answers questions fast (<2 min). When the attribution crosses t
 | **lane-history** | Snapshot-history growth attribution | "From git history `~/.disk_magician_backup`, identify top growers between <floor-sha> and HEAD; cross-check with live `du`. Cite commit SHAs." |
 | **lane-tmp** | /private/tmp live holders vs orphan candidates | "du + lsof, list per-entry: size, mtime, tmux-holder-PID, safe-to-drop?" |
 | **lane-colima** | Colima sparse-disk inflation + recovery sequence | "Baseline du ~/.colima; fstrim; measure delta. Stop sequence optional. NEVER docker prune -af." |
-| **lane-frontier** | Run `disk_frontier_scan.py --granularity-gib 5 --output-default` (900s cap) | One-pass GNU du inventory when available; named frontier fallback otherwise |
+| **lane-frontier** | Run `diskm frontier --output-default` (900s cap) | Requires the 100 MiB descent default and retained leaf rows. If the scanner leaves a real directory at or above 100 MiB unexplored, report its path and incomplete coverage. |
 | **lane-critic** | Adversarial reality-check on top claims | "Try to refute each finding by recomputing from raw data. Cite file:line." |
 
 Fan-out rule: **single-writer per file**, `grep -n "agent(" <swarm-script>` cost-routed (haiku for mechanical, sonnet for analysis), staggered starts (rule 4 in `/swarm`), explicit `--model:` on every call. Adversarial verify ≥3 lenses before any actionable claim.
@@ -300,9 +319,10 @@ When recommending or executing cleanups on this workstation, reference the canon
 
 A complete root-cause answer for this machine has:
 - [ ] Default `disk-magician audit` three-lane report completed or its named limits were reported
-- [ ] Every normal Data path bucket is at or below 5 GiB, without parent/child or symlink double counting
-- [ ] Every larger directory is recursively subdivided or named on the unfinished frontier; indivisible files above 5 GiB are labeled separately
-- [ ] Displayed Data equation reconciles bounded buckets + indivisible files + measured tail + purgeable estimate + residual = Data used from one accepted leaf ledger
+- [ ] Every real directory at or above 100 MiB is recursively itemised, or named on the unfinished frontier with coverage marked incomplete
+- [ ] Measured directory leaves are strictly under 100 MiB; every file is its own leaf regardless of size
+- [ ] Symlinks are measured as link leaves and never followed
+- [ ] Displayed Data equation reconciles measured leaves + measured tail + purgeable estimate + residual = Data used from one accepted leaf ledger
 - [ ] Data-used before/after bracket is shown; any drift is marked non-atomic with a residual interval
 - [ ] Residual is explicitly not called backup or reclaimable without evidence
 - [ ] Phase 0 ground-truth probe done

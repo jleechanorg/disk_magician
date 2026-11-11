@@ -19,9 +19,9 @@ SCRIPT = REPO / "scripts" / "growth_top10.py"
 GIB_KB = 1024 * 1024
 
 USER_PROBE_PATHS = {
-    "mobile_sync": os.path.join(os.path.expanduser("~"), "Library", "Application Support", "MobileSync", "Backup"),
-    "mail": os.path.join(os.path.expanduser("~"), "Library", "Mail"),
-    "messages": os.path.join(os.path.expanduser("~"), "Library", "Messages"),
+    "mobile_sync": os.path.join("/Users/reviewer", "Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("/Users/reviewer", "Library", "Mail"),
+    "messages": os.path.join("/Users/reviewer", "Library", "Messages"),
 }
 
 
@@ -29,7 +29,8 @@ def make_valid_floor(captured_at=None, buckets=None, disk_used_kb=10000000, scop
     if captured_at is None:
         captured_at = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     if buckets is None:
-        buckets = [{"path": "/Users/x/a", "measured_kb": 4000000}]
+        # Track an indivisible file whose allocation can grow past 100 MiB.
+        buckets = [{"path": "/Users/x/a", "measured_kb": 4000000, "kind": "file"}]
     if scope is None:
         scope = {"hostname": "testhost", "root": "/Users/x"}
     bucket_total = sum(b.get("measured_kb", 0) for b in buckets)
@@ -86,7 +87,7 @@ def make_valid_partial(captured_at=None, buckets=None, disk_used_kb=10500000, sc
     if captured_at is None:
         captured_at = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     if buckets is None:
-        buckets = [{"path": "/Users/x/a", "measured_kb": 4500000}]
+        buckets = [{"path": "/Users/x/a", "measured_kb": 4500000, "kind": "file"}]
     if scope is None:
         scope = {"hostname": "testhost", "root": "/Users/x"}
     bucket_total = sum(b.get("measured_kb", 0) for b in buckets)

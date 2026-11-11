@@ -7,6 +7,9 @@
 # units/drop-ins, or a live process; the newest --keep-releases releases;
 # anything with a file modified inside --days (floor: safety_min_stale_days).
 set -euo pipefail
+
+# Read-only detail is independent of lifecycle/removal eligibility.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 # Paths are byte strings: byte-wise tools avoid "illegal byte sequence"
 # aborts (BSD sed/tr) on non-UTF-8 names under a UTF-8 locale.
 export LC_ALL=C
@@ -187,11 +190,12 @@ remove() {
     log "PROTECTED ($reason): $alias"
     return 0
   fi
+  scratch_budget_report_measurement "$path" || exit $?
   kb="$(du -sk "$path" 2>/dev/null | awk '{print $1}')"
   kb="${kb:-0}"
   if [[ "$DRY_RUN" == true ]]; then
     total_kb=$(( total_kb + kb )); count=$(( count + 1 ))
-    log "DRY RUN: would remove $kind: $path (${kb} KB)"
+    log "DRY RUN: would remove $kind: $path (aggregate ${kb} KB)"
     return 0
   fi
   chmod -R u+w "$path" 2>/dev/null || true
@@ -275,6 +279,7 @@ for l in sys.stdin.buffer:
   for rel in "$RELEASES_DIR"/*/; do
     rel="${rel%/}"
     [[ -d "$rel" && ! -L "$rel" ]] || continue
+    scratch_budget_report_measurement "$rel" || exit $?
     grep -qxF "$rel" "$keep" && continue
     # Substring match over all reference text, so any terminator (: ; ) etc.)
     # still protects; over-protection (r1 vs r10) is the safe direction.
@@ -292,10 +297,11 @@ if root_ok "$RUNS_DIR"; then
   RUNS_DIR="$(phys "$RUNS_DIR")"
   while IFS= read -r -d '' run; do
     [[ -L "$run" ]] && continue
+    scratch_budget_report_measurement "$run" || exit $?
     is_live "$run" "$runs_logical/${run##*/}" && continue
     is_stale "$run" || continue
     remove "$run" run "$runs_logical/${run##*/}"
-  done < <(find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +"$DAYS" -print0)
+  done < <(find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -print0)
 fi
 
 # --- per-run log dirs (~/Library/Logs/dark-factory/<run>) ---
@@ -309,10 +315,11 @@ if root_ok "$LOGS_DIR"; then
   LOGS_DIR="$(phys "$LOGS_DIR")"
   while IFS= read -r -d '' run_log; do
     [[ -L "$run_log" ]] && continue
+    scratch_budget_report_measurement "$run_log" || exit $?
     is_live "$run_log" "$logs_logical/${run_log##*/}" && { log "SKIP run log dir (live process): $run_log"; continue; }
     is_stale "$run_log" || continue
     remove "$run_log" run_log "$logs_logical/${run_log##*/}"
-  done < <(find "$LOGS_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +"$DAYS" -print0)
+  done < <(find "$LOGS_DIR" -mindepth 1 -maxdepth 1 -type d -print0)
 fi
 
 # --- df-* AO session homes ---
@@ -322,6 +329,7 @@ if root_ok "$SESSIONS_DIR"; then
   for sess in "$SESSIONS_DIR"/df-*/; do
     sess="${sess%/}"
     [[ -d "$sess" && ! -L "$sess" ]] || continue
+    scratch_budget_report_measurement "$sess" || exit $?
     is_live "$sess" "$sessions_logical/${sess##*/}" && { log "SKIP session (live process): $sess"; continue; }
     is_stale "$sess" || continue
     remove "$sess" session "$sessions_logical/${sess##*/}"

@@ -442,6 +442,7 @@ resolve_timeout_bin() {
 }
 
 path_size_kb() {
+  scratch_budget_report_measurement "$1" || exit $?
   # Bead disk_magician-lsl: `du -sk` can emit zero, one, or (under a TOCTOU
   # race / BSD-du edge case on a live, churning TMPDIR) multiple lines.
   # Take the first numeric field of the LAST line; default to 0 when there
@@ -495,7 +496,7 @@ remove_path() {
   local kb result
   REMOVE_PATH_KB=0
   REMOVE_PATH_COMPLETED=false
-  kb=$(path_size_kb "$path")
+  kb=$(path_size_kb "$path") || exit $?
   if (( kb < 0 )); then
     log "Preserving (size unknown, not removing): $path"
     return 0
@@ -574,7 +575,7 @@ scan_protected_root_children() {
       log "Skipping recently active protected-root child (mtime/ctime within ${protected_child_active_hours}h): $child"
       continue
     fi
-    kb=$(path_size_kb "$child")
+    kb=$(path_size_kb "$child") || exit $?
     if [[ "$kb" -lt 0 ]]; then
       log "Skipping protected-root child (size unknown): $child"
       continue
@@ -1128,7 +1129,7 @@ PY
   fi
   # Size first because du can be slow. All safety probes follow it, with the
   # open-file check last immediately before the destructive operation.
-  kb=$(path_size_kb "$d")
+  kb=$(path_size_kb "$d") || exit $?
   size_unknown=false
   (( kb < 0 )) && { size_unknown=true; kb=0; }
   # Hard cap (bead jleechan-mtow): past max_hours the
@@ -1322,7 +1323,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       continue
     fi
     files_completed=0
-    local_kb=$(path_size_kb "$f")
+    local_kb=$(path_size_kb "$f") || exit $?
     if (( local_kb < 0 )); then
       log "Skipping (size unknown): $f"
       continue
@@ -1451,7 +1452,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     fi
 
     # Size filter
-    kb=$(path_size_kb "$subdir")
+    kb=$(path_size_kb "$subdir") || exit $?
     if (( kb < 0 )); then
       log "Skipping (size unknown): $subdir"
       continue
@@ -1604,6 +1605,7 @@ container_child_has_protected_repository() {
 large_consider_entry() {
   local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0
   local scratch_container=false
+  scratch_budget_report_measurement "$d" || exit $?
   base="$(basename "$d")"
 
   if is_different_filesystem "$d" "${PRIVATE_TMP_ROOT:-}"; then
@@ -1694,7 +1696,7 @@ large_consider_entry() {
     return 0
   fi
 
-  kb=$(path_size_kb "$d")
+  kb=$(path_size_kb "$d") || exit $?
   if [[ "$kb" -lt 0 ]]; then
     log "Skipping large-dir candidate (size unknown): $d"
     return 0
@@ -1770,7 +1772,7 @@ if [[ "$INCLUDE_AGED" == true && -n "$PRIVATE_TMP_ROOT" ]]; then
       continue
     fi
     [[ -f "$f" && ! -L "$f" ]] || continue
-    aged_file_kb=$(path_size_kb "$f")
+    aged_file_kb=$(path_size_kb "$f") || exit $?
     if (( aged_file_kb < 0 )); then
       log "Skipping aged agent prompt (size unknown): $f"
       continue

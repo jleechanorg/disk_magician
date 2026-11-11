@@ -16,13 +16,13 @@ import argparse, datetime, json, math, os, sys, tempfile
 
 STALE_HOURS = 36
 GIB_KB = 1024 * 1024
-GRANULARITY_CEILING_KB = 5 * GIB_KB
+GRANULARITY_CEILING_KB = 100 * 1024
 LEDGER_JSON = "topdown-5g.json"
 LEDGER_MD = "topdown-5g.md"
 STATUS_JSON = "topdown-5g.status.json"
 PARTIAL_LEDGER_JSON = "topdown-5g.partial.json"
 SCHEMA_VERSION = 2
-BUCKET_KINDS = {"dir", "file", "direct_allocation_segment"}
+BUCKET_KINDS = {"dir", "file"}
 INTRINSIC_GATE_KEYS = {"path", "reason", "verification", "reclaimable"}
 INTRINSIC_GATE_OPTIONAL_KEYS = {"errno", "root_device", "path_device"}
 SIZE_KEYS = {"measured_kb", "size_kb", "size_mb", "allocated_kb", "bytes"}
@@ -336,6 +336,11 @@ def complete_coverage_envelope(report):
     intrinsic_gates = report.get("opaque_intrinsic_gates")
     if not isinstance(intrinsic_gates, list):
         return False
+    # Legacy scanners promoted these measurement failures to opaque gates.
+    # Attesting a failure does not establish complete byte attribution.
+    failed_boundary_reasons = {
+        "permission_denied_intrinsic", "vanished_during_scan", "cross_device_boundary",
+    }
     allowed_gate_keys = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
     if any(
         not isinstance(item, dict)
@@ -345,6 +350,7 @@ def complete_coverage_envelope(report):
             isinstance(item.get(key), str) and item[key]
             for key in ("path", "reason", "verification")
         )
+        or item["reason"] in failed_boundary_reasons
         or type(item.get("reclaimable")) is not bool
         or item["reclaimable"] is not False
         or SIZE_KEYS.intersection(item)
@@ -361,7 +367,7 @@ def complete_coverage_envelope(report):
         or not item.get("path")
         or type(item.get("measured_kb")) is not int
         or item["measured_kb"] < 0
-        or item["measured_kb"] > GRANULARITY_CEILING_KB
+        or (item["measured_kb"] >= GRANULARITY_CEILING_KB and item.get("kind", "dir") != "file")
         or item.get("kind", "dir") not in BUCKET_KINDS
         for item in buckets
     ):
@@ -661,7 +667,7 @@ def main():
     atomic_write_json(args.out_dir, LEDGER_JSON, canonical_ledger)
 
     lines = [
-        f"# Top-down 5 GiB ledger — {report.get('hostname', 'unknown')}",
+        f"# Top-down 100 MiB ledger — {report.get('hostname', 'unknown')}",
         f"Captured: {captured_at}",
         "",
         "| Size (GiB) | Path |",

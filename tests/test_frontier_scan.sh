@@ -240,7 +240,7 @@ python3 "$SCANNER" --root "$T2" --no-sibling-volumes --no-purgeable \
 
 measured_total=$(json_get "$OUT2" "d['measured_total_kb']")
 alias_kb=$(json_get "$OUT2" "d['measured'].get('$T2/alias_to_real', -1)")
-real_kb=$(json_get "$OUT2" "d['measured'].get('$T2/real', -1)")
+real_kb=$(json_get "$OUT2" "d['measured'].get('$T2/real/payload', -1)")
 
 if [[ "$measured_total" == "200" ]]; then
   ok "measured_total_kb == 200 (payload counted exactly once, alias not double-counted)"
@@ -255,7 +255,7 @@ else
 fi
 
 if [[ "$real_kb" == "200" ]]; then
-  ok "real target measured once under its own path (200 KB)"
+  ok "real payload measured once under its own path (200 KB)"
 else
   bad "real target size unexpected: $real_kb"
 fi
@@ -441,7 +441,7 @@ os.makedirs(child, exist_ok=True)
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
     wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=2,
+    no_purgeable=True, granularity_gib=100 / 1024, shallow_enumeration_depth=2,
 )
 scanner = m.FrontierScanner(args)
 scanner.start_time = time.time()
@@ -474,7 +474,7 @@ os.makedirs(last, exist_ok=True)
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
     wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=5,
+    no_purgeable=True, granularity_gib=100 / 1024,
 )
 scanner = m.FrontierScanner(args)
 order = []
@@ -512,7 +512,7 @@ os.symlink(os.path.join(work, "real"), alias)
 args = SimpleNamespace(
     root=work, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
     wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=0,
+    no_purgeable=True, granularity_gib=100 / 1024,
 )
 scanner = m.FrontierScanner(args)
 scanner.start_time = time.time()
@@ -540,20 +540,20 @@ os.makedirs(path, exist_ok=True)
 args = SimpleNamespace(
     root=path, resolve_root=False, workers=1, max_depth=1, max_nodes=10,
     wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=5,
+    no_purgeable=True, granularity_gib=100 / 1024,
 )
 scanner = m.FrontierScanner(args)
 scanner.start_time = time.time()
 scanner.root_dev = os.lstat(path).st_dev
 with mock.patch.object(scanner, "measure_one", return_value=6 * 1024 * 1024):
     scanner.process_node(path, 1, False)
-limit_named = any(item.get("reason") == "granularity_max_depth_reached"
+limit_named = any(item.get("reason") == "inventory_max_depth_reached"
                   for item in scanner.frontier_unfinished)
-buckets = m.build_granularity_buckets(scanner.measured, path, 5 * 1024 * 1024)
+buckets = m.build_granularity_buckets(scanner.measured, path, 100 * 1024)
 print(limit_named, path not in scanner.measured, buckets == [])
 PY
 )
-[[ "$GRANULARITY_LIMIT_OUT" == "True True True" ]] && ok "large unfinished parent stays out of the <=5 GiB leaf ledger" \
+[[ "$GRANULARITY_LIMIT_OUT" == "True True True" ]] && ok "depth-limited parent stays unfinished and out of the <100 MiB leaf ledger" \
   || bad "large parent falsely looked complete at requested granularity: $GRANULARITY_LIMIT_OUT"
 
 MAX_BUCKET_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
@@ -565,22 +565,22 @@ import disk_frontier_scan as m
 gib = 1024 * 1024
 root = "/fixture"
 measured = {
-    f"{root}/large/a": 4 * gib,
-    f"{root}/large/b": 4 * gib,
-    f"{root}/large/c": 4 * gib,
+    f"{root}/large/a": 40 * 1024,
+    f"{root}/large/b": 40 * 1024,
+    f"{root}/large/c": 40 * 1024,
 }
-buckets = m.build_granularity_buckets(measured, root, 5 * gib)
+buckets = m.build_granularity_buckets(measured, root, 100 * 1024)
 expected = [
-    {"path": f"{root}/large/a", "measured_kb": 4 * gib},
-    {"path": f"{root}/large/b", "measured_kb": 4 * gib},
-    {"path": f"{root}/large/c", "measured_kb": 4 * gib},
+    {"path": f"{root}/large/a", "measured_kb": 40 * 1024},
+    {"path": f"{root}/large/b", "measured_kb": 40 * 1024},
+    {"path": f"{root}/large/c", "measured_kb": 40 * 1024},
 ]
 print(buckets == expected,
-      all(item["measured_kb"] <= 5 * gib for item in buckets),
-      sum(item["measured_kb"] for item in buckets) == 12 * gib)
+      all(item["measured_kb"] < 100 * 1024 for item in buckets),
+      sum(item["measured_kb"] for item in buckets) == 120 * 1024)
 PY
 )
-[[ "$MAX_BUCKET_OUT" == "True True True" ]] && ok "display partition recursively subdivides every directory above 5 GiB" \
+[[ "$MAX_BUCKET_OUT" == "True True True" ]] && ok "display partition recursively subdivides every directory at or above 100 MiB" \
   || bad "display partition emitted an oversized parent or lost bytes: $MAX_BUCKET_OUT"
 
 OVERSIZE_FILE_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
@@ -602,7 +602,7 @@ with open(path, "wb") as f:
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
     wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=5,
+    no_purgeable=True, granularity_gib=100 / 1024,
 )
 scanner = m.FrontierScanner(args)
 scanner.start_time = time.time()
@@ -619,7 +619,7 @@ print(scanner.measured.get(path) == 6 * gib,
       scanner.oversize_files == [
           {"path": path, "measured_kb": 6 * gib, "reason": "indivisible_file"}
       ],
-      m.build_granularity_buckets(scanner.measured, root, 5 * gib) == [])
+      m.build_granularity_buckets(scanner.measured, root, 100 * 1024) == [])
 PY
 )
 [[ "$OVERSIZE_FILE_OUT" == "True True True" ]] && ok "indivisible file above 5 GiB is separate from bounded directory buckets" \
@@ -643,7 +643,7 @@ with open(path, "wb") as f:
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=10,
     wall_clock_cap=10, timeout_tiers=[1], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=5,
+    no_purgeable=True, granularity_gib=100 / 1024,
 )
 scanner = m.FrontierScanner(args)
 scanner.start_time = time.time()
@@ -737,7 +737,7 @@ with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
 cmd = run.call_args.args[0]
 print(
     run.call_count == 1,
-    cmd == ["/fake/gdu", "-x", "-k", "--null", "--", "/fixture/shard-a"],
+    cmd == ["/fake/gdu", "-a", "-x", "-k", "--null", "--", "/fixture/shard-a"],
     "-s" not in cmd,
     result["records"]["/fixture/shard-a"] == 8 * gib,
     len(result["records"]) == 3,
@@ -823,10 +823,10 @@ for path in (os.path.join(one, "payload.bin"), os.path.join(two, "payload.bin"),
         f.write(b"x")
 
 rows = [
-    (4 * gib, one),
-    (4 * gib, two),
-    (8 * gib, shard_a),
-    (3 * gib, shard_b),
+    (60 * 1024, one),
+    (60 * 1024, two),
+    (120 * 1024 + (os.lstat(shard_a).st_blocks * 512 + 1023) // 1024, shard_a),
+    (30 * 1024, shard_b),
     (7 * gib, huge),
     (1, protected),
 ]
@@ -836,7 +836,7 @@ completed = subprocess.CompletedProcess(["/fake/gdu"], 1, stdout=raw, stderr=std
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=2, max_depth=6, max_nodes=10_000_000,
     wall_clock_cap=10, timeout_tiers=[10], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=0,
+    no_purgeable=True, granularity_gib=100 / 1024, shallow_enumeration_depth=0,
 )
 scanner = m.FrontierScanner(args)
 with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
@@ -859,15 +859,15 @@ nonoverlap = not any(
 print(
     error is None,
     len(commands) == 1,
-    set(commands[0][5:]) == {shard_a, shard_b, huge, protected},
-    all(item["measured_kb"] <= 5 * gib for item in buckets),
+    set(commands[0][6:]) == {shard_a, shard_b, huge, protected},
+    all(item["measured_kb"] < 100 * 1024 for item in buckets),
     set(bucket_paths) == {one, two, shard_b},
     oversize == [{"path": huge, "measured_kb": 7 * gib, "reason": "indivisible_file"}],
     any(item.get("path") == protected and item.get("reason") == "inventory_permission_denied"
         for item in unfinished),
     all(not path.startswith(protected + os.sep) and path != protected for path in bucket_paths),
-    measured_total == 18 * gib,
-    sum(item["measured_kb"] for item in buckets) + sum(item["measured_kb"] for item in oversize)
+    measured_total == 7 * gib + 150 * 1024 + scanner.directory_metadata[shard_a],
+    sum(item["measured_kb"] for item in buckets) + sum(item["measured_kb"] for item in oversize) + scanner.directory_metadata[shard_a]
         == measured_total,
     nonoverlap,
 )
@@ -895,7 +895,7 @@ completed = subprocess.CompletedProcess(["/fake/gdu"], 0, stdout=raw, stderr="")
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=100_000_000,
     wall_clock_cap=10, timeout_tiers=[10], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=0,
+    no_purgeable=True, granularity_gib=100 / 1024, shallow_enumeration_depth=0,
 )
 scanner = m.FrontierScanner(args)
 with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
@@ -903,15 +903,15 @@ with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
     scanner.run()
 sizes = sorted(item["measured_kb"] for item in scanner.inventory_buckets)
 print(
-    sizes == [2 * gib, 5 * gib, 5 * gib],
-    all(item.get("kind") == "direct_allocation_segment" for item in scanner.inventory_buckets),
-    sum(sizes) == 12 * gib,
+    sizes == [],
+    any(item.get("path") == heavy and item.get("reason") == "granularity_direct_allocation_unattributed" for item in scanner.frontier_unfinished),
+    scanner.measured == {heavy: 12 * gib},
     not scanner.oversize_files,
 )
 PY
 )
-[[ "$GDU_DIRECT_SEGMENTS_OUT" == "True True True True" ]] && ok "large direct-file allocation is split into honest <=5 GiB path segments" \
-  || bad "direct allocation stayed as an oversized hidden tail: $GDU_DIRECT_SEGMENTS_OUT"
+[[ "$GDU_DIRECT_SEGMENTS_OUT" == "True True True True" ]] && ok "unexplained direct allocation remains unfinished without fabricated segments" \
+  || bad "unexplained allocation was falsely attributed: $GDU_DIRECT_SEGMENTS_OUT"
 
 GDU_MISSING_ANCESTOR_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
 import os
@@ -929,21 +929,21 @@ shard = os.path.join(root, "System")
 safe = os.path.join(shard, "Library", "AssetsV2")
 failed = os.path.join(shard, "Library", "Speech")
 os.makedirs(safe, exist_ok=True)
-raw = f"{4 * gib}\t{safe}\0"
+raw = f"{40 * 1024}\t{safe}\0"
 stderr = f"gdu: fts_read failed: {failed}: No such file or directory\n"
 completed = subprocess.CompletedProcess(["/fake/gdu"], 1, stdout=raw, stderr=stderr)
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=1, max_depth=6, max_nodes=100_000_000,
     wall_clock_cap=10, timeout_tiers=[10], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=0,
+    no_purgeable=True, granularity_gib=100 / 1024, shallow_enumeration_depth=0,
 )
 scanner = m.FrontierScanner(args)
 with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
      mock.patch.object(m.subprocess, "run", return_value=completed):
     scanner.run()
 print(
-    scanner.measured == {safe: 4 * gib},
-    scanner.inventory_buckets == [{"path": safe, "measured_kb": 4 * gib}],
+    scanner.measured == {safe: 40 * 1024},
+    scanner.inventory_buckets == [{"path": safe, "measured_kb": 40 * 1024}],
     any(item.get("path") == failed and item.get("reason") == "inventory_path_disappeared"
         for item in scanner.frontier_unfinished),
 )
@@ -974,7 +974,7 @@ scanner = SimpleNamespace(
 )
 args = SimpleNamespace(
     workers=1, max_depth=6, max_nodes=100_000_000, wall_clock_cap=10,
-    timeout_tiers=[10], granularity_gib=5,
+    timeout_tiers=[10], granularity_gib=100 / 1024,
 )
 report = m.build_report(
     scanner,
@@ -1016,7 +1016,7 @@ scanner = SimpleNamespace(
 )
 args = SimpleNamespace(
     workers=1, max_depth=6, max_nodes=100_000_000, wall_clock_cap=10,
-    timeout_tiers=[10], granularity_gib=5,
+    timeout_tiers=[10], granularity_gib=100 / 1024,
 )
 report = m.build_report(
     scanner,
@@ -1079,7 +1079,7 @@ import disk_frontier_scan as m
 args = SimpleNamespace(
     root="/fixture", resolve_root=False, workers=1, max_depth=6, max_nodes=10,
     wall_clock_cap=300, timeout_tiers=[10, 30, 90, 180], no_sibling_volumes=True,
-    no_purgeable=True, granularity_gib=0,
+    no_purgeable=True, granularity_gib=100 / 1024,
 )
 scanner = m.FrontierScanner(args)
 scanner.start_time = time.time()
@@ -1093,15 +1093,17 @@ PY
   || bad "dua repeated timeout tiers instead of subdividing: $DUA_ATTEMPT_OUT"
 
 # ─────────────────────────────────────────────────────────────
-section "4. Timeout-tier escalation then subdivide-on-exhaustion (not open-ended growth)"
+section "4. Metadata fallback descends to files without directory subprocesses"
 FAKEBIN="$WORK/fakebin"
 mkdir -p "$FAKEBIN"
 cat > "$FAKEBIN/dua" <<'FAKE_DUA_DISABLED'
 #!/usr/bin/env bash
+printf 'dua\n' >> "$AGGREGATE_MARKER"
 exit 1
 FAKE_DUA_DISABLED
 cat > "$FAKEBIN/du" <<'FAKE_DU'
 #!/usr/bin/env bash
+printf 'du\n' >> "$AGGREGATE_MARKER"
 # Fake du: hang forever for a dir literally named "slow_dir" (exact basename
 # match, so its children — which contain "slow_dir" as a path prefix but not
 # as their own basename — are unaffected and delegate to real du).
@@ -1121,27 +1123,30 @@ dd if=/dev/zero of="$T4/slow_dir/childB/f" bs=1024 count=20 >/dev/null 2>&1
 dd if=/dev/zero of="$T4/fast_dir/f" bs=1024 count=5 >/dev/null 2>&1
 
 OUT4="$WORK/out4.json"
-PATH="$FAKEBIN:$PATH" python3 "$SCANNER" --root "$T4" --no-sibling-volumes --no-purgeable \
+AGGREGATE_MARKER="$WORK/aggregate.marker" PATH="$FAKEBIN:$PATH" python3 "$SCANNER" --root "$T4" --no-sibling-volumes --no-purgeable \
   --workers 4 --wall-clock-cap 60 --timeout-tiers 1,1,1,1 --output "$OUT4" >/dev/null 2>&1
 
 slow_dir_measured=$(json_get "$OUT4" "'$T4/slow_dir' in d['measured']")
-childA_measured=$(json_get "$OUT4" "d['measured'].get('$T4/slow_dir/childA', -1)")
-childB_measured=$(json_get "$OUT4" "d['measured'].get('$T4/slow_dir/childB', -1)")
-fast_measured=$(json_get "$OUT4" "d['measured'].get('$T4/fast_dir', -1)")
+childA_measured=$(json_get "$OUT4" "d['measured'].get('$T4/slow_dir/childA/f', -1)")
+childB_measured=$(json_get "$OUT4" "d['measured'].get('$T4/slow_dir/childB/f', -1)")
+fast_measured=$(json_get "$OUT4" "d['measured'].get('$T4/fast_dir/f', -1)")
 
-        # du reports allocated blocks, not raw byte count, so small files
+        # lstat reports allocated blocks, not raw byte count, so small files
         # round up (APFS observed: a 10K file -> 12K). Assert "measured and
         # in the right ballpark" (>= raw size, well under 2x), not byte-exact.
 in_ballpark() { local got="$1" raw="$2"; [[ "$got" != "-1" ]] && (( got >= raw )) && (( got <= raw * 2 + 8 )); }
 
-[[ "$slow_dir_measured" == "False" ]] && ok "slow_dir itself was NOT measured directly (subdivided after tier exhaustion)" \
-  || bad "slow_dir was measured directly — subdivision did not trigger: $slow_dir_measured"
-in_ballpark "$childA_measured" 10 && ok "slow_dir/childA measured after subdivision (~10 KB, got $childA_measured — du block-rounds)" \
+[[ "$slow_dir_measured" == "False" ]] && ok "slow_dir itself was NOT measured directly (metadata fallback descended to files)" \
+  || bad "slow_dir was measured directly — metadata fallback emitted aggregate: $slow_dir_measured"
+in_ballpark "$childA_measured" 10 && ok "slow_dir/childA file measured by allocated blocks (~10 KB, got $childA_measured — filesystem block-rounds)" \
   || bad "slow_dir/childA not measured correctly: $childA_measured"
-in_ballpark "$childB_measured" 20 && ok "slow_dir/childB measured after subdivision (~20 KB, got $childB_measured — du block-rounds)" \
+in_ballpark "$childB_measured" 20 && ok "slow_dir/childB file measured by allocated blocks (~20 KB, got $childB_measured — filesystem block-rounds)" \
   || bad "slow_dir/childB not measured correctly: $childB_measured"
-in_ballpark "$fast_measured" 5 && ok "sibling fast_dir unaffected by slow_dir's timeouts (~5 KB, got $fast_measured — du block-rounds)" \
+in_ballpark "$fast_measured" 5 && ok "sibling fast_dir file measured without aggregate du (~5 KB, got $fast_measured — filesystem block-rounds)" \
   || bad "fast_dir measurement unexpected: $fast_measured"
+
+[[ ! -e "$WORK/aggregate.marker" ]] && ok "metadata fallback never invokes aggregate du/dua" \
+  || bad "metadata fallback invoked an aggregate directory backend"
 
 # ─────────────────────────────────────────────────────────────
 section "5. Global worker pool never exceeds configured cap (subdivision must not multiply workers)"
@@ -1218,7 +1223,7 @@ clones=$(json_get "$OUT7" "d['clones_suspected']")
   || bad "clones_suspected flag not set: $clones"
 
 # ─────────────────────────────────────────────────────────────
-section "8. Partial du output with a failing exit code is never reported as complete"
+section "8. Depth-limited metadata fallback stays explicitly unfinished"
 T8_PARTIAL="$WORK/t8_partial"
 PARTIAL_BIN="$WORK/partial_bin"
 mkdir -p "$T8_PARTIAL/protected" "$PARTIAL_BIN"
@@ -1247,15 +1252,15 @@ d = json.load(open(sys.argv[1]))
 path = sys.argv[2]
 assert path not in d["measured"]
 assert d["mode"] == "partial"
-assert any(item["path"] == path for item in d["frontier_unfinished"])
+assert any(item["path"] == path and item["reason"] == "inventory_max_depth_reached" for item in d["frontier_unfinished"])
 PY
 then
-  ok "nonzero du exit with partial stdout stays on the named unfinished frontier"
+  ok "depth-limited directory stays on the named unfinished frontier"
 else
-  bad "nonzero du exit was silently accepted as a complete measurement"
+  bad "depth-limited directory was silently accepted as complete"
 fi
 
-section "9. dua is preferred, rejects partial output, and falls back to du"
+section "9. Legacy aggregate helper rejects partial dua output and falls back to du"
 DUA_BIN="$WORK/dua_bin"
 mkdir -p "$DUA_BIN"
 cat > "$DUA_BIN/dua" <<'FAKE_DUA_OK'
@@ -1271,12 +1276,14 @@ chmod +x "$DUA_BIN/dua" "$DUA_BIN/du"
 
 T9_DUA="$WORK/t9_dua"
 mkdir -p "$T9_DUA/large"
-DUA_MARKER="$WORK/dua-ok.marker" PATH="$DUA_BIN:$PATH" \
-  python3 "$SCANNER" --root "$T9_DUA" --no-sibling-volumes --no-purgeable \
-  --workers 1 --wall-clock-cap 10 --timeout-tiers 1 --output "$WORK/out9_dua.json" \
-  >/dev/null 2>&1
-
-dua_kb=$(json_get "$WORK/out9_dua.json" "d['measured'].get('$T9_DUA/large', -1)")
+dua_kb=$(DUA_MARKER="$WORK/dua-ok.marker" PATH="$DUA_BIN:$PATH" \
+  python3 - "$REPO_ROOT" "$T9_DUA/large" <<'PY_HELPER'
+import sys
+sys.path.insert(0, sys.argv[1] + "/scripts")
+import disk_frontier_scan as m
+print(m.run_du(sys.argv[2], 1, m.ConcurrencyTracker()))
+PY_HELPER
+)
 if [[ -s "$WORK/dua-ok.marker" ]] && grep -q -- '-x' "$WORK/dua-ok.marker" &&
    [[ "$dua_kb" == "6144" ]]; then
   ok "dua is preferred and its byte total is converted to allocated KiB"
@@ -1297,11 +1304,14 @@ printf '321\t%s\n' "$path"
 FAKE_DU_FALLBACK
 chmod +x "$DUA_BIN/dua" "$DUA_BIN/du"
 
-DUA_MARKER="$WORK/dua-partial.marker" PATH="$DUA_BIN:$PATH" \
-  python3 "$SCANNER" --root "$T9_DUA" --no-sibling-volumes --no-purgeable \
-  --workers 1 --wall-clock-cap 10 --timeout-tiers 1 --output "$WORK/out9_fallback.json" \
-  >/dev/null 2>&1
-fallback_kb=$(json_get "$WORK/out9_fallback.json" "d['measured'].get('$T9_DUA/large', -1)")
+fallback_kb=$(DUA_MARKER="$WORK/dua-partial.marker" PATH="$DUA_BIN:$PATH" \
+  python3 - "$REPO_ROOT" "$T9_DUA/large" <<'PY_HELPER'
+import sys
+sys.path.insert(0, sys.argv[1] + "/scripts")
+import disk_frontier_scan as m
+print(m.run_du(sys.argv[2], 1, m.ConcurrencyTracker()))
+PY_HELPER
+)
 if [[ -s "$WORK/dua-partial.marker" && "$fallback_kb" == "321" ]]; then
   ok "nonzero dua partial output is rejected and bounded du fallback is used"
 else
@@ -1385,7 +1395,7 @@ class TestYq7GduBudgetCap(unittest.TestCase):
             args = SimpleNamespace(
                 root=tmpdir, resolve_root=False, workers=2, max_depth=6, max_nodes=1000,
                 wall_clock_cap=2700.0, timeout_tiers=[1, 2, 5], no_sibling_volumes=True,
-                no_purgeable=True, granularity_gib=5, shallow_enumeration_depth=0,
+                no_purgeable=True, granularity_gib=100 / 1024, shallow_enumeration_depth=0,
             )
             s = m.FrontierScanner(args)
             s.start_time = time.time()

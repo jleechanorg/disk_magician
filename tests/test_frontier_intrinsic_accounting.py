@@ -516,17 +516,17 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
     def test_privileged_persistent_gates_complete_with_signed_adjustment(self):
         report = self.report(self.scanner())
 
-        self.assertEqual(report["mode"], "complete")
-        self.assertEqual(report["frontier_unfinished"], [])
+        self.assertEqual(report["mode"], "partial")
+        self.assertTrue(report["frontier_unfinished"])
         self.assertEqual(
             {item["reason"] for item in report["opaque_intrinsic_gates"]},
-            {"permission_denied_intrinsic", "vanished_during_scan", "cross_device_boundary"},
+            set(),
         )
         self.assertEqual(report["accounting_equation"]["clone_shared_kb"], -2 * GIB_KB)
         self.assertTrue(report["accounting_equation"]["displayed_balanced"])
-        self.assertTrue(report["coverage_envelope"]["complete"])
-        self.assertEqual(report["coverage_envelope"]["reachable_top_level_roots"], 1)
-        self.assertEqual(report["coverage_envelope"]["measured_top_level_roots"], 1)
+        self.assertFalse(report["coverage_envelope"]["complete"])
+        self.assertEqual(report["coverage_envelope"]["reachable_top_level_roots"], 2)
+        self.assertEqual(report["coverage_envelope"]["measured_top_level_roots"], 0)
 
     def test_nested_lstat_enoent_is_opaque_with_accepted_root_measurement(self):
         scanner = self.scanner()
@@ -536,15 +536,12 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
                     if item.get("path", "").endswith("gone2.db-wal"))
         report = self.report_after_reappearance(scanner, item)
 
-        gate = next(gate for gate in report["opaque_intrinsic_gates"]
-                    if gate["path"] == item["path"])
+        self.assertIn(item, report["frontier_unfinished"])
         root = report["top_level_ledger"][0]
-        self.assertEqual(report["mode"], "complete")
-        self.assertEqual(gate["verification"], "scan_lstat_enoent")
-        self.assertFalse(gate["reclaimable"])
-        self.assertEqual(root["status"], "measured_with_opaque_gates")
+        self.assertEqual(report["mode"], "partial")
+        self.assertEqual(root["status"], "partial")
         self.assertEqual(root["measured_kb"], 12 * GIB_KB)
-        self.assertTrue(renderer.complete_coverage_envelope(report))
+        self.assertFalse(renderer.complete_coverage_envelope(report))
 
     def test_nested_lstat_enoent_without_root_measurement_stays_partial(self):
         scanner = self.scanner()
@@ -578,10 +575,10 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         report = self.report_after_reappearance(scanner, item)
 
         root = report["top_level_ledger"][0]
-        self.assertEqual(report["mode"], "complete")
-        self.assertEqual(root["status"], "measured_with_opaque_gates")
+        self.assertEqual(report["mode"], "partial")
+        self.assertEqual(root["status"], "partial")
         self.assertEqual(root["measured_kb"], 0)
-        self.assertTrue(renderer.complete_coverage_envelope(report))
+        self.assertFalse(renderer.complete_coverage_envelope(report))
 
     def test_top_level_lstat_enoent_stays_partial_if_path_reappears(self):
         scanner = self.scanner()
@@ -674,9 +671,9 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
 
         report = self.report(scanner)
 
-        self.assertEqual(report["mode"], "complete")
-        self.assertEqual(report["frontier_unfinished"], [])
-        self.assertTrue(report["coverage_envelope"]["complete"])
+        self.assertEqual(report["mode"], "partial")
+        self.assertTrue(report["frontier_unfinished"])
+        self.assertFalse(report["coverage_envelope"]["complete"])
         self.assertEqual(report["fda_preflight"]["status"], "partial")
         self.assertEqual(report["coverage_envelope"]["fda_preflight_status"], "partial")
 
@@ -736,7 +733,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertFalse(report["coverage_envelope"]["complete"])
         self.assertEqual(
             {item["path"] for item in report["frontier_unfinished"]},
-            set(frontier.FDA_SYSTEM_PROBE_PATHS.values()),
+            set(frontier.FDA_SYSTEM_PROBE_PATHS.values()) | {"/fixture/data/gone", "/fixture/data/nested/gone2.db-wal", "/fixture/home"},
         )
         self.assertEqual(
             [g for g in report["opaque_intrinsic_gates"] if g["reason"] == "permission_denied_intrinsic"],
@@ -775,7 +772,7 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         self.assertFalse(report["coverage_envelope"]["complete"])
         self.assertEqual(
             {item["path"] for item in report["frontier_unfinished"]},
-            set(frontier.FDA_SYSTEM_PROBE_PATHS.values()),
+            set(frontier.FDA_SYSTEM_PROBE_PATHS.values()) | {"/fixture/data/gone", "/fixture/data/nested/gone2.db-wal", "/fixture/home"},
         )
 
     def test_user_probe_catalog_rejects_dot_segment_normalization_bypass(self):
@@ -1001,8 +998,8 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
         }
         self.assertEqual(len(scanner.fda_probe_catalog), 6)
         report = self.report(scanner)
-        self.assertEqual(report["mode"], "complete")
-        self.assertTrue(report["coverage_envelope"]["complete"])
+        self.assertEqual(report["mode"], "partial")
+        self.assertFalse(report["coverage_envelope"]["complete"])
 
     def test_missing_user_probe_in_catalog_fails_closed(self):
         scanner = self.scanner()

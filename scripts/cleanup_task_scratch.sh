@@ -4,6 +4,9 @@
 # Defaults to DRY-RUN (--dry-run); pass --clean (or --apply) to execute removals.
 set -euo pipefail
 
+# Shared measurement is independent of lifecycle deletion eligibility.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
 
@@ -467,6 +470,11 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     # Skip symlinks or non-directories
     if [[ -L "$dir" || ! -d "$dir" ]]; then
       continue
+    fi
+
+    # Measurement includes protected source; deletion gates remain below.
+    if matches_task_scratch_pattern "$base"; then
+      scratch_budget_report_measurement "$dir" || exit $?
     fi
 
     # Candidate must NOT itself be a git repo or linked worktree

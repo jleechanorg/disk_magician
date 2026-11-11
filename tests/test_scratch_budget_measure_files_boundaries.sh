@@ -26,7 +26,7 @@ print(sum(os.lstat(os.path.join(p, n)).st_size for n in ('plain', 'link')))
 PY
 )"
 rows="$(scratch_budget_measure_files "$T/small" 100)"; rc=$?
-actual="$(awk -F '\t' -v p="$T/small" '$4 == "A" && $5 == p {print $1}' <<<"$rows")"
+actual="$(awk -F '\t' -v p="$T/small" '{sum += $1} END {print sum}' <<<"$rows")"
 printf 'symlink rc=%s expected_bytes=%s actual_bytes=%s\n%s\n' "$rc" "$expected" "$actual" "$rows"
 if [[ "$rc" -eq 0 && "$actual" == "$expected" ]]; then
   ok 'below-threshold aggregate includes link bytes without target bytes'
@@ -36,14 +36,14 @@ fi
 
 mkdir -p "$T/bin" "$T/slow/child"
 truncate -s 200M "$T/slow/child/payload"
-REAL_FIND="$(command -v find)"
-export REAL_FIND
-cat >"$T/bin/find" <<'SH'
+REAL_PYTHON="$(command -v python3)"
+export REAL_PYTHON
+cat >"$T/bin/python3" <<'SH'
 #!/usr/bin/env bash
-sleep 1
-exec "$REAL_FIND" "$@"
+[[ "${1:-}" != "-" ]] || sleep 1
+exec "$REAL_PYTHON" "$@"
 SH
-chmod +x "$T/bin/find"
+chmod +x "$T/bin/python3"
 start="$(act_mono_now)"
 ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic() + 0.25)')"
 export ACT_DEADLINE_AT

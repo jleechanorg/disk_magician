@@ -69,6 +69,12 @@ class TestPruneAsideSessions(unittest.TestCase):
             else:
                 fpath.write_bytes(content)
 
+        # Date-based stale fixtures must also have stale descendant metadata.
+        if mtime_epoch is None and session_name[:10].count("-") == 2:
+            try:
+                mtime_epoch = datetime.datetime.strptime(session_name[:10], "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()
+            except ValueError:
+                pass
         if mtime_epoch is not None:
             for root, dirs, files in os.walk(sdir):
                 for d in dirs:
@@ -121,6 +127,7 @@ exit 0
         # 2026-08-09 is 14 days before 2026-08-23
         sdir = self.u0_sessions / "2026-08-09_abc123"
         sdir.mkdir(parents=True)
+        os.utime(sdir, (self.ref_time - 14 * self.day_secs,) * 2)
         age, method = parse_session_age_days(sdir, self.ref_time)
         self.assertEqual(method, "date_prefix")
         self.assertAlmostEqual(age, 14.0, places=2)
@@ -128,6 +135,7 @@ exit 0
         # 2026-08-20 is 3 days before 2026-08-23
         sdir2 = self.u0_sessions / "2026-08-20_xyz789"
         sdir2.mkdir(parents=True)
+        os.utime(sdir2, (self.ref_time - 3 * self.day_secs,) * 2)
         age2, method2 = parse_session_age_days(sdir2, self.ref_time)
         self.assertEqual(method2, "date_prefix")
         self.assertAlmostEqual(age2, 3.0, places=2)

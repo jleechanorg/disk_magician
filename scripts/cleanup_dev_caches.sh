@@ -4,6 +4,9 @@
 # Defaults to actually deleting (use --dry-run to preview).
 set -euo pipefail
 
+# Shared measurement is independent of lifecycle deletion eligibility.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/quarantine.sh
@@ -48,6 +51,7 @@ resolve_existing_path() {
 size_kb() {
   local path="$1"
   if [[ ! -e "$path" ]]; then echo 0; return; fi
+  scratch_budget_report_measurement "$path" || exit $?
   du -sk "$path" 2>/dev/null | awk '{print $1+0}'
 }
 
@@ -76,7 +80,7 @@ clean_dir_contents() {
   fi
 
   local before_kb
-  before_kb=$(size_kb "$path")
+  before_kb=$(size_kb "$path") || exit $?
   log "$label: before $(fmt_kb "$before_kb") ($path)"
 
   if [[ "$DRY_RUN" == true ]]; then
@@ -101,7 +105,7 @@ clean_dir_contents() {
   fi
 
   local after_kb freed_kb
-  after_kb=$(size_kb "$path")
+  after_kb=$(size_kb "$path") || exit $?
   freed_kb=$(( before_kb - after_kb ))
   [[ $freed_kb -lt 0 ]] && freed_kb=0
   TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
@@ -119,7 +123,7 @@ clean_whole_dir() {
     return
   fi
   local before_kb
-  before_kb=$(size_kb "$path")
+  before_kb=$(size_kb "$path") || exit $?
   log "$label: before $(fmt_kb "$before_kb") ($path)"
   if [[ "$DRY_RUN" == true ]]; then
     log "$label: [dry-run] would delete $path"
@@ -134,7 +138,7 @@ clean_whole_dir() {
     mkdir -p "$path"
   fi
   local after_kb freed_kb
-  after_kb=$(size_kb "$path")
+  after_kb=$(size_kb "$path") || exit $?
   freed_kb=$(( before_kb - after_kb ))
   [[ $freed_kb -lt 0 ]] && freed_kb=0
   TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
@@ -228,7 +232,7 @@ for _trash_root in "${_trash_roots[@]}"; do
     done
   fi
   if _safety_reason="$(safety_gate "$_trash_root" 2>/dev/null)"; then
-    _trash_before_kb=$(size_kb "$_trash_root")
+    _trash_before_kb=$(size_kb "$_trash_root") || exit $?
     log "user Trash: before $(fmt_kb "$_trash_before_kb") ($_trash_root)"
     if [[ "$DRY_RUN" == true ]]; then
       log "user Trash: [dry-run] would delete contents of $_trash_root"
@@ -286,7 +290,7 @@ for _, path in sorted(entries, reverse=True):
 PY_TRASH
         )
       done
-      _trash_after_kb=$(size_kb "$_trash_root")
+      _trash_after_kb=$(size_kb "$_trash_root") || exit $?
       _trash_freed_kb=$(( _trash_before_kb - _trash_after_kb ))
       [[ $_trash_freed_kb -lt 0 ]] && _trash_freed_kb=0
       TOTAL_FREED_KB=$(( TOTAL_FREED_KB + _trash_freed_kb ))
@@ -308,13 +312,28 @@ clean_hf_cache_if_idle() {
     log "$label: directory not found, skipping"
     return
   fi
+  scratch_budget_report_measurement "$path" || exit $?
   young="$(find "$path" -type f -mmin -1440 -print -quit 2>/dev/null)" || rc=$?
   if (( rc != 0 )); then
     log "$label: mtime scan failed (rc=$rc) — preserving (fail closed)"
     return
   fi
   if [[ -n "$young" ]]; then
-    log "$label: recently written (${young#"$path"/}) — preserving, younger than 24h"
+    log "$label: recently written (${young#"$path"/}) — preserving active units, younger than 24h"
+    # Model roots are lifecycle units: never turn internal blobs/snapshots into
+    # deletion candidates just because measurement descends them. A download
+    # in one model must not shelter a different, idle model.
+    local units="$path" entry child_young child_rc
+    [[ "$path" == "$HOME/.cache/huggingface" ]] && units="$path/hub"
+    [[ -d "$units" && ! -L "$units" ]] || return 0
+    while IFS= read -r -d '' entry; do
+      [[ -d "$entry" && ! -L "$entry" && "${entry##*/}" != .* ]] || continue
+      [[ ! -e "$entry/.git" && ! -L "$entry/.git" ]] || continue
+      child_rc=0
+      child_young="$(find "$entry" -type f -mmin -1440 -print -quit 2>/dev/null)" || child_rc=$?
+      (( child_rc == 0 )) && [[ -z "$child_young" ]] || continue
+      clean_whole_dir "$label idle unit" "$entry" false rebuildable
+    done < <(find "$units" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
     return
   fi
   clean_dir_contents "$label" "$path" true rebuildable
@@ -336,7 +355,7 @@ for dated_log_root in \
     log "$dated_label: directory not found, skipping"
     continue
   fi
-  dated_before_kb=$(size_kb "$dated_root")
+  dated_before_kb=$(size_kb "$dated_root") || exit $?
   log "$dated_label: before $(fmt_kb "$dated_before_kb") ($dated_root)"
   while IFS= read -r -d '' entry; do
     if [[ "$DRY_RUN" == true ]]; then
@@ -350,7 +369,7 @@ for dated_log_root in \
     \( -name '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]' -o -path '*/[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]' \) \
     -mtime +7 -print0 2>/dev/null)
   if [[ "$DRY_RUN" != true ]]; then
-    dated_after_kb=$(size_kb "$dated_root")
+    dated_after_kb=$(size_kb "$dated_root") || exit $?
     dated_freed_kb=$(( dated_before_kb - dated_after_kb ))
     [[ $dated_freed_kb -lt 0 ]] && dated_freed_kb=0
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + dated_freed_kb ))
@@ -365,7 +384,7 @@ OPENCODE_SAFE_SUBDIRS=("repos" "log" "tool-output" "snapshot")
 if [[ ! -d "$OPENCODE_DIR" ]]; then
   log "opencode data dir: not found, skipping"
 else
-  before_kb=$(size_kb "$OPENCODE_DIR")
+  before_kb=$(size_kb "$OPENCODE_DIR") || exit $?
   log "opencode data dir: before $(fmt_kb "$before_kb") ($OPENCODE_DIR)"
 
   for subdir in "${OPENCODE_SAFE_SUBDIRS[@]}"; do
@@ -387,7 +406,7 @@ else
   done
 
   if [[ "$DRY_RUN" != true ]]; then
-    after_kb=$(size_kb "$OPENCODE_DIR")
+    after_kb=$(size_kb "$OPENCODE_DIR") || exit $?
     freed_kb=$(( before_kb - after_kb ))
     [[ $freed_kb -lt 0 ]] && freed_kb=0
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
@@ -401,7 +420,7 @@ CURSOR_VERSIONS_DIR="$HOME/.local/share/cursor-agent/versions"
 if [[ ! -d "$CURSOR_VERSIONS_DIR" ]]; then
   log "cursor-agent versions: directory not found, skipping"
 else
-  before_kb=$(size_kb "$CURSOR_VERSIONS_DIR")
+  before_kb=$(size_kb "$CURSOR_VERSIONS_DIR") || exit $?
   log "cursor-agent versions: before $(fmt_kb "$before_kb") ($CURSOR_VERSIONS_DIR)"
 
   ALL_VERSIONS=()
@@ -452,7 +471,7 @@ else
     done
 
     if [[ "$DRY_RUN" != true ]]; then
-      after_kb=$(size_kb "$CURSOR_VERSIONS_DIR")
+      after_kb=$(size_kb "$CURSOR_VERSIONS_DIR") || exit $?
       freed_kb=$(( before_kb - after_kb ))
       [[ $freed_kb -lt 0 ]] && freed_kb=0
       TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
@@ -498,7 +517,7 @@ for dev_cache_path in \
     continue
   fi
 
-  before_kb=$(size_kb "$dev_cache_path")
+  before_kb=$(size_kb "$dev_cache_path") || exit $?
   log "$dev_cache_label: before $(fmt_kb "$before_kb") ($dev_cache_path)"
 
   found_old_entry=false
@@ -523,7 +542,7 @@ for dev_cache_path in \
   fi
 
   if [[ "$DRY_RUN" != true ]]; then
-    after_kb=$(size_kb "$dev_cache_path")
+    after_kb=$(size_kb "$dev_cache_path") || exit $?
     freed_kb=$(( before_kb - after_kb ))
     [[ $freed_kb -lt 0 ]] && freed_kb=0
     TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed_kb ))
@@ -566,7 +585,7 @@ elif ! fsevents_state_resolved="$(resolve_existing_path "$FSEVENTS_STATE")"; the
 elif [[ ! -f "$fsevents_state_resolved" ]]; then
   log "fsevents state cache: SAFETY-SKIP (not a regular file)"
 else
-  fsevents_state_kb=$(size_kb "$fsevents_state_resolved")
+  fsevents_state_kb=$(size_kb "$fsevents_state_resolved") || exit $?
   fsevents_state_reason=""
   if fsevents_state_is_stale "$fsevents_state_resolved"; then
     fsevents_state_reason="untouched for ${FSEVENTS_STATE_DAYS}d"
@@ -608,7 +627,7 @@ WIKI_PUBLISH_CACHE="$HOME/.cache/wiki-publish"
 if [[ ! -d "$WIKI_PUBLISH_CACHE" ]]; then
   log "wiki-publish cache: not found, skipping"
 else
-  before_kb=$(size_kb "$WIKI_PUBLISH_CACHE")
+  before_kb=$(size_kb "$WIKI_PUBLISH_CACHE") || exit $?
   log "wiki-publish cache: $(fmt_kb "$before_kb") ($WIKI_PUBLISH_CACHE) — retained; automatic deletion disabled until lifecycle provenance is known"
 fi
 

@@ -198,17 +198,16 @@ c14_ephemeral_retention() {
     while IFS= read -r r; do
         r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" ]] || continue
         [[ "$archive_origin" != --archive-origin ]] || return 1
+        python3 "$_AV_DIR/scratch_budget_artifact_children.py" scope "$r" "$p" || continue
         if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 1440; return 0; fi
         if [[ "$rel" =~ ^[^./][^/]*$ && ( -d "$content/.git" || -f "$content/.git" ) ]]; then echo 1440; return 0; fi
-        # E8: a direct child of the registered scratch-VOLUME root is ephemeral
-        # at 1440 min whatever its name. Name shapes cannot enumerate agent
-        # scratch, and the volume's own class already declares its contents
-        # disposable. This row supplies only the missing retention: lease, live
-        # cwd, open file, secret, repository and recency gates all run before it
-        # (see _av_artifact_removal_verdict), so it bypasses nothing. Depth stays
-        # one component, the OS-owned basenames the tmp-root loop excludes (:179)
-        # stay excluded, and a symlink is never followed.
-        if [[ "$rel" =~ ^[^./][^/]*$ && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) && -d "$content" && ! -L "$p" ]]; then echo 1440; return 0; fi
+        # E8: registered Scratch declares generic directory units ephemeral.
+        # An ancestor's fresh sibling must not shelter an independently stale
+        # unit. Validate every ancestor without following links or crossing Git
+        # boundaries; C14 still proves leases, live use, secrets and provenance.
+        if [[ -d "$content" && ! -L "$p" ]]; then
+            echo 1440; return 0
+        fi
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}

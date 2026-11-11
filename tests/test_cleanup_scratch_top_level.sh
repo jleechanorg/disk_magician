@@ -115,6 +115,63 @@ PY
 }
 use_root
 
+# Public automatic contract: a fresh sibling cannot shelter generic stale units.
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == generic-nested-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == generic-safety-contract ]]; then
+  use_root
+  register_test_volume
+  generic="$SCRATCH_ROOT/arbitrary-container/a/b/c/d"
+  mkdir -p "$generic/stale-unit" "$generic/fresh-unit" "$generic/secret-unit" \
+    "$generic/git-dir/nested-unit" "$generic/git-file/nested-unit" "$generic/bare.git/nested-unit"
+  printf 'disposable fixture\n' >"$generic/stale-unit/payload"
+  printf 'recent fixture\n' >"$generic/fresh-unit/payload"
+  printf 'secret fixture\n' >"$generic/secret-unit/placeholder.pem"
+  mkdir "$generic/git-dir/.git"
+  printf 'gitdir: /missing-fixture\n' >"$generic/git-file/.git"
+  git init --bare -q "$generic/bare.git"
+  ln -s "$generic/stale-unit" "$generic/symlink-unit"
+  old_stamp "$SCRATCH_ROOT/arbitrary-container" 26
+  touch "$generic/fresh-unit/payload"
+  if [[ "$SCRATCH_PRUNE_TEST_FILTER" == generic-safety-contract ]]; then
+    mkdir -p "$generic/leased-parent/stale-child" "$generic/cwd-unit" "$generic/open-unit" "$generic/dangling-git/nested-unit" "$generic/.hidden/stale-child"
+    printf 'open fixture\n' >"$generic/open-unit/payload"
+    ln -s "$T/nonexistent" "$generic/dangling-git/.git"
+    for unit in leased-parent cwd-unit open-unit dangling-git .hidden; do old_stamp "$generic/$unit" 26; done
+    sleep 300 & nested_lease_pid=$!
+    (cd "$generic/cwd-unit" && exec sleep 300) & nested_cwd_pid=$!
+    python3 -c 'import sys,time; f=open(sys.argv[1]); print("ready",flush=True); time.sleep(300)' "$generic/open-unit/payload" >"$T/open-ready" & nested_open_pid=$!
+    for _attempt in {1..100}; do [[ -s "$T/open-ready" ]] && break; sleep .02; done
+    env DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" bash -c '
+source "$1/scripts/lib/worktree_lease.sh"
+lease_write "$2" "$2" "" nested-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$generic/leased-parent" "$nested_lease_pid"
+  fi
+  preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$ROOT/disk_magician.sh" scratch-prune --dry-run 2>&1)"; rc=$?
+  check "generic deep stale child is discovered and eligible" "would-remove:remove $generic/stale-unit" "$preview"
+  check "fresh sibling remains recent" "kept:recent-activity $generic/fresh-unit" "$preview"
+  check "nested secret remains protected" "kept:secret-like $generic/secret-unit" "$preview"
+  for boundary in git-dir git-file bare.git; do
+    [[ "$preview" != *"$generic/$boundary/nested-unit"* ]] && ok "$boundary is never entered" || bad "$boundary was entered"
+  done
+  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$ROOT/disk_magician.sh" scratch-prune --clean 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "public cleanup exits 0" || bad "public cleanup rc=$rc"
+  [[ ! -e "$generic/stale-unit" ]] && ok "generic stale child removed" || bad "generic stale child remains"
+  for keep in fresh-unit/payload secret-unit/placeholder.pem git-dir/nested-unit git-file/nested-unit bare.git/nested-unit; do
+    [[ -e "$generic/$keep" ]] && ok "preserved $keep" || bad "lost $keep"
+  done
+  [[ -L "$generic/symlink-unit" ]] && ok "symlink preserved" || bad "symlink removed"
+  if [[ "$SCRATCH_PRUNE_TEST_FILTER" == generic-safety-contract ]]; then
+    for unit in leased-parent/stale-child cwd-unit open-unit/payload dangling-git/nested-unit .hidden/stale-child; do
+      [[ -e "$generic/$unit" ]] && ok "nested safety preserved $unit" || bad "nested safety lost $unit"
+    done
+    check "ancestor lease protects child" "kept:live-owner $generic/leased-parent/stale-child" "$preview"
+    check "live cwd protects nested unit" "kept:live-cwd $generic/cwd-unit" "$preview"
+    check "open file protects nested unit" "kept:open-file $generic/open-unit" "$preview"
+    kill "$nested_lease_pid" "$nested_cwd_pid" "$nested_open_pid" 2>/dev/null || true
+    wait "$nested_lease_pid" "$nested_cwd_pid" "$nested_open_pid" 2>/dev/null || true
+  fi
+  echo "generic-nested-contract: PASS=$PASS FAIL=$FAIL"
+  [[ "$FAIL" == 0 ]]; exit $?
+fi
+
 if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == budget-preserve-contract ]]; then
   echo "Test: manual LRU skips sub-threshold probes but keeps fresh usage identity"
   LRU_DISKM="$T/lru-diskm"
@@ -357,7 +414,7 @@ source "$1/scripts/lib/worktree_lease.sh"
 lease_write "$2" "$2" "" scratch-prune-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$E8_ROOT/e8-leased-26h" "$e8_lease_pid"
 eph_retention() { run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2" 2>/dev/null' _ "$ROOT" "$1"; }
 assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-26h")" 1440 "E8 proves an arbitrary volume-child name"
-assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-26h/nested")" "" "E8 stays top-level only"
+assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-26h/nested")" 1440 "E8 covers independent nested volume directories"
 assert_eq "$(eph_retention "$E8_ROOT/.dot-26h")" "" "E8 never covers a dot entry"
 assert_eq "$(eph_retention "$E8_ROOT/e8-link-26h")" "" "E8 never answers for a symlink"
 assert_eq "$(eph_retention "$E8_ROOT/worldai_frontend/build/e2-probe")" 1440 "the <name>/build/<name> row still answers 1440"
@@ -376,7 +433,7 @@ fi
 check "the unpushed repository keeps through the repository gate, not the class row" "kept:not-pushed $E8_ROOT/e8-unpushed-26h" "$preview"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean 2>&1)"; rc=$?
 kill "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true; wait "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true
-[[ "$rc" == 0 ]] && ok "automatic E8 cleanup exits 0" || bad "automatic E8 cleanup exits 0" "rc=$rc"
+[[ "$rc" == 0 ]] && ok "automatic E8 cleanup exits 0" || bad "automatic E8 cleanup exits 0" "rc=$rc; $out"
 [[ ! -e "$E8_ROOT/e8-unleased-26h" ]] && ok "an unleased dormant volume child is reclaimed" || bad "an unleased dormant volume child is reclaimed" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
 [[ -e "$E8_ROOT/e8-recent-23h" ]] && ok "the 24h floor is still honoured by default" || bad "the 24h floor is still honoured by default"
 [[ -e "$E8_ROOT/e8-leased-26h" ]] && ok "a leased volume child is preserved" || bad "a leased volume child is preserved"

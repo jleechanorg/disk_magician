@@ -668,7 +668,7 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
     so totals from independently scanned shards cannot safely be summed.
     NUL records preserve whitespace and newlines in filesystem paths.
     """
-    cmd = [GDU_CMD, "-x", "-k", "--null", "--", *paths]
+    cmd = [GDU_CMD, "-a", "-x", "-k", "--null", "--", *paths]
     with tempfile.TemporaryFile(mode="w+b") as stdout_spool:
         tracker.enter()
         try:
@@ -927,7 +927,7 @@ def frontier_sort_key(root, item):
     )
 
 
-def build_granularity_buckets(measured, root, granularity_kb):
+def build_granularity_buckets(measured, root, granularity_kb, directory_metadata=None):
     """Project one non-overlapping display partition from accepted leaves.
 
     A path is rolled up only when its accepted descendants total no more than
@@ -957,8 +957,22 @@ def build_granularity_buckets(measured, root, granularity_kb):
             )
             node["measured_kb"] += kb
 
+    # Metadata is separately accounted, but still determines whether an
+    # actual directory reaches the descent ceiling.
+    metadata_totals = collections.defaultdict(int)
+    for directory, kb in (directory_metadata or {}).items():
+        current = directory
+        while current == root or current.startswith(root.rstrip(os.sep) + os.sep):
+            metadata_totals[current] += kb
+            if current == root:
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+
     def select(node):
-        if 0 < node["measured_kb"] <= granularity_kb:
+        if 0 < node["measured_kb"] and node["measured_kb"] + metadata_totals[node["path"]] < granularity_kb:
             return [{"path": node["path"], "measured_kb": node["measured_kb"]}]
         selected = []
         for child in node["children"].values():
@@ -1142,7 +1156,9 @@ def get_purgeable_info(root, warnings):
 
 class FrontierScanner:
     def __init__(self, args):
-        self.root = os.path.realpath(args.root) if args.resolve_root else args.root
+        self.root = args.root.rstrip(os.sep) or os.sep
+        if args.resolve_root and not os.path.islink(self.root):
+            self.root = os.path.realpath(self.root)
         self.workers_cap = args.workers
         self.max_depth = args.max_depth
         self.max_nodes = args.max_nodes
@@ -1152,6 +1168,7 @@ class FrontierScanner:
         self.tracker = ConcurrencyTracker()
         self.sem = AdjustableSemaphore(args.workers)
         self.measured = {}
+        self.directory_metadata = {}
         self.discovered_directories = {os.path.abspath(self.root)}
         self.inventory_mode = getattr(args, "inventory", False)
         self.hardlink_seen = {}
@@ -1162,7 +1179,7 @@ class FrontierScanner:
         # the granularity report. `measured` remains the non-overlapping byte
         # ledger; `observed` is only for selecting useful display buckets.
         self.observed = {}
-        self.granularity_kb = int(args.granularity_gib * 1024 * 1024)
+        self.granularity_kb = min(100 * 1024, max(1, int(args.granularity_gib * 1024 * 1024)))
         self.shallow_enumeration_depth = getattr(
             args,
             "shallow_enumeration_depth",
@@ -1202,11 +1219,7 @@ class FrontierScanner:
         #   - ~/.dark-factory/logs/  97,762 log files × ~4 KiB = 383 MiB
         #   - ~/.gemini/history/     1,916 entries × ~120 KiB = 231 MiB
         # Operators may extend via --exclude-prefix.
-        default_excludes = [] if getattr(args, "inventory", False) else [
-            "/.claude/session-env/",
-            "/.dark-factory/logs/",
-            "/.gemini/history/",
-        ]
+        default_excludes = []
         extra = getattr(args, "exclude_prefix", None) or []
         self.exclude_prefix_patterns = list(default_excludes) + list(extra)
 
@@ -1234,7 +1247,7 @@ class FrontierScanner:
         ]
 
     def _apply_inventory_partition(self, records, error_items, manifest):
-        """Build one safe byte ledger and one <=granularity display frontier."""
+        """Build a safe byte ledger and a strictly sub-ceiling directory frontier."""
         children = collections.defaultdict(set)
         for path in records:
             current = path
@@ -1284,60 +1297,25 @@ class FrontierScanner:
         buckets = []
 
         def emit_direct_allocation(path, direct_kb):
-            """Explain directory-local allocation without emitting a >5 GiB row.
-
-            Directory-only gdu output keeps the inventory small. Unique-link
-            direct files above the ceiling can still be named exactly; the
-            remaining direct files plus directory metadata are split into
-            bounded, explicitly synthetic path-local segments.
-            """
-            remaining_kb = max(0, direct_kb)
+            # Actual directory inode allocation is metadata, not a synthetic
+            # file leaf. Keep it separate from displayed file/dir buckets.
             try:
-                direct_files = []
-                with os.scandir(path) as entries:
-                    for entry in entries:
-                        try:
-                            if not entry.is_file(follow_symlinks=False):
-                                continue
-                            st = entry.stat(follow_symlinks=False)
-                        except OSError:
-                            continue
-                        file_kb = (st.st_blocks * 512 + 1023) // 1024
-                        if st.st_nlink == 1 and file_kb > self.granularity_kb:
-                            direct_files.append((entry.path, file_kb))
-                for file_path, file_kb in sorted(direct_files):
-                    if file_kb > remaining_kb:
-                        continue
-                    self.oversize_files.append(
-                        {
-                            "path": file_path,
-                            "measured_kb": file_kb,
-                            "reason": "indivisible_file",
-                        }
-                    )
-                    remaining_kb -= file_kb
+                st = os.lstat(path)
+                own_kb = (st.st_blocks * 512 + 1023) // 1024
+                self.directory_metadata[path] = own_kb
             except OSError:
-                pass
-
-            if remaining_kb <= 0:
-                return
-            parts = (remaining_kb + self.granularity_kb - 1) // self.granularity_kb
-            for index in range(parts):
-                segment_kb = min(self.granularity_kb, remaining_kb)
-                suffix = "" if parts == 1 else f" {index + 1}/{parts}"
-                buckets.append(
-                    {
-                        "path": f"{path} [direct files + directory metadata{suffix}]",
-                        "source_path": path,
-                        "kind": "direct_allocation_segment",
-                        "measured_kb": segment_kb,
-                    }
-                )
-                remaining_kb -= segment_kb
+                own_kb = 0
+            unexplained = direct_kb - own_kb
+            if unexplained != 0:
+                self.frontier_unfinished.append({
+                    "path": path,
+                    "reason": "granularity_direct_allocation_unattributed",
+                    "observed_kb": max(0, unexplained),
+                })
 
         def select_display(path):
             kb = records[path]
-            if kb <= self.granularity_kb:
+            if kb < self.granularity_kb:
                 if kb > 0:
                     buckets.append({"path": path, "measured_kb": kb})
                 return
@@ -1426,7 +1404,8 @@ class FrontierScanner:
                 except OSError:
                     pass
                 else:
-                    recovered_kb = self.measure_one(path, is_symlink=stat.S_ISLNK(st.st_mode))
+                    recovered_kb = run_du(path, min(1, max(0.001, self.remaining_budget())),
+                                          self.tracker, is_symlink=stat.S_ISLNK(st.st_mode))
                     if recovered_kb is not None:
                         result["records"][path] = recovered_kb
                         continue
@@ -1597,13 +1576,15 @@ class FrontierScanner:
 
         if stat.S_ISDIR(st.st_mode):
             self.discovered_directories.add(os.path.abspath(path))
+            self.directory_metadata[path] = (st.st_blocks * 512 + 1023) // 1024
 
-        # Inventory mode uses the same BFS queue to descend through every directory,
+        # Metadata-only fallback descends through every directory for global inode dedup,
         # including small and hidden paths; budget/depth/errors remain explicit.
-        if self.inventory_mode and stat.S_ISDIR(st.st_mode):
+        if stat.S_ISDIR(st.st_mode):
             if depth >= self.max_depth:
                 self.frontier_unfinished.append({"path": path, "depth": depth,
                     "reason": "inventory_max_depth_reached"})
+                return []
             else:
                 children, enumeration_error = list_children(
                     path, self.frontier_unfinished, self.remaining_budget,
@@ -1670,7 +1651,7 @@ class FrontierScanner:
             kb = (st.st_blocks * 512 + 1023) // 1024
         if kb is not None:
             self.observed[path] = kb
-            if self.granularity_kb > 0 and kb > self.granularity_kb:
+            if self.granularity_kb > 0 and kb >= self.granularity_kb:
                 if not stat.S_ISDIR(st.st_mode):
                     self.oversize_files.append(
                         {"path": path, "measured_kb": kb, "reason": "indivisible_file"}
@@ -1754,7 +1735,13 @@ class FrontierScanner:
         self.start_time = time.time()
         self.run_started_at = self.start_time
         try:
-            self.root_dev = os.stat(self.root).st_dev
+            root_stat = os.lstat(self.root)
+            self.root_dev = root_stat.st_dev
+            if stat.S_ISLNK(root_stat.st_mode):
+                self.measured[self.root] = (root_stat.st_blocks * 512 + 1023) // 1024
+                self.level1_paths = [self.root]
+                self.run_finished_at = time.time()
+                return None
         except OSError as exc:
             return {"error": f"root not accessible: {self.root}: {exc}"}
 
@@ -1766,10 +1753,9 @@ class FrontierScanner:
             self.frontier_unfinished.append({"path": self.root, "depth": 0,
                 "reason": "inventory_" + root_enumeration_error})
         if level1 is None:
-            return {
-                "error": f"could not enumerate root: {self.root}",
-                "reason": root_enumeration_error,
-            }
+            self.frontier_unfinished.append({"path": self.root, "depth": 0,
+                "reason": root_enumeration_error or "root_enumeration_failed"})
+            level1 = []
         self.level1_paths = [path for path, _ in level1]
 
         if not self.inventory_mode and GDU_CMD and self.granularity_kb > 0 and self.run_one_pass_inventory(level1):
@@ -1884,7 +1870,9 @@ def build_report(
     apfs_accounting=None, disk_stats_before=None,
 ):
     disk_stats_before = disk_stats_before or disk_stats
-    measured_total_kb = sum(scanner.measured.values())
+    directory_metadata = getattr(scanner, "directory_metadata", {})
+    extra_metadata = directory_metadata if scanner.inventory_buckets is None else {}
+    measured_total_kb = sum(scanner.measured.values()) + sum(extra_metadata.values())
     residual_raw_kb = disk_stats["used_kb"] - measured_total_kb - purgeable_info["purgeable_kb"]
     residual_negative_clamped = residual_raw_kb < 0
     residual_kb = max(0, residual_raw_kb)
@@ -1926,6 +1914,11 @@ def build_report(
         if os.sep not in rel:
             exact_measured[top] = kb
 
+    for path, kb in extra_metadata.items():
+        top, _ = top_child(path)
+        if top is not None:
+            measured_by_top[top] += kb
+
     operational_unfinished = []
     opaque_intrinsic_gates = []
     fda_status = getattr(scanner, "fda_preflight", None) or fda_preflight()
@@ -1942,71 +1935,8 @@ def build_report(
         path = item.get("path", "")
         reason = item.get("reason") or "unknown"
         intrinsic = None
-        if (
-            is_permission_frontier_item(item)
-            and is_attestable_system_path(path)
-            and verify_system_boundary_attestation(
-                attestations.get(path),
-                run_id=run_id,
-                path=path,
-                effective_uid=effective_uid,
-                fda_preflight=fda_status,
-                run_started_at=run_started_at,
-                run_finished_at=run_finished_at,
-            )
-        ):
-            attestation = attestations[path]
-            identity = attestation["identity_before"]
-            intrinsic = {
-                "path": path,
-                "reason": "permission_denied_intrinsic",
-                "errno": attestation["errno"],
-                "root_device": getattr(scanner, "root_dev", None),
-                "path_device": identity["st_dev"],
-                "verification": "parent_scanner_system_boundary_confirmation",
-                "reclaimable": False,
-            }
-            if intrinsic["root_device"] is None:
-                del intrinsic["root_device"]
-        elif (
-            reason == "lstat_failed"
-            and item.get("errno") == errno.ENOENT
-            and item.get("depth", 0) > 0
-            and top_child(path)[0] in measured_by_top
-        ):
-            intrinsic = {
-                "path": path,
-                "reason": "vanished_during_scan",
-                "errno": errno.ENOENT,
-                "verification": "scan_lstat_enoent",
-                "reclaimable": False,
-            }
-        elif reason in ("path_disappeared", "inventory_path_disappeared"):
-            try:
-                os.lstat(path)
-            except OSError as exc:
-                if exc.errno == errno.ENOENT:
-                    intrinsic = {
-                        "path": path,
-                        "reason": "vanished_during_scan",
-                        "errno": exc.errno,
-                        "verification": "lstat_enoent_at_capture",
-                        "reclaimable": False,
-                    }
-        elif reason == "cross_device_boundary":
-            try:
-                path_dev = os.lstat(path).st_dev
-            except OSError:
-                path_dev = None
-            if path_dev is not None and path_dev != scanner.root_dev:
-                intrinsic = {
-                    "path": path,
-                    "reason": "cross_device_boundary",
-                    "root_device": scanner.root_dev,
-                    "path_device": path_dev,
-                    "verification": "lstat_device_mismatch_at_capture",
-                    "reclaimable": False,
-                }
+        # Permission and identity failures remain resumable unfinished work,
+        # even when the boundary is attested. Attestation is context, not bytes.
         if intrinsic is None:
             operational_unfinished.append(item)
         else:
@@ -2083,7 +2013,7 @@ def build_report(
     granularity_buckets = (
         inventory_buckets
         if inventory_buckets is not None
-        else build_granularity_buckets(scanner.measured, scanner.root, granularity_kb)
+        else build_granularity_buckets(scanner.measured, scanner.root, granularity_kb, directory_metadata)
     )
     granularity_bucket_total_kb = sum(
         item["measured_kb"] for item in granularity_buckets
@@ -2254,6 +2184,8 @@ def build_report(
             "wall_clock_cap_s": args.wall_clock_cap,
             "timeout_tiers_s": args.timeout_tiers,
             "granularity_gib": args.granularity_gib,
+            "measurement_method": "allocated-blocks",
+            "directory_ceiling_mib": 100,
             "max_bucket_gib": args.granularity_gib,
             "shallow_enumeration_depth": getattr(scanner, "shallow_enumeration_depth", 0),
             "scan_backend": getattr(scanner, "inventory_backend", None) or "frontier_per_node",
@@ -2268,6 +2200,7 @@ def build_report(
             "non_atomic": used_before_kb != used_after_kb,
             "residual_interval_kb": residual_interval_kb,
         },
+        "directory_metadata_kb": directory_metadata,
         "measured": scanner.measured,
         "measured_total_kb": measured_total_kb,
         "granularity_buckets": granularity_buckets,
@@ -2384,10 +2317,10 @@ def parse_args(argv):
              "defaults to 2 for the Data-volume root and 0 for custom roots",
     )
     p.add_argument(
-        "--granularity-gib", type=float, default=0.0,
+        "--granularity-gib", type=float, default=100 / 1024,
         help="maximum size of each non-overlapping displayed path bucket; "
              "larger directories are subdivided and larger indivisible files "
-             "are reported separately (0 disables)",
+             "are reported separately (must be >0 and <=100 MiB)",
     )
     p.add_argument("--wall-clock-cap", type=float, default=DEFAULT_WALL_CLOCK_CAP)
     p.add_argument(
@@ -2410,6 +2343,8 @@ def parse_args(argv):
                     help="test-only: force disk_used_kb to exercise residual clamping")
     raw_args = list(argv if argv is not None else sys.argv[1:])
     args = p.parse_args(raw_args)
+    if not 0 < args.granularity_gib <= 100 / 1024:
+        p.error("--granularity-gib must be >0 and <=0.09765625 (100 MiB)")
     if args.inventory and sys.platform != "darwin" and "--root" not in raw_args:
         args.root = "/"
     if args.root_inventory:

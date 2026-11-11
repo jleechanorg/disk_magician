@@ -68,6 +68,11 @@ Commands:
   worktree-restore-verify Fetch pinned backups, verify full restore, and write a receipt.
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
+  cleanup-agent-artifacts Clean stale agent logs and caches.
+  cleanup-xcode          Clean eligible Xcode build artifacts.
+  cleanup-sessions       Clean eligible stale agent sessions.
+  cleanup-downloads-evidence Clean expired evidence downloads.
+  cleanup-code-sign-clones Clean inactive code-sign clones.
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
   scratch-prune          Reclaim C14-recognized Scratch artifacts behind lease/live-cwd/open-file
                          gates (--clean needs operator approval or internal safe automatic mode).
@@ -585,6 +590,18 @@ case "$CMD" in
     ;;
   worktree_hygiene|worktree-hygiene)
     "$SCRIPT_DIR/scripts/worktree_hygiene.sh" "$@"
+    ;;
+  cleanup_agent_artifacts|cleanup-agent-artifacts)
+    "$SCRIPT_DIR/scripts/cleanup_agent_artifacts.sh" "$@"
+    ;;
+  cleanup_xcode|cleanup-xcode)
+    "$SCRIPT_DIR/scripts/cleanup_xcode.sh" "$@"
+    ;;
+  cleanup_sessions|cleanup-sessions)
+    "$SCRIPT_DIR/scripts/cleanup_sessions.sh" "$@"
+    ;;
+  cleanup_downloads_evidence|cleanup-downloads-evidence)
+    "$SCRIPT_DIR/scripts/cleanup_downloads_evidence.sh" "$@"
     ;;
   cleanup_dev_caches|cleanup-dev-caches)
     "$SCRIPT_DIR/scripts/cleanup_dev_caches.sh" "$@"

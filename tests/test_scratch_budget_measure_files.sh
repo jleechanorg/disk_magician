@@ -53,7 +53,7 @@ out="$(scratch_budget_measure_files "$SMALL" 100)"; rc=$?
   && ok "aggregate row counts both files" || bad "aggregate row file count wrong"
 
 # 3. The threshold is honoured AT the boundary: exactly 100 MiB is never
-#    aggregated at 100, and is aggregated at 101.
+#    aggregated at 100, including an attempted ceiling above 100.
 EXACT="$T/exact"
 mkdir -p "$EXACT"
 truncate -s 100M "$EXACT/f"
@@ -62,8 +62,8 @@ grep -q 'A	'"$EXACT"'$' <<<"$out" \
   && bad "100 MiB aggregated at a 100 MiB threshold" \
   || ok "100 MiB directory itemised at a 100 MiB threshold"
 out="$(scratch_budget_measure_files "$EXACT" 101)"
-[[ "$(flags_of "$EXACT" "$out")" == "A" ]] && ok "100 MiB directory aggregated at a 101 MiB threshold" \
-  || bad "100 MiB directory not aggregated at a 101 MiB threshold"
+[[ "$(flags_of "$EXACT" "$out")" != "A" ]] && ok "101 MiB configuration capped to100 MiB" \
+  || bad "configured ceiling above100 MiB hid the directory"
 
 # 4. Symlinks are never followed: a link to a 200 MiB tree contributes the link
 #    itself (a few dozen bytes), never the target's bytes.

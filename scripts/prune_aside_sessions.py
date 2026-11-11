@@ -40,18 +40,33 @@ def format_size(bytes_val: int) -> str:
     return f"{v:.2f} TB"
 
 
-def get_dir_size(dir_path: Path) -> int:
-    """Return total bytes of all files in dir_path."""
-    total = 0
+def report_measurement(path: Path) -> bool:
+    """Publish shared metadata leaves; failed measurement cannot authorize cleanup."""
+    lib = Path(__file__).resolve().parent / "lib" / "scratch_budget.sh"
     try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    total += (Path(root) / f).stat().st_size
-                except OSError:
-                    continue
-    except OSError:
-        pass
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; scratch_budget_report_measurement "$2"',
+             "_", str(lib), str(path)], check=False, timeout=300,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"measurement_status=incomplete path={path}: {exc}", file=sys.stderr)
+        return False
+
+
+def get_dir_size(dir_path: Path) -> int:
+    """Unique-inode metadata bytes; never follow links or conceal read errors."""
+    total = 0
+    seen = set()
+    def failed(error):
+        raise error
+    for root, dirs, files in os.walk(dir_path, followlinks=False, onerror=failed):
+        for name in files + [name for name in dirs if (Path(root) / name).is_symlink()]:
+            st = (Path(root) / name).lstat()
+            inode = (st.st_dev, st.st_ino)
+            if inode not in seen:
+                seen.add(inode)
+                total += st.st_size
     return total
 
 
@@ -76,25 +91,23 @@ def quarantine_remove(path: Path, *extra: str) -> Tuple[bool, str]:
 
 
 def get_dir_max_mtime(dir_path: Path) -> float:
-    """Return the most recent mtime of any file inside dir_path, or dir mtime."""
-    max_mtime = 0.0
+    """Newest metadata mtime, failing closed and never following symlinks."""
+    def failed(error):
+        raise error
     try:
-        max_mtime = dir_path.stat().st_mtime
+        newest = dir_path.lstat().st_mtime
+        if dir_path.is_symlink():
+            return float("inf")
+        for root, dirs, files in os.walk(dir_path, followlinks=False, onerror=failed):
+            for name in dirs + files:
+                path = Path(root) / name
+                st = path.lstat()
+                if path.is_symlink():
+                    return float("inf")
+                newest = max(newest, st.st_mtime)
+        return newest
     except OSError:
-        return 0.0
-
-    try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    mt = (Path(root) / f).stat().st_mtime
-                    if mt > max_mtime:
-                        max_mtime = mt
-                except OSError:
-                    continue
-    except OSError:
-        pass
-    return max_mtime
+        return float("inf")
 
 
 def parse_session_age_days(session_dir: Path, ref_time: Optional[float] = None) -> Tuple[float, str]:
@@ -109,7 +122,8 @@ def parse_session_age_days(session_dir: Path, ref_time: Optional[float] = None) 
             session_epoch = dt.timestamp()
             age_days = (now - session_epoch) / 86400.0
             if age_days >= 0:
-                return age_days, "date_prefix"
+                content_age = max(0.0, (now - get_dir_max_mtime(session_dir)) / 86400.0)
+                return min(age_days, content_age), "date_prefix"
         except (ValueError, OverflowError):
             pass
 
@@ -282,6 +296,7 @@ class AsideSessionPruner:
         self.verbose = verbose
 
         self.stats = {
+            "measurement_failures": 0,
             "sessions_scanned": 0,
             "sessions_retained_recent": 0,
             "sessions_retained_in_use": 0,
@@ -293,24 +308,29 @@ class AsideSessionPruner:
         }
 
     def discover_session_containers(self) -> List[Path]:
-        """Find all sessions directories (e.g. ~/.aside/u/0/sessions, ~/.aside/u/1/sessions)."""
-        if self.sessions_dirs:
-            return [d for d in self.sessions_dirs if d.is_dir()]
+        """Find physical session containers without traversing link roots."""
+        def physical_dir(path):
+            if path.is_symlink():
+                if not report_measurement(path):
+                    self.stats["measurement_failures"] += 1
+                return False
+            return path.is_dir()
 
+        if self.sessions_dirs:
+            return [d for d in self.sessions_dirs if physical_dir(d)]
+        if not physical_dir(self.aside_dir):
+            return []
         containers = []
         u_dir = self.aside_dir / "u"
-        if u_dir.is_dir():
+        if physical_dir(u_dir):
             for child in sorted(u_dir.iterdir()):
-                if child.is_dir():
+                if physical_dir(child):
                     s_dir = child / "sessions"
-                    if s_dir.is_dir():
+                    if physical_dir(s_dir):
                         containers.append(s_dir)
-
-        # Also check top-level sessions if any
         top_sessions = self.aside_dir / "sessions"
-        if top_sessions.is_dir() and top_sessions not in containers:
+        if physical_dir(top_sessions) and top_sessions not in containers:
             containers.append(top_sessions)
-
         return containers
 
     def is_safe_session_path(self, session_dir: Path, container: Path) -> bool:
@@ -439,10 +459,18 @@ class AsideSessionPruner:
             lsof_valid, open_session_paths = get_open_session_paths(container, self.lsof_bin)
 
             for entry in entries:
+                if entry.is_symlink():
+                    if not report_measurement(entry):
+                        self.stats["measurement_failures"] += 1
+                    continue
                 if not entry.is_dir():
                     continue
 
                 self.stats["sessions_scanned"] += 1
+                if not report_measurement(entry):
+                    self.stats["measurement_failures"] += 1
+                    self.stats["sessions_retained_in_use"] += 1
+                    continue
                 age_days, method = parse_session_age_days(entry, self.ref_time)
 
                 # Signal A: Age check
@@ -476,7 +504,13 @@ class AsideSessionPruner:
                         print(f"Safety guard: path rejected for deletion: {entry}")
                     continue
 
-                size = get_dir_size(entry)
+                try:
+                    size = get_dir_size(entry)
+                except OSError as exc:
+                    print(f"measurement_status=incomplete path={entry}: {exc}", file=sys.stderr)
+                    self.stats["measurement_failures"] += 1
+                    self.stats["sessions_retained_in_use"] += 1
+                    continue
                 stale_candidates.append((entry, container, age_days, size))
 
         # Execute Session Pruning
@@ -484,13 +518,13 @@ class AsideSessionPruner:
             if self.dry_run:
                 self.stats["sessions_pruned"] += 1
                 self.stats["bytes_pruned"] += size
-                print(f"[DRY-RUN] Would prune stale session: {session_dir} ({format_size(size)}, {age_days:.1f} days old)")
+                print(f"[DRY-RUN] Would prune stale session: {session_dir} (aggregate {format_size(size)}, lifecycle age {age_days:.1f} days)")
             else:
                 removed, reason = quarantine_remove(session_dir, "--kind", "ephemeral")
                 if removed:
                     self.stats["sessions_pruned"] += 1
                     self.stats["bytes_pruned"] += size
-                    print(f"Pruned stale session: {session_dir} ({format_size(size)}, {age_days:.1f} days old)")
+                    print(f"Pruned stale session: {session_dir} (aggregate {format_size(size)}, lifecycle age {age_days:.1f} days)")
                 else:
                     print(f"Kept stale session (C14 {reason}): {session_dir}", file=sys.stderr)
                     retained_dirs.append(session_dir)
@@ -606,7 +640,7 @@ def main() -> int:
         prefix = "Would Reclaim" if not args.clean else "Total Reclaimed"
         print(f"{prefix}:             {format_size(total_freed)}")
 
-    return 0
+    return 75 if stats["measurement_failures"] else 0
 
 
 if __name__ == "__main__":

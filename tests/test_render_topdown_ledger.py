@@ -11,9 +11,9 @@ SYSTEM_BOUNDARY_PATHS = (
     "/System/Volumes/Data/.DocumentRevisions-V100",
 )
 USER_PROBE_PATHS = {
-    "mobile_sync": os.path.join(os.path.expanduser("~"), "Library", "Application Support", "MobileSync", "Backup"),
-    "mail": os.path.join(os.path.expanduser("~"), "Library", "Mail"),
-    "messages": os.path.join(os.path.expanduser("~"), "Library", "Messages"),
+    "mobile_sync": os.path.join("/Users/reviewer", "Library", "Application Support", "MobileSync", "Backup"),
+    "mail": os.path.join("/Users/reviewer", "Library", "Mail"),
+    "messages": os.path.join("/Users/reviewer", "Library", "Messages"),
 }
 FORGED_USER_PROBE_PATHS = {
     "mobile_sync": "/Users/reviewer/../../tmp/forged/Library/Application Support/MobileSync/Backup",
@@ -65,9 +65,10 @@ class TestRenderTopdownLedger(unittest.TestCase):
             "disk_used_kb": 500 * 1024 * 1024,
             "residual_kb": 524288,  # 0.5 GiB
             "purgeable_kb": 1024,
+            # Large synthetic entries are indivisible files, not directory totals.
             "granularity_buckets": [
-                {"path": "/Users/x/big", "measured_kb": 3145728},    # 3.0 GiB
-                {"path": "/Users/x/small", "measured_kb": 1048576},  # 1.0 GiB
+                {"path": "/Users/x/big", "measured_kb": 3145728, "kind": "file"},    # 3.0 GiB
+                {"path": "/Users/x/small", "measured_kb": 1048576, "kind": "file"},  # 1.0 GiB
             ],
             "oversize_indivisible_files": [],
             "accounting_equation": {
@@ -163,15 +164,19 @@ class TestRenderTopdownLedger(unittest.TestCase):
             json.dump(data, f)
         return path
 
-    def test_attested_partial_system_boundary_publishes_and_preserves_evidence(self):
+    def test_attested_permission_failure_stays_partial_and_preserves_evidence(self):
         frontier = self._attested_partial_fixture()
 
         rc, _, err = run(frontier, self.out_dir)
 
         self.assertEqual(rc, 0, err)
         ledger_path = os.path.join(self.out_dir, "topdown-5g.json")
-        self.assertTrue(os.path.exists(ledger_path))
+        self.assertFalse(os.path.exists(ledger_path))
+        ledger_path = os.path.join(self.out_dir, "topdown-5g.partial.json")
         ledger = json.load(open(ledger_path))
+        self.assertIs(ledger["canonical"], False)
+        status = json.load(open(os.path.join(self.out_dir, "topdown-5g.status.json")))
+        self.assertEqual(status["status"], "partial")
         self.assertEqual(ledger["coverage_envelope"]["fda_preflight_status"], "partial")
         self.assertEqual(ledger["coverage_envelope"]["fda_user_preflight_status"], "granted")
         self.assertEqual(len(ledger["system_boundary_attestations"]), 3)
@@ -183,13 +188,6 @@ class TestRenderTopdownLedger(unittest.TestCase):
         self.assertEqual(ledger["run_started_at"], 100.0)
         self.assertEqual(ledger["run_finished_at"], 102.0)
         self.assertEqual(ledger["fda_probe_paths"], USER_PROBE_PATHS)
-        validated = subprocess.run(
-            ["python3", str(REPO / "scripts" / "history_diff.py"), "--validate", ledger_path],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(validated.returncode, 0, validated.stderr)
-        self.assertIn("valid full-attribution ledger", validated.stdout)
 
     def test_transplanted_attestations_from_another_run_are_not_published(self):
         frontier = self._attested_partial_fixture()
@@ -452,7 +450,7 @@ class TestRenderTopdownLedger(unittest.TestCase):
             "sidecar_invalid_status: unknown",
         )
 
-    def test_exact_5g_bucket_publishes_and_history_accepts_it(self):
+    def test_indivisible_5g_file_publishes_and_history_accepts_it(self):
         frontier = self._fixture(age_hours=1)
         with open(frontier) as f:
             data = json.load(f)
@@ -477,26 +475,56 @@ class TestRenderTopdownLedger(unittest.TestCase):
         self.assertEqual(validated.returncode, 0, validated.stderr)
         self.assertIn("valid full-attribution ledger", validated.stdout)
 
-    def test_opaque_intrinsic_gate_is_published_without_a_size(self):
-        frontier = self._fixture(age_hours=1)
-        with open(frontier) as f:
-            data = json.load(f)
-        gate = {
-            "path": "/private/var/db/protected",
-            "reason": "permission_denied_intrinsic",
-            "errno": 1,
-            "verification": "root-owned persistent state",
-            "reclaimable": False,
-        }
-        data["opaque_intrinsic_gates"] = [gate]
-        with open(frontier, "w") as f:
-            json.dump(data, f)
+    def test_directory_leaves_require_strictly_less_than_100_mib(self):
+        for size_kb in (100 * 1024 - 1, 100 * 1024, 100 * 1024 + 1, 5 * 1024 * 1024):
+            for kind in (None, "dir", "file"):
+                with self.subTest(size_kb=size_kb, kind=kind):
+                    frontier = self._fixture(age_hours=1)
+                    with open(frontier) as f:
+                        report = json.load(f)
+                    bucket = report["granularity_buckets"][0]
+                    previous_kb = bucket["measured_kb"]
+                    bucket["measured_kb"] = size_kb
+                    if kind is None:
+                        bucket.pop("kind")
+                    else:
+                        bucket["kind"] = kind
+                    report["accounting_equation"]["displayed_buckets_kb"] += size_kb - previous_kb
+                    report["accounting_equation"]["sub_granularity_tail_kb"] -= size_kb - previous_kb
+                    # A legacy producer's larger configured ceiling cannot relax
+                    # the current complete-publication contract.
+                    report["config"] = {"granularity_gib": 5, "max_bucket_gib": 5}
+                    self.assertEqual(
+                        renderer.complete_coverage_envelope(report),
+                        kind == "file" or size_kb < 100 * 1024,
+                    )
 
-        rc, _, err = run(frontier, self.out_dir)
+    def test_legacy_failure_gates_never_publish_complete_ledger(self):
+        for reason in ("permission_denied_intrinsic", "vanished_during_scan", "cross_device_boundary"):
+            with self.subTest(reason=reason):
+                self.out_dir = os.path.join(self.tmp, reason)
+                frontier = self._fixture(age_hours=1)
+                with open(frontier) as f:
+                    data = json.load(f)
+                gate = {
+                    "path": "/private/var/db/protected",
+                    "reason": reason,
+                    "verification": "legacy scanner boundary confirmation",
+                    "reclaimable": False,
+                }
+                data["opaque_intrinsic_gates"] = [gate]
+                with open(frontier, "w") as f:
+                    json.dump(data, f)
 
-        self.assertEqual(rc, 0, err)
-        ledger = json.load(open(os.path.join(self.out_dir, "topdown-5g.json")))
-        self.assertEqual(ledger["opaque_intrinsic_gates"], [gate])
+                rc, _, err = run(frontier, self.out_dir)
+
+                self.assertEqual(rc, 0, err)
+                self.assertFalse(os.path.exists(os.path.join(self.out_dir, "topdown-5g.json")))
+                partial = json.load(open(os.path.join(self.out_dir, "topdown-5g.partial.json")))
+                self.assertEqual(partial["opaque_intrinsic_gates"], [gate])
+                self.assertIs(partial["canonical"], False)
+                status = json.load(open(os.path.join(self.out_dir, "topdown-5g.status.json")))
+                self.assertEqual(status["status"], "partial")
 
     def test_opaque_intrinsic_gate_with_size_is_rejected(self):
         frontier = self._fixture(age_hours=1)
@@ -546,7 +574,7 @@ class TestRenderTopdownLedger(unittest.TestCase):
             "equation": lambda d: d["accounting_equation"].update(displayed_balanced=False),
             "forged_equation": lambda d: d["accounting_equation"].update(displayed_buckets_kb=1),
             "oversize_directory_bucket": lambda d: (
-                d["granularity_buckets"][0].update(measured_kb=6 * 1024 * 1024),
+                d["granularity_buckets"][0].update(measured_kb=6 * 1024 * 1024, kind="dir"),
                 d.update(disk_used_kb=7 * 1024 * 1024, residual_kb=0, purgeable_kb=0),
                 d["accounting_equation"].update(
                     data_used_kb=7 * 1024 * 1024,
@@ -659,9 +687,10 @@ class TestPartialLedgerArtifact(unittest.TestCase):
             "disk_used_kb": 500 * 1024 * 1024,
             "residual_kb": 524288,
             "purgeable_kb": 1024,
+            # Large synthetic entries are indivisible files, not directory totals.
             "granularity_buckets": [
-                {"path": "/Users/x/big", "measured_kb": 3145728},
-                {"path": "/Users/x/small", "measured_kb": 1048576},
+                {"path": "/Users/x/big", "measured_kb": 3145728, "kind": "file"},
+                {"path": "/Users/x/small", "measured_kb": 1048576, "kind": "file"},
             ],
             "oversize_indivisible_files": [],
             "accounting_equation": {

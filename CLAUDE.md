@@ -1,5 +1,7 @@
 # disk_magician — agent instructions
 
+**Measurement invariant (hard):** For a complete size, age, or reclaimability claim, recurse every real directory at or above 100 MiB until the measured directories are strictly under 100 MiB or each remaining leaf is a file. Exactly 100 MiB descends. If descent cannot finish, report incomplete coverage. Details: the measurement rule below.
+
 ## One operational entry point — `diskm` (hard)
 
 Drive all disk operations through the Disk Magician CLI: diagnosis, history,
@@ -192,8 +194,10 @@ underestimated cumulative-reservoir growth):
    0.00002 GiB "verified" was actually 2.4 GiB+).
 
 4. **System Residual & Mega-Table Invariant**: All disk breakdown reports
-   must subdivide directory nodes >5 GiB down to child buckets $\le$5 GiB
-   (or opaque leaves). When residual unaccounted space is >10 GiB, run
+   must recursively itemise every real directory at or above 100 MiB until
+   measured leaves are files or directories strictly under 100 MiB. Any
+   unexplored directory at or above 100 MiB remains on the unfinished frontier
+   and makes coverage incomplete. When residual unaccounted space is >10 GiB, run
    `./scripts/check_system_residual.sh` to check system staging paths
    (`/private/var/dirs_cleaner`) and `deleted_helper` unified logs for
    `removefile error ENAMETOOLONG`. Clean via `./disk_magician.sh cleanup-dirs-cleaner --clean`.
@@ -471,11 +475,10 @@ Rules that follow, and that any new reclaim code must obey:
 - Evaluate eligibility **per child**, not on a parent aggregate. Enumerate
   artifact-shaped descendants (`scratch_budget_artifact_children`, depth-bounded)
   and judge each on **its own** newest-file age.
-- The descent is **name-scoped to build outputs** (`build|dist|out|target|coverage|
-  artifacts|gradle|android-sdk|avd|isolated-*|.next|.cache|DerivedData|Pods|…`),
-  depth-bounded, never follows a symlink, and **never enters a directory that
-  contains `.git`** -- a working tree is not a build artifact and deleting a
-  nested source directory would be data loss.
+- Cleanup candidate discovery may be name-scoped to build outputs, preserve Git
+  worktrees, and refuse symlink targets. Those are deletion protections only.
+  They do not permit measurement to stop early: read-only measurement must
+  descend real Git/source/session directories under the rule below.
 - Size reporting must sum **file sizes**, not stop at directory entries: `du` on a
   parent cannot tell you that 23.7 of 35 GiB is stale while 7 GiB is live. The
   measurement rule below is how this is applied and checked.
@@ -496,19 +499,30 @@ a hypothetical: reported as a directory, `Scratch/worldai_frontend/build` was
 35 GiB and "0 h old"; measured as files, 23.7 GiB of that same tree was 39-41 h
 old while 7 GiB was live.
 
-There is exactly one permitted stop, on size: **100 MiB**.
+For a complete measurement, the threshold is exactly 100 MiB (104857600 bytes); the only size-based directory stop is a real
+directory strictly smaller than 100 MiB. A file is an indivisible leaf at any
+size. No larger-size exception applies.
 
-- A directory **smaller than 100 MiB** MAY be treated as one unit — reported,
-  aged, and judged as a single entry on its own newest-file age.
-- A directory **at or above 100 MiB** MUST be itemised into its children, and
-  each child recursed by the same test, until every entry reported is either a
-  file or a directory under 100 MiB. A `du` total, a bare child list, or "the
-  parent is 35 GiB" is not an itemisation.
-- Descending never follows a symlink and never enters a directory that contains
-  `.git` (see the bullet above); content behind those boundaries is reported as
-  an opaque unit with that fact stated.
-- The floor governs age claims too: an age is only reported for the unit the
-  size rule allowed you to stop at, so a 35 GiB directory never gets an age.
+- A directory smaller than 100 MiB MAY be reported and aged as one unit on its
+  own newest-file age.
+- A directory at or above 100 MiB, including exactly 100 MiB, MUST be itemised
+  into children. Recurse each real child directory by the same test until every
+  measured directory leaf is strictly under 100 MiB or every remaining leaf is
+  an individual file. A du total, bare child list, or parent size is not an
+  itemisation.
+- Never follow symlinks. Report each link itself as a link leaf; do not count
+  or age its target.
+- Git directories, source trees, and session trees are not exempt from read-only
+  size measurement. Measurement does not grant deletion eligibility: Git
+  contents, dirty or unpushed worktrees, active leases, live working
+  directories, secrets, and other C14 keeps remain ineligible even when their
+  sizes are measured.
+- If an access error, identity boundary, mount boundary, deadline, or depth limit
+  prevents descent through a real directory at or above 100 MiB, name the exact
+  path on the unfinished frontier and mark coverage incomplete. Never report
+  it as a completed opaque leaf or claim its size class was proven.
+- The age rule applies only after measurement reaches a file or directory
+  strictly under 100 MiB. A 35 GiB directory never gets an age.
 
 Every reported size states its method and its threshold:
 
@@ -517,7 +531,8 @@ Every reported size states its method and its threshold:
   parent's number), and name the threshold it was measured to, e.g. "file-summed,
   itemised to 100 MiB".
 - A directory-aggregate figure is a place to descend from, never evidence of
-  age, staleness, or reclaimability.
+  age, staleness, or reclaimability. Any grouped display must retain its
+  itemised leaf rows and cannot stand in for measurement.
 
 **Never claim "nothing to reclaim" from a directory-level scan.** That claim
 requires the opposite proof: name the largest individual files you examined,

@@ -78,30 +78,22 @@ for location in root nested; do
     if python3 - "$protected" "$location" "$case_root" "$PR322_FIND_TRACE" "$PR322_STAT_TRACE" "$rows" "$rc" <<'PY'
 import pathlib, sys
 protected, location, root, find_log, stat_log, output, rc = sys.argv[1:]
-violations = []
-logs = list(pathlib.Path(find_log).parent.glob(pathlib.Path(find_log).name + ".*"))
-logs.append(pathlib.Path(stat_log))
-for log in logs:
-    for path in log.read_text().splitlines():
-        if path.startswith(protected + "/") and path != protected + "/.git":
-            violations.append(path)
 rows = [line.split("\t", 4) for line in output.splitlines()]
-opaque = [r for r in rows if len(r) == 5 and r[4] == protected
-          and r[3].lower() in ("g", "o", "git", "opaque")]
-exposed = [r[4] for r in rows if len(r) == 5
-           and r[4].startswith(protected + "/")]
+sentinel = protected + "/protected-content/sentinel"
+measured = any(len(r) == 5 and r[4] == sentinel and r[3] == "F"
+               and r[0] == str(200 * 1024 * 1024) for r in rows)
 ordinary = location == "root" or any(
     len(r) == 5 and r[4] == root + "/ordinary"
     and r[3] == "F" and r[0] == str(150 * 1024 * 1024) for r in rows)
-if rc != "0" or violations or exposed or not opaque or not ordinary:
-    print("boundary_failure", dict(rc=rc, traversed=violations,
-          exposed=exposed, opaque=opaque, ordinary_measured=ordinary))
-    raise SystemExit(1)
+assert rc == "0" and measured and ordinary, (rc, rows)
+assert pathlib.Path(sentinel).stat().st_size == 200 * 1024 * 1024
+assert not any(r[3] == "G" for r in rows)
+
 PY
     then
-      ok "$location Git $marker is opaque before subtree scan"
+      ok "$location Git $marker metadata descends without deletion"
     else
-      bad "$location Git $marker traversed, hidden, or swallowed sibling"
+      bad "$location Git $marker metadata hidden, modified, or swallowed sibling"
     fi
   done
 done
