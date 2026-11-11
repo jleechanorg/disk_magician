@@ -100,6 +100,21 @@ class GranularMeasurementContract(unittest.TestCase):
         self.assertEqual(rendered["file_leaves"], directory["file_leaves"])
         self.assertEqual(rendered["granularity_buckets"][0]["apparent_bytes"], 200 * 1024 ** 2)
 
+    def test_renderer_omits_redundant_tiny_file_inventory_from_older_reports(self):
+        terminal = {"path": "/fixture/terminal", "apparent_bytes": 200 * 1024 ** 2,
+                    "allocated_kb": 0, "inode_deduplicated": True}
+        report = {
+            "granularity_buckets": [{"path": "/fixture/small", "kind": "dir",
+                                    "measured_kb": 4, "apparent_bytes": 1}],
+            "oversize_indivisible_files": [{"path": terminal["path"], "measured_kb": 0,
+                                           "apparent_bytes": terminal["apparent_bytes"]}],
+            "file_leaves": [{"path": "/fixture/small/tiny", "apparent_bytes": 1,
+                             "allocated_kb": 4}, terminal],
+        }
+        rendered = r.build_ledger_dict(report, "2026-11-11T08:00:00Z")
+        self.assertEqual(rendered["file_leaves"], [terminal])
+        self.assertEqual(len(report["file_leaves"]), 2)
+
     def test_renderer_rejects_synthetic_kind_and_large_ceiling(self):
         self.assertNotIn('direct_allocation_segment', r.BUCKET_KINDS)
         self.assertEqual(r.GRANULARITY_CEILING_KB, 100 * 1024)

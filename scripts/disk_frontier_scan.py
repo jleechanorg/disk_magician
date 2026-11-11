@@ -2131,6 +2131,13 @@ def build_report(
         getattr(scanner, "oversize_files", []),
         key=lambda item: (-item["measured_kb"], item["path"]),
     )
+    # Tiny files were measured individually, but a resolved directory below
+    # the ceiling is their terminal evidence. Persist only actual file leaves.
+    terminal_file_paths = {item["path"] for item in granularity_buckets
+                           if item.get("kind") == "file"}
+    terminal_file_paths.update(item["path"] for item in oversize_files)
+    file_leaves = [item for path, item in getattr(scanner, "file_leaves", {}).items()
+                   if path in terminal_file_paths]
     oversize_files_total_kb = sum(item["measured_kb"] for item in oversize_files)
     granularity_tail_raw_kb = (
         measured_total_kb - granularity_bucket_total_kb - oversize_files_total_kb
@@ -2312,7 +2319,7 @@ def build_report(
         },
         "directory_metadata_kb": directory_metadata,
         "measured": scanner.measured,
-        "file_leaves": list(getattr(scanner, "file_leaves", {}).values()),
+        "file_leaves": file_leaves,
         "measured_total_kb": measured_total_kb,
         "granularity_buckets": granularity_buckets,
         "granularity_bucket_total_kb": granularity_bucket_total_kb,

@@ -477,6 +477,15 @@ def build_ledger_dict(report, captured_at):
         buckets = report.get("buckets")
     oversize = report.get("oversize_indivisible_files")
     equation = report.get("accounting_equation")
+    terminal_file_paths = {
+        item["path"] for item in (buckets if isinstance(buckets, list) else [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+        and item.get("kind") == "file"
+    }
+    terminal_file_paths.update(
+        item["path"] for item in (oversize if isinstance(oversize, list) else [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    )
 
     ledger = {
         "schema_version": schema_version,
@@ -496,7 +505,8 @@ def build_ledger_dict(report, captured_at):
         "residual_kb": report.get("residual_kb"),
         "purgeable_kb": report.get("purgeable_kb"),
         "granularity_buckets": buckets,
-        "file_leaves": report.get("file_leaves", []),
+        "file_leaves": [item for item in (report.get("file_leaves") or [])
+                        if isinstance(item, dict) and item.get("path") in terminal_file_paths],
         "measurement_method": (report.get("config") or {}).get(
             "directory_subdivision_method", "legacy allocation (apparent metadata unavailable)"),
         "directory_ceiling_mib": 100,

@@ -10,9 +10,16 @@ import unittest
 REPO = pathlib.Path(os.environ.get('GRANULAR_TEST_REPO', pathlib.Path(__file__).resolve().parents[1]))
 SCRATCH_TEMP_ROOT = os.environ.get("PYTEST_DEBUG_TEMPROOT")
 def scratch_tempdir():
-    if not SCRATCH_TEMP_ROOT:
-        raise RuntimeError("configure pytest debug temp root on Scratch")
-    return tempfile.TemporaryDirectory(dir=SCRATCH_TEMP_ROOT)
+    scratch = SCRATCH_TEMP_ROOT
+    if not scratch:
+        result = subprocess.run(
+            ["bash", str(REPO / "disk_magician.sh"), "scratch-dir", "frontier-tests"],
+            text=True, capture_output=True, check=True,
+        )
+        scratch = result.stdout.strip()
+        if not scratch:
+            raise RuntimeError("diskm scratch-dir returned no test scratch path")
+    return tempfile.TemporaryDirectory(dir=scratch)
 class PublicFrontier(unittest.TestCase):
     def test_metadata_descent_and_rerun(self):
         with scratch_tempdir() as d:
@@ -87,6 +94,77 @@ class PublicFrontier(unittest.TestCase):
                                          if not row["inode_deduplicated"]), 200 * 1024 ** 2)
                     self.assertTrue(any(row["inode_deduplicated"] for row in report["file_leaves"]))
 
+    def test_scale_publishes_only_terminal_file_evidence(self):
+        du = shutil.which("gdu") or shutil.which("du")
+        version = subprocess.run([du, "--version"], capture_output=True, text=True)
+        self.assertIn("GNU coreutils", version.stdout)
+        with scratch_tempdir() as tmp:
+            work = pathlib.Path(tmp)
+            root = work / "root"
+            group = root / "small-files"
+            group.mkdir(parents=True)
+            count = 5000
+            expected_apparent = 0
+            expected_allocated_kb = 0
+            for index in range(count):
+                size = index % 7 + 1
+                path = group / ("file-%05d" % index)
+                path.write_bytes(b"x" * size)
+                expected_apparent += size
+                expected_allocated_kb += (path.stat().st_blocks * 512 + 1023) // 1024
+            expected_allocated_kb += (group.stat().st_blocks * 512 + 1023) // 1024
+            large_group = root / "large-files"
+            large_group.mkdir()
+            large = large_group / "large-sparse"
+            with large.open("wb") as stream:
+                stream.truncate(200 * 1024 ** 2)
+            alias = large_group / "large-alias"
+            os.link(large, alias)
+            expected_allocated_kb += (large_group.stat().st_blocks * 512 + 1023) // 1024
+            env = dict(os.environ, DISK_MAGICIAN_GDU_CMD=du, DISK_MAGICIAN_DUA_CMD="")
+            proc = subprocess.run([
+                "bash", str(REPO / "disk_magician.sh"), "frontier", "--root", str(root),
+                "--no-sibling-volumes", "--no-purgeable", "--wall-clock-cap", "30",
+            ], env=env, text=True, capture_output=True, timeout=40)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            report = json.loads(proc.stdout)
+            self.assertEqual(report["config"]["scan_backend"], "gdu_one_pass", report["warnings"])
+            frontier = work / "frontier.json"
+            frontier.write_text(proc.stdout)
+            ledger_dir = work / "ledger"
+            rendered = subprocess.run([
+                "python3", str(REPO / "scripts" / "render_topdown_ledger.py"),
+                "--frontier", str(frontier), "--out-dir", str(ledger_dir),
+            ], text=True, capture_output=True, timeout=20)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            # Publication must follow the scanner's actual coverage evidence.
+            canonical_path = ledger_dir / "topdown-5g.json"
+            self.assertEqual(canonical_path.exists(), report["coverage_envelope"]["complete"])
+            partial_path = ledger_dir / "topdown-5g.partial.json"
+            ledger = json.loads(partial_path.read_text())
+            print("scale: files=%d report_rows=%d ledger_rows=%d file_leaf_bytes=%d report_bytes=%d partial_ledger_bytes=%d" % (
+                count, len(report["file_leaves"]), len(ledger["file_leaves"]),
+                len(json.dumps(ledger["file_leaves"])), len(proc.stdout.encode()),
+                partial_path.stat().st_size))
+            print("scale canonical_ledger_bytes:",
+                  canonical_path.stat().st_size if canonical_path.exists() else "not-published")
+            if canonical_path.exists():
+                canonical = json.loads(canonical_path.read_text())
+                self.assertEqual(len(canonical["file_leaves"]), 2)
+            print("scale largest report fields:", sorted(
+                ((len(json.dumps(value)), key) for key, value in report.items()), reverse=True)[:3])
+            print("scale largest ledger fields:", sorted(
+                ((len(json.dumps(value)), key) for key, value in ledger.items()), reverse=True)[:3])
+            self.assertEqual(report["measured_total_kb"], expected_allocated_kb)
+            bucket = next(row for row in report["granularity_buckets"] if row["path"] == str(group))
+            self.assertEqual(bucket["apparent_bytes"], expected_apparent)
+            self.assertEqual(len(report["file_leaves"]), 2)
+            self.assertEqual(len(ledger["file_leaves"]), 2)
+            self.assertEqual({row["path"] for row in ledger["file_leaves"]}, {str(large), str(alias)})
+            self.assertEqual(sum(row["apparent_bytes"] for row in ledger["file_leaves"]),
+                             400 * 1024 ** 2)
+            self.assertTrue(any(row["inode_deduplicated"] for row in ledger["file_leaves"]))
+
     def test_hardlink_apparent_size_descends_each_directory_without_double_accounting(self):
         du = shutil.which("gdu") or shutil.which("du")
         version = subprocess.run([du, "--version"], capture_output=True, text=True)
@@ -100,6 +178,8 @@ class PublicFrontier(unittest.TestCase):
             with payload.open("wb") as stream:
                 for _ in range(200):
                     stream.write(b"x" * 1024 ** 2)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.link(payload, alias)
             small = second / "small"
             small.write_text("x")
@@ -132,9 +212,7 @@ class PublicFrontier(unittest.TestCase):
         version = subprocess.run([du, "--version"], capture_output=True, text=True)
         self.assertEqual(version.returncode, 0, version.stderr)
         self.assertIn("GNU coreutils", version.stdout)
-        scratch = os.environ.get("PYTEST_DEBUG_TEMPROOT")
-        self.assertTrue(scratch, "test runner must use the configured Scratch temp root")
-        with tempfile.TemporaryDirectory(dir=scratch) as tmp:
+        with scratch_tempdir() as tmp:
             root = pathlib.Path(tmp) / "root"
             parent = root
             for index in range(32):
