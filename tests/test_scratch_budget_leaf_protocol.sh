@@ -43,3 +43,20 @@ assert int(items[alias][2])>0 and int(items[original][2])==int(items[alias][2])
 assert sym in items and items[sym][3]==b'L' and int(items[sym][5])<4096
 print('NUL protocol: sparse apparent sizes, Git metadata, hardlink age/dedup, tab/newline paths, symlink leaf PASS')
 PY
+python3 - "$ROOT/scripts/lib/scratch_budget_artifact_children.py" "$T/stream-tree" <<'PY'
+import os, pathlib, subprocess, sys
+helper, root = sys.argv[1:]
+root=pathlib.Path(root); root.mkdir()
+for i in range(2000):
+    leaf=root/("leaf-%04d" % i); leaf.mkdir(); (leaf/"payload").write_text("x")
+proc=subprocess.Popen([sys.executable,helper,"stream-generic-leaves",str(root),""],
+                      stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+first=proc.stdout.read(1)
+while first and first != b"\0":
+    first=proc.stdout.read(1)
+assert first == b"\0", first
+proc.stdout.close()
+rc=proc.wait(timeout=5)
+assert rc == 73, rc
+print('stream producer: consumer-close returns explicit rc=73 PASS')
+PY

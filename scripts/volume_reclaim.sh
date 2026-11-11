@@ -101,7 +101,7 @@ fi
 reserve_before="$(reserve_available "$before" 2>/dev/null)" || reserve_before=0
 reserve_before_json=false
 [[ "$reserve_before" == 1 ]] && reserve_before_json=true
-AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0 metadata_incomplete=0 pressure_failed=0 reserve_after=$reserve_before reserve_after_json=$reserve_before_json
+AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0 metadata_incomplete=0 pressure_failed=0 reserve_after=$reserve_before reserve_after_json=$reserve_before_json intentional_target_stop=0
 receipt="$SCRIPT_DIR/job_receipt.py"
 precondition="{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pct,\"reserve_available\":$reserve_before_json}"
 run_id="${DISK_MAGICIAN_RECLAIM_RECEIPT_ID:-}"
@@ -221,9 +221,9 @@ while IFS= read -r -d '' entry; do
  AFTER_PCT=$((now_used * 100 / now_quota))
  if [[ "$available_floor" == true ]]; then
   pressure_measure || { TOP_REASON=measurement-unavailable; measurement_error=1; pressure_failed=1; break; }
-  (( free_bytes < 53687091200 )) || break
+  if (( free_bytes >= 53687091200 )); then intentional_target_stop=1; break; fi
  else
-  (( now_used * 100 > now_quota * target_pct )) || break
+  if (( now_used * 100 <= now_quota * target_pct )); then intentional_target_stop=1; break; fi
  fi
 done <"$DISCOVERY_DIR/candidates"
 # Reap the bounded producer even after an early consumer stop. It remains
@@ -231,6 +231,10 @@ done <"$DISCOVERY_DIR/candidates"
 wait "$discovery_pid"; discovery_rc=$?
 rm -f "$DISCOVERY_DIR/candidates" "$DISCOVERY_DIR/records"
 rmdir "$DISCOVERY_DIR"
+if (( discovery_rc == 73 && intentional_target_stop )); then
+ echo "measurement_status=stopped-target-met producer_rc=73 path=$root" >&2
+ discovery_rc=0
+fi
 if (( discovery_rc != 0 )); then
  metadata_incomplete=1
  measurement_error=1

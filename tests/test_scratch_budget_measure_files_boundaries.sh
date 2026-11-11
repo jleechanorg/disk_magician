@@ -70,8 +70,18 @@ rows="$(scratch_budget_measure_files "$HARD" 100)"; rc=$?
 actual_mtime="$(awk -F '\t' -v p="$HARD/later/alias" '$5==p {print $3}' <<<"$rows")"
 actual_bytes="$(awk -F '\t' '{sum += $1} END {print sum+0}' <<<"$rows")"
 file_paths="$(awk -F '\t' '$4=="F" {n++} END {print n+0}' <<<"$rows")"
-apparent_bytes="$(awk -F '\t' '{sum += $6} END {print sum+0}' <<<"$rows")"
-if [[ "$rc" -eq 0 && "$actual_mtime" == "$expected_mtime" && "$actual_bytes" == 104857600 && "$file_paths" == 2 && "$apparent_bytes" == 209715200 ]]; then
+NUL_ROWS="$T/hardlinks.nul"
+scratch_budget_measure_files "$HARD" 100 --nul >"$NUL_ROWS"; nul_rc=$?
+apparent_bytes="$(python3 - "$NUL_ROWS" <<'PY'
+import pathlib,sys
+parts=pathlib.Path(sys.argv[1]).read_bytes().split(bytes((0,)))
+parts=[p for p in parts if p]
+assert parts[0] == b'diskm-measure-leaves-v1'
+assert (len(parts)-1) % 6 == 0
+print(sum(int(parts[i+5]) for i in range(1,len(parts),6)))
+PY
+)"
+if [[ "$rc" -eq 0 && "$nul_rc" -eq 0 && "$actual_mtime" == "$expected_mtime" && "$actual_bytes" == 104857600 && "$file_paths" == 2 && "$apparent_bytes" == 209715200 ]]; then
   ok "later hardlink keeps inode mtime and counts bytes once"
 else
   bad "hardlink metadata wrong: mtime=$actual_mtime expected=$expected_mtime unique=$actual_bytes paths=$file_paths apparent=$apparent_bytes rc=$rc"

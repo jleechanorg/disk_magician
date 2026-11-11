@@ -165,6 +165,8 @@ def main():
             stream_generic_leaves(sys.argv[2], deadline)
         except TimeoutError:
             return 124
+        except BrokenPipeError:
+            return 73
         except OSError:
             return 1
         return 0

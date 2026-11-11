@@ -286,19 +286,33 @@ data_volume_free_bytes() {
 # C14 verdict, the recency floor, the cursor and the LRU order are untouched.
 DETAIL_MIB=100
 report_candidate_detail() {
-  local entry="$1" rows bytes files newest flag path apparent_bytes metadata rc=0
-  # The caller supplies allocated du KiB; only the measurement can decide
-  # the apparent-size threshold (sparse files may have almost no allocation).
-  rows="$(scratch_budget_measure_files "$entry" "$DETAIL_MIB" 2>/dev/null)" || rc=$?
-  while IFS=$'\t' read -r bytes files newest flag path apparent_bytes; do
-    [[ -n "${flag:-}" ]] || continue
-    [[ "$flag" == A && "$path" == "$entry" ]] && continue
+  local entry="$1" rows_file protocol bytes files newest flag path apparent_bytes metadata rc=0
+  rows_file="$(mktemp "${TMPDIR:-/tmp}/dm-measure-display.XXXXXX")" || return 2
+  scratch_budget_measure_files "$entry" "$DETAIL_MIB" --nul >"$rows_file" 2>/dev/null || rc=$?
+  exec 3<"$rows_file"
+  IFS= read -r -d '' protocol <&3 || { (( rc != 0 )) || rc=1; }
+  [[ "$protocol" == diskm-measure-leaves-v1 ]] || { (( rc != 0 )) || rc=1; }
+  while :; do
+    bytes=""
+    IFS= read -r -d '' bytes <&3
+    read_rc=$?
+    if (( read_rc != 0 )); then
+      [[ -z "$bytes" ]] || { (( rc != 0 )) || rc=1; }
+      break
+    fi
+    IFS= read -r -d '' files <&3 || { (( rc != 0 )) || rc=1; break; }
+    IFS= read -r -d '' newest <&3 || { (( rc != 0 )) || rc=1; break; }
+    IFS= read -r -d '' flag <&3 || { (( rc != 0 )) || rc=1; break; }
+    IFS= read -r -d '' path <&3 || { (( rc != 0 )) || rc=1; break; }
+    IFS= read -r -d '' apparent_bytes <&3 || { (( rc != 0 )) || rc=1; break; }
     metadata="size_method=inode-deduplicated-file-summed-apparent threshold_mib=$DETAIL_MIB apparent_bytes=$apparent_bytes unique_bytes=$bytes"
     if [[ "$flag" == G || "$flag" == E ]]; then
       metadata="size_method=unmeasured size_known=false age_known=false threshold_mib=$DETAIL_MIB"
     fi
     printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path"
-  done <<<"$rows"
+  done
+  exec 3<&-
+  python3 -c 'import os,sys; os.unlink(sys.argv[1])' "$rows_file" 2>/dev/null || { (( rc != 0 )) || rc=1; }
   if (( rc != 0 )); then
     printf 'detail:unfinished rc=%s path=%s\n' "$rc" "$entry"
   fi

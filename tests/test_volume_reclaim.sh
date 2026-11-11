@@ -95,6 +95,48 @@ esac
 MOCK
 chmod +x "$DISK_MAGICIAN_DISKM_BIN"
 
+if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == target-met-broken-pipe || "${VOLUME_RECLAIM_TEST_FILTER:-}" == target-met-real-error ]]; then
+  export BALLAST_LOG="$T/ballast.log"
+  export REAL_PYTHON3="$(command -v python3)"
+  export STREAM_FIRST="$TEST_ROOT/repo/evidence/oldest"
+  : >"$STATUS_CALLS_FILE"
+  mkdir "$T/target-bin"
+  cat >"$T/target-bin/python3" <<'FIND'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */scratch_budget_artifact_children.py && "${2:-}" == stream-generic-leaves ]]; then
+  if [[ "$VOLUME_RECLAIM_TEST_FILTER" == target-met-real-error ]]; then
+    printf '%s\0' "$STREAM_FIRST"
+    exit 1
+  fi
+  exec "$REAL_PYTHON3" -c 'import os,sys; first=os.fsencode(os.environ["STREAM_FIRST"])+b"\0"; os.write(1,first); payload=first*10000
+try:
+    while True: os.write(1,payload)
+except BrokenPipeError:
+    raise SystemExit(73)'
+else
+  exec "$REAL_PYTHON3" "$@"
+fi
+FIND
+  chmod +x "$T/target-bin/python3"
+  set +e
+  PATH="$T/target-bin:/usr/bin:/bin:/usr/sbin:/sbin" TEST_STATUS_SEQUENCE="900 800 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/target-stop.out" 2>&1
+  target_rc=$?
+  set -e
+  cat "$T/target-stop.out"
+  if [[ "$VOLUME_RECLAIM_TEST_FILTER" == target-met-real-error ]]; then
+    [[ "$target_rc" == 1 && ! -e "$STREAM_FIRST" ]] || { echo "FAIL: real producer error rc=$target_rc"; exit 1; }
+    grep -q 'measurement_status=incomplete rc=1' "$T/target-stop.out"
+    python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="error" and r["candidates"]["removed"]==1 and r["postcondition"]["target_reached"] is None'
+    echo 'PASS: actual producer failure stays incomplete after target reached'
+  else
+    [[ "$target_rc" == 0 && ! -e "$STREAM_FIRST" ]] || { echo "FAIL: target stop rc=$target_rc"; exit 1; }
+    ! grep -q 'measurement_status=incomplete' "$T/target-stop.out"
+    python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==1 and r["postcondition"]["target_reached"]'
+    echo 'PASS: intentional target-met FIFO close is successful'
+  fi
+  exit 0
+fi
+
 if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == streaming-find ]]; then
   export BALLAST_LOG="$T/ballast.log"
   export REAL_PYTHON3="$(command -v python3)"

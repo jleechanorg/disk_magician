@@ -606,12 +606,13 @@ scratch_budget_artifact_children_batch() {
 # Read-only metadata traversal, independent of cleanup eligibility. Git/source/
 # session trees have no measurement exemption. Symlinks are indivisible link
 # leaves and never followed. Hardlinks count once per invocation (device/inode).
-# TSV: unique inode bytes, file paths, newest epoch, A/F/L/E, path, apparent bytes.
+# TSV: unique inode bytes, file paths, newest epoch, A/F/L/E, path. NUL adds apparent bytes.
 # A requires strictly less than the ceiling (maximum 100 MiB). E is incomplete.
 # Returns 0 complete, 1 metadata/identity failure, 124 deadline, 2 usage error.
 scratch_budget_measure_files() {
   local path="${1:-}" threshold_mib="${2:-100}" output_format="${3:-tsv}" rc=0
   [[ -n "$path" ]] || return 2
+  if [[ "$output_format" =~ ^[0-9]+$ ]]; then output_format=tsv; fi
   [[ "$output_format" == tsv || "$output_format" == --nul ]] || return 2
   [[ "$threshold_mib" =~ ^[0-9]+$ ]] || threshold_mib=100
   if (( threshold_mib < 1 || threshold_mib > 100 )); then threshold_mib=100; fi
@@ -634,7 +635,7 @@ def emit_row(row):
         for value in row:
             sys.stdout.buffer.write(os.fsencode(str(value)) + b'\0')
     else:
-        print('%d\t%d\t%d\t%s\t%s\t%d' % tuple(row))
+        print('%d\t%d\t%d\t%s\t%s' % tuple(row[:5]))
 ceiling = int(threshold) * 1024 * 1024
 deadline = float(deadline) if deadline else None
 nodes = {}
