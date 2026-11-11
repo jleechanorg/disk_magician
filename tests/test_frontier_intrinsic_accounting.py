@@ -1084,7 +1084,7 @@ class TestHardlinkAttribution(unittest.TestCase):
             scanner.process_node(first, 2, False)
             scanner.process_node(duplicate, 2, False)
 
-        self.assertEqual(scanner.measured, {first: 100 * GIB_KB // 1024})
+        self.assertEqual(scanner.measured, {first: 100 * GIB_KB // 1024, duplicate: 0})
         self.assertEqual(scanner.hardlink_duplicate_kb, 100 * GIB_KB // 1024)
         self.assertEqual(scanner.hardlink_duplicates[0]["path"], duplicate)
 

@@ -87,6 +87,45 @@ class PublicFrontier(unittest.TestCase):
                                          if not row["inode_deduplicated"]), 200 * 1024 ** 2)
                     self.assertTrue(any(row["inode_deduplicated"] for row in report["file_leaves"]))
 
+    def test_hardlink_apparent_size_descends_each_directory_without_double_accounting(self):
+        du = shutil.which("gdu") or shutil.which("du")
+        version = subprocess.run([du, "--version"], capture_output=True, text=True)
+        self.assertIn("GNU coreutils", version.stdout)
+        with scratch_tempdir() as tmp:
+            root = pathlib.Path(tmp)
+            first, second = root / "first", root / "second"
+            first.mkdir()
+            second.mkdir()
+            payload, alias = first / "payload.bin", second / "alias.bin"
+            with payload.open("wb") as stream:
+                for _ in range(200):
+                    stream.write(b"x" * 1024 ** 2)
+            os.link(payload, alias)
+            small = second / "small"
+            small.write_text("x")
+            expected_files_kb = sum((path.stat().st_blocks * 512 + 1023) // 1024
+                                    for path in (payload, small))
+            expected_kb = expected_files_kb + sum((path.stat().st_blocks * 512 + 1023) // 1024
+                                                 for path in (first, second))
+            for backend in (du, ""):
+                with self.subTest(backend=backend or "fallback"):
+                    env = dict(os.environ, DISK_MAGICIAN_GDU_CMD=backend, DISK_MAGICIAN_DUA_CMD="")
+                    proc = subprocess.run([
+                        "bash", str(REPO / "disk_magician.sh"), "frontier", "--root", str(root),
+                        "--no-sibling-volumes", "--no-purgeable", "--workers", "1",
+                        "--wall-clock-cap", "20",
+                    ], env=env, text=True, capture_output=True, timeout=30)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    report = json.loads(proc.stdout)
+                    self.assertEqual(report["mode"], "complete", report["frontier_unfinished"])
+                    bucket_paths = {row["path"] for row in report["granularity_buckets"]}
+                    self.assertFalse({str(first), str(second)} & bucket_paths, report["granularity_buckets"])
+                    large_files = {row["path"] for row in report["oversize_indivisible_files"]}
+                    self.assertEqual(large_files, {str(payload), str(alias)})
+                    self.assertEqual(report["measured_total_kb"], expected_kb)
+                    self.assertEqual(sum(row["allocated_kb"] for row in report["file_leaves"]),
+                                     expected_files_kb)
+
     def test_fallback_default_depth_does_not_hide_file_under_large_directory(self):
         du = shutil.which("gdu") or shutil.which("du")
         self.assertIsNotNone(du, "GNU du is required for this backend fixture")
