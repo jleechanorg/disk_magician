@@ -87,7 +87,6 @@ def discover_generic(root, deadline):
         raise OSError("candidate is not a real directory")
     result = []
     pending = [root]
-    visited = 0
     while pending:
         if expired(deadline):
             raise TimeoutError
@@ -99,11 +98,6 @@ def discover_generic(root, deadline):
             for entry in entries:
                 if expired(deadline):
                     raise TimeoutError
-                visited += 1
-                # Explicitly incomplete rather than unbounded memory/work when
-                # a manual caller supplies no actuator deadline.
-                if visited > 100000:
-                    raise OSError("generic discovery entry budget exhausted")
                 if entry.name.startswith("."):
                     continue
                 info_child = entry.stat(follow_symlinks=False)
@@ -123,7 +117,6 @@ def stream_generic_leaves(root, deadline):
     if not stat.S_ISDIR(root_info.st_mode):
         raise OSError("candidate is not a real directory")
     pending = [root]
-    visited = 0
     while pending:
         if expired(deadline):
             raise TimeoutError
@@ -134,9 +127,6 @@ def stream_generic_leaves(root, deadline):
                 for entry in entries:
                     if expired(deadline):
                         raise TimeoutError
-                    visited += 1
-                    if visited > 100000:
-                        raise OSError("generic discovery entry budget exhausted")
                     info = entry.stat(follow_symlinks=False)
                     if (not entry.name.startswith(".") and stat.S_ISDIR(info.st_mode)
                             and info.st_dev == root_info.st_dev):
