@@ -519,7 +519,10 @@ class DiskInventoryTest(unittest.TestCase):
             fake_realpath.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
             fake_realpath.chmod(0o755)
             fake_python = fake_bin / "python3"
-            fake_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake_python.write_text(
+                "#!/bin/sh\ncase \"$2\" in *os.path.realpath*) exit 1;; esac\n"
+                f"exec {sys.executable} \"$@\"\n", encoding="utf-8",
+            )
             fake_python.chmod(0o755)
 
             completed = subprocess.run(
