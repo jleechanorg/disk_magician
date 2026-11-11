@@ -658,12 +658,15 @@ lease_reuse_lock_acquire() {
 _lease_registry_mkdir() {
     python3 - "$1" <<'PYREGISTRYMKDIR'
 import os, sys
+old_umask = os.umask(0o022)
 try:
-    os.mkdir(sys.argv[1])
+    os.mkdir(sys.argv[1], 0o755)
 except FileExistsError:
     sys.exit(2)
 except OSError:
     sys.exit(1)
+finally:
+    os.umask(old_umask)
 PYREGISTRYMKDIR
 }
 _lease_reuse_lock_acquire() {
@@ -674,7 +677,8 @@ _lease_reuse_lock_acquire() {
             if _lease_registry_mkdir "$lock"; then break; else mkdir_rc=$?; fi
             if (( mkdir_rc == 2 )); then _lease_registry_wait_contention=1; fi
         else
-            if mkdir "$lock" 2>/dev/null; then break; fi
+            if _lease_registry_mkdir "$lock"; then break; else mkdir_rc=$?; fi
+            if (( mkdir_rc == 2 )); then _lease_registry_wait_contention=1; fi
         fi
         [[ -z "$_lease_scope_signals" && "$attempt" == 0 ]] || return 1
         lease_reuse_lock_recover "$lease" || return 1
@@ -682,19 +686,28 @@ _lease_reuse_lock_acquire() {
     identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(str(s.st_dev)+":"+str(s.st_ino))' "$lock")" || { rmdir "$lock" 2>/dev/null || true; return 1; }
     slot=${#_lease_scope_paths[@]}
     _lease_scope_paths[slot]="$lease"; _lease_scope_ids[slot]="$identity"; _lease_scope_stamps[slot]=""; _lease_scope_complete[slot]=0
+    local saved_umask
+    saved_umask="$(umask)" || return 1
+    umask 0022
     if [[ -n "$_lease_scope_signals" ]] || ! printf '%s\n' "$_lease_scope_pid" > "$lock/pid" 2>/dev/null; then
+        umask "$saved_umask"
         rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true
         rmdir "$lock" 2>/dev/null || true
         _lease_scope_paths[slot]=""
         return 1
     fi
+    umask "$saved_umask"
     stamp="$(date +%s 2>/dev/null)" || stamp=""
+    saved_umask="$(umask)" || return 1
+    umask 0022
     if [[ ! "$stamp" =~ ^[0-9]+$ || -n "$_lease_scope_signals" ]] || ! printf '%s\n' "$stamp" > "$lock/acquired_at" 2>/dev/null; then
+        umask "$saved_umask"
         rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true
         rmdir "$lock" 2>/dev/null || true
         _lease_scope_paths[slot]=""
         return 1
     fi
+    umask "$saved_umask"
     _lease_scope_stamps[slot]="$stamp"
     _lease_scope_complete[slot]=1
     if [[ -n "$_lease_scope_signals" ]]; then
