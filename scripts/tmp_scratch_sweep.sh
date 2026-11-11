@@ -202,7 +202,9 @@ elif [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" ]]; then
 else
   VOLUME_COMMAND_STARTED=true
   volume_command=("$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}")
-  volume_command=("$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "$((VOLUME_TIMEOUT_SEC + 2))s" "${volume_command[@]}")
+  if [[ "$SWEEP_MODE" == full ]]; then
+    volume_command=("$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "$((VOLUME_TIMEOUT_SEC + 2))s" "${volume_command[@]}")
+  fi
   run_bounded_capture VOLUME_OUTPUT env ACT_DEADLINE_AT="$VOLUME_PHASE_DEADLINE_AT" ACT_CURSOR="$VOLUME_CURSOR" \
     DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS="$VOLUME_TIMEOUT_SEC" \
     "${volume_command[@]}" || VOLUME_RC=$?
