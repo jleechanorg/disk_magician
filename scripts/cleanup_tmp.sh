@@ -1605,7 +1605,6 @@ container_child_has_protected_repository() {
 large_consider_entry() {
   local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0
   local scratch_container=false
-  scratch_budget_report_measurement "$d" || exit $?
   base="$(basename "$d")"
 
   if is_different_filesystem "$d" "${PRIVATE_TMP_ROOT:-}"; then
@@ -1613,6 +1612,8 @@ large_consider_entry() {
     cleanup_tmp_count_candidate_result "kept:mountpoint"
     return 0
   fi
+
+  scratch_budget_report_measurement "$d" || exit $?
 
   case "$base" in
     com.apple.*|system-*|PowerlogHelperd*|systemd-private-*|snap-private-tmp|.X11-unix|.XIM-unix|.ICE-unix|.Test-unix|.font-unix) return 0 ;;
@@ -1713,9 +1714,9 @@ large_consider_entry() {
         IFS= read -r -d '' _newest && IFS= read -r -d '' kind &&
         IFS= read -r -d '' leaf && IFS= read -r -d '' _apparent; do
         [[ "$leaf" == "$d" ]] && continue
-        descended=true
         if [[ "$kind" == A && -d "$leaf" && ! -L "$leaf" ]] &&
           python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$d" "$leaf"; then
+          descended=true
           large_consider_entry "$leaf" "$((depth + 1))" "$min_kb" "$active_hours" "$aged_mode" || {
             plan_rc=$?
             break
