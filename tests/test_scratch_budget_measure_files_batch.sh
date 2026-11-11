@@ -50,6 +50,15 @@ else
   bad 'a missing file was counted or lost its error row'
 fi
 
+_dm_mf_list() { _batch_original_list "$@"; }
+python3 -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); (p/"z").mkdir(parents=True); (p/"a\n").write_bytes(b"x"*2097152)' "$T/newline"
+scratch_budget_measure_files "$T/newline" 1 >"$T/newline.rows"; rc=$?
+if [[ "$rc" -eq 0 ]] && python3 -c 'from pathlib import Path; import os,sys; expected=b"\tF\t"+os.fsencode(Path(sys.argv[1])/"a\n")+b"\n"; assert expected in Path(sys.argv[2]).read_bytes()' "$T/newline" "$T/newline.rows"; then
+  ok 'batch flush preserves a trailing newline in a filename'
+else
+  bad 'batch capture changed filename bytes'
+fi
+
 _dm_mf_list() {
   _batch_original_list "$@" || return $?
   ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic() - 1)')"

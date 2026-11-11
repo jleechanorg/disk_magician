@@ -703,7 +703,8 @@ _dm_mf_emit_leaf() {
 _dm_mf_emit_leaf_batch() {
   local manifest="$1" parent="$2" out rc=0
   [[ -s "$manifest" ]] || return 0
-  if out="$(act_run_bounded python3 - "$manifest" "${ACT_DEADLINE_AT:-}" "$_DM_MF_WORK" <<'PYMFSTAT'
+  out="$_DM_MF_WORK/rows.$(( ++_DM_MF_SEQ ))"
+  if act_run_bounded python3 - "$manifest" "${ACT_DEADLINE_AT:-}" "$_DM_MF_WORK" >"$out" <<'PYMFSTAT'
 import os
 import sys
 import tempfile
@@ -758,18 +759,18 @@ except (OSError, ValueError) as error:
     print("metadata batch failed: %s" % error, file=sys.stderr)
     sys.exit(1)
 PYMFSTAT
-  )"; then
+  then
     rc=0
   else
     rc=$?
   fi
-  if [[ -n "$out" ]]; then printf '%s\n' "$out"; fi
+  if [[ -s "$out" ]]; then cat "$out"; fi
   if (( rc == 124 )); then
     printf '0\t0\t0\tE\t%s\n' "$parent"
     _dm_mf_report_err "$parent"
     _DM_MF_RC=124
   elif (( rc != 0 )); then
-    [[ -n "$out" ]] || printf '0\t0\t0\tE\t%s\n' "$parent"
+    [[ -s "$out" ]] || printf '0\t0\t0\tE\t%s\n' "$parent"
     _dm_mf_report_err "$parent"
   fi
   return 0
