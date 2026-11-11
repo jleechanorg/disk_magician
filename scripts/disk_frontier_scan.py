@@ -1303,7 +1303,11 @@ class FrontierScanner:
                     continue
                 duplicate = (stat.S_ISREG(st.st_mode) and st.st_nlink > 1
                              and path not in allocated_records)
-                apparent = 0 if duplicate else st.st_size
+                # Every pathname contributes its logical size to directory
+                # descent; only the allocated-byte ledger deduplicates inodes.
+                apparent = st.st_size
+                if duplicate:
+                    allocated_records[path] = 0
                 self.apparent_bytes[path] = apparent
                 if stat.S_ISREG(st.st_mode):
                     self.file_leaves[path] = {
@@ -1653,6 +1657,13 @@ class FrontierScanner:
                         "measured_kb": first_kb,
                     })
                     self.hardlink_duplicate_kb += first_kb
+                    self.measured[path] = 0
+                    self.apparent_bytes[path] = st.st_size
+                    if self.granularity_kb > 0 and st.st_size >= self.granularity_kb * 1024:
+                        self.oversize_files.append({
+                            "path": path, "measured_kb": 0,
+                            "apparent_bytes": st.st_size, "reason": "indivisible_file",
+                        })
                     self.file_leaves[path] = {
                         "path": path, "apparent_bytes": st.st_size,
                         "allocated_kb": 0, "inode_deduplicated": True,
