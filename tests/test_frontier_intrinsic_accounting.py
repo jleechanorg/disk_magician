@@ -869,7 +869,8 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             self.assertEqual(scanner.measured[str(failed)], 852)
             self.assertEqual(
                 [item for item in scanner.inventory_buckets if item["path"] == str(failed)],
-                [{"path": str(failed), "measured_kb": 852}],
+                [{"path": str(failed), "measured_kb": 852, "apparent_bytes": 0,
+                  "kind": "dir", "measurement_method": "file-summed"}],
             )
             self.assertEqual(measure.call_count, 1)
             self.assertEqual(measure.call_args.args[0], str(failed))
@@ -906,7 +907,8 @@ class TestIntrinsicGateAccounting(unittest.TestCase):
             self.assertEqual(scanner.measured[str(failed)], 852)
             self.assertEqual(
                 scanner.inventory_buckets,
-                [{"path": str(failed), "measured_kb": 852}],
+                [{"path": str(failed), "measured_kb": 852, "apparent_bytes": 0,
+                  "kind": "dir", "measurement_method": "file-summed"}],
             )
             self.assertEqual(measure.call_count, 1)
             self.assertEqual(measure.call_args.args[0], str(failed))
@@ -1076,7 +1078,7 @@ class TestHardlinkAttribution(unittest.TestCase):
         duplicate = "/fixture/b/payload"
         inode_stat = SimpleNamespace(
             st_dev=1, st_ino=77, st_nlink=2, st_mode=stat.S_IFREG,
-            st_blocks=200 * 1024,
+            st_blocks=200 * 1024, st_size=100 * 1024 ** 2,
         )
         with mock.patch.object(frontier.os, "lstat", return_value=inode_stat):
             scanner.process_node(first, 2, False)

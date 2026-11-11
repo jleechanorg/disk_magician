@@ -367,7 +367,10 @@ def complete_coverage_envelope(report):
         or not item.get("path")
         or type(item.get("measured_kb")) is not int
         or item["measured_kb"] < 0
-        or (item["measured_kb"] >= GRANULARITY_CEILING_KB and item.get("kind", "dir") != "file")
+        or ("apparent_bytes" in item and (
+            type(item["apparent_bytes"]) is not int or item["apparent_bytes"] < 0))
+        or (item.get("apparent_bytes", item["measured_kb"] * 1024) >= GRANULARITY_CEILING_KB * 1024
+            and item.get("kind", "dir") != "file")
         or item.get("kind", "dir") not in BUCKET_KINDS
         for item in buckets
     ):
@@ -493,6 +496,10 @@ def build_ledger_dict(report, captured_at):
         "residual_kb": report.get("residual_kb"),
         "purgeable_kb": report.get("purgeable_kb"),
         "granularity_buckets": buckets,
+        "file_leaves": report.get("file_leaves", []),
+        "measurement_method": (report.get("config") or {}).get(
+            "directory_subdivision_method", "legacy allocation (apparent metadata unavailable)"),
+        "directory_ceiling_mib": 100,
         "oversize_indivisible_files": oversize,
         "accounting_equation": equation,
     }
@@ -670,16 +677,23 @@ def main():
         f"# Top-down 100 MiB ledger — {report.get('hostname', 'unknown')}",
         f"Captured: {captured_at}",
         "",
-        "| Size (GiB) | Path |",
-        "|---:|---|",
+        f"Method: {ledger['measurement_method']}. Directory ceiling: below 100 MiB; files are indivisible leaves.",
+        "Allocated sizes are filesystem accounting, not apparent sizes.",
+        "",
+        "| Allocated (GiB) | Apparent (MiB) | Path |",
+        "|---:|---:|---|",
     ]
     for item in sorted(buckets, key=lambda b: -(b.get("measured_kb") or 0)):
-        lines.append(f"| {gib(item.get('measured_kb')):.1f} | {item.get('path')} |")
+        apparent = item.get("apparent_bytes")
+        apparent_text = f"{apparent / 1024 ** 2:.1f}" if apparent is not None else "unknown"
+        lines.append(f"| {gib(item.get('measured_kb')):.1f} | {apparent_text} | {item.get('path')} |")
     for item in oversize:
+        apparent = item.get("apparent_bytes")
+        apparent_text = f"{apparent / 1024 ** 2:.1f}" if apparent is not None else "unknown"
         lines.append(
-            f"| {gib(item.get('measured_kb')):.1f} | {item.get('path')} (indivisible file) |"
+            f"| {gib(item.get('measured_kb')):.1f} | {apparent_text} | {item.get('path')} (indivisible file) |"
         )
-    lines.append(f"| {gib(report.get('residual_kb')):.1f} | _residual (unattributed)_ |")
+    lines.append(f"| {gib(report.get('residual_kb')):.1f} | unknown | _residual (unattributed)_ |")
     lines.append("")
     lines.append(f"Balanced: {str(bool(equation.get('displayed_balanced'))).lower()}")
     with open(os.path.join(args.out_dir, LEDGER_MD), "w") as f:

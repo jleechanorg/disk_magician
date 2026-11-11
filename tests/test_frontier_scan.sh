@@ -242,10 +242,11 @@ measured_total=$(json_get "$OUT2" "d['measured_total_kb']")
 alias_kb=$(json_get "$OUT2" "d['measured'].get('$T2/alias_to_real', -1)")
 real_kb=$(json_get "$OUT2" "d['measured'].get('$T2/real/payload', -1)")
 
-if [[ "$measured_total" == "200" ]]; then
-  ok "measured_total_kb == 200 (payload counted exactly once, alias not double-counted)"
+expected_total=$(python3 -c 'import os,sys; print(sum((os.lstat(p).st_blocks*512+1023)//1024 for p in sys.argv[1:]))' "$T2/real/payload" "$T2/real" "$T2/alias_to_real")
+if [[ "$measured_total" == "$expected_total" ]]; then
+  ok "payload counted once with actual directory and symlink metadata"
 else
-  bad "measured_total_kb == $measured_total (expected 200 — symlink alias was double-counted)"
+  bad "measured_total_kb == $measured_total (expected $expected_total from lstat allocation)"
 fi
 
 if [[ "$alias_kb" != "-1" && "$alias_kb" -lt 10 ]]; then
@@ -575,7 +576,7 @@ expected = [
     {"path": f"{root}/large/b", "measured_kb": 40 * 1024},
     {"path": f"{root}/large/c", "measured_kb": 40 * 1024},
 ]
-print(buckets == expected,
+print([{key: item[key] for key in ("path", "measured_kb")} for item in buckets] == expected,
       all(item["measured_kb"] < 100 * 1024 for item in buckets),
       sum(item["measured_kb"] for item in buckets) == 120 * 1024)
 PY
@@ -612,12 +613,13 @@ fake = SimpleNamespace(
     st_dev=real.st_dev,
     st_mode=real.st_mode,
     st_blocks=12 * gib,
+    st_size=6 * gib * 1024,
 )
 with mock.patch.object(m.os, "lstat", return_value=fake):
     scanner.process_node(path, 1, False)
 print(scanner.measured.get(path) == 6 * gib,
       scanner.oversize_files == [
-          {"path": path, "measured_kb": 6 * gib, "reason": "indivisible_file"}
+          {"path": path, "measured_kb": 6 * gib, "apparent_bytes": 6 * gib * 1024, "reason": "indivisible_file"}
       ],
       m.build_granularity_buckets(scanner.measured, root, 100 * 1024) == [])
 PY
@@ -820,7 +822,9 @@ for path in (one, two, shard_b, protected):
 for path in (os.path.join(one, "payload.bin"), os.path.join(two, "payload.bin"),
              os.path.join(shard_b, "payload.bin"), huge):
     with open(path, "wb") as f:
-        f.write(b"x")
+        f.truncate((7 * gib * 1024 if path == huge else
+                    30 * 1024 ** 2 if path == os.path.join(shard_b, "payload.bin") else
+                    60 * 1024 ** 2))
 
 rows = [
     (60 * 1024, one),
@@ -862,7 +866,8 @@ print(
     set(commands[0][6:]) == {shard_a, shard_b, huge, protected},
     all(item["measured_kb"] < 100 * 1024 for item in buckets),
     set(bucket_paths) == {one, two, shard_b},
-    oversize == [{"path": huge, "measured_kb": 7 * gib, "reason": "indivisible_file"}],
+    oversize == [{"path": huge, "measured_kb": 7 * gib,
+                  "apparent_bytes": 7 * gib * 1024, "reason": "indivisible_file"}],
     any(item.get("path") == protected and item.get("reason") == "inventory_permission_denied"
         for item in unfinished),
     all(not path.startswith(protected + os.sep) and path != protected for path in bucket_paths),
@@ -943,7 +948,8 @@ with mock.patch.object(m, "GDU_CMD", "/fake/gdu"), \
     scanner.run()
 print(
     scanner.measured == {safe: 40 * 1024},
-    scanner.inventory_buckets == [{"path": safe, "measured_kb": 40 * 1024}],
+    scanner.inventory_buckets == [{"path": safe, "measured_kb": 40 * 1024,
+        "apparent_bytes": 0, "kind": "dir", "measurement_method": "file-summed"}],
     any(item.get("path") == failed and item.get("reason") == "inventory_path_disappeared"
         for item in scanner.frontier_unfinished),
 )

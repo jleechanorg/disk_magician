@@ -1,5 +1,6 @@
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,7 +47,11 @@ class GranularMeasurementContract(unittest.TestCase):
             payload = child/'payload'
             with payload.open('wb') as out:
                 for _ in range(100): out.write(b'x' * (1024 * 1024))
-            result = subprocess.run(['du', '-a', '-k', '--null', str(child)], capture_output=True, check=True)
+            du = shutil.which("gdu") or shutil.which("du")
+            version = subprocess.run([du, "--version"], capture_output=True, text=True)
+            if version.returncode or "GNU coreutils" not in version.stdout:
+                self.skipTest("GNU du unavailable")
+            result = subprocess.run([du, '-a', '-k', '--null', str(child)], capture_output=True, check=True)
             records = {os.fsdecode(row.split(b'\t', 1)[1]): int(row.split(b'\t', 1)[0])
                        for row in result.stdout.split(b'\0') if row}
             scanner = f.FrontierScanner(f.parse_args(['--root', d]))
@@ -78,6 +83,22 @@ class GranularMeasurementContract(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case), self.assertRaises(history.LedgerError):
                 history.validate_full_attribution_ledger(case, label='incomplete')
+
+    def test_history_checks_apparent_directory_ceiling_and_preserves_file_metrics(self):
+        import history_diff as history
+        from test_history_diff import ledger
+        row = {"path": "/fixture/sparse", "kind": "dir", "measured_kb": 4,
+               "apparent_bytes": 200 * 1024 ** 2}
+        directory = ledger(4, 0, [row])
+        with self.assertRaises(history.LedgerError):
+            history.validate_full_attribution_ledger(directory, label="sparse-directory")
+        row["kind"] = "file"
+        history.validate_full_attribution_ledger(directory, label="sparse-file")
+        directory["file_leaves"] = [{"path": row["path"], "apparent_bytes": row["apparent_bytes"],
+                                     "allocated_kb": 4}]
+        rendered = r.build_ledger_dict(directory, "2026-11-11T08:00:00Z")
+        self.assertEqual(rendered["file_leaves"], directory["file_leaves"])
+        self.assertEqual(rendered["granularity_buckets"][0]["apparent_bytes"], 200 * 1024 ** 2)
 
     def test_renderer_rejects_synthetic_kind_and_large_ceiling(self):
         self.assertNotIn('direct_allocation_segment', r.BUCKET_KINDS)
