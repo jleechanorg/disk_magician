@@ -1691,6 +1691,43 @@ large_consider_entry() {
     done < <(/usr/bin/find "$d" -xdev -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
     return 0
   fi
+  # Split measured large parents before per-unit recency; retain repository
+  # lifecycle units and the existing typed paths for files and links.
+  local plan plan_rc=0 marker _bytes _files _newest kind leaf _apparent descended=false
+  plan="$(mktemp "${TMPDIR:-/tmp}/cleanup-tmp-leaves.XXXXXX")" || return 1
+  scratch_budget_measure_files "$d" 100 --nul >"$plan" || plan_rc=$?
+  if (( plan_rc != 0 )); then
+    rm -f -- "$plan"
+    return "$plan_rc"
+  fi
+  IFS= read -r -d '' marker <"$plan" || marker=""
+  if [[ "$marker" != diskm-measure-leaves-v1 ]]; then
+    rm -f -- "$plan"
+    log "ERROR: invalid measurement frame; preserving $d"
+    return 1
+  fi
+  if ! _scratch_budget_contains_git "$d"; then
+    {
+      IFS= read -r -d '' marker
+      while IFS= read -r -d '' _bytes && IFS= read -r -d '' _files &&
+        IFS= read -r -d '' _newest && IFS= read -r -d '' kind &&
+        IFS= read -r -d '' leaf && IFS= read -r -d '' _apparent; do
+        [[ "$leaf" == "$d" ]] && continue
+        descended=true
+        if [[ "$kind" == A && -d "$leaf" && ! -L "$leaf" ]] &&
+          python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$d" "$leaf"; then
+          large_consider_entry "$leaf" "$((depth + 1))" "$min_kb" "$active_hours" "$aged_mode" || {
+            plan_rc=$?
+            break
+          }
+        fi
+      done
+    } <"$plan"
+  fi
+  rm -f -- "$plan"
+  (( plan_rc == 0 )) || return "$plan_rc"
+  [[ "$descended" == true ]] && return 0
+
   if has_recent_activity "$d" "$active_hours" "$aged_mode"; then
     log "Skipping recently active dir (mtime/ctime within ${active_hours}h): $d"
     return 0

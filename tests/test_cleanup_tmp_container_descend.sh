@@ -154,6 +154,7 @@ run_sweep() {
 mkchild() { mkdir -p "$1"; head -c 20000 /dev/zero > "$1/payload.bin"; }
 archived() { /usr/bin/find "$AR" -mindepth 3 -maxdepth 3 -name "$1" 2>/dev/null | head -n1; }
 
+if [[ "${DISK_MAGICIAN_TMP_TEST_FILTER:-}" != t22 ]]; then
 echo "Test 1: active container -> idle child evaluated and kept (no declared-ephemeral row); fresh child and container kept"
 make_env t1
 mkdir -p "$PT/agent-scratch"
@@ -485,5 +486,29 @@ assert_contains "t21 container was not archived as a unit" "Dirs archived: 0" "$
 
 
 echo
+fi
+echo "Test 22: a fresh sibling does not shelter a stale typed build unit beneath a large /tmp parent"
+# Explicitly register build as a tmp root so its direct pr_ units use the
+# existing E2 row. The two 60 MiB units cross the parent threshold.
+make_env t22
+PT="$TMP_ROOT/t22-tmp"
+mkdir -p "$PT/project/build/pr_stale-unit" "$PT/project/build/pr_fresh-unit"
+truncate -s $((60 * 1024 * 1024)) "$PT/project/build/pr_stale-unit/payload.bin"
+truncate -s $((60 * 1024 * 1024)) "$PT/project/build/pr_fresh-unit/payload.bin"
+set_age_hours "$PT/project/build/pr_stale-unit" 72
+run_sweep t22 --dry-run DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=project DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT/project/build"
+printf '%s\n' "$OUT"
+assert_exists "t22 dry-run leaves stale eligible unit untouched" "$PT/project/build/pr_stale-unit"
+assert_exists "t22 fresh sibling remains untouched" "$PT/project/build/pr_fresh-unit"
+assert_contains "t22 stale typed unit reaches its own C14 decision" \
+  "DRY RUN: would archive: $PT/project/build/pr_stale-unit" "$OUT"
+assert_contains "t22 fresh sibling is preserved by its own recency check" \
+  "Skipping recently active dir" "$OUT"
+run_sweep t22 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=project DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT/project/build"
+printf '%s\n' "$OUT"
+assert_missing "t22 clean archives stale typed unit" "$PT/project/build/pr_stale-unit"
+assert_exists "t22 clean preserves fresh typed sibling" "$PT/project/build/pr_fresh-unit"
+assert_exists "t22 archived stale unit retains recoverable bytes" "$(archived pr_stale-unit)/payload.bin"
+
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]
