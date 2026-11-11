@@ -1,6 +1,8 @@
 """Regression tests for c14_probe.py lsremote local remote alternates and commondir validation."""
 import json
 import os
+import shutil
+import socket
 from pathlib import Path
 import subprocess
 import sys
@@ -377,6 +379,105 @@ class TestC14ProbeRemoteAlternates(unittest.TestCase):
             text=True,
         )
         self.assertEqual(res_unique.stdout.strip(), "yes")
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(root_dir / "local.sock"))
+            local_socket = subprocess.run(
+                [sys.executable, str(PROBE), "open-file", str(root_dir)],
+                env={**self.env, "DISK_MAGICIAN_LSOF_BIN": str(fake_lsof), "TARGET_PATH": str(clone_bin)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(local_socket.stdout.strip(), "kept:unix-socket")
+
+
+    def test_open_file_preserves_relative_unix_socket(self):
+        lsof = shutil.which("lsof")
+        if not lsof:
+            self.skipTest("real lsof is required for Unix socket coverage")
+        root = self.tmproot / "socket"
+        outside = self.tmproot / "outside"
+        root.mkdir()
+        outside.mkdir()
+        (outside / "socket-link").symlink_to(root, target_is_directory=True)
+        code = (
+            'import os,socket,sys; os.chdir(sys.argv[1]); '
+            's=socket.socket(socket.AF_UNIX); s.bind("fsmonitor--daemon.ipc"); '
+            's.listen(); print("ready",flush=True); sys.stdin.read()'
+        )
+        with subprocess.Popen(
+            [sys.executable, "-c", code, str(root)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        ) as child:
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+                for path, expected in ((root, "kept:unix-socket"), (outside, "no")):
+                    result = subprocess.run(
+                        [sys.executable, str(PROBE), "open-file", str(path)],
+                        env={**self.env, "DISK_MAGICIAN_LSOF_BIN": lsof},
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), expected)
+            finally:
+                child.stdin.close()
+                child.wait(timeout=5)
+        # The filesystem alone cannot prove that an old socket is unused.
+        result = subprocess.run(
+            [sys.executable, str(PROBE), "open-file", str(root)],
+            env={**self.env, "DISK_MAGICIAN_LSOF_BIN": lsof},
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.stdout.strip(), "kept:unix-socket")
+
+    def test_open_file_preserves_socket_scan_failure(self):
+        root = self.tmproot / "candidate"
+        root.mkdir()
+        fake_bin = self.tmproot / "closed-probes"
+        fake_bin.mkdir()
+        for name, status in (("lsof", 1), ("find", 2)):
+            script = fake_bin / name
+            script.write_text(f"#!/bin/sh\nexit {status}\n", encoding="utf-8")
+            script.chmod(0o755)
+        result = subprocess.run(
+            [sys.executable, str(PROBE), "open-file", str(root)],
+            env={**self.env, "DISK_MAGICIAN_LSOF_BIN": str(fake_bin / "lsof"),
+                 "PATH": str(fake_bin) + os.pathsep + self.env["PATH"]},
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.stdout.strip(), "kept:check-failed")
+
+
+    def test_open_file_defers_incomplete_socket_scan(self):
+        root = self.tmproot / "candidate"
+        root.mkdir()
+        fake_bin = self.tmproot / "slow-probes"
+        fake_bin.mkdir()
+        for name, code in (("lsof", "exit 1"), ("find", "sleep 5")):
+            script = fake_bin / name
+            script.write_text(f"#!/bin/sh\n{code}\n", encoding="utf-8")
+            script.chmod(0o755)
+        result = subprocess.run(
+            [sys.executable, str(PROBE), "open-file", str(root)],
+            env={**self.env, "DISK_MAGICIAN_LSOF_BIN": str(fake_bin / "lsof"),
+                 "DISK_MAGICIAN_LSOF_CAP": "0.1",
+                 "PATH": str(fake_bin) + os.pathsep + self.env["PATH"]},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.stdout.strip(), "deferred:tree-walk")
+
+    def test_open_file_preserves_symlink_root(self):
+        root = self.tmproot / "candidate"
+        root.mkdir()
+        link = self.tmproot / "linked-candidate"
+        link.symlink_to(root, target_is_directory=True)
+        fake_lsof = self.tmproot / "closed-lsof"
+        fake_lsof.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        fake_lsof.chmod(0o755)
+        result = subprocess.run(
+            [sys.executable, str(PROBE), "open-file", str(link)],
+            env={**self.env, "DISK_MAGICIAN_LSOF_BIN": str(fake_lsof)},
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.stdout.strip(), "kept:check-failed")
 
 
 if __name__ == "__main__":

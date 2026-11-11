@@ -174,6 +174,7 @@ echo "=== cleanup_tmp.sh open-file probes test suite (disk_magician-dcz) ==="
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 1: Fake lsof only accepts `+w -n -P -F fnt`; unrelated mount warning is safe
 # ─────────────────────────────────────────────────────────────────────────────
+if [[ "${DISK_MAGICIAN_OPEN_FILE_TEST_FILTER:-}" != relative-unix ]]; then
 echo "Test 1: Fake lsof requires targetless '+w -n -P -F fnt' and rejects '+D'"
 T1_PRIVATE_TMP="$TMP_ROOT/t1-private-tmp"
 T1_TMP="$TMP_ROOT/t1-tmp"
@@ -1204,6 +1205,76 @@ run_capture "$T11_OUT" env -i HOME="$TMP_ROOT/t11-home" \
 assert_rc "Test 11c (unknown path format): exits 0" 0 $?
 assert_exists "Test 11c: candidate preserved on unknown path format" "$T11_ARCHIVE/20200101T000000Z"
 assert_contains "Test 11c: logs unknown path format fail-closed" "Open-file check encountered unknown path format" "$(cat "$T11_OUT")"
+fi
+
+echo "Test 12: relative Unix sockets require a candidate-scoped explicit no"
+T12_PRIVATE_TMP="$TMP_ROOT/t12-private-tmp"
+T12_TMP="$TMP_ROOT/t12-tmp"
+T12_ARCHIVE="$TMP_ROOT/t12-archive"
+T12_BIN="$TMP_ROOT/t12-bin"
+T12_OUT="$TMP_ROOT/t12.out"
+T12_TRACE="$TMP_ROOT/t12-scoped"
+mkdir -p "$T12_PRIVATE_TMP" "$T12_TMP"
+make_find_shim "$T12_BIN" "$T12_PRIVATE_TMP" "$T12_TMP"
+make_fake_timeout "$T12_BIN/timeout"
+cat > "$T12_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == -w ]]; then
+  printf 'scoped\n' >>"$DISK_MAGICIAN_TEST_SCOPE_TRACE"
+  case "$DISK_MAGICIAN_TEST_SOCKET_MODE" in
+    unrelated) exit 1 ;;
+    local) printf 'p1201\nf3\nn%s/fsmonitor--daemon.ipc\n' "$DISK_MAGICIAN_TEST_SCOPE_CANDIDATE"; exit 0 ;;
+    error) exit 2 ;;
+    *) echo "unexpected scoped query" >&2; exit 99 ;;
+  esac
+fi
+type=unix
+case "$DISK_MAGICIAN_TEST_SOCKET_MODE" in regular) type=REG ;; unknown) type="" ;; esac
+printf 'p1201\nf3\n'
+[[ -z "$type" ]] || printf 't%s\n' "$type"
+printf 'nfsmonitor--daemon.ipc\n'
+exit 0
+EOF
+chmod +x "$T12_BIN/lsof"
+for socket_mode in unrelated local error regular unknown; do
+  candidate="$T12_ARCHIVE/$socket_mode/20200101T000000Z"
+  mkdir -p "$candidate/app"
+  printf payload >"$candidate/app/payload.bin"
+  set_old_mtime "$candidate"
+  trace="$T12_TRACE-$socket_mode"
+  run_capture "$T12_OUT" env -i HOME="$TMP_ROOT/t12-home" \
+    PATH="$T12_BIN:/usr/bin:/bin" LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
+    DISK_MAGICIAN_LSOF_BIN="$T12_BIN/lsof" \
+    DISK_MAGICIAN_TIMEOUT_BIN="$T12_BIN/timeout" \
+    DISK_MAGICIAN_ARCHIVE_ROOT="$T12_ARCHIVE/$socket_mode" \
+    DISK_MAGICIAN_TEST_SOCKET_MODE="$socket_mode" \
+    DISK_MAGICIAN_TEST_SCOPE_CANDIDATE="$candidate/app" \
+    DISK_MAGICIAN_TEST_SCOPE_TRACE="$trace" \
+    DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+    DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T12_PRIVATE_TMP" \
+    DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T12_TMP" \
+    bash "$SOURCE_SCRIPT" --clean
+  assert_rc "Test 12 $socket_mode: cleanup completes" 0 $?
+  output="$(cat "$T12_OUT")"
+  case "$socket_mode" in
+    unrelated)
+      assert_contains "Test 12: unrelated socket permits independent C14 evaluation" "C14 kept:unproven-content" "$output"
+      assert_not_contains "Test 12: unrelated socket does not mark candidate in use" "Skipping in-use aged archive" "$output"
+      assert_exists "Test 12: closed result came from scoped probe" "$trace"
+      ;;
+    local|error)
+      assert_contains "Test 12 $socket_mode: candidate remains in use" "Skipping in-use aged archive" "$output"
+      assert_exists "Test 12 $socket_mode: scoped probe executed" "$trace"
+      assert_exists "Test 12 $socket_mode: bytes preserved" "$candidate/app/payload.bin"
+      ;;
+    regular|unknown)
+      assert_contains "Test 12 $socket_mode: ambiguous file still fails closed" "Open-file check encountered unknown path format" "$output"
+      assert_missing "Test 12 $socket_mode: socket fallback did not run" "$trace"
+      assert_exists "Test 12 $socket_mode: bytes preserved" "$candidate/app/payload.bin"
+      ;;
+  esac
+done
+
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
