@@ -32,7 +32,9 @@ fields = dict(re.findall(r"(?:^|\s)([a-z_]+)=([^\s]+)", matches[0]))
 assert fields.get("threshold_mib") == "100", fields
 if kind == "measured":
     assert fields.get("bytes") == "209715200", fields
-    assert fields.get("size_method") == "file-summed-apparent", fields
+    assert fields.get("size_method") == "inode-deduplicated-file-summed-apparent", fields
+    assert fields.get("apparent_bytes") == "209715200", fields
+    assert fields.get("unique_bytes") == "209715200", fields
 else:
     assert fields.get("size_method") == "unmeasured", fields
     assert fields.get("size_known") == "false", fields
