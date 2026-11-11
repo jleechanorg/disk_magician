@@ -530,6 +530,24 @@ case "$mode" in
     lease_reuse_lock_release "$lease"
     [[ ! -e "$lease.reuse-lock" ]]
     ;;
+  umask)
+    umask 0002
+    lease_reuse_lock_acquire "$lease"
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock")" == 493 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock/pid")" == 420 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock/acquired_at")" == 420 ]]
+    [[ "$(umask)" == 0002 ]]
+    lease_reuse_lock_release "$lease"
+    [[ ! -e "$lease.reuse-lock" ]]
+    _lease_registry_wait_path="$lease.reuse-lock"
+    lease_reuse_lock_acquire "$lease"
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock")" == 493 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock/pid")" == 420 ]]
+    [[ "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$lease.reuse-lock/acquired_at")" == 420 ]]
+    [[ "$(umask)" == 0002 ]]
+    lease_reuse_lock_release "$lease"
+    [[ ! -e "$lease.reuse-lock" ]]
+    ;;
   write-fail)
     printf() {
       if [[ "${LEASE_TEST_FAIL_ACQUIRED_WRITE:-0}" == "1" && "$BASH_COMMAND" == *"acquired_at"* ]]; then
@@ -589,6 +607,14 @@ esac
     assert normal_writer.returncode == 0, (normal_writer.stdout, normal_writer.stderr)
     assert not Path(str(writer_lease) + ".reuse-lock").exists()
     print("PASS: normal setup/release leaves no lock and preserves the caller TERM trap")
+
+    umask_lease = writer_lease_dir / "umask-fixture.json"
+    umask_writer = subprocess.run(
+        ["bash", str(writer_case), "umask", str(umask_lease)],
+        env=writer_env, text=True, capture_output=True, check=False,
+    )
+    assert umask_writer.returncode == 0, (umask_writer.stdout, umask_writer.stderr)
+    print("PASS: lock and metadata modes remain recovery-compatible under umask 0002")
 
     write_error_env = {**writer_env, "LEASE_TEST_FAIL_ACQUIRED_WRITE": "1"}
     write_error = subprocess.run(
