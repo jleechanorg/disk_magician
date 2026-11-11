@@ -286,14 +286,14 @@ data_volume_free_bytes() {
 # C14 verdict, the recency floor, the cursor and the LRU order are untouched.
 DETAIL_MIB=100
 report_candidate_detail() {
-  local entry="$1" rows bytes files newest flag path metadata rc=0
+  local entry="$1" rows bytes files newest flag path apparent_bytes metadata rc=0
   # The caller supplies allocated du KiB; only the measurement can decide
   # the apparent-size threshold (sparse files may have almost no allocation).
   rows="$(scratch_budget_measure_files "$entry" "$DETAIL_MIB" 2>/dev/null)" || rc=$?
-  while IFS=$'\t' read -r bytes files newest flag path; do
+  while IFS=$'\t' read -r bytes files newest flag path apparent_bytes; do
     [[ -n "${flag:-}" ]] || continue
     [[ "$flag" == A && "$path" == "$entry" ]] && continue
-    metadata="size_method=file-summed-apparent threshold_mib=$DETAIL_MIB"
+    metadata="size_method=inode-deduplicated-file-summed-apparent threshold_mib=$DETAIL_MIB apparent_bytes=$apparent_bytes unique_bytes=$bytes"
     if [[ "$flag" == G || "$flag" == E ]]; then
       metadata="size_method=unmeasured size_known=false age_known=false threshold_mib=$DETAIL_MIB"
     fi

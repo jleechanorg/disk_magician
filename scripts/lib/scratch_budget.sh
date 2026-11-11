@@ -606,24 +606,35 @@ scratch_budget_artifact_children_batch() {
 # Read-only metadata traversal, independent of cleanup eligibility. Git/source/
 # session trees have no measurement exemption. Symlinks are indivisible link
 # leaves and never followed. Hardlinks count once per invocation (device/inode).
-# TSV: apparent bytes, file count, newest file epoch, A/F/L/E, path.
+# TSV: unique inode bytes, file paths, newest epoch, A/F/L/E, path, apparent bytes.
 # A requires strictly less than the ceiling (maximum 100 MiB). E is incomplete.
 # Returns 0 complete, 1 metadata/identity failure, 124 deadline, 2 usage error.
 scratch_budget_measure_files() {
-  local path="${1:-}" threshold_mib="${2:-100}" rc=0
+  local path="${1:-}" threshold_mib="${2:-100}" output_format="${3:-tsv}" rc=0
   [[ -n "$path" ]] || return 2
+  [[ "$output_format" == tsv || "$output_format" == --nul ]] || return 2
   [[ "$threshold_mib" =~ ^[0-9]+$ ]] || threshold_mib=100
   if (( threshold_mib < 1 || threshold_mib > 100 )); then threshold_mib=100; fi
-  act_run_bounded python3 - "$path" "$threshold_mib" "${ACT_DEADLINE_AT:-}" <<'PY' || rc=$?
+  act_run_bounded python3 - "$path" "$threshold_mib" "${ACT_DEADLINE_AT:-}" "$output_format" <<'PY' || rc=$?
 import os
 import stat
 import sys
 import time
 
-root, threshold, deadline = sys.argv[1:]
+root, threshold, deadline, output_format = sys.argv[1:]
+if output_format not in ('tsv', '--nul'):
+    sys.exit(2)
 # A trailing slash makes lstat follow a link on POSIX. Strip only slashes;
 # realpath/normpath would change ancestor-link semantics.
 root = root.rstrip(os.sep) or os.sep
+if output_format == '--nul':
+    sys.stdout.buffer.write(b'diskm-measure-leaves-v1\0')
+def emit_row(row):
+    if output_format == '--nul':
+        for value in row:
+            sys.stdout.buffer.write(os.fsencode(str(value)) + b'\0')
+    else:
+        print('%d\t%d\t%d\t%s\t%s\t%d' % tuple(row))
 ceiling = int(threshold) * 1024 * 1024
 deadline = float(deadline) if deadline else None
 nodes = {}
@@ -652,13 +663,14 @@ try:
                 failed = True
             children = [nodes[p] for p in node['children']]
             node['bytes'] = sum(n['bytes'] for n in children)
+            node['apparent_bytes'] = sum(n['apparent_bytes'] for n in children)
             node['files'] = sum(n['files'] for n in children)
             node['newest'] = max((n['newest'] for n in children), default=0)
             node['error'] |= any(n['error'] for n in children)
             # Link leaves remain visible even below the aggregation ceiling.
             node['links'] = any(n['links'] for n in children)
             continue
-        node = nodes[path] = dict(bytes=0, files=0, newest=0, flag='E',
+        node = nodes[path] = dict(bytes=0, apparent_bytes=0, files=0, newest=0, flag='E',
                                   children=[], error=False, links=False)
         try:
             st = os.lstat(path)
@@ -676,9 +688,14 @@ try:
                 node['flag'] = 'L' if stat.S_ISLNK(st.st_mode) else 'F'
                 node['links'] = node['flag'] == 'L'
                 identity = (st.st_dev, st.st_ino)
+                # Count shared inode bytes once, but retain each path's own
+                # mtime so a later hardlink row cannot appear to be age zero.
+                node['apparent_bytes'] = st.st_size
+                node['newest'] = max(0, int(st.st_mtime))
+                node['files'] = 1
                 if identity not in seen:
                     seen.add(identity)
-                    node.update(bytes=st.st_size, files=1, newest=max(0, int(st.st_mtime)))
+                    node['bytes'] = st.st_size
         except OSError as exc:
             node['error'] = True
             node['flag'] = 'E'
@@ -690,18 +707,18 @@ try:
         check_deadline()
         path = stack.pop()
         node = nodes[path]
-        if node['flag'] == 'A' and (node['bytes'] >= ceiling or node['error'] or node['links']):
+        if node['flag'] == 'A' and (node['apparent_bytes'] >= ceiling or node['error'] or node['links']):
             stack.extend(reversed(node['children']))
             if node['error'] and not node['children']:
-                print('0\t0\t0\tE\t%s' % path)
+                emit_row((0, 0, 0, 'E', path, 0))
             elif node['error'] and node.get('identity'):
                 # Preserve explicit unfinished coverage even when readable
                 # siblings exist; successful child rows remain only partial.
-                print('0\t0\t0\tE\t%s' % path)
+                emit_row((0, 0, 0, 'E', path, 0))
             continue
-        print('%d\t%d\t%d\t%s\t%s' % (node['bytes'], node['files'], node['newest'], node['flag'], path))
+        emit_row((node['bytes'], node['files'], node['newest'], node['flag'], path, node['apparent_bytes']))
 except TimeoutError:
-    print('0\t0\t0\tE\t%s' % root)
+    emit_row((0, 0, 0, 'E', root, 0))
     sys.exit(124)
 sys.exit(1 if failed else 0)
 PY

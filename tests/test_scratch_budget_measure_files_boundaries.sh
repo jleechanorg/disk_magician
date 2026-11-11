@@ -58,5 +58,24 @@ if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 0.9 else 1)' "$ela
 else
   bad 'cleanup detail boundary exceeds deadline or reports complete traversal'
 fi
+
+# 7. A later hardlink path retains its newest time when the first link
+#    already contributed the inode's apparent bytes.
+HARD="$T/hardlinks"
+mkdir -p "$HARD/first" "$HARD/later"
+truncate -s 100M "$HARD/first/payload"
+ln "$HARD/first/payload" "$HARD/later/alias"
+expected_mtime="$(python3 -c 'import os,sys,time; p=sys.argv[1]; t=int(time.time())-3600; os.utime(p,(t,t)); print(t)' "$HARD/first/payload")"
+rows="$(scratch_budget_measure_files "$HARD" 100)"; rc=$?
+actual_mtime="$(awk -F '\t' -v p="$HARD/later/alias" '$5==p {print $3}' <<<"$rows")"
+actual_bytes="$(awk -F '\t' '{sum += $1} END {print sum+0}' <<<"$rows")"
+file_paths="$(awk -F '\t' '$4=="F" {n++} END {print n+0}' <<<"$rows")"
+apparent_bytes="$(awk -F '\t' '{sum += $6} END {print sum+0}' <<<"$rows")"
+if [[ "$rc" -eq 0 && "$actual_mtime" == "$expected_mtime" && "$actual_bytes" == 104857600 && "$file_paths" == 2 && "$apparent_bytes" == 209715200 ]]; then
+  ok "later hardlink keeps inode mtime and counts bytes once"
+else
+  bad "hardlink metadata wrong: mtime=$actual_mtime expected=$expected_mtime unique=$actual_bytes paths=$file_paths apparent=$apparent_bytes rc=$rc"
+fi
+
 printf 'PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
