@@ -301,8 +301,10 @@ assert_receipt_field "parent receipt includes volume artifacts removed" "$STATE_
 assert_receipt_field "parent receipt includes volume safety reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('volume_top_kept_reason')" "lease_active"
 
 echo "Test 7b: partial volume result propagates to scheduler receipt"
-INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial /bin/bash "$SCRIPT" --clean
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial /bin/bash "$SCRIPT" --scratch-only --clean
 assert_receipt_field "volume partial produces parent partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "volume partial is paired with a successful Scratch prune" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_outcome')" "success"
+assert_receipt_field "volume partial preserves its unmet target" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_target_reached'))" "False"
 
 echo "Test 7b: ballast restore failure propagates partial and remains counted"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial VOLUME_MOCK_BALLAST_FAILURES=1 /bin/bash "$SCRIPT" --clean >/dev/null
