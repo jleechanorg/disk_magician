@@ -71,7 +71,16 @@ case "$*" in
     ;;
   'volume verify-mount '*) exit 0 ;;
   'volume trim-auto scratch --clean')
-    [[ -z "${TEST_TRIM_CALLS_FILE:-}" ]] || printf 'trim\n' >>"$TEST_TRIM_CALLS_FILE"
+    if [[ -n "${TEST_TRIM_CALLS_FILE:-}" ]]; then
+      if [[ "${TEST_TRIM_ORDER_MARKERS:-0}" == 1 && -e "$TEST_ROOT/repo/evidence/oldest/content" ]]; then
+        printf 'trim-before-delete\n' >>"$TEST_TRIM_CALLS_FILE"
+      elif [[ "${TEST_TRIM_ORDER_MARKERS:-0}" == 1 ]]; then
+        printf 'trim-after-delete\n' >>"$TEST_TRIM_CALLS_FILE"
+      else
+        printf 'trim\n' >>"$TEST_TRIM_CALLS_FILE"
+      fi
+    fi
+    [[ -z "${TEST_TRIM_SLEEP:-}" ]] || sleep "$TEST_TRIM_SLEEP"
     printf '%s\n' "${TEST_TRIM_OUTPUT:-skipped:non-native-scratch}"
     exit "${TEST_TRIM_RC:-0}" ;;
   'volume ballast recover scratch')
@@ -94,6 +103,103 @@ case "$*" in
 esac
 MOCK
 chmod +x "$DISK_MAGICIAN_DISKM_BIN"
+
+if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == available-floor-trim ]]; then
+  [[ "$(uname -s)" == Linux ]] || { echo 'SKIP: Linux Scratch trim contract'; exit 0; }
+  mkdir -p "$T/pressure-bin"
+  REAL_PYTHON3="$(command -v python3)"
+  export REAL_PYTHON3
+  cat >"$T/pressure-bin/python3" <<'PYTHON_PRESSURE'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */scratch_pressure.py ]]; then printf '%s\n' "${TEST_PRESSURE_FREE_BYTES:-70000000000}"; exit 0; fi
+exec "$REAL_PYTHON3" "$@"
+PYTHON_PRESSURE
+  chmod +x "$T/pressure-bin/python3"
+  export TEST_TRIM_CALLS_FILE="$T/available-floor-trim.calls"
+  : >"$TEST_TRIM_CALLS_FILE"
+  out="$(PATH="$T/pressure-bin:$PATH" TEST_USED=950 TEST_TRIM_OUTPUT='{"status":"trimmed","host_free_delta_bytes":100}' \
+    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean 2>&1)"
+  if ! grep -q '^trim$' "$TEST_TRIM_CALLS_FILE"; then
+    echo 'FAIL: high Scratch free space skipped canonical host trim'
+    exit 1
+  fi
+  grep -q 'host_free_delta_bytes' <<<"$out"
+  [[ -f "$TEST_ROOT/repo/evidence/oldest/content" ]]
+  python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["reason"]=="host-trimmed" and r["precondition"]["policy"]=="available-floor"'
+  echo 'PASS: high Scratch free space still runs bounded host trim without deleting aged artifacts'
+
+  : >"$TEST_TRIM_CALLS_FILE"
+  out="$(PATH="$T/pressure-bin:$PATH" TEST_USED=950 TEST_TRIM_OUTPUT='{"status":"skipped","reason":"no-reclaimable-gap"}' \
+    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean 2>&1)"
+  [[ "$(grep -c '^trim$' "$TEST_TRIM_CALLS_FILE")" == 1 ]]
+  grep -q 'skipped:no-reclaimable-gap:' <<<"$out"
+  python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success_noop" and r["reason"]=="no-reclaimable-gap"'
+  echo 'PASS: high-free clean pass records a healthy no-gap trim no-op accurately'
+
+  : >"$TEST_TRIM_CALLS_FILE"
+  out="$(PATH="$T/pressure-bin:$PATH" TEST_USED=950 "$ROOT/scripts/volume_reclaim.sh" --available-floor 2>&1)"
+  [[ ! -s "$TEST_TRIM_CALLS_FILE" ]]
+  grep -q 'skipped:available-floor:' <<<"$out"
+  python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success_noop" and r["reason"]=="available-floor"'
+  echo 'PASS: high-free dry run remains a no-op and never invokes host trim'
+
+  : >"$TEST_TRIM_CALLS_FILE"
+  if PATH="$T/pressure-bin:$PATH" TEST_USED=950 TEST_TRIM_RC=1 TEST_TRIM_OUTPUT='missing pinned image' \
+    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean >"$T/available-floor-trim-fail.out" 2>&1; then
+    echo 'FAIL: high-free trim failure unexpectedly succeeded'; exit 1
+  fi
+  if ! grep -q '^trim$' "$TEST_TRIM_CALLS_FILE"; then
+    echo 'FAIL: low-free available-floor pass skipped canonical host trim after pruning'
+    exit 1
+  fi
+  python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="error" and r["reason"]=="host-trim-unavailable"'
+  echo 'PASS: high-free trim failure is reported as an error receipt'
+
+  expired="$(python3 -c 'import time; print(time.monotonic()-1)')"
+  : >"$TEST_TRIM_CALLS_FILE"
+  if PATH="$T/pressure-bin:$PATH" TEST_USED=950 ACT_DEADLINE_AT="$expired" \
+    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean >"$T/available-floor-trim-expired.out" 2>&1; then
+    echo 'FAIL: expired trim deadline unexpectedly succeeded'; exit 1
+  fi
+  [[ ! -s "$TEST_TRIM_CALLS_FILE" ]]
+  python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["reason"]=="deadline-before-trim"'
+  echo 'PASS: expired shared deadline prevents starting trim and writes a partial receipt'
+
+  mkdir -p "$T/slow-bin"
+  REAL_FIND="$(command -v find)"
+  export REAL_FIND
+  cat >"$T/slow-bin/find" <<'FIND_TIMEOUT'
+#!/usr/bin/env bash
+if [[ " $* " == *" -mindepth "* ]]; then
+  printf '%s\0' "$TEST_ROOT/repo/evidence/oldest"
+  sleep 15
+else
+  exec "$REAL_FIND" "$@"
+fi
+FIND_TIMEOUT
+  chmod +x "$T/slow-bin/find"
+  : >"$TEST_TRIM_CALLS_FILE"
+  slow_deadline="$(python3 -c 'import time; print(time.monotonic()+4)')"
+  out="$(PATH="$T/slow-bin:$T/pressure-bin:$PATH" TEST_PRESSURE_FREE_BYTES=1 TEST_USED=950 \
+    TEST_TRIM_OUTPUT='{"status":"trimmed","host_free_delta_bytes":100}' ACT_DEADLINE_AT="$slow_deadline" \
+    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean 2>&1)"
+  grep -q '^trim$' "$TEST_TRIM_CALLS_FILE"
+  grep -q 'candidate-discovery-timeout' <<<"$out"
+  echo 'PASS: low-free trim happens before a bounded slow-discovery timeout'
+
+  : >"$TEST_TRIM_CALLS_FILE"
+  out="$(PATH="$T/pressure-bin:$PATH" TEST_PRESSURE_FREE_BYTES=1 TEST_USED=950 \
+    TEST_TRIM_OUTPUT='{"status":"trimmed","host_free_delta_bytes":100}' TEST_TRIM_ORDER_MARKERS=1 \
+    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean 2>&1)"
+  if [[ "$(cat "$TEST_TRIM_CALLS_FILE")" != $'trim-before-delete\ntrim-after-delete' ]]; then
+    echo 'FAIL: low-free available-floor pass did not trim before discovery and after deletion'
+    exit 1
+  fi
+  [[ ! -f "$TEST_ROOT/repo/evidence/oldest/content" ]]
+  python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["reason"]=="trim-target-not-reached" and r["candidates"]["removed"]>=1'
+  echo 'PASS: low-free available-floor pass trims before discovery and after removal'
+  exit 0
+fi
 
 if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == streaming-find ]]; then
   export BALLAST_LOG="$T/ballast.log"

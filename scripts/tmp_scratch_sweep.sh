@@ -6,7 +6,9 @@
 # failure-continuing between steps but propagating a nonzero exit if either step
 # failed, so an unattended launchd job doesn't silently look healthy when a
 # step is broken. The 20-minute --scratch-only mode runs safe registered-volume
-# scratch-prune first, then the separate available-floor volume reclaim pass.
+# the available-floor volume reclaim pass before the slower Scratch prune, so
+# host sparse-image trim gets bounded time even when candidate itemization runs
+# to its deadline.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
@@ -157,6 +159,87 @@ SCRATCH_PRUNE_LOCK_SKIPPED=false
 SCRATCH_PRUNE_OUTCOME="not-run"
 SCRATCH_PRUNE_REMOVED=0
 SCRATCH_PRUNE_SCANNED=0
+run_volume_reclaim_phase() {
+# Give the existing volume-reclaim phase first use of the shared deadline.
+# Scratch pruning can spend the entire 15-minute window itemising a large
+# candidate; volume reclaim owns the host sparse-image trim needed to return
+# freed Scratch blocks to the root filesystem. The established 300s phase cap
+# leaves the remainder for Scratch pruning.
+volume_args=(volume reclaim --available-floor)
+[[ "$clean_flag" == "--clean" ]] && volume_args+=(--clean)
+VOLUME_TIMEOUT_SEC="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
+[[ "$VOLUME_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]] || VOLUME_TIMEOUT_SEC=300
+VOLUME_PHASE_DEADLINE_AT="$(python3 - "$ACT_DEADLINE_AT" "$VOLUME_TIMEOUT_SEC" <<'PY'
+import sys,time
+now=time.monotonic()
+try: phase=now+int(sys.argv[2])
+except (TypeError,ValueError): phase=now+300
+try:
+    parent=float(sys.argv[1])
+    if parent > 0: phase=min(phase,parent)
+except (TypeError,ValueError): pass
+print(f"{phase:.6f}")
+PY
+)"
+VOLUME_TIMEOUT_SEC="$(python3 - "$VOLUME_PHASE_DEADLINE_AT" <<'PY'
+import math,sys,time
+print(max(0,math.ceil(float(sys.argv[1])-time.monotonic())))
+PY
+)"
+VOLUME_CURSOR=""
+[[ -n "$ACT_CURSOR" ]] && VOLUME_CURSOR="${ACT_CURSOR}.volume-reclaim"
+VOLUME_OUTPUT=""
+VOLUME_RC=0
+VOLUME_COMMAND_STARTED=false
+DEFERRED_DEADLINE_SKIP=false
+if (( SCHEDULER_SIGNAL != 0 )); then
+  VOLUME_OUTPUT="skipped:scheduler-interrupted"
+elif [[ "$VOLUME_TIMEOUT_SEC" == 0 ]]; then
+  VOLUME_OUTPUT="skipped:deadline-before-volume-reclaim"
+elif [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" ]]; then
+  VOLUME_OUTPUT="skipped:bounded-runtime-unavailable"
+  VOLUME_RC=124
+else
+  VOLUME_COMMAND_STARTED=true
+  volume_command=("$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}")
+  volume_command=("$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "$((VOLUME_TIMEOUT_SEC + 2))s" "${volume_command[@]}")
+  run_bounded_capture VOLUME_OUTPUT env ACT_DEADLINE_AT="$VOLUME_PHASE_DEADLINE_AT" ACT_CURSOR="$VOLUME_CURSOR" \
+    DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS="$VOLUME_TIMEOUT_SEC" \
+    "${volume_command[@]}" || VOLUME_RC=$?
+fi
+if (( SCHEDULER_SIGNAL == 0 && (VOLUME_RC == 124 || VOLUME_RC == 137 || VOLUME_RC == 143) )); then
+  VOLUME_TIMEOUT_REASON="${VOLUME_OUTPUT:-volume reclaim exceeded bounded runtime}"
+  VOLUME_OUTPUT="${VOLUME_OUTPUT:+$VOLUME_OUTPUT$'\n'}skipped:runtime-timeout"
+  VOLUME_BALLAST_FAILURES=0
+  if [[ "$clean_flag" == "--clean" && "$VOLUME_COMMAND_STARTED" == true ]]; then
+    "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s 12s "$SCRIPT_DIR/../disk_magician.sh" volume ballast recover scratch >/dev/null 2>&1 || VOLUME_BALLAST_FAILURES=1
+  fi
+  VOLUME_ACTIVE="$(python3 "$RECEIPT_HELPER" read --job volume_reclaim --active 2>/dev/null || true)"
+  VOLUME_RUN_IDS="$(python3 - "$VOLUME_ACTIVE" "$CHILD_TRIGGER" <<'PY'
+import json,sys
+try: rows=json.loads(sys.argv[1])
+except Exception: rows=[]
+if isinstance(rows,dict): rows=rows.get("active",[])
+for row in rows if isinstance(rows,list) else []:
+    if isinstance(row,dict) and row.get("trigger")==sys.argv[2] and isinstance(row.get("id"),str): print(row["id"])
+PY
+)"
+  if [[ -z "$VOLUME_RUN_IDS" ]]; then
+    VOLUME_RUN_IDS="$(python3 "$RECEIPT_HELPER" begin --job volume_reclaim --trigger "$CHILD_TRIGGER" --precondition '{}')" || VOLUME_RUN_IDS=""
+  fi
+  for volume_run_id in $VOLUME_RUN_IDS; do
+    [[ -n "$volume_run_id" ]] || continue
+    python3 "$RECEIPT_HELPER" finish --job volume_reclaim --run-id "$volume_run_id" --outcome timeout \
+      --reason "bounded runtime expired: $VOLUME_TIMEOUT_REASON" --trigger "$CHILD_TRIGGER" \
+      --candidates "{\"aged_scanned\":null,\"removed\":null,\"top_kept_reason\":\"runtime-timeout\",\"ballast_restore_failures\":$VOLUME_BALLAST_FAILURES}" \
+      --postcondition '{"allocated_bytes_after":null,"target_reached":null}' >/dev/null 2>&1 || true
+  done
+fi
+[[ -n "$VOLUME_OUTPUT" ]] && printf '%s\n' "$VOLUME_OUTPUT"
+}
+if [[ "$SWEEP_MODE" == scratch-only ]]; then
+  run_volume_reclaim_phase
+fi
 if [[ "$SWEEP_MODE" == scratch-only ]]; then
   SCRATCH_CURSOR="${ACT_CURSOR}.scratch-prune"
   scratch_args=(scratch-prune "$clean_flag")
@@ -256,80 +339,16 @@ else
   fi
   "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
 fi
-# The installed hourly entry point also drives quota-volume C14 reclaim.
-volume_args=(volume reclaim --available-floor)
-[[ "$clean_flag" == "--clean" ]] && volume_args+=(--clean)
-VOLUME_TIMEOUT_SEC="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
-if [[ -n "$ACT_DEADLINE_AT" ]]; then
-  VOLUME_TIMEOUT_SEC="$(python3 - "$ACT_DEADLINE_AT" <<'PY'
-import sys,time
-try: remaining=max(0.0,float(sys.argv[1])-time.monotonic())
-except (TypeError,ValueError): remaining=0.0
-print(f"{remaining+15.0:.3f}")
-PY
-)"
-elif ! [[ "$VOLUME_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]]; then
-  VOLUME_TIMEOUT_SEC=0
+if [[ "$SWEEP_MODE" == full ]]; then
+  run_volume_reclaim_phase
 fi
-VOLUME_CURSOR=""
-[[ -n "$ACT_CURSOR" ]] && VOLUME_CURSOR="${ACT_CURSOR}.volume-reclaim"
-VOLUME_OUTPUT=""
-VOLUME_RC=0
-VOLUME_COMMAND_STARTED=false
-DEFERRED_DEADLINE_SKIP=false
-if (( SCHEDULER_SIGNAL != 0 )); then
-  VOLUME_OUTPUT="skipped:scheduler-interrupted"
-  VOLUME_RC=0
-elif [[ "$SCRATCH_PRUNE_OUTCOME" == partial ]] && ! act_unit_fits 0; then
-  # The shared deadline is exhausted after a partial Scratch pass.
-  # Do not start the next phase with an already-expired deadline.
-  DEFERRED_DEADLINE_SKIP=true
-  VOLUME_OUTPUT="skipped:deadline-after-deferred"
-  VOLUME_RC=0
-elif [[ -z "$VOLUME_TIMEOUT_BIN" || ! -x "$VOLUME_TIMEOUT_BIN" || "$VOLUME_TIMEOUT_SEC" == 0 ]]; then
-  VOLUME_OUTPUT="skipped:bounded-runtime-unavailable"
-  VOLUME_RC=124
-else
-  VOLUME_COMMAND_STARTED=true
-  volume_command=("$SCRIPT_DIR/../disk_magician.sh" "${volume_args[@]}")
-  if [[ "$SWEEP_MODE" == full ]]; then
-    volume_command=("$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${VOLUME_TIMEOUT_SEC}s" "${volume_command[@]}")
-  fi
-  run_bounded_capture VOLUME_OUTPUT env ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$VOLUME_CURSOR" \
-    DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS="$VOLUME_TIMEOUT_SEC" \
-    "${volume_command[@]}" || VOLUME_RC=$?
-fi
-if (( SCHEDULER_SIGNAL == 0 && (VOLUME_RC == 124 || VOLUME_RC == 137 || VOLUME_RC == 143) )); then
-  VOLUME_TIMEOUT_REASON="${VOLUME_OUTPUT:-volume reclaim exceeded bounded runtime}"
-  VOLUME_OUTPUT="${VOLUME_OUTPUT:+$VOLUME_OUTPUT$'\n'}skipped:runtime-timeout"
-  VOLUME_BALLAST_FAILURES=0
-  if [[ "$clean_flag" == "--clean" && "$VOLUME_COMMAND_STARTED" == true ]]; then
-    "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s 12s "$SCRIPT_DIR/../disk_magician.sh" volume ballast recover scratch >/dev/null 2>&1 || VOLUME_BALLAST_FAILURES=1
-  fi
-  VOLUME_ACTIVE="$(python3 "$RECEIPT_HELPER" read --job volume_reclaim --active 2>/dev/null || true)"
-  VOLUME_RUN_IDS="$(python3 - "$VOLUME_ACTIVE" "$CHILD_TRIGGER" <<'PY'
-import json,sys
-try: rows=json.loads(sys.argv[1])
-except Exception: rows=[]
-if isinstance(rows,dict): rows=rows.get("active",[])
-for row in rows if isinstance(rows,list) else []:
-    if isinstance(row,dict) and row.get("trigger")==sys.argv[2] and isinstance(row.get("id"),str): print(row["id"])
-PY
-)"
-  if [[ -z "$VOLUME_RUN_IDS" ]]; then
-    VOLUME_RUN_IDS="$(python3 "$RECEIPT_HELPER" begin --job volume_reclaim --trigger "$CHILD_TRIGGER" --precondition '{}')" || VOLUME_RUN_IDS=""
-  fi
-  for volume_run_id in $VOLUME_RUN_IDS; do
-    [[ -n "$volume_run_id" ]] || continue
-    python3 "$RECEIPT_HELPER" finish --job volume_reclaim --run-id "$volume_run_id" --outcome timeout \
-      --reason "bounded runtime expired: $VOLUME_TIMEOUT_REASON" --trigger "$CHILD_TRIGGER" \
-      --candidates "{\"aged_scanned\":null,\"removed\":null,\"top_kept_reason\":\"runtime-timeout\",\"ballast_restore_failures\":$VOLUME_BALLAST_FAILURES}" \
-      --postcondition '{"allocated_bytes_after":null,"target_reached":null}' >/dev/null 2>&1 || true
-  done
-fi
-[[ -n "$VOLUME_OUTPUT" ]] && printf '%s\n' "$VOLUME_OUTPUT"
 # Same classification as the scratch-prune child: rc 75 with the lock helper's
 # message is contention (nothing ran), not a failed reclaim.
+if [[ "$VOLUME_OUTPUT" == skipped:deadline-before-volume-reclaim && "$SCRATCH_PRUNE_OUTCOME" == partial ]]; then
+  # Both bounded phases deferred before any volume receipt or free-space
+  # measurement was available; preserve the truthful partial receipt.
+  DEFERRED_DEADLINE_SKIP=true
+fi
 VOLUME_LOCK_SKIPPED=false
 if [[ $VOLUME_RC -eq 75 ]] && grep -q 'scratch lock held' <<<"$VOLUME_OUTPUT"; then
   VOLUME_LOCK_SKIPPED=true
@@ -355,6 +374,8 @@ elif "scratch lock held" in sys.argv[4]:
  print(json.dumps({"valid":True,"outcome":"skipped_lock","skip_reason":"scratch-lock-held","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scratch-lock-held"},separators=(",",":")))
 elif sys.argv[4].strip() == "skipped:scheduler-interrupted":
  print(json.dumps({"valid":True,"outcome":"timeout","skip_reason":"scheduler-interrupted","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scheduler-interrupted"},separators=(",",":")))
+elif sys.argv[4].strip() == "skipped:deadline-before-volume-reclaim":
+ print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":"deadline-before-volume-reclaim","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"deadline-before-volume-reclaim"},separators=(",",":")))
 elif sys.argv[4].strip() == "skipped:deadline-after-deferred":
  print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":"deadline-after-deferred","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"deadline-after-deferred"},separators=(",",":")))
 else:
