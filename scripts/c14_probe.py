@@ -1215,13 +1215,36 @@ def open_file(root, deadline=None):
     else:
         rc, out = result
         if out and rc in (0, 1) and os.path.isdir(root) and _hardlink_only_false_positive(lsof_bin, root, out, cap, deadline):
-            print("no")
+            pass
         elif out:
             print("yes")
-        elif rc == 1:
-            print("no")
-        else:
+            return
+        elif rc != 1:
             print("kept:check-failed")
+            return
+        # lsof +D may omit bound relative Unix sockets, including beside an
+        # ignored shared hardlink. Socket leaves cannot establish closure.
+        probe_root = root.rstrip(os.sep) or os.sep
+        try:
+            if stat.S_ISLNK(os.lstat(probe_root).st_mode):
+                raise OSError("symlink candidate")
+            if not os.path.isabs(probe_root):
+                probe_root = os.path.join(".", probe_root)
+            sockets = _run_bounded(
+                ["find", probe_root, "-xdev", "-type", "s", "-print", "-quit"],
+                cap=cap, deadline=deadline, step="tree-walk", stderr=subprocess.STDOUT,
+            )
+        except OSError:
+            print("kept:check-failed")
+            return
+        if sockets is None:
+            print("deferred:tree-walk")
+        elif sockets[0] != 0:
+            print("kept:check-failed")
+        elif sockets[1]:
+            print("kept:unix-socket")
+        else:
+            print("no")
 
 if __name__ == "__main__":
     a = sys.argv[1:]

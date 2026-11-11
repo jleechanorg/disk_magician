@@ -869,6 +869,7 @@ has_open_files() {
   local unknown_path=0
   local unknown_path_val=""
   local norm_val=""
+  local scoped_open=""
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" ]] && continue
@@ -944,6 +945,17 @@ has_open_files() {
           elif [[ "$val" == "->"* || "$val" == "["* || "$val" == *":"* || "$val" == "count="* || "$val" == "(revoked)" || "$val" =~ ^[0-9A-Fa-f-]{36} ]]; then
             # Recognized non-filesystem lsof descriptor (pipe, socket, kernel control, mach port)
             :
+          elif [[ "$descriptor_type" == unix ]]; then
+            # Relative Unix socket names have no global pathname meaning.
+            # Only the canonical candidate-scoped probe may clear this case.
+            if [[ -z "$scoped_open" ]]; then
+              scoped_open="$(_av_open_file "$canon_dir" "${ACT_DEADLINE_AT:-}")" || scoped_open=kept:check-failed
+            fi
+            if [[ "$scoped_open" != no ]]; then
+              log "Open-file scoped socket check for $dir: $scoped_open — treating as active."
+              has_open=0
+              break
+            fi
           else
             unknown_path=1
             unknown_path_val="$val"
