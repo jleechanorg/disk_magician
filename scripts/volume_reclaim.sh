@@ -51,10 +51,12 @@ fi
 root="$("$diskm" volume path scratch --for-reclaim 2>/dev/null)"; rc=$?
 if [[ $rc -ne 0 || ! -d "$root" ]]; then echo skipped:unavailable; pressure_failure unavailable; [[ "$available_floor" == true ]] && exit 75; exit 0; fi
 "$diskm" volume verify-mount "$root" >/dev/null 2>&1 || { echo skipped:unavailable; pressure_failure unavailable; [[ "$available_floor" == true ]] && exit 75; exit 0; }
-# Scheduled pressure mode never performs even reserve/trim maintenance above
-# the floor. Revalidate mount and availability before each destructive unit.
+# Scheduled pressure mode never removes aged artifacts above the floor, but a
+# Linux clean pass still checks the sparse-image trim path. Revalidate mount and
+# availability before each destructive unit.
 free_bytes=""
 free_before=""
+available_floor_reached=false
 pressure_measure() {
  "$diskm" volume verify-mount "$root" >/dev/null 2>&1 || return 75
  free_bytes="$(python3 "$SCRIPT_DIR/scratch_pressure.py" "$root")" || return 75
@@ -64,12 +66,20 @@ if [[ "$available_floor" == true ]]; then
  pressure_measure || { echo skipped:measurement-unavailable; pressure_failure measurement-unavailable; exit 75; }
  free_before="$free_bytes"
  if (( free_bytes >= 53687091200 )); then
+  # Keep the available-space policy for aged artifact deletion, but allow the
+  # Linux clean path to reach the existing bounded host trim below. Guest free
+  # space says nothing about reclaimable blocks held by the sparse image.
+  if [[ "$clean" == true && "$(uname -s)" == Linux ]]; then
+   available_floor_reached=true
+   TOP_REASON=available-floor
+  else
   receipt="$SCRIPT_DIR/job_receipt.py"
   condition="{\"policy\":\"available-floor\",\"available_bytes\":$free_bytes,\"available_floor_bytes\":53687091200}"
   run_id="${DISK_MAGICIAN_RECLAIM_RECEIPT_ID:-}"
   [[ -n "$run_id" ]] || run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICIAN_TRIGGER:-manual}" --precondition "$condition")" || exit 1
   python3 "$receipt" finish --job volume_reclaim --run-id "$run_id" --outcome success_noop --reason available-floor --candidates '{"aged_scanned":0,"removed":0,"ballast_restore_failures":0,"top_kept_reason":"available-floor"}' --postcondition "$condition" >/dev/null || exit 1
   echo "skipped:available-floor:$free_bytes"; exit 0
+  fi
  fi
 fi
 before="$(status_json)" || { echo skipped:measurement-unavailable; pressure_failure measurement-unavailable; [[ "$available_floor" == true ]] && exit 75; exit 0; }
@@ -102,11 +112,58 @@ reserve_before="$(reserve_available "$before" 2>/dev/null)" || reserve_before=0
 reserve_before_json=false
 [[ "$reserve_before" == 1 ]] && reserve_before_json=true
 AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0 metadata_incomplete=0 pressure_failed=0 reserve_after=$reserve_before reserve_after_json=$reserve_before_json intentional_target_stop=0
+[[ "$available_floor_reached" == true ]] && TOP_REASON=available-floor
 receipt="$SCRIPT_DIR/job_receipt.py"
 precondition="{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pct,\"reserve_available\":$reserve_before_json}"
 run_id="${DISK_MAGICIAN_RECLAIM_RECEIPT_ID:-}"
 [[ -n "$run_id" ]] || run_id="$(python3 "$receipt" begin --job volume_reclaim --trigger "${DISK_MAGICIAN_TRIGGER:-manual}" --precondition "$precondition")" || { echo kept:receipt-begin-failed; exit 1; }
 [[ -n "$run_id" ]] || { echo kept:receipt-begin-failed; exit 1; }
+trim_failed=0
+trim_done=0
+trim_reason=""
+trim_deferred=0
+trim_attempted=false
+run_host_trim() {
+ trim_failed=0
+ trim_done=0
+ trim_reason=""
+ trim_deferred=0
+ trim_attempted=true
+ if ! act_unit_fits 1; then
+  trim_deferred=1
+  case "$TOP_REASON" in
+   measurement-unavailable|quota-changed|ballast-restore-failed|cursor-invalid|cursor-reset-failed|deadline-before-unit|trim-target-not-reached) ;;
+   *) TOP_REASON=deadline-before-trim ;;
+  esac
+  echo skipped:deadline-before-trim
+  return 0
+ fi
+ trim_output="$(act_run_bounded "$diskm" volume trim-auto scratch --clean 2>&1)" || trim_failed=1
+ if (( trim_failed )); then
+  case "$TOP_REASON" in
+   measurement-unavailable|quota-changed|ballast-restore-failed|cursor-invalid|cursor-reset-failed|deadline-before-unit|trim-target-not-reached) ;;
+   *) TOP_REASON=host-trim-unavailable ;;
+  esac
+  echo "degraded:host-trim-unavailable:$trim_output" >&2
+ else
+  if python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if isinstance(d,dict) and d.get("status")=="trimmed" else 1)' <<<"$trim_output" 2>/dev/null; then
+   trim_done=1
+  else
+   trim_reason="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("reason", ""))' <<<"$trim_output" 2>/dev/null || true)"
+  fi
+  if [[ "$available_floor" == true ]]; then
+   if [[ "$trim_done" == 1 ]]; then TOP_REASON=host-trimmed
+   elif [[ -n "$trim_reason" ]]; then TOP_REASON="$trim_reason"
+   fi
+  fi
+  printf '%s\n' "$trim_output"
+ fi
+}
+# Pressure mode gives the bounded trim an early chance before candidate
+# discovery and per-artifact safety checks consume the shared deadline.
+if [[ "$available_floor" == true && "$clean" == true && "$(uname -s)" == Linux ]]; then
+ run_host_trim
+fi
 below_trigger=false
 crossed_trigger=false
 if [[ "$available_floor" != true ]] && (( used * 100 < quota * trigger_pct )); then
@@ -115,7 +172,7 @@ if [[ "$available_floor" != true ]] && (( used * 100 < quota * trigger_pct )); t
 fi
 ACT_CURSOR_SOURCE="volume_reclaim:v1:$root"
 cursor_error=0
-if [[ "$below_trigger" != true && "$clean" == true && -n "$ACT_CURSOR" ]]; then
+if [[ "$below_trigger" != true && "$available_floor_reached" != true && "$clean" == true && -n "$ACT_CURSOR" ]]; then
  act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" >/dev/null || { cursor_error=1; TOP_REASON=cursor-invalid; }
  if (( ! cursor_error )); then act_cursor_reset_once "$ACT_CURSOR" "$ACT_CURSOR_SOURCE" || { cursor_error=1; TOP_REASON=cursor-reset-failed; }; fi
 fi
@@ -167,7 +224,7 @@ PYDIAG
 # runs under the shared monotonic deadline (deferred without starting when
 # already expired) and is killed with its process group on expiry.
 DISCOVERY_DIR=""
-if [[ "$below_trigger" != true ]] && (( ! cursor_error )); then
+if [[ "$below_trigger" != true && "$available_floor_reached" != true ]] && (( ! cursor_error )); then
  DISCOVERY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dm-volume-discovery.XXXXXX")" || { echo kept:discovery-create-failed; exit 1; }
  mkfifo "$DISCOVERY_DIR/candidates" || { rmdir "$DISCOVERY_DIR"; exit 1; }
  # A FIFO lets C14 process each candidate before discovery reaches a later
@@ -291,17 +348,14 @@ if [[ "$available_floor" == true ]]; then
  target_reached=0
  if (( ! measurement_error && free_bytes >= 53687091200 )); then target_reached=1; fi
 fi
-trim_failed=0
-trim_done=0
-if [[ "$clean" == true && "$available_floor" != true && "$(uname -s)" == Linux ]]; then
- trim_output="$("$diskm" volume trim-auto scratch --clean 2>&1)" || trim_failed=1
- if (( trim_failed )); then
-  TOP_REASON=host-trim-unavailable
-  echo "degraded:host-trim-unavailable:$trim_output" >&2
- else
-  if python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if isinstance(d,dict) and d.get("status")=="trimmed" else 1)' <<<"$trim_output" 2>/dev/null; then trim_done=1; fi
-  printf '%s\n' "$trim_output"
- fi
+if [[ "$available_floor" == true && "$clean" == true && "$(uname -s)" == Linux && "$REMOVED" -gt 0 ]]; then
+ # The early trim returns any pre-existing guest-free blocks before discovery;
+ # trim again after deletions so this pass's removals reach the host as well.
+ trim_attempted=false
+ run_host_trim
+fi
+if [[ "$clean" == true && "$(uname -s)" == Linux && "$trim_attempted" != true ]]; then
+ run_host_trim
 fi
 outcome=success_noop
 reason=dry-run
@@ -309,7 +363,7 @@ if (( measurement_error )); then outcome=error; reason=measurement-unavailable; 
 if [[ "$below_trigger" == true ]]; then reason=below-trigger; fi
 if [[ "$clean" == true ]]; then
  outcome=success; reason="$TOP_REASON"
- if (( trim_failed || measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$crossed_trigger" == true ]]; then outcome=partial; reason=trim-target-not-reached; elif [[ "$below_trigger" == true && "$trim_done" == 1 ]]; then outcome=success; reason=host-trimmed; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( target_reached )); then outcome=success; else outcome=partial; fi
+ if (( trim_failed || measurement_error )); then outcome=error; reason="$TOP_REASON"; elif (( trim_deferred )); then outcome=partial; reason="$TOP_REASON"; elif (( BALLAST_RESTORE_FAILURES > 0 )); then outcome=partial; reason=ballast-restore-failed; elif [[ "$crossed_trigger" == true || ( "$available_floor" == true && "$trim_done" == 1 && $target_reached == 0 ) ]]; then outcome=partial; reason=trim-target-not-reached; elif [[ "$available_floor" == true && "$trim_done" == 1 ]]; then outcome=success; reason=host-trimmed; elif [[ "$available_floor_reached" == true ]]; then outcome=success_noop; reason="${trim_reason:-available-floor}"; elif [[ "$below_trigger" == true && "$trim_done" == 1 ]]; then outcome=success; reason=host-trimmed; elif [[ "$below_trigger" == true ]]; then outcome=success_noop; reason=below-trigger; elif (( target_reached )); then outcome=success; else outcome=partial; fi
  if (( ! measurement_error )) && [[ "$below_trigger" != true ]] && ! python3 - "$AGED" "$REMOVED" "$TOP_REASON" "$used" "$now_used" "$quota" "$target_pct" "$available_floor" "$free_before" "$free_bytes" "$target_reached" <<'PYREC'
 import json,os,sys,tempfile
 from datetime import datetime,timezone
@@ -343,6 +397,9 @@ if [[ "$available_floor" == true ]]; then
 fi
 if ! python3 "$receipt" finish --job volume_reclaim --run-id "$run_id" --outcome "$outcome" --reason "$reason" --candidates "$candidates" --precondition "$precondition" --postcondition "$post" >/dev/null; then
  echo kept:receipt-finish-failed >&2; exit 1
+fi
+if [[ "$available_floor_reached" == true && "$trim_done" == 0 && "$trim_failed" == 0 && "$measurement_error" == 0 ]]; then
+ echo "skipped:${trim_reason:-available-floor}:$free_bytes"
 fi
 if [[ "$below_trigger" == true && "$outcome" == success_noop && "$trim_done" == 0 ]]; then echo "skipped:below-trigger:$pct"; fi
 [[ "$outcome" != error ]]

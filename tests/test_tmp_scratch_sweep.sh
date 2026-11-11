@@ -136,7 +136,7 @@ echo "Test 0: launchd template is a valid plist with the expected schedule"
 python3 -c 'import plistlib,sys; p=plistlib.load(open(sys.argv[1],"rb")); assert p["Label"] == "com.jleechanorg.disk-magician-tmp-scratch", p["Label"]; assert p["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "tmp-scratch-sweep", "--clean"], p["ProgramArguments"]; assert p["StartInterval"] == 3600, p["StartInterval"]; print("  PASS  plist parses and matches Label, ProgramArguments, and StartInterval")' "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template"
 python3 -c 'import plistlib,sys; p=plistlib.load(open(sys.argv[1],"rb")); assert p["Label"] == "com.jleechanorg.disk-magician-scratch-pressure", p["Label"]; assert p["ProgramArguments"] == ["@HOME@/.local/bin/diskm", "tmp-scratch-sweep", "--scratch-only", "--clean"], p["ProgramArguments"]; assert p["StartInterval"] == 1200, p["StartInterval"]; print("  PASS  pressure timer routes through bounded scratch-only wrapper")' "$REPO_ROOT/launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template"
 
-echo "Test 0b: scheduled Scratch-only mode invokes safe top-level pruning before volume reclaim"
+echo "Test 0b: scheduled Scratch-only mode invokes volume reclaim before safe top-level pruning"
 : > "$INVOCATION_LOG"
 SCRATCH_DEADLINE="$(python3 -c 'import time; print(time.monotonic()+60)')"
 set +e
@@ -149,9 +149,26 @@ assert_contains "Scratch-only mode dispatches the existing scratch-prune CLI" "d
 assert_contains "automatic mode does not use the content-override approval" "scratch_prune_mode automatic=1 approval=0" "$SCRATCH_ONLY_CALLS"
 assert_contains "Scratch-prune receives the shared deadline" "deadline=$SCRATCH_DEADLINE" "$SCRATCH_ONLY_CALLS"
 assert_contains "Scratch-prune receives its own resume cursor" "cursor=$TMP_ROOT/sweep.cursor.scratch-prune" "$SCRATCH_ONLY_CALLS"
-SCRATCH_PRUNE_LINE="$(grep -n '^disk_magician scratch-prune' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
 VOLUME_RECLAIM_LINE="$(grep -n '^disk_magician volume reclaim' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
-[[ -n "$SCRATCH_PRUNE_LINE" && -n "$VOLUME_RECLAIM_LINE" && "$SCRATCH_PRUNE_LINE" -lt "$VOLUME_RECLAIM_LINE" ]] && echo "  PASS  Scratch pruning precedes its volume-reclaim sibling" || { echo "  FAIL  Scratch pruning precedes its volume-reclaim sibling"; FAIL=$((FAIL+1)); }
+SCRATCH_PRUNE_LINE="$(grep -n '^disk_magician scratch-prune' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+[[ -n "$SCRATCH_PRUNE_LINE" && -n "$VOLUME_RECLAIM_LINE" && "$VOLUME_RECLAIM_LINE" -lt "$SCRATCH_PRUNE_LINE" ]] && echo "  PASS  bounded volume reclaim precedes long Scratch pruning" || { echo "  FAIL  bounded volume reclaim precedes long Scratch pruning"; FAIL=$((FAIL+1)); }
+
+echo "Test 0d: a Scratch prune timeout cannot starve the earlier volume reclaim pass"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=124 \
+  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" \
+  --cursor "$TMP_ROOT/prune-timeout.cursor" >"$TMP_ROOT/prune-timeout.out" 2>&1
+PRUNE_TIMEOUT_RC=$?
+set -e
+VOLUME_RECLAIM_LINE="$(grep -n '^disk_magician volume reclaim' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+SCRATCH_PRUNE_LINE="$(grep -n '^disk_magician scratch-prune' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+[[ -n "$VOLUME_RECLAIM_LINE" && -n "$SCRATCH_PRUNE_LINE" && "$VOLUME_RECLAIM_LINE" -lt "$SCRATCH_PRUNE_LINE" ]] \
+  && echo "  PASS  volume reclaim starts before the simulated Scratch timeout" \
+  || { echo "  FAIL  volume reclaim precedes timed-out Scratch pass"; FAIL=$((FAIL+1)); }
+[[ "$PRUNE_TIMEOUT_RC" -ne 0 ]] && echo "  PASS  simulated Scratch timeout remains visible" \
+  || { echo "  FAIL  simulated Scratch timeout remains visible"; FAIL=$((FAIL+1)); }
+assert_receipt_field "volume reclaim result is retained when Scratch prune times out" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "2"
 
 echo "Test 0c: the LRU budget opt-in switches the Scratch pass to approved budget mode"
 : > "$INVOCATION_LOG"
@@ -284,8 +301,10 @@ assert_receipt_field "parent receipt includes volume artifacts removed" "$STATE_
 assert_receipt_field "parent receipt includes volume safety reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('volume_top_kept_reason')" "lease_active"
 
 echo "Test 7b: partial volume result propagates to scheduler receipt"
-INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial /bin/bash "$SCRIPT" --clean
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial /bin/bash "$SCRIPT" --scratch-only --clean
 assert_receipt_field "volume partial produces parent partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "volume partial is paired with a successful Scratch prune" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_outcome')" "success"
+assert_receipt_field "volume partial preserves its unmet target" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_target_reached'))" "False"
 
 echo "Test 7b: ballast restore failure propagates partial and remains counted"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial VOLUME_MOCK_BALLAST_FAILURES=1 /bin/bash "$SCRIPT" --clean >/dev/null
@@ -318,7 +337,14 @@ DEADLINE="$(python3 -c 'import time; print(time.monotonic()+60)')"
 CURSOR="$TMP_ROOT/governor.cursor"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   /bin/bash "$SCRIPT" --clean --deadline-at "$DEADLINE" --cursor "$CURSOR" >/dev/null
-assert_contains "volume invocation receives deadline and isolated cursor" "deadline=$DEADLINE cursor=${CURSOR}.volume-reclaim" "$(cat "$INVOCATION_LOG")"
+assert_contains "volume invocation receives its isolated cursor" "cursor=${CURSOR}.volume-reclaim" "$(cat "$INVOCATION_LOG")"
+VOLUME_DEADLINE="$(sed -n 's/^disk_magician volume reclaim.*deadline=\([^ ]*\) cursor=.*/\1/p' "$INVOCATION_LOG" | head -1)"
+python3 - "$DEADLINE" "$VOLUME_DEADLINE" <<'PY'
+import sys,time
+parent, volume = map(float, sys.argv[1:])
+assert time.monotonic() < volume <= parent + 0.01, (volume, parent)
+PY
+echo "  PASS  volume phase deadline is bounded by the shared deadline"
 : >"$INVOCATION_LOG"
 STARTED="$(python3 -c 'import time; print(time.monotonic())')"
 set +e
