@@ -1010,7 +1010,12 @@ _SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cp
 _CODE_EXTS = _SRC_EXTS | {"sh", "bash", "zsh", "md", "rst", "html", "htm", "css", "svg"}
 _NATIVE = (".h", ".hpp", ".pyc", ".so", ".a", ".dylib")
 
-_CA_BUNDLES = ("cacert.pem", "ca-bundle.pem", "ca-certificates.pem")
+# Public CA trust stores shipped by vendored tooling. `roots.pem` is grpc's bundle
+# (venv/lib/python*/site-packages/grpc/_cython/_credentials/roots.pem); omitting it
+# made every grpc-bearing venv unremovable as "secret-like" (ja: 52 GB blocked on
+# jeff-ubuntu 2026-11-13). These names are still only exempt under _DEP_DIRS, so a
+# deploy.pem / corp roots.pem outside a dependency dir stays secret-like.
+_CA_BUNDLES = ("cacert.pem", "ca-bundle.pem", "ca-certificates.pem", "roots.pem")
 
 def _never(n):
     return n.startswith((".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")) or n.endswith((".pem", ".key", ".p12", ".pfx")) or n in (".npmrc", ".netrc")
