@@ -475,8 +475,9 @@ file_dev_ino() {
     printf '%s\n' "$identity"
   elif identity="$(stat -f '%d:%i' "$1" 2>/dev/null)" && [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
     printf '%s\n' "$identity"
+  else
+    return 1
   fi
-  return 0
 }
 
 # archive_target_available <basename>: rc 1 when an existing archive entry
@@ -649,7 +650,12 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     # --archive-to with --clean would otherwise need a live re-clone to recover;
     # record what the clone was so the archive name and log line stay truthful.
     dir_sha="$(git -C "$dir" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
-    dir_dev_ino="$(file_dev_ino "$dir")"
+    dir_dev_ino=""
+    if [[ -n "$ARCHIVE_TO" ]] && ! dir_dev_ino="$(file_dev_ino "$dir")"; then
+      printf '%s\n' "archive-identity-unavailable" >>"$REASONS_FILE"
+      log "KEEP [archive-identity-unavailable] $dir (source identity could not be verified)"
+      continue
+    fi
     ELIGIBLE=$(( ELIGIBLE + 1 ))
 
     if (( MAX_KB > 0 )) && (( REAL_KB + dir_kb > MAX_KB )); then
@@ -682,8 +688,9 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
 
       post_reason="$(candidate_reason "$dir")"
       if [[ -z "$post_reason" ]]; then
-        current_dev_ino="$(file_dev_ino "$dir")"
-        if [[ -n "$dir_dev_ino" && "$current_dev_ino" != "$dir_dev_ino" ]]; then
+        if ! current_dev_ino="$(file_dev_ino "$dir")"; then
+          post_reason="identity-unavailable"
+        elif [[ "$current_dev_ino" != "$dir_dev_ino" ]]; then
           post_reason="identity-changed"
         fi
       fi
