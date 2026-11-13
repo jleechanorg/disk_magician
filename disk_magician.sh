@@ -19,6 +19,7 @@ Commands:
   status        Report fleet, accounting, job outcomes, and deployed identity (--json).
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
   measure         Measure one monitored key now, sharded, with a generous timeout (diskm measure KEY [--timeout S]).
+  measure-files   Itemise a path by apparent file size to the fixed 100 MiB floor (diskm measure-files PATH [--deadline-at T]).
   reclaim-ledger  Read the published report (--read-existing), or regenerate (--stdout to preview).
   correlate-swings  Attribute df swings in snapshot history to non-file signals (--json).
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
@@ -600,6 +601,9 @@ case "$CMD" in
     ;;
   emergency)
     "$SCRIPT_DIR/scripts/emergency_reclaim.sh" "$@"
+    ;;
+  measure_files|measure-files)
+    "$SCRIPT_DIR/scripts/measure_files.sh" "$@"
     ;;
   cleanup_apfs_snapshots|cleanup-apfs-snapshots)
     "$SCRIPT_DIR/scripts/cleanup_apfs_snapshots.sh" "$@"
