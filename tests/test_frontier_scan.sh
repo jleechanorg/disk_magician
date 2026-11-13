@@ -797,6 +797,49 @@ PY
 [[ "$GDU_MISSING_MANIFEST_OUT" == "False True" ]] && ok "silently omitted manifest roots fail closed" \
   || bad "missing manifest root could masquerade as a complete inventory: $GDU_MISSING_MANIFEST_OUT"
 
+GDU_DIAGNOSTIC_PREFIX_OUT=$(cd "$REPO_ROOT" && python3 - <<'PY'
+import subprocess
+from unittest import mock
+
+import sys
+sys.path.insert(0, "scripts")
+import disk_frontier_scan as m
+
+valid = True
+for prefix in ("gdu:", "du:", "/usr/bin/du:"):
+    completed = subprocess.CompletedProcess(
+        ["/usr/bin/du"], 1, stdout="4\t/fixture/protected\0",
+        stderr=f"{prefix} cannot read directory '/fixture/protected': Permission denied\n",
+    )
+    with mock.patch.object(m, "GDU_CMD", "/usr/bin/du"), \
+         mock.patch.object(m.subprocess, "run", return_value=completed):
+        result = m.run_gdu_inventory(
+            ["/fixture/protected"], 10, m.ConcurrencyTracker(), 100
+        )
+    valid = valid and result["usable"] and not result["unknown_errors"] and (
+        result["error_paths"] == [{
+            "path": "/fixture/protected", "reason": "inventory_permission_denied"
+        }]
+    )
+
+unknown = subprocess.CompletedProcess(
+    ["/usr/bin/du"], 1, stdout="4\t/fixture/protected\0",
+    stderr="/usr/bin/du: unexpected diagnostic format\n",
+)
+with mock.patch.object(m, "GDU_CMD", "/usr/bin/du"), \
+     mock.patch.object(m.subprocess, "run", return_value=unknown):
+    result = m.run_gdu_inventory(
+        ["/fixture/protected"], 10, m.ConcurrencyTracker(), 100
+    )
+valid = valid and not result["usable"] and result["unknown_errors"] == [
+    "/usr/bin/du: unexpected diagnostic format"
+]
+print(valid)
+PY
+)
+[[ "$GDU_DIAGNOSTIC_PREFIX_OUT" == "True" ]] && ok "GNU du diagnostics preserve localized permission failures and unknown errors fail closed" \
+  || bad "GNU du diagnostics were not classified safely: $GDU_DIAGNOSTIC_PREFIX_OUT"
+
 GDU_INVENTORY_PARTITION_OUT=$(cd "$REPO_ROOT" && python3 - "$WORK" <<'PY'
 import os
 import subprocess
@@ -831,7 +874,7 @@ rows = [
     (1, protected),
 ]
 raw = "".join(f"{kb}\t{path}\0" for kb, path in rows)
-stderr = f"gdu: cannot read directory '{protected}': Permission denied\n"
+stderr = f"/usr/bin/du: cannot read directory '{protected}': Permission denied\n"
 completed = subprocess.CompletedProcess(["/fake/gdu"], 1, stdout=raw, stderr=stderr)
 args = SimpleNamespace(
     root=root, resolve_root=False, workers=2, max_depth=6, max_nodes=10_000_000,
