@@ -285,8 +285,19 @@ data_volume_free_bytes() {
 # line while 23.7 GiB of its children were 39-41 h old. Reporting only -- the
 # C14 verdict, the recency floor, the cursor and the LRU order are untouched.
 DETAIL_MIB=100
+# Scheduled runs write the itemisation to a per-run file instead of stdout:
+# measured 2026-11-12 on Jeff-Ubuntu, diskm-scratch-reclaim.service printed
+# ~30k detail lines/hour into the journal and a 1.4 GB weekly syslog. The rows
+# are unchanged; stdout gets one summary line per candidate naming the file.
+DETAIL_FILE=""
+if [[ ( -n "${DISK_MAGICIAN_TRIGGER:-}" || "$SCRATCH_AUTOMATIC" == 1 ) && "${DISK_MAGICIAN_SCRATCH_DETAIL:-}" != stdout ]]; then
+  _detail_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}/scratch_detail"
+  if mkdir -p "$_detail_dir" 2>/dev/null && : >"$_detail_dir/latest.txt" 2>/dev/null; then
+    DETAIL_FILE="$_detail_dir/latest.txt"
+  fi
+fi
 report_candidate_detail() {
-  local entry="$1" rows bytes files newest flag path metadata
+  local entry="$1" rows bytes files newest flag path metadata n=0
   # The caller supplies allocated du KiB; only the measurement can decide
   # the apparent-size threshold (sparse files may have almost no allocation).
   rows="$(scratch_budget_measure_files "$entry" "$DETAIL_MIB" 2>/dev/null)" || :
@@ -297,8 +308,16 @@ report_candidate_detail() {
     if [[ "$flag" == G || "$flag" == E ]]; then
       metadata="size_method=unmeasured size_known=false age_known=false threshold_mib=$DETAIL_MIB"
     fi
-    printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path"
+    if [[ -n "${DETAIL_FILE:-}" ]]; then
+      printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path" >>"$DETAIL_FILE"
+      n=$((n + 1))
+    else
+      printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path"
+    fi
   done <<<"$rows"
+  if [[ -n "${DETAIL_FILE:-}" ]] && (( n > 0 )); then
+    printf 'detail-summary: rows=%s file=%s %s\n' "$n" "$DETAIL_FILE" "$entry"
+  fi
 }
 
 if [[ "$AVAILABLE_FLOOR" == true ]]; then
