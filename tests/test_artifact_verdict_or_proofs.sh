@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 2026-11-12 operator decision: artifact_removal_verdict is "no veto AND at least one
-# proof", not "every gate passes". Secret-like content, dirty/unpushed git and a missing
-# name-shape retention only remove proofs; live cwd, open file, symlink and the
+# proof", not "every gate passes". Secret-like and ignored content are vetoes;
+# dirty/unpushed repositories require a verified rescue instead of age proof.
+# live cwd, open file, symlink and the
 # .diskm-ballast / dot-prefixed top-level names still veto whatever else holds.
 # Portable (Python sets mtimes); fixtures live in a mktemp dir only. Run with TMPDIR outside a
 # registered Scratch volume (the fixture HOME has no volume registration, so paths on it read
@@ -95,7 +96,7 @@ assert_eq "$(proofs)" on-origin "on-origin label printed"
 clone_fixture dirty-young; printf 'wip' >"$T/s/dirty-young/new"; age "$T/s/dirty-young" 90
 assert_eq "$(av "$T/s/dirty-young")" kept:no-proof "dirty clone, young"
 clone_fixture dirty-old; printf 'wip' >"$T/s/dirty-old/new"; age "$T/s/dirty-old" 2000
-assert_eq "$(av "$T/s/dirty-old")" remove "dirty clone, old: age proof, dirty no longer a veto"
+assert_eq "$(av "$T/s/dirty-old")" remove "dirty clone, old: preserved by independent rescue"
 clone_fixture unpushed-young; git -C "$T/s/unpushed-young" commit -q --allow-empty -m local; age "$T/s/unpushed-young" 90
 assert_eq "$(av "$T/s/unpushed-young")" kept:no-proof "unpushed clone, young"
 
@@ -110,10 +111,15 @@ PUSHED="$T/pushed.log"
     [[ "$(cat "$PUSHED")" == "$T/s/rescue-ok" ]] && ok "rescue_push called on the tree" || bad "rescue_push not called"
     : >"$PUSHED"
     clone_fixture rescue-preview; printf 'wip' >"$T/s/rescue-preview/new"; age "$T/s/rescue-preview" 90
-    assert_eq "$(av "$T/s/rescue-preview" --no-rescue-push)" remove "preview counts the proof"
+    assert_eq "$(av "$T/s/rescue-preview" --no-rescue-push)" kept:rescue-required "read-only preview does not claim a rescue"
     [[ ! -s "$PUSHED" ]] && ok "preview never pushes" || bad "preview pushed"
+    if git -C "$T/origin.git" for-each-ref --format='%(refname)' refs/diskm-rescue | grep -q rescue-preview; then
+        bad "read-only preview created a rescue ref"
+    else
+        ok "read-only preview creates no rescue ref"
+    fi
     clone_fixture rescue-fail; printf 'wip' >"$T/s/rescue-fail/new"; age "$T/s/rescue-fail" 90
-    assert_eq "$(RESCUE_RC=1 av "$T/s/rescue-fail")" kept:no-proof "rescue_push rc 1 keeps the tree"
+    assert_eq "$(RESCUE_RC=1 av "$T/s/rescue-fail")" kept:dirty "rescue_push rc 1 keeps the tree"
     clone_fixture rescue-skip; age "$T/s/rescue-skip" 90
     : >"$PUSHED"
     av "$T/s/rescue-skip" >/dev/null

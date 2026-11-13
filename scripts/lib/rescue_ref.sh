@@ -6,6 +6,8 @@
 # The user's index and working tree are never touched: the snapshot uses a throwaway GIT_INDEX_FILE.
 
 _RR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -f "$_RR_DIR/worktree_ignored.sh" ]] && source "$_RR_DIR/worktree_ignored.sh"
+_RR_PROBE="$_RR_DIR/../c14_probe.py"
 
 _rr_timeout() {
     local secs="$1"; shift
@@ -37,17 +39,27 @@ _rr_size_bytes() {
 }
 
 rescue_check() {
-    local dir="${1:?rescue_check <dir>}" cap_mb="${DISK_MAGICIAN_RESCUE_CAP_MB:-200}" size
+    local dir="${1:?rescue_check <dir>}" cap_mb="${DISK_MAGICIAN_RESCUE_CAP_MB:-200}" size url urls
     [[ -d "$dir" && ! -L "$dir" ]] || return 1
     [[ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" == true ]] || return 1
     # Only a work-tree root is rescuable: a subdirectory (e.g. venv/ inside a repo) would push
     # the parent's snapshot and then lose only the subdirectory's local state.
     [[ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$dir" && pwd -P)" ]] || return 1
     git -C "$dir" remote get-url origin >/dev/null 2>&1 || return 1
+    # A rescue destination borrowing Git objects from the candidate is not an
+    # independent backup: deleting the source would remove both copies.
+    urls="$(git -C "$dir" remote get-url --push --all origin 2>/dev/null)" || return 1
+    [[ -n "$urls" ]] || return 1
+    while IFS= read -r url; do
+        [[ -n "$url" ]] || return 1
+        python3 "$_RR_PROBE" lsremote "$url" "$dir" >/dev/null 2>&1 || return 1
+    done <<<"$urls"
     # A nested repository snapshots as a bare gitlink (none of its files or commits), so the
     # push would succeed while its content is lost; keep such trees for on-origin or age.
     [[ -z "$(find "$dir" -mindepth 2 -name .git -print -quit 2>/dev/null)" ]] || return 1
     _rr_secret_like "$dir" && return 1
+    declare -F has_ignored_user_data >/dev/null 2>&1 || return 1
+    has_ignored_user_data "$dir" && return 1
     [[ "$cap_mb" =~ ^[0-9]+$ ]] || return 1
     size="$(_rr_size_bytes "$dir")" || return 1
     (( size <= cap_mb * 1024 * 1024 )) || return 1

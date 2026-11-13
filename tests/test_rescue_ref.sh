@@ -26,9 +26,9 @@ ref="$(rescue_push "$T/clean")"; r=$?
 [[ "$(git -C "$T/clean.git" rev-parse "$ref")" == "$(git -C "$T/clean" ls-remote origin "$ref" | cut -f1)" ]] && ok "ref verified on origin" || bad "ref not on origin"
 grep -q $'\trescue\t' "$T/del.log" && ok "deletion log has rescue line" || bad "no rescue log line"
 
-# dirty tracked + untracked + ignored
+# dirty tracked + untracked
 mk dirty
-echo changed >"$T/dirty/a.txt"; echo new >"$T/dirty/u.txt"; echo ig >"$T/dirty/skip.log"; echo '*.log' >"$T/dirty/.gitignore"
+echo changed >"$T/dirty/a.txt"; echo new >"$T/dirty/u.txt"
 before="$(state "$T/dirty")"
 ref="$(rescue_push "$T/dirty")"; r=$?
 after="$(state "$T/dirty")"
@@ -36,7 +36,6 @@ after="$(state "$T/dirty")"
 [[ "$before" == "$after" ]] && ok "user's index/status unchanged" || bad "index or status changed"
 tree="$(git -C "$T/dirty.git" ls-tree -r --name-only "$ref")"
 grep -qx u.txt <<<"$tree" && ok "untracked file captured" || bad "untracked missing"
-grep -qx skip.log <<<"$tree" && bad "ignored file included" || ok "ignored file excluded"
 [[ "$(git -C "$T/dirty.git" show "$ref:a.txt")" == changed ]] && ok "tracked change captured" || bad "tracked change missing"
 [[ "$(git -C "$T/dirty.git" rev-parse "$ref^")" == "$(git -C "$T/dirty" rev-parse HEAD)" ]] && ok "parent is HEAD" || bad "parent not HEAD"
 
@@ -54,6 +53,18 @@ mk sec; echo k >"$T/sec/server.pem"
 [[ "$(rc rescue_check "$T/sec")" -ne 0 ]] && ok "secret blocks check" || bad "secret did not block check"
 [[ "$(rc rescue_push "$T/sec")" -ne 0 ]] && ok "secret blocks push" || bad "secret did not block push"
 [[ -z "$(git -C "$T/sec.git" for-each-ref refs/diskm-rescue)" ]] && ok "nothing pushed for secret" || bad "ref pushed despite secret"
+
+# non-secret ignored user data is not part of the rescue snapshot
+mk ignored; echo 'local.db' >"$T/ignored/.gitignore"; echo state >"$T/ignored/local.db"
+[[ "$(rc rescue_check "$T/ignored")" -ne 0 && "$(rc rescue_push "$T/ignored")" -ne 0 ]] && ok "ignored user data blocks rescue" || bad "ignored user data passed rescue"
+[[ -z "$(git -C "$T/ignored.git" for-each-ref refs/diskm-rescue)" ]] && ok "nothing pushed for ignored data" || bad "ref pushed despite ignored data"
+
+# an origin that borrows the candidate's object database is not an independent rescue
+mk alt
+mkdir -p "$T/alt.git/objects/info"
+printf '%s\n' "$T/alt/.git/objects" >"$T/alt.git/objects/info/alternates"
+git -C "$T/alt.git" update-ref refs/heads/main "$(git -C "$T/alt" rev-parse HEAD)"
+[[ "$(rc rescue_check "$T/alt")" -ne 0 && "$(rc rescue_push "$T/alt")" -ne 0 ]] && ok "dependent origin blocks rescue" || bad "dependent origin passed rescue"
 
 # over cap
 mk big; head -c 2097152 /dev/zero >"$T/big/blob"

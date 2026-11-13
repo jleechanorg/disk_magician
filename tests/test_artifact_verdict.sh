@@ -3,9 +3,9 @@
 # per-repository content checks in scripts/lib/artifact_verdict.sh, function
 # level. Temp dirs and temp repos only; nothing is removed.
 # 2026-11-12 operator decision: artifact_removal_verdict is 'no veto AND at least one proof'.
-# Old gate reasons for the full verdict (secret-like, not-pushed, unproven-content,
-# recent-activity) became `remove` for 30 d old fixtures and `kept:no-proof` for
-# unproven young ones. macOS-only (`date -r`): not runnable on the Linux dev host.
+# Secret-like, dirty, unpushed, ignored and unverified remote content remain
+# protected even when a separate age or producer-release proof exists.
+# macOS-only (`date -r`): not runnable on the Linux dev host.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -580,17 +580,17 @@ printf '{}' >"$TMPROOT/invalid-inventory.json"
 assert_eq "$(python3 "$PROBE" newest-mtime "$TMPROOT/invalid-inventory.json")" kept:check-failed "malformed inventory cannot supply an mtime"
 mkdir -p "$PT/pr-sec" "$PT/pr-key" && printf 'T=1' >"$PT/pr-sec/.env" && printf 'k' >"$PT/pr-key/id_ed25519"
 age "$PT/pr-sec" 43200 && age "$PT/pr-key" 43200
-assert_eq "$(eph "$PT/pr-sec")" remove ".env in an E3 dir at 30 d"
-assert_eq "$(eph "$PT/pr-key")" remove "id_ed25519 in an E3 dir at 30 d"
+assert_eq "$(eph "$PT/pr-sec")" kept:secret-like ".env in an E3 dir at 30 d"
+assert_eq "$(eph "$PT/pr-key")" kept:secret-like "id_ed25519 in an E3 dir at 30 d"
 mkdir -p "$PT/pr-review-only.pem" && printf 'synthetic sentinel\n' >"$PT/pr-review-only.pem/payload"
 age "$PT/pr-review-only.pem" 43200
-assert_eq "$(eph "$PT/pr-review-only.pem")" remove "secret-like root name in an E3 directory"
+assert_eq "$(eph "$PT/pr-review-only.pem")" kept:secret-like "secret-like root name in an E3 directory"
 printf 'synthetic sentinel\n' >"$PT/review-only.pem"
 root_file_inventory="$TMPROOT/root-secret-file-inventory.json"
 assert_eq "$(python3 "$PROBE" inventory "$PT/review-only.pem" "$root_file_inventory")" ok "inventory of a regular-file candidate"
 assert_eq "$(python3 "$PROBE" secrets "$root_file_inventory")" yes "secret-like regular-file root name is recognized"
 mkdir -p "$PT/pr-git" && mkrepo "$PT/pr-git/repo" && age "$PT/pr-git" 43200
-assert_eq "$(eph "$PT/pr-git")" remove "git repo with an unpushed commit in an E3 dir at 30 d"
+assert_eq "$(eph "$PT/pr-git")" kept:not-pushed "git repo with an unpushed commit in an E3 dir at 30 d"
 mkdir -p "$HOME/work/run-9" && printf 'r' >"$HOME/work/run-9/report.md" && age "$HOME/work/run-9" 43200
 assert_eq "$(eph "$HOME/work/run-9")" remove "unique report.md under ~/work/run-9/"
 # '.'/'..' basenames must not resolve to the parent and inherit a row's retention (§7.2 globs).

@@ -143,6 +143,12 @@ c14_repo_pushed_ok() (
 # with the first recorded token means every keep was listed, so the decision does
 # not depend on discovery order.
 _c14_keep() {  # records into the caller's `soft`
+    # Secret/ignored data and unverified remotes cannot be overridden.
+    # Dirty or unpushed content is handled separately by verified rescue.
+    case "$1" in
+        kept:secret-like|kept:ignored-data|kept:remote-unverified|kept:unreachable-object)
+            echo "$1"; return 1 ;;
+    esac
     if [[ -n "${C14_OVERRIDABLE:-}" && "|$C14_OVERRIDABLE|" == *"|$1|"* ]]; then soft=${soft:-$1}; return 0; fi
     echo "${1:-kept:check-failed}"; return 1
 }
@@ -675,9 +681,11 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ "$st" == deferred:* ]] && { echo "$st"; return 0; }
     [[ "$st" == yes ]] && { echo kept:open-file; return 0; }
     [[ "$st" == no ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; }
+    st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv" "$kind")"
+    if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
     # 2026-11-12 operator decision: eligible = no veto AND at least one proof.
-    # Secret-like, dirty, unpushed and unproven-name entries are not vetoes;
-    # they only lack proofs. Vetoes ran above (protected, lease, live cwd, open file).
+    # Secret-like content is vetoed below before any proof is considered.
+    # Dirty/unpushed repositories require rescue; age and release do not qualify them.
     newest="$(_av_newest_mtime "$inv")" || newest=''
     case "$kind" in
         ephemeral) ret="$(c14_archive_origin "$p" "$inv")"
@@ -734,7 +742,26 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
         if [[ -n "$st" || -e "$p/.git" || "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then
             st="$(c14_repos_ok "$p" "$inv" "$deadline")"
             case "$st" in
-                deferred:*|kept:external-worktree|kept:check-failed|kept:git-metadata|kept:linked-worktree) echo "$st"; return 0 ;;
+                deferred:*|kept:external-worktree|kept:check-failed|kept:git-metadata|kept:linked-worktree|kept:secret-like|kept:ignored-data|kept:remote-unverified|kept:unreachable-object)
+                    echo "$st"; return 0 ;;
+            esac
+            case "$st" in
+                kept:dirty|kept:not-pushed)
+                    # Age or producer release cannot substitute for preserving
+                    # local repository changes. Rescue is a proof only when the
+                    # complete visible payload can be pushed to an independent
+                    # remote; secret/ignored/nested content is rejected there.
+                    # Age or release says nothing about saving local changes.
+                    # A verified rescue destination must be the sole proof.
+                    if ! declare -F rescue_check >/dev/null 2>&1 || ! rescue_check "$p"; then echo "$st"; return 0; fi
+                    proofs=""
+                    if [[ "${C14_NO_RESCUE_PUSH:-}" == 1 ]]; then
+                        echo kept:rescue-required; return 0
+                    elif rescue_push "$p" >/dev/null 2>&1; then
+                        proofs+=" rescued"
+                    else
+                        echo "$st"; return 0
+                    fi ;;
             esac
             if [[ "$st" != ok && "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then echo "$st"; return 0; fi
             # Only the repository root itself: files beside a nested clone belong to no repo.
@@ -758,7 +785,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     if [[ -n "${DISK_MAGICIAN_OPERATOR_TARGETS:-}" ]] && grep -qxF -- "$p" <<<"$DISK_MAGICIAN_OPERATOR_TARGETS"; then proofs+=" operator-named"; fi
     # Proof 3: rescued. Only when nothing else proves it; the push must succeed.
     if [[ -z "$proofs" ]] && declare -F rescue_check >/dev/null 2>&1 && rescue_check "$p" >/dev/null 2>&1; then
-        if [[ "${C14_NO_RESCUE_PUSH:-}" == 1 ]]; then proofs+=" rescued"
+        if [[ "${C14_NO_RESCUE_PUSH:-}" == 1 ]]; then echo kept:rescue-required; return 0
         elif declare -F rescue_push >/dev/null 2>&1 && rescue_push "$p" >/dev/null 2>&1; then proofs+=" rescued"; fi
     fi
     [[ -n "$proofs" ]] || { echo kept:no-proof; return 0; }
