@@ -180,6 +180,8 @@ rc=0
 arch_out="$(WORKTREE_APPROVED=1 bash "$SCRIPT" --clean --root "$HOME/mirror" \
   --archive-to "$ARCHIVE_DIR" 2>&1)" || rc=$?
 check "archive run exits 0" '[[ "$rc" -eq 0 ]]'
+check "unchanged source identity passes post-archive revalidation" \
+  '! grep -qF "KEEP [post-archive-identity-changed]" <<<"$arch_out"'
 check "archive run removed the source clone" '[[ ! -e "$ARCH_MIRROR" ]]'
 arch_file="$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'archive-mirror-*.tar.zst' | head -1)"
 check "archive file landed on the target volume" '[[ -f "$arch_file" ]]'
@@ -202,6 +204,33 @@ check "restore preserves the exec bit" '[[ -x "$RESTORE/tool.sh" ]]'
 check "restore preserves the symlink as a symlink" '[[ -L "$RESTORE/readme-link" ]]'
 check "restore preserves the symlink target" \
   '[[ "$(readlink "$RESTORE/readme-link")" == "README.md" ]]'
+
+echo "Test 8b: --archive-to preserves the source when identity probes are invalid"
+UNKNOWN_ID_MIRROR="$HOME/mirror/unknown-id-mirror"
+clone_into "$UNKNOWN_ID_MIRROR"
+BAD_STAT="$WORK/bin/stat"
+cat >"$BAD_STAT" <<'BAD_STAT_SCRIPT'
+#!/usr/bin/env bash
+if { [[ "${1:-}" == -c && "${2:-}" == '%d:%i' ]] || [[ "${1:-}" == -f && "${2:-}" == '%d:%i' ]]; }; then
+  printf 'not-a-device-inode\n'
+  exit 1
+fi
+exec /usr/bin/stat "$@"
+BAD_STAT_SCRIPT
+chmod 755 "$BAD_STAT"
+rm -f "$DISK_MAGICIAN_DELETION_LOG"
+rc=0
+unknown_id_out="$(WORKTREE_APPROVED=1 PATH="$WORK/bin:$PATH" bash "$SCRIPT" \
+  --clean --root "$HOME/mirror" --archive-to "$ARCHIVE_DIR" 2>&1)" || rc=$?
+check "unknown-identity archive run exits 0" '[[ "$rc" -eq 0 ]]'
+check "unknown source identity keeps the source clone" '[[ -d "$UNKNOWN_ID_MIRROR" ]]'
+check "unknown source identity is reported fail-closed" \
+  'grep -qF "KEEP [archive-identity-unavailable] $UNKNOWN_ID_MIRROR" <<<"$unknown_id_out"'
+check "unknown source identity publishes no archive" \
+  '[[ -z "$(find "$ARCHIVE_DIR" -maxdepth 1 -name "unknown-id-mirror-*.tar.zst" -o -name "*.part-*")" ]]'
+check "unknown source identity writes no deletion-log entry" \
+  '! grep -qF "$UNKNOWN_ID_MIRROR" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || [[ ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]'
+rm -f "$BAD_STAT"
 
 echo "Test 9: a verify failure keeps the source and leaves no archive behind"
 FAIL_MIRROR="$HOME/mirror/verifyfail-mirror"
