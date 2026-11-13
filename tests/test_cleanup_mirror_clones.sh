@@ -382,6 +382,19 @@ check "consumer entering during archive keeps source clone intact" '[[ -d "$ENTE
 check "consumer entering during archive writes no deletion log entry" \
   '! grep -qF "$ENTER_MIRROR" "$DISK_MAGICIAN_DELETION_LOG" 2>/dev/null || [[ ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]'
 
+if [[ "$(uname -s)" != Linux ]]; then
+  echo "Test 14: registry reader is refused outside Linux"
+  READER_IMAGE="sha256:$(printf 'a%.0s' {1..64})"
+  rc=0
+  platform_out="$(bash "$SCRIPT" --dry-run --root "$HOME/mirror" \
+    --registry-reader-image "$READER_IMAGE" 2>&1)" || rc=$?
+  check "non-Linux reader request is rejected explicitly" \
+    '[[ "$rc" -eq 2 ]] && grep -qF "supported only on Linux" <<<"$platform_out"'
+  echo "Results: $PASS passed, $FAIL failed"
+  [[ "$FAIL" -eq 0 ]]
+  exit
+fi
+
 echo "Test 14: registry-reader option is pinned and cannot relax archive gates"
 reader_help="$(bash "$SCRIPT" --help 2>&1)"
 check "usage documents the optional registry reader image" 'grep -q -- "--registry-reader-image sha256:" <<<"$reader_help"'
@@ -407,6 +420,8 @@ READER_BIN="$WORK/reader-bin"
 REAL_FIND_BIN="$(command -v find)"
 READER_IMAGE="sha256:$(printf 'a%.0s' {1..64})"
 DOCKER_ARGS_LOG="$WORK/reader-docker-args.log"
+TIMEOUT_ARGS_LOG="$WORK/reader-timeout-args.log"
+REAL_TIMEOUT_BIN="$(type -P timeout)"
 mkdir -p "$READER_ROOT" "$READER_BIN"
 clone_into "$READER_CLONE"
 mkdir -p "$READER_ADMIN/.git/worktrees/zombie"
@@ -430,6 +445,16 @@ set -euo pipefail
 [[ "$*" == "volume path scratch" ]] || exit 90
 printf '%s\n' "${MOCK_ACTIVE_SCRATCH_ROOT:?}"
 EOF
+cat >"$READER_BIN/timeout" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$TIMEOUT_ARGS_LOG"
+args=("$@")
+if [[ "${MOCK_TIMEOUT_QUICK:-0}" == 1 && "${args[2]:-}" == 120s ]]; then
+  args[2]=1s
+fi
+exec "$REAL_TIMEOUT_BIN" "${args[@]}"
+EOF
 cat >"$READER_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -445,16 +470,20 @@ case "${1:-}" in
     ;;
   run)
     args=" $* "
-    for required in --pull=never --network=none --read-only --security-opt=no-new-privileges:true \
+    for required in --rm --pull=never --network=none --read-only --security-opt=no-new-privileges:true \
       --cap-drop=ALL --cap-add=DAC_READ_SEARCH --user=0:0 --memory=128m --memory-swap=128m \
-      --pids-limit=32 --cpus=0.5 --mount= --entrypoint=/usr/bin/find; do
+      --pids-limit=32 --cpus=0.5 --mount= --entrypoint=/usr/bin/timeout; do
       [[ "$args" == *"$required"* ]] || { echo "unsafe/missing Docker option: $required" >&2; exit 93; }
     done
-    [[ "$args" == *"dst=/registry-root,readonly"* && "$args" == *"/registry-root -maxdepth "* &&
+    [[ "$args" == *"dst=/registry-root,readonly"* && "$args" == *"--signal=TERM --kill-after=5s 90s /usr/bin/find /registry-root -maxdepth "* &&
        "$args" == *"-type d -path */.git/worktrees -print0"* ]] || exit 94
     [[ "$args" != *--privileged* && "$args" != *--network=host* && "$args" != *--cap-add=SYS_ADMIN* ]] || exit 95
     [[ "$args" == *"$EXPECTED_READER_IMAGE"* ]] || exit 96
     case "${MOCK_READER_MODE:-success}" in
+      timeout-missing) echo "fixture /usr/bin/timeout missing" >&2; exit 127 ;;
+      client-hang)
+        printf '%s\n' "$$" >"${MOCK_READER_PID_FILE:?}"
+        exec sleep 30 ;;
       success) [[ -n "${MOCK_READER_OUTPUT:-}" ]] && printf '%s\0' "$MOCK_READER_OUTPUT" ;;
       empty) : ;;
   failure) echo "fixture Docker find failure" >&2; exit 1 ;;
@@ -469,8 +498,9 @@ case "${1:-}" in
   *) exit 98 ;;
 esac
 EOF
-chmod 755 "$READER_BIN/find" "$READER_BIN/diskm" "$READER_BIN/docker"
-reader_env=(PATH="$READER_BIN:$PATH" REAL_FIND_BIN="$REAL_FIND_BIN" DOCKER_ARGS_LOG="$DOCKER_ARGS_LOG"
+chmod 755 "$READER_BIN/find" "$READER_BIN/diskm" "$READER_BIN/timeout" "$READER_BIN/docker"
+reader_env=(PATH="$READER_BIN:$PATH" REAL_FIND_BIN="$REAL_FIND_BIN" REAL_TIMEOUT_BIN="$REAL_TIMEOUT_BIN"
+  DOCKER_ARGS_LOG="$DOCKER_ARGS_LOG" TIMEOUT_ARGS_LOG="$TIMEOUT_ARGS_LOG"
   EXPECTED_READER_IMAGE="$READER_IMAGE" REGISTRY_FAIL_ROOT="$READER_ROOT"
   MOCK_ACTIVE_SCRATCH_ROOT="$READER_ROOT" DISK_MAGICIAN_MIRROR_REGISTRY_REPOS="$REG")
 rc=0
@@ -486,7 +516,7 @@ check "reader image is inspected locally before run" \
 check "reader uses no network, no-new-privileges, bounded resources and a read-only bind" \
   'grep -q -- "--network=none" "$DOCKER_ARGS_LOG" && grep -q -- "--security-opt=no-new-privileges:true" "$DOCKER_ARGS_LOG" && grep -q -- "--memory=128m" "$DOCKER_ARGS_LOG" && grep -q -- "--pids-limit=32" "$DOCKER_ARGS_LOG" && grep -qF "dst=/registry-root,readonly" "$DOCKER_ARGS_LOG"'
 check "reader drops all but DAC_READ_SEARCH and executes only fixed find" \
-  'grep -q -- "--cap-drop=ALL" "$DOCKER_ARGS_LOG" && grep -q -- "--cap-add=DAC_READ_SEARCH" "$DOCKER_ARGS_LOG" && grep -q -- "--entrypoint=/usr/bin/find" "$DOCKER_ARGS_LOG" && ! grep -q -- "--privileged" "$DOCKER_ARGS_LOG" && ! grep -q -- "--network=host" "$DOCKER_ARGS_LOG"'
+  'grep -q -- "--cap-drop=ALL" "$DOCKER_ARGS_LOG" && grep -q -- "--cap-add=DAC_READ_SEARCH" "$DOCKER_ARGS_LOG" && grep -q -- "--entrypoint=/usr/bin/timeout" "$DOCKER_ARGS_LOG" && grep -q -- "/usr/bin/timeout.* /usr/bin/find" "$DOCKER_ARGS_LOG" && ! grep -q -- "--privileged" "$DOCKER_ARGS_LOG" && ! grep -q -- "--network=host" "$DOCKER_ARGS_LOG"'
 
 OTHER_ROOT="$WORK/not-registered-scratch"
 OTHER_CLONE="$OTHER_ROOT/other-clone"
@@ -501,8 +531,27 @@ other_root_out="$(env "${reader_env[@]}" REGISTRY_FAIL_ROOT="$OTHER_ROOT" \
 check "reader fallback is not used outside the active registered Scratch root" \
   '[[ "$rc" -eq 0 ]] && grep -qF "KEEP [registry-incomplete] $OTHER_CLONE" <<<"$other_root_out" && [[ ! -s "$DOCKER_ARGS_LOG" ]]'
 
-echo "Test 16: Docker and malformed reader output fail closed for the whole registry"
-for mode in inspect-failure failure stderr malformed foreign-prefix newline unterminated; do
+echo "Test 16: timeout bounds the Docker client and the fixed in-container find"
+READER_PID_FILE="$WORK/reader-client.pid"
+: >"$DOCKER_ARGS_LOG"
+: >"$TIMEOUT_ARGS_LOG"
+rc=0
+client_timeout_out="$(env "${reader_env[@]}" MOCK_TIMEOUT_QUICK=1 MOCK_READER_MODE=client-hang \
+  MOCK_READER_PID_FILE="$READER_PID_FILE" \
+  bash "$SCRIPT" --dry-run --root "$READER_ROOT" --max-depth 12 \
+  --registry-reader-image "$READER_IMAGE" 2>&1)" || rc=$?
+reader_pid="$(cat "$READER_PID_FILE" 2>/dev/null || true)"
+check "Docker image and run client calls have finite TERM/KILL timeouts" \
+  'grep -q -- "--signal=TERM --kill-after=5s 120s" "$TIMEOUT_ARGS_LOG"'
+check "fixed in-container timeout supervises only the fixed find command" \
+  'grep -q -- "--entrypoint=/usr/bin/timeout" "$DOCKER_ARGS_LOG" && grep -q -- "--signal=TERM --kill-after=5s 90s /usr/bin/find" "$DOCKER_ARGS_LOG" && grep -q -- "--rm" "$DOCKER_ARGS_LOG"'
+check "timed out reader process is reaped" \
+  '[[ -n "$reader_pid" ]] && ! kill -0 "$reader_pid" 2>/dev/null'
+check "timed out reader keeps candidates behind the incomplete registry gate" \
+  '[[ "$rc" -eq 0 ]] && grep -qF "KEEP [registry-incomplete] $READER_CLONE" <<<"$client_timeout_out"'
+
+echo "Test 17: Docker and malformed reader output fail closed for the whole registry"
+for mode in inspect-failure failure stderr timeout-missing malformed foreign-prefix newline unterminated; do
   rc=0
   failed_reader_out="$(env "${reader_env[@]}" MOCK_READER_MODE="$mode" \
     MOCK_READER_OUTPUT="/registry-root/registered-mirror/.git/worktrees" \
@@ -514,7 +563,7 @@ for mode in inspect-failure failure stderr malformed foreign-prefix newline unte
     'grep -qF "KEEP [registry-incomplete] $READER_ADMIN" <<<"$failed_reader_out"'
 done
 
-echo "Test 17: a host-side registry pointer listing error remains incomplete"
+echo "Test 18: a host-side registry pointer listing error remains incomplete"
 POINTER_CLONE="$READER_ROOT/pointer-unreadable"
 POINTER_ADMIN="$READER_ROOT/pointer-admin"
 clone_into "$POINTER_CLONE"
@@ -528,7 +577,7 @@ pointer_out="$(env "${reader_env[@]}" REGISTRY_FAIL_POINTER="$POINTER_ADMIN/.git
 check "host-side pointer listing failure preserves all reader candidates" \
   '[[ "$rc" -eq 0 ]] && grep -qF "registry-incomplete: 4" <<<"$pointer_out" && grep -qF "KEEP [registry-incomplete] $POINTER_CLONE" <<<"$pointer_out"'
 
-echo "Test 18: reader mode applies canonical recency, C14 leases and quarantine removal"
+echo "Test 19: reader mode applies canonical recency, C14 leases and quarantine removal"
 C14_ROOT="$WORK/c14-scratch"
 OLD_READER_CLONE="$C14_ROOT/old-clean-clone"
 UNBASELINED_CLONE="$C14_ROOT/old-unbaselined-clone"
@@ -536,7 +585,8 @@ RECENT_READER_CLONE="$C14_ROOT/recent-clone"
 UNKNOWN_LEASE_CLONE="$C14_ROOT/unknown-lease-clone"
 ACTIVE_LEASE_CLONE="$C14_ROOT/active-lease-clone"
 mkdir -p "$C14_ROOT"
-c14_reader_env=(PATH="$READER_BIN:$PATH" REAL_FIND_BIN="$REAL_FIND_BIN" DOCKER_ARGS_LOG="$DOCKER_ARGS_LOG"
+c14_reader_env=(PATH="$READER_BIN:$PATH" REAL_FIND_BIN="$REAL_FIND_BIN" REAL_TIMEOUT_BIN="$REAL_TIMEOUT_BIN"
+  DOCKER_ARGS_LOG="$DOCKER_ARGS_LOG" TIMEOUT_ARGS_LOG="$TIMEOUT_ARGS_LOG"
   EXPECTED_READER_IMAGE="$READER_IMAGE" REGISTRY_FAIL_ROOT="$C14_ROOT"
   MOCK_ACTIVE_SCRATCH_ROOT="$C14_ROOT" DISK_MAGICIAN_MIRROR_REGISTRY_REPOS="$REG")
 for d in "$OLD_READER_CLONE" "$UNBASELINED_CLONE" "$RECENT_READER_CLONE" "$UNKNOWN_LEASE_CLONE" "$ACTIVE_LEASE_CLONE"; do
@@ -579,18 +629,97 @@ printf '{}\n' >"$DISK_MAGICIAN_SAFETY_FILE"
 source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
 source "$REPO_ROOT/scripts/lib/artifact_verdict.sh"
 c14_baseline() {
-  local lease gitdir
+  local lease gitdir gitmeta
   lease="$(lease_path_for "$1")"
   gitdir="$(git -C "$1" rev-parse --absolute-git-dir)"
+  gitmeta="$(python3 "$REPO_ROOT/scripts/c14_probe.py" gitmeta "$gitdir")"
   mkdir -p "$(dirname "$lease")"
-  printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":%s}\n' \
-    "$1" "$(python3 "$REPO_ROOT/scripts/c14_probe.py" gitmeta "$gitdir")" >"$lease"
+  python3 - "$lease" "$1" "$gitmeta" <<'PY'
+import json, os, sys
+lease, path, gitmeta = sys.argv[1:]
+with open(lease, "w") as f:
+    json.dump({"path": os.path.realpath(path), "owner": {"pid": 1},
+               "released_at": 1, "git_meta": json.loads(gitmeta)}, f)
+PY
 }
 c14_baseline "$OLD_READER_CLONE"
 old_c14_verdict="$(artifact_removal_verdict "$OLD_READER_CLONE")"
 check "old clone with released C14 git baseline receives an exact remove verdict" '[[ "$old_c14_verdict" == remove ]]'
 unbaselined_c14_verdict="$(artifact_removal_verdict "$UNBASELINED_CLONE")"
 check "unbaselined clone is kept by C14" '[[ "$unbaselined_c14_verdict" == kept:git-unbaselined ]]'
+
+ROOT_POINTER_ROOT="$WORK/root-pointer-scratch"
+ROOT_POINTER_CLONE="$ROOT_POINTER_ROOT/old-clean-clone"
+ROOT_POINTER_ADMIN="$ROOT_POINTER_ROOT/root-pointer-admin"
+mkdir -p "$ROOT_POINTER_ROOT"
+clone_into "$ROOT_POINTER_CLONE"
+age_clone_content_days "$ROOT_POINTER_CLONE" 8
+c14_baseline "$ROOT_POINTER_CLONE"
+root_pointer_verdict="$(artifact_removal_verdict "$ROOT_POINTER_CLONE")"
+check "root-pointer fixture is otherwise C14 removable" '[[ "$root_pointer_verdict" == remove ]]'
+mkdir -p "$ROOT_POINTER_ADMIN/.git/worktrees/invalid"
+printf '/\n' >"$ROOT_POINTER_ADMIN/.git/worktrees/invalid/gitdir"
+root_pointer_env=(PATH="$READER_BIN:$PATH" REAL_FIND_BIN="$REAL_FIND_BIN" REAL_TIMEOUT_BIN="$REAL_TIMEOUT_BIN"
+  DOCKER_ARGS_LOG="$DOCKER_ARGS_LOG" TIMEOUT_ARGS_LOG="$TIMEOUT_ARGS_LOG"
+  EXPECTED_READER_IMAGE="$READER_IMAGE" REGISTRY_FAIL_ROOT="$ROOT_POINTER_ROOT"
+  MOCK_ACTIVE_SCRATCH_ROOT="$ROOT_POINTER_ROOT" DISK_MAGICIAN_MIRROR_REGISTRY_REPOS="$REG")
+rc=0
+root_pointer_out="$(env "${root_pointer_env[@]}" MOCK_READER_MODE=success \
+  MOCK_READER_OUTPUT="/registry-root/root-pointer-admin/.git/worktrees" \
+  bash "$SCRIPT" --dry-run --root "$ROOT_POINTER_ROOT" --max-depth 12 \
+  --registry-reader-image "$READER_IMAGE" 2>&1)" || rc=$?
+check "root-only pointer makes registry incomplete and preserves an otherwise-removable clone" \
+  '[[ "$rc" -eq 0 ]] && grep -qF "KEEP [registry-incomplete] $ROOT_POINTER_CLONE" <<<"$root_pointer_out"'
+
+NUL_POINTER_ROOT="$WORK/nul-pointer-scratch"
+NUL_POINTER_CLONE="$NUL_POINTER_ROOT/old-clean-clone"
+NUL_POINTER_ADMIN="$NUL_POINTER_ROOT/nul-pointer-admin"
+mkdir -p "$NUL_POINTER_ROOT"
+clone_into "$NUL_POINTER_CLONE"
+age_clone_content_days "$NUL_POINTER_CLONE" 8
+c14_baseline "$NUL_POINTER_CLONE"
+nul_pointer_verdict="$(artifact_removal_verdict "$NUL_POINTER_CLONE")"
+check "NUL-pointer fixture is otherwise C14 removable" '[[ "$nul_pointer_verdict" == remove ]]'
+mkdir -p "$NUL_POINTER_ADMIN/.git/worktrees/invalid"
+python3 - "$NUL_POINTER_ADMIN/.git/worktrees/invalid/gitdir" "$NUL_POINTER_CLONE" <<'PY'
+import sys
+with open(sys.argv[1], "wb") as f:
+    f.write(sys.argv[2].encode() + b"\0suffix/.git\n")
+PY
+nul_pointer_env=(PATH="$READER_BIN:$PATH" REAL_FIND_BIN="$REAL_FIND_BIN" REAL_TIMEOUT_BIN="$REAL_TIMEOUT_BIN"
+  DOCKER_ARGS_LOG="$DOCKER_ARGS_LOG" TIMEOUT_ARGS_LOG="$TIMEOUT_ARGS_LOG"
+  EXPECTED_READER_IMAGE="$READER_IMAGE" REGISTRY_FAIL_ROOT="$NUL_POINTER_ROOT"
+  MOCK_ACTIVE_SCRATCH_ROOT="$NUL_POINTER_ROOT" DISK_MAGICIAN_MIRROR_REGISTRY_REPOS="$REG")
+rc=0
+nul_pointer_out="$(env "${nul_pointer_env[@]}" MOCK_READER_MODE=success \
+  MOCK_READER_OUTPUT="/registry-root/nul-pointer-admin/.git/worktrees" \
+  bash "$SCRIPT" --dry-run --root "$NUL_POINTER_ROOT" --max-depth 12 \
+  --registry-reader-image "$READER_IMAGE" 2>&1)" || rc=$?
+check "embedded NUL pointer makes registry incomplete and preserves the C14-removable clone" \
+  '[[ "$rc" -eq 0 ]] && grep -qF "KEEP [registry-incomplete] $NUL_POINTER_CLONE" <<<"$nul_pointer_out"'
+
+BACKSLASH_ROOT="$WORK/backslash-scratch"
+BACKSLASH_NAME='registered\nclone'
+BACKSLASH_CLONE="$BACKSLASH_ROOT/$BACKSLASH_NAME"
+BACKSLASH_ADMIN="$BACKSLASH_ROOT/backslash-admin"
+mkdir -p "$BACKSLASH_ROOT"
+clone_into "$BACKSLASH_CLONE"
+age_clone_content_days "$BACKSLASH_CLONE" 8
+c14_baseline "$BACKSLASH_CLONE"
+mkdir -p "$BACKSLASH_ADMIN/.git/worktrees/registered"
+printf '%s\n' "$BACKSLASH_CLONE/.git" >"$BACKSLASH_ADMIN/.git/worktrees/registered/gitdir"
+backslash_reader_env=(PATH="$READER_BIN:$PATH" REAL_FIND_BIN="$REAL_FIND_BIN" REAL_TIMEOUT_BIN="$REAL_TIMEOUT_BIN"
+  DOCKER_ARGS_LOG="$DOCKER_ARGS_LOG" TIMEOUT_ARGS_LOG="$TIMEOUT_ARGS_LOG"
+  EXPECTED_READER_IMAGE="$READER_IMAGE" REGISTRY_FAIL_ROOT="$BACKSLASH_ROOT"
+  MOCK_ACTIVE_SCRATCH_ROOT="$BACKSLASH_ROOT" DISK_MAGICIAN_MIRROR_REGISTRY_REPOS="$REG")
+rc=0
+backslash_out="$(env "${backslash_reader_env[@]}" MOCK_READER_MODE=success \
+  MOCK_READER_OUTPUT="/registry-root/backslash-admin/.git/worktrees" \
+  bash "$SCRIPT" --dry-run --root "$BACKSLASH_ROOT" --max-depth 12 \
+  --registry-reader-image "$READER_IMAGE" 2>&1)" || rc=$?
+check "literal backslash in a registered Unix path is compared without escape decoding" \
+  '[[ "$rc" -eq 0 ]] && grep -qF "KEEP [registered-worktree] $BACKSLASH_CLONE" <<<"$backslash_out"'
+
 : >"$DOCKER_ARGS_LOG"
 rc=0
 native_reader_out="$(env "${reader_env[@]}" MOCK_READER_MODE=empty \

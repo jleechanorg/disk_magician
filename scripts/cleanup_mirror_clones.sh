@@ -308,8 +308,13 @@ registered_scratch_root() {
 }
 
 registry_reader_docker() {
+  local limit="$1" timeout_bin docker_bin
+  shift
+  timeout_bin="$(type -P timeout 2>/dev/null)" || { log "registry reader timeout utility unavailable"; return 1; }
+  docker_bin="$(type -P docker 2>/dev/null)" || { log "registry reader Docker client unavailable"; return 1; }
   env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
-    docker --host unix:///var/run/docker.sock "$@"
+    "$timeout_bin" --signal=TERM --kill-after=5s "$limit" \
+    "$docker_bin" --host unix:///var/run/docker.sock "$@"
 }
 
 registry_reader_validate_paths() {
@@ -342,19 +347,23 @@ registry_reader_admins() {
   esac
   case "$root" in *$'\n'*|*$'\r'*|*','*) log "registry reader refused unmountable root path"; return 1 ;; esac
 
-  if ! registry_reader_docker image inspect --format '{{.Id}}' "$REGISTRY_READER_IMAGE" \
+  if ! registry_reader_docker 20s image inspect --format '{{.Id}}' "$REGISTRY_READER_IMAGE" \
       >"$RUN_TMP/reader.$$.image" 2>"$err" || [[ -s "$err" ]]; then
-    log "registry reader image unavailable locally"
+    log "registry reader image unavailable locally or inspect timed out"
     return 1
   fi
   image_id="$(<"$RUN_TMP/reader.$$.image")"
   [[ "$image_id" == "$REGISTRY_READER_IMAGE" ]] || { log "registry reader image digest mismatch"; return 1; }
 
   mount_arg="type=bind,src=$root,dst=/registry-root,readonly"
-  if ! registry_reader_docker run --rm --pull=never --network=none --read-only \
+  # The in-container timeout bounds find even if the host client loses its
+  # connection. The outer timeout bounds that client; --rm removes the reader
+  # container when its fixed command exits.
+  if ! registry_reader_docker 120s run --rm --pull=never --network=none --read-only \
       --security-opt=no-new-privileges:true --cap-drop=ALL --cap-add=DAC_READ_SEARCH \
       --user=0:0 --memory=128m --memory-swap=128m --pids-limit=32 --cpus=0.5 \
-      --mount="$mount_arg" --entrypoint=/usr/bin/find "$REGISTRY_READER_IMAGE" \
+      --mount="$mount_arg" --entrypoint=/usr/bin/timeout "$REGISTRY_READER_IMAGE" \
+      --signal=TERM --kill-after=5s 90s /usr/bin/find \
       /registry-root -maxdepth $((MAX_DEPTH + 2)) -type d -path '*/.git/worktrees' -print0 \
       >"$raw" 2>"$err" || [[ -s "$err" ]]; then
     log "registry reader Docker/find failed or returned diagnostics"
@@ -368,7 +377,7 @@ registry_reader_admins() {
 }
 
 build_registry_index() {
-  local root wtadmin pointer path find_err pointer_err pointer_lines pointer_bytes canonical
+  local root wtadmin pointer path find_err pointer_err pointer_path canonical
   : >"$REGISTRY_INDEX" || { REGISTRY_COMPLETE=false; return 0; }
   for root in ${REGISTRY_ROOTS[@]+"${REGISTRY_ROOTS[@]}"}; do
     [[ -d "$root" ]] || continue
@@ -402,22 +411,36 @@ build_registry_index() {
           REGISTRY_COMPLETE=false
           continue
         }
-        pointer_lines="$(wc -l <"$pointer" 2>/dev/null | tr -d '[:space:]')" || pointer_lines=""
-        pointer_bytes="$(wc -c <"$pointer" 2>/dev/null | tr -d '[:space:]')" || pointer_bytes=""
-        [[ "$pointer_lines" == 1 && "$pointer_bytes" =~ ^[0-9]+$ ]] && (( pointer_bytes <= 4096 )) || {
+        pointer_path="$RUN_TMP/gitdir-path.$$"
+        if ! "$PYTHON" - "$pointer" "$pointer_path" <<'PYREGISTRYPOINTER' 2>/dev/null
+import sys
+source, target = sys.argv[1:]
+try:
+    with open(source, "rb") as f:
+        raw = f.read(4097)
+    if (len(raw) > 4096 or b"\0" in raw or raw.count(b"\n") != 1 or
+            not raw.endswith(b"\n")):
+        raise ValueError("invalid gitdir pointer bytes")
+    path = raw[:-1]
+    if (not path.startswith(b"/") or path == b"/" or b"\r" in path or
+            any(part in (b"", b".", b"..") for part in path.split(b"/")[1:])):
+        raise ValueError("invalid gitdir pointer path")
+    with open(target, "wb") as f:
+        f.write(path + b"\0")
+except Exception:
+    sys.exit(1)
+PYREGISTRYPOINTER
+        then
           REGISTRY_COMPLETE=false
-          continue
-        }
-        if ! path="$(head -c 4097 "$pointer" 2>/dev/null)"; then
-          REGISTRY_COMPLETE=false
+          rm -f "$pointer_path"
           continue
         fi
-        path="${path%$'\n'}"
-        if [[ -z "$path" || "$path" != /* || "$path" == *$'\n'* || "$path" == *$'\r'* ]]; then
+        if ! IFS= read -r -d '' path <"$pointer_path"; then
           REGISTRY_COMPLETE=false
+          rm -f "$pointer_path"
           continue
         fi
-        case "$path/" in *"//"*|*"/./"*|*"/../"*) REGISTRY_COMPLETE=false; continue ;; esac
+        rm -f "$pointer_path"
         case "$path" in
           /*/.git) printf '%s\n' "${path%/.git}" >>"$REGISTRY_INDEX" ;;
           /*) printf '%s\n' "$path" >>"$REGISTRY_INDEX" ;;
@@ -436,8 +459,15 @@ build_registry_index
 # registry_hit <path>: prints "registered-worktree" when <path> is a registered
 # worktree path, contains one, or lives inside one.
 registry_hit() {
+  local candidate="$1"
   [[ -s "$REGISTRY_INDEX" ]] || return 1
-  awk -v c="$1" '
+  [[ "$candidate" != *$'\n'* && "$candidate" != *$'\r'* ]] || {
+    echo "registry-path-unrepresentable"
+    return 0
+  }
+  # Do not pass paths with `-v`: awk decodes backslash escapes in assignments.
+  REGISTRY_HIT_PATH="$candidate" awk '
+    BEGIN { c = ENVIRON["REGISTRY_HIT_PATH"] }
     { p = $0
       if (p == "" ) next
       if (p == c || index(p, c "/") == 1 || index(c, p "/") == 1) { hit = 1; exit } }
