@@ -102,11 +102,11 @@ _GDU_OVERRIDE = os.environ.get("DISK_MAGICIAN_GDU_CMD")
 GDU_CMD = shutil.which("gdu") if _GDU_OVERRIDE is None else (_GDU_OVERRIDE or None)
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 GDU_LOCALIZED_ERROR_RE = re.compile(
-    r"^(?:gdu|(?:.*/)?du): .*? '(.+)': (Permission denied|Operation not permitted|"
+    r"^(?:.*/)?g?du: .*? '(.+)': (Permission denied|Operation not permitted|"
     r"No such file or directory|Input/output error|Interrupted system call)$"
 )
 GDU_FTS_ERROR_RE = re.compile(
-    r"^(?:gdu|(?:.*/)?du): fts_read failed: (.+): (No such file or directory|"
+    r"^(?:.*/)?g?du: fts_read failed: (.+): (No such file or directory|"
     r"Permission denied|Operation not permitted|Input/output error|Interrupted system call)$"
 )
 

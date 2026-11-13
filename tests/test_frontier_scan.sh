@@ -806,7 +806,7 @@ sys.path.insert(0, "scripts")
 import disk_frontier_scan as m
 
 valid = True
-for prefix in ("gdu:", "du:", "/usr/bin/du:"):
+for prefix in ("gdu:", "du:", "/usr/bin/du:", "/opt/homebrew/bin/gdu:"):
     completed = subprocess.CompletedProcess(
         ["/usr/bin/du"], 1, stdout="4\t/fixture/protected\0",
         stderr=f"{prefix} cannot read directory '/fixture/protected': Permission denied\n",
@@ -821,6 +821,21 @@ for prefix in ("gdu:", "du:", "/usr/bin/du:"):
             "path": "/fixture/protected", "reason": "inventory_permission_denied"
         }]
     )
+
+fts = subprocess.CompletedProcess(
+    ["/opt/homebrew/bin/gdu"], 1, stdout="4\t/fixture/protected\0",
+    stderr="/opt/homebrew/bin/gdu: fts_read failed: /fixture/protected: Permission denied\n",
+)
+with mock.patch.object(m, "GDU_CMD", "/opt/homebrew/bin/gdu"), \
+     mock.patch.object(m.subprocess, "run", return_value=fts):
+    result = m.run_gdu_inventory(
+        ["/fixture/protected"], 10, m.ConcurrencyTracker(), 100
+    )
+valid = valid and result["usable"] and not result["unknown_errors"] and (
+    result["error_paths"] == [{
+        "path": "/fixture/protected", "reason": "inventory_permission_denied"
+    }]
+)
 
 unknown = subprocess.CompletedProcess(
     ["/usr/bin/du"], 1, stdout="4\t/fixture/protected\0",
