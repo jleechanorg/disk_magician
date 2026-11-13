@@ -89,7 +89,7 @@ BUDGET_PRESERVE_CONTENT_KEEPS=false
 BUDGET_FLOOR_MINUTES=120
 # Known content/provenance keeps budget mode may override; anything else keeps,
 # including remote-unverified (a failed ls-remote is an unknown, not a keep).
-BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
+BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:no-proof|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
 DRY_RUN=true
 
 usage() {
@@ -366,7 +366,7 @@ _verdict_and_maybe_remove() {
   fi
   case "$verdict" in
     remove) ;;
-    kept:secret-like|kept:unproven-content)
+    kept:secret-like|kept:unproven-content|kept:no-proof)
       # Ordered-gate guarantee: C14 evaluates owner lease, live cwd, open files
       # and recent activity BEFORE these content checks, so both are already
       # proven for this candidate when this branch runs.
@@ -805,7 +805,7 @@ while IFS= read -r -d '' entry; do
       outcome="$(scratch_budget_quarantine_remove "$entry")"
       automatic_logged=true
     else
-      preview_args=(--kind ephemeral)
+      preview_args=(--kind ephemeral --no-rescue-push)
       [[ -n "$ACT_DEADLINE_AT" ]] && preview_args+=(--deadline-at "$ACT_DEADLINE_AT")
       auto_verdict="$(artifact_removal_verdict "$entry" "${preview_args[@]}")"
       case "$auto_verdict" in
