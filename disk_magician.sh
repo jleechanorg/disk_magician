@@ -71,6 +71,9 @@ Commands:
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
   scratch-prune          Reclaim C14-recognized Scratch artifacts behind lease/live-cwd/open-file
                          gates (--clean needs operator approval or internal safe automatic mode).
+  emergency              One-off emergency reclaim of tmp + Scratch under one lock hold; age floor
+                         steps 24h -> 12h -> 6h -> 2h (never lower) until --target-gb is free.
+                         Flags: --target-gb N --max-age-hours H --dry-run --include-worktrees.
   cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.
   cleanup-antigravity-brain Prune old Antigravity brain dirs, idle worktrees, .backup leftovers.
   cleanup-claude-state   Run the guarded Claude state maintenance helper.
@@ -594,6 +597,9 @@ case "$CMD" in
     ;;
   scratch_prune|scratch-prune)
     "$SCRIPT_DIR/scripts/cleanup_scratch_top_level.sh" "$@"
+    ;;
+  emergency)
+    "$SCRIPT_DIR/scripts/emergency_reclaim.sh" "$@"
     ;;
   cleanup_apfs_snapshots|cleanup-apfs-snapshots)
     "$SCRIPT_DIR/scripts/cleanup_apfs_snapshots.sh" "$@"
