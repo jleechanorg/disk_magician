@@ -56,6 +56,16 @@ worktree_is_recently_active() {
     [[ "$rc" == 0 && "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 0
     (( value < $2 ))
 }
+# 48 h floor (operator decision 2026-11-12): the script asks the minutes flavour. Fold it
+# onto the same day-valued fixture so the call-count assertions stay comparable.
+worktree_is_recently_active_minutes() {
+    printf '%s\t%s\t%s\n' "$1" "$(( $2 / 1440 ))" "${3:-}" >> "$PREDICATE_COUNTER"
+    local value rc
+    value="$(awk -F '\t' -v p="$1" '$1 == p { print $2; found=1; exit } END { if (!found) exit 1 }' "$AGE_MAP")" || return 0
+    rc="$(awk -F '\t' -v p="$1" '$1 == p { print $3; exit }' "$AGE_MAP")"
+    [[ "$rc" == 0 && "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 0
+    (( value * 1440 < $2 ))
+}
 SH
 
 require() { "$@" || { printf '    assertion failed: %s\n' "$*" >&2; return 1; }; }

@@ -209,11 +209,12 @@ assert_not_contains "$OUT" "PRESERVED-WIP" "neither preserved"
 assert_true "[[ -d '$W6' && -d '$W6b' ]]" "both worktrees kept"
 
 # ---------------------------------------------------------------------------
-echo "case 7: young (<7d) dirty worktree untouched"
+# 48 h default floor (operator decision 2026-11-12) replaced the 7d floor: "young" is now <48h.
+echo "case 7: young (<48h) dirty worktree untouched"
 R7="$(mk_repo r7)"
 W7="$(mk_wt "$R7" young7)"
 echo "fresh" >>"$W7/tracked.txt"
-backdate_tree "$W7" 3
+backdate_tree "$W7" 1
 OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R7" --push-wip --execute --preserve-wip --min-age 1)"
 assert_contains "$OUT" "young" "young preserved"
 assert_not_contains "$OUT" "PRESERVED-WIP" "young not wip-preserved"

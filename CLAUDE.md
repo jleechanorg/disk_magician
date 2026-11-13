@@ -294,7 +294,22 @@ Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scri
 
 ## Worktree 7-day rule (hard) — recency is measured, never proxied
 
-**Amended 2026-10-08 (user decision):** `scripts/cleanup_worktrees.sh` now uses a
+**Amended 2026-11-12 (operator decision, Jeffrey: "Make this default 48hr") — current default:**
+the default recency floor for every worktree cleaner is **48 hours (2880 minutes)**:
+`cleanup_worktrees.sh`, `cleanup_worktree_deps.sh`, `cleanup_worktree_venvs.sh`,
+`slim_worktree_checkouts.sh`, `worktree_hygiene.sh`, `cleanup_claude_state.sh` and
+`worktree_remove_hook.sh`. It is applied through `worktree_is_recently_active_minutes`
+(never rounded to days). `safety_worktree_floor_minutes` in `scripts/safety_lib.sh` owns the
+number: config (`worktree_min_stale_hours`, `worktree_min_stale_days`, legacy `min_stale_days`
+above 7) and `--min-age`/`WORKTREE_MIN_AGE_DAYS` may only RAISE it, never lower it below 48 h.
+Unmeasurable recency is still treated as active (kept). The env overrides below
+(`DISK_MAGICIAN_WORKTREE_FLOOR_HOURS` >= 12, `DISK_MAGICIAN_REMOVE_HOOK_RECENCY`) keep working
+unchanged, and AO-owned worktrees keep their separate 7-day bar and ownership veto. Every other
+gate is unchanged. Read every "3 days"/"7 days" below as superseded by this paragraph, except the
+AO 7-day bar and the 3-to-7-day merged-clean exception, which only matters when config raises
+the floor to 7 days.
+
+**Amended 2026-10-08 (user decision; floor superseded 2026-11-12 by 48 h above):** `scripts/cleanup_worktrees.sh` used a
 3-day floor for ALL worktrees (`safety_worktree_floor_days`; the
 `worktree_min_stale_days` config key may only raise it). Every other condition
 below is unchanged (clean, no unpushed commits, not live-cwd, not locked, not

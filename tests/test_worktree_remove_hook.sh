@@ -475,14 +475,35 @@ result="$(TEST_AO_ROOT="$HOME/.worktrees/space-root " bash -c '''source "$1"; ao
 unset DISK_MAGICIAN_AO_CONFIG
 
 printf 'p999999\nfcwd\nn/\n' >"$FAKE_LSOF_FIXTURE"
-echo "== case 29: recently touched worktree is protected by 7-day floor =="
+echo "== case 29: recently touched worktree is protected by the 48 h floor (was 7-day; 2026-11-12) =="
 add_wt recent worktree-recent
 touch "$WTROOT/recent/README.md"
 run_hook "$(json "$WTROOT/recent")"; rc=$?
 [[ -d "$WTROOT/recent" ]] && ok "recent worktree kept" || bad "recent worktree removed"
 tail -n 1 "$LOG" | grep -q "recent-activity" && ok "recent reason logged" || bad "recent reason missing"
 
-echo "== case 29b: recency override: minutes:120 keeps a just-touched worktree, minutes:5 (below the 60 floor) falls back to 7 days =="
+echo "== case 29e: default floor is 48 h: 47h-idle kept, 49h-idle removed (operator decision 2026-11-12) =="
+age_wt_hours() { python3 - "$1" "$2" <<'AGEH'
+import os, sys, time
+root, hours = sys.argv[1], float(sys.argv[2])
+old = time.time() - hours * 3600
+for base, dirs, files in os.walk(root):
+    for name in dirs + files:
+        try: os.utime(os.path.join(base, name), (old, old))
+        except OSError: pass
+try: os.utime(root, (old, old))
+except OSError: pass
+AGEH
+}
+add_wt h47 worktree-h47; add_wt h49 worktree-h49
+git -C "$WTROOT/h47" push -q origin HEAD:refs/heads/h47 2>/dev/null; git -C "$WTROOT/h49" push -q origin HEAD:refs/heads/h49 2>/dev/null
+age_wt_hours "$WTROOT/h47" 47; age_wt_hours "$WTROOT/h49" 49
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" hours:48' _ "$SCRIPT" "$WTROOT/h47")"
+assert_eq "$V" "kept:recent-activity" "47h-idle worktree kept at hours:48"
+V="$(bash -c 'source "$1"; wrh_removal_verdict "$2" hours:48' _ "$SCRIPT" "$WTROOT/h49")"
+assert_eq "$V" "remove" "49h-idle worktree eligible at hours:48"
+
+echo "== case 29b: recency override: minutes:120 keeps a just-touched worktree, minutes:5 (below the 60 floor) falls back to the 48 h default =="
 add_wt ovr1 worktree-ovr1
 touch "$WTROOT/ovr1/README.md"
 printf '%s' "$(json "$WTROOT/ovr1")" | DISK_MAGICIAN_REMOVE_HOOK_RECENCY=minutes:120 DISK_MAGICIAN_UNSCANNABLE_CWD_APPROVED=1 bash "$SCRIPT" >/dev/null 2>&1
@@ -513,7 +534,7 @@ printf '%s' "$(json "$WTROOT/ovr2")" | DISK_MAGICIAN_DELETION_LOG="$DLOG" DISK_M
 ! grep -q "remove_worktree.*ovr2" "$DLOG" 2>/dev/null && ok "refused removal writes no deletion record" || bad "refused removal wrote deletion record"
 tail -n 3 "$LOG" | grep -q "recency override active: minutes:60" && ok "override logged to hook log" || bad "override not logged to hook log"
 
-echo "== case 29d: unwritable state dir -> override falls back to days:7 (61-minute-old worktree kept) =="
+echo "== case 29d: unwritable state dir -> override falls back to hours:48 (61-minute-old worktree kept) =="
 add_wt ovr3 worktree-ovr3
 age_wt_minutes "$WTROOT/ovr3" 61
 mv "$LOG" "$LOG.keep"; mkdir "$LOG"  # a directory: the audit append must fail
