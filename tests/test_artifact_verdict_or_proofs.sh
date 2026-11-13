@@ -31,12 +31,9 @@ git config --global user.name t
 git config --global init.defaultBranch main
 # shellcheck source=scripts/lib/artifact_verdict.sh
 source "$LIB"
-# The real rescue_ref.sh is sourced by the verdict. Keep the proof 1/2/4/6 cases isolated
-# from it (they assert "dirty alone is no proof"); proof 3 uses stubs and one real case below.
+# Rescue is part of the observable C14 decision: dirty/unpushed source qualifies
+# only after a real independent snapshot is pushed and verified.
 declare -F rescue_check >/dev/null || { echo "FAIL: artifact_verdict.sh did not source rescue_ref.sh"; exit 1; }
-eval "_real_$(declare -f rescue_check)"
-eval "_real_$(declare -f rescue_push)"
-unset -f rescue_check rescue_push
 
 PROOF_OUT="$T/proof.out"
 export DISK_MAGICIAN_C14_PROOF_OUT="$PROOF_OUT"
@@ -60,7 +57,7 @@ mkdir_file() { mkdir -p "$1" && printf 'payload' >"$1/${2:-f}"; }
 git init -q --bare "$T/origin.git"
 git clone -q "$T/origin.git" "$T/seed" 2>/dev/null
 printf 'x\n' >"$T/seed/a"; git -C "$T/seed" add a; git -C "$T/seed" commit -qm init; git -C "$T/seed" push -q origin main
-clone_fixture() { git clone -q "$T/origin.git" "$T/s/$1" 2>/dev/null; }
+clone_fixture() { git clone -q --no-local "$T/origin.git" "$T/s/$1" 2>/dev/null; }
 
 echo "== no proof: kept:no-proof, not an old gate reason =="
 mkdir_file "$T/s/recent"; age "$T/s/recent" 30
@@ -76,9 +73,9 @@ mkdir_file "$T/s/old"; age "$T/s/old" 2000
 assert_eq "$(av "$T/s/old")" remove "old dir"
 assert_eq "$(proofs)" age "age label printed"
 mkdir_file "$T/s/secret-old"; printf 'k' >"$T/s/secret-old/.env"; printf 'k' >"$T/s/secret-old/id_rsa"; age "$T/s/secret-old" 2000
-assert_eq "$(av "$T/s/secret-old")" remove "secret-like + old is eligible by age"
+assert_eq "$(av "$T/s/secret-old")" kept:secret-like "secret-like remains protected even when old"
 mkdir_file "$T/s/secret-young"; printf 'k' >"$T/s/secret-young/.env"; age "$T/s/secret-young" 90
-assert_eq "$(av "$T/s/secret-young")" kept:no-proof "secret-like + young has no proof"
+assert_eq "$(av "$T/s/secret-young")" kept:secret-like "secret-like is protected regardless of age"
 mkdir_file "$T/s/floor"; age "$T/s/floor" 100
 assert_eq "$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=10 av "$T/s/floor")" kept:no-proof "env floor below 120 clamps up to 120"
 age "$T/s/floor" 130
@@ -87,18 +84,25 @@ assert_eq "$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=10 av "$T/s/floor")" remove "130 mi
     _av_newest_mtime() { return 1; }
     mkdir_file "$T/s/unmeasurable"; age "$T/s/unmeasurable" 5000
     assert_eq "$(av "$T/s/unmeasurable")" kept:mtime-unmeasurable "unmeasurable age fails closed"
-) || true
+    [[ "$FAIL" -eq 0 ]]
+) || FAIL=$((FAIL + 1))
 
 echo "== proof 2: on-origin / dirty and unpushed git =="
 clone_fixture clean-young; age "$T/s/clean-young" 90
 assert_eq "$(av "$T/s/clean-young")" remove "clean pushed clone, young"
 assert_eq "$(proofs)" on-origin "on-origin label printed"
 clone_fixture dirty-young; printf 'wip' >"$T/s/dirty-young/new"; age "$T/s/dirty-young" 90
-assert_eq "$(av "$T/s/dirty-young")" kept:no-proof "dirty clone, young"
+assert_eq "$(av "$T/s/dirty-young")" remove "dirty clone removed only after rescue push"
+assert_eq "$(proofs)" rescued "dirty clone rescue label printed"
 clone_fixture dirty-old; printf 'wip' >"$T/s/dirty-old/new"; age "$T/s/dirty-old" 2000
-assert_eq "$(av "$T/s/dirty-old")" remove "dirty clone, old: preserved by independent rescue"
+assert_eq "$(av "$T/s/dirty-old")" remove "old dirty clone removed only after rescue push"
+assert_eq "$(proofs)" rescued "old dirty clone rescue label printed"
+clone_fixture dirty-old-no-remote; printf 'wip' >"$T/s/dirty-old-no-remote/new"; age "$T/s/dirty-old-no-remote" 2000
+git -C "$T/s/dirty-old-no-remote" remote set-url origin "$T/missing-origin.git"
+assert_eq "$(av "$T/s/dirty-old-no-remote")" kept:dirty "age cannot bypass a failed independent rescue"
 clone_fixture unpushed-young; git -C "$T/s/unpushed-young" commit -q --allow-empty -m local; age "$T/s/unpushed-young" 90
-assert_eq "$(av "$T/s/unpushed-young")" kept:no-proof "unpushed clone, young"
+assert_eq "$(av "$T/s/unpushed-young")" remove "unpublished HEAD commit is captured by independent rescue"
+assert_eq "$(proofs)" rescued "unpushed HEAD rescue label printed"
 
 echo "== proof 3: rescued (only when nothing else proves, push must succeed) =="
 PUSHED="$T/pushed.log"
@@ -108,7 +112,7 @@ PUSHED="$T/pushed.log"
     clone_fixture rescue-ok; printf 'wip' >"$T/s/rescue-ok/new"; age "$T/s/rescue-ok" 90
     assert_eq "$(av "$T/s/rescue-ok")" remove "dirty young clone, rescue_check ok, rescue_push rc 0"
     assert_eq "$(proofs)" rescued "rescued label printed"
-    [[ "$(cat "$PUSHED")" == "$T/s/rescue-ok" ]] && ok "rescue_push called on the tree" || bad "rescue_push not called"
+    [[ "$(cat "$PUSHED")" == "$(cd "$T/s/rescue-ok" && pwd -P)" ]] && ok "rescue_push called on the tree" || bad "rescue_push not called"
     : >"$PUSHED"
     clone_fixture rescue-preview; printf 'wip' >"$T/s/rescue-preview/new"; age "$T/s/rescue-preview" 90
     assert_eq "$(av "$T/s/rescue-preview" --no-rescue-push)" kept:rescue-required "read-only preview does not claim a rescue"
@@ -124,25 +128,22 @@ PUSHED="$T/pushed.log"
     : >"$PUSHED"
     av "$T/s/rescue-skip" >/dev/null
     [[ ! -s "$PUSHED" ]] && ok "no push when on-origin already proves it" || bad "pushed despite another proof"
-) || true
-(
-    clone_fixture rescue-absent; printf 'wip' >"$T/s/rescue-absent/new"; age "$T/s/rescue-absent" 90
-    assert_eq "$(av "$T/s/rescue-absent")" kept:no-proof "rescue_check undefined: proof 3 unavailable"
-) || true
+    [[ "$FAIL" -eq 0 ]]
+) || FAIL=$((FAIL + 1))
 
 (
-    eval "$(declare -f _real_rescue_check | sed '1s/^_real_//')"
-    eval "$(declare -f _real_rescue_push | sed '1s/^_real_//')"
     export DISK_MAGICIAN_DELETION_LOG="$T/deletions.log"
     clone_fixture rescue-real; printf 'wip' >"$T/s/rescue-real/new"; age "$T/s/rescue-real" 90
     assert_eq "$(av "$T/s/rescue-real")" remove "real rescue_ref: dirty young clone rescued"
-    refs="$(git -C "$T/origin.git" for-each-ref --format='%(refname)' 'refs/diskm-rescue/' | wc -l | tr -d ' ')"
-    assert_eq "$refs" 1 "rescue ref exists on origin before removal"
-    snap="$(git -C "$T/origin.git" for-each-ref --format='%(objectname)' 'refs/diskm-rescue/')"
+    assert_eq "$(proofs)" rescued "real rescue_ref proof recorded"
+    ref="$(git -C "$T/origin.git" for-each-ref --format='%(refname)' refs/diskm-rescue | grep 'rescue-real-')"
+    [[ -n "$ref" ]] && ok "rescue ref exists on origin before removal" || bad "rescue ref missing"
+    snap="$(git -C "$T/origin.git" rev-parse "$ref" 2>/dev/null)"
     assert_eq "$(git -C "$T/origin.git" show "$snap:new" 2>/dev/null)" wip "rescue ref holds the untracked work"
     clone_fixture rescue-secret; printf 'wip' >"$T/s/rescue-secret/new"; printf 'k' >"$T/s/rescue-secret/.env"; age "$T/s/rescue-secret" 90
-    assert_eq "$(av "$T/s/rescue-secret")" kept:no-proof "real rescue_ref: secret-like tree is never pushed"
-) || true
+    assert_eq "$(av "$T/s/rescue-secret")" kept:secret-like "secret-like source remains protected"
+    [[ "$FAIL" -eq 0 ]]
+) || FAIL=$((FAIL + 1))
 
 echo "== proofs 4 and 6: rebuildable name, operator-named =="
 mkdir_file "$T/s/proj/build"; age "$T/s/proj/build" 90
@@ -151,11 +152,11 @@ assert_eq "$(proofs)" rebuildable "rebuildable label printed"
 mkdir_file "$T/s/proj3/build"; age "$T/s/proj3/build" 30
 assert_eq "$(av "$T/s/proj3/build")" kept:recent-activity "build dir written minutes ago: 1 h idle veto"
 mkdir_file "$T/s/proj2/build"; git init -q "$T/s/proj2/build"; age "$T/s/proj2/build" 90
-assert_eq "$(av "$T/s/proj2/build")" kept:no-proof "a build-named tree holding .git is not rebuildable"
+assert_eq "$(av "$T/s/proj2/build")" kept:dirty "a build-named repo with untracked content is kept"
 mkdir_file "$T/s/named"; age "$T/s/named" 90
-assert_eq "$(DISK_MAGICIAN_OPERATOR_TARGETS="$T/s/other
-$T/s/named" av "$T/s/named")" remove "operator-named, young"
-assert_eq "$(proofs)" operator-named "operator-named label printed"
+target_list="$(printf '%s\n' "$T/s/other" "$T/s/named")"
+assert_eq "$(DISK_MAGICIAN_OPERATOR_TARGETS="$target_list" av "$T/s/named")" kept:no-proof "operator name does not preserve unproven content"
+assert_eq "$(proofs)" "" "operator-name alone is not a preservation proof"
 
 echo "== vetoes keep even when every proof holds =="
 mkdir_file "$T/s/cwd"; age "$T/s/cwd" 2000

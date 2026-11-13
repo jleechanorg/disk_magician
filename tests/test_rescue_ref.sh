@@ -43,6 +43,51 @@ grep -qx u.txt <<<"$tree" && ok "untracked file captured" || bad "untracked miss
 mk unp; echo 2 >"$T/unp/b.txt"; git -C "$T/unp" add b.txt; git -C "$T/unp" commit -qm two
 ref="$(rescue_push "$T/unp")"; git -C "$T/unp.git" show "$ref:b.txt" >/dev/null 2>&1 && ok "unpushed commit rescued" || bad "unpushed commit missing"
 
+# A dirty current branch does not preserve a separate unpublished branch.
+mk branch
+git -C "$T/branch" push -q origin main
+git -C "$T/branch" checkout -q -b local-only
+printf 'branch-only\n' >"$T/branch/local.txt"
+git -C "$T/branch" add local.txt; git -C "$T/branch" commit -qm local-only
+git -C "$T/branch" checkout -q main
+printf 'dirty current branch\n' >"$T/branch/a.txt"
+[[ "$(rc rescue_check "$T/branch")" -ne 0 ]] && ok "unpublished branch blocks rescue check" || bad "unpublished branch was not checked"
+[[ "$(rc rescue_push "$T/branch")" -ne 0 ]] && ok "unpublished branch blocks rescue push" || bad "unpublished branch was lost by rescue"
+[[ -z "$(git -C "$T/branch.git" for-each-ref refs/diskm-rescue)" ]] && ok "no rescue ref for unpublished branch" || bad "rescue ref created despite unpublished branch"
+
+# Stashes and reflog-reachable commits are separate history, not HEAD's tree.
+mk stash; git -C "$T/stash" push -q origin main
+printf 'saved\n' >"$T/stash/a.txt"; git -C "$T/stash" stash push -qm saved
+printf 'current\n' >"$T/stash/a.txt"
+[[ "$(rc rescue_check "$T/stash")" -ne 0 && "$(rc rescue_push "$T/stash")" -ne 0 ]] && ok "stash blocks rescue" || bad "stash was lost by rescue"
+[[ -z "$(git -C "$T/stash.git" for-each-ref refs/diskm-rescue)" ]] && ok "no rescue ref for stash" || bad "rescue ref created despite stash"
+
+# The fresh rescue index starts at HEAD, so it cannot hold a staged blob A
+# while the worktree has a different blob B for the same path.
+mk staged; git -C "$T/staged" push -q origin main
+printf 'staged A\n' >"$T/staged/a.txt"; git -C "$T/staged" add a.txt
+printf 'unstaged B\n' >"$T/staged/a.txt"
+[[ "$(rc rescue_check "$T/staged")" -ne 0 && "$(rc rescue_push "$T/staged")" -ne 0 ]] && ok "different staged/worktree versions block rescue" || bad "staged version was lost by rescue"
+
+mk hidden; git -C "$T/hidden" push -q origin main
+git -C "$T/hidden" update-index --assume-unchanged a.txt
+printf 'hidden dirty A\n' >"$T/hidden/a.txt"
+[[ "$(rc rescue_check "$T/hidden")" -ne 0 && "$(rc rescue_push "$T/hidden")" -ne 0 ]] && ok "hidden index state blocks rescue" || bad "hidden index state was lost by rescue"
+
+# A deleted local branch can leave its only commit in the reflog.
+mk reflog; git -C "$T/reflog" push -q origin main
+git -C "$T/reflog" checkout -q -b temp-only
+printf 'reflog-only\n' >"$T/reflog/r.txt"; git -C "$T/reflog" add r.txt; git -C "$T/reflog" commit -qm reflog-only
+git -C "$T/reflog" checkout -q main; git -C "$T/reflog" branch -D -q temp-only
+printf 'dirty\n' >"$T/reflog/a.txt"
+[[ "$(rc rescue_check "$T/reflog")" -ne 0 && "$(rc rescue_push "$T/reflog")" -ne 0 ]] && ok "reflog-only commit blocks rescue" || bad "reflog-only commit was lost by rescue"
+
+# An unreachable blob is outside the HEAD-parented rescue tree.
+mk dangling; git -C "$T/dangling" push -q origin main
+printf 'private object\n' | git -C "$T/dangling" hash-object -w --stdin >/dev/null
+printf 'dirty\n' >"$T/dangling/a.txt"
+[[ "$(rc rescue_check "$T/dangling")" -ne 0 && "$(rc rescue_push "$T/dangling")" -ne 0 ]] && ok "unreachable object blocks rescue" || bad "unreachable object was lost by rescue"
+
 # unborn
 git init -q --bare "$T/unb.git"; git init -q "$T/unb"; git -C "$T/unb" remote add origin "$T/unb.git"; echo x >"$T/unb/x.txt"
 ref="$(rescue_push "$T/unb")"; r=$?

@@ -28,6 +28,24 @@ _rr_secret_like() {
     return 0
 }
 
+# The rescue snapshot has only HEAD as its parent. Reject local history or
+# unreachable objects that the resulting commit would not retain.
+_rr_history_captured() {
+    local dir="$1" head outstanding unreachable flags
+    local args=(--all --reflog)
+    head="$(git -C "$dir" rev-parse --verify -q HEAD^{commit} 2>/dev/null)" || head=""
+    [[ -z "$head" ]] || args+=(--not "$head")
+    outstanding="$(git -C "$dir" rev-list "${args[@]}" 2>/dev/null)" || return 1
+    [[ -z "$outstanding" ]] || return 1
+    unreachable="$(git -C "$dir" fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>/dev/null)" || return 1
+    ! grep -q '^unreachable ' <<<"$unreachable" || return 1
+    flags="$(git -C "$dir" ls-files -v 2>/dev/null)" || return 1
+    declare -F _wi_has_flagged_index_entries >/dev/null 2>&1 || return 1
+    _wi_has_flagged_index_entries "$dir" "$flags" && return 1
+    git -C "$dir" diff --cached --quiet --ignore-submodules=none -- || return 1
+    return 0
+}
+
 # Snapshot size in bytes (tracked + untracked non-ignored); rc 1 on failure.
 _rr_size_bytes() {
     local dir="$1" total=0 n
@@ -45,6 +63,7 @@ rescue_check() {
     # Only a work-tree root is rescuable: a subdirectory (e.g. venv/ inside a repo) would push
     # the parent's snapshot and then lose only the subdirectory's local state.
     [[ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$dir" && pwd -P)" ]] || return 1
+    _rr_history_captured "$dir" || return 1
     git -C "$dir" remote get-url origin >/dev/null 2>&1 || return 1
     # A rescue destination borrowing Git objects from the candidate is not an
     # independent backup: deleting the source would remove both copies.
@@ -86,7 +105,8 @@ rescue_push() {
         -m "diskm rescue snapshot of $dir")" || return 1
     short="${commit:0:8}"
     host="$(hostname -s 2>/dev/null || echo host)"
-    base="$(basename "$dir" | tr -c 'A-Za-z0-9._-' '_')"
+    base="$(basename "$dir")"
+    base="${base//[^A-Za-z0-9._-]/_}"
     ref="refs/diskm-rescue/${host//[^A-Za-z0-9._-]/_}/$(date -u +%Y%m%d)/${base}-${short}"
     _rr_timeout 60 git -C "$dir" push -q origin "$commit:$ref" >/dev/null 2>&1 || { echo "rescue_push: push failed" >&2; return 1; }
     out="$(_rr_timeout 60 git -C "$dir" ls-remote origin "$ref" 2>/dev/null)" || return 1
