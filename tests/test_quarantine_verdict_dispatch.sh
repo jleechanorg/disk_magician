@@ -39,6 +39,15 @@ OUT="$(bash "$REPO_ROOT/disk_magician.sh" quarantine verdict "$WT/.venv" --kind 
   exit 1
 }
 
+PROOF_OUT="$TMP_ROOT/proof-sentinel.txt"
+printf 'preserve proof sentinel\n' > "$PROOF_OUT"
+OUT="$(DISK_MAGICIAN_C14_PROOF_OUT="$PROOF_OUT" bash "$REPO_ROOT/disk_magician.sh" \
+  quarantine verdict "$WT/.venv" --kind rebuildable 2>&1)"
+[[ "$OUT" == remove && "$(cat "$PROOF_OUT")" == 'preserve proof sentinel' ]] || {
+  echo "FAIL: read-only verdict changed the configured proof-output file"
+  exit 1
+}
+
 set +e
 OUT="$(bash "$REPO_ROOT/disk_magician.sh" quarantine verdict "$CANDIDATE" --kind rebuildable 2>&1)"
 RC=$?

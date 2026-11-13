@@ -712,9 +712,9 @@ case "$CMD" in
         done
         source "$SCRIPT_DIR/scripts/lib/artifact_verdict.sh"
         if [[ "$verdict_args_seen" == 1 ]]; then
-          DISK_MAGICIAN_C14_LEDGER= artifact_removal_verdict "$verdict_path" "${verdict_args[@]}" --no-rescue-push
+          DISK_MAGICIAN_C14_LEDGER= DISK_MAGICIAN_C14_PROOF_OUT= artifact_removal_verdict "$verdict_path" "${verdict_args[@]}" --no-rescue-push
         else
-          DISK_MAGICIAN_C14_LEDGER= artifact_removal_verdict "$verdict_path" --no-rescue-push
+          DISK_MAGICIAN_C14_LEDGER= DISK_MAGICIAN_C14_PROOF_OUT= artifact_removal_verdict "$verdict_path" --no-rescue-push
         fi
         ;;
       *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]|verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]}" >&2; exit 2 ;;

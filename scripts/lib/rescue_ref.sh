@@ -64,6 +64,10 @@ rescue_check() {
     # the parent's snapshot and then lose only the subdirectory's local state.
     [[ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$dir" && pwd -P)" ]] || return 1
     _rr_history_captured "$dir" || return 1
+    local common topology
+    common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+    topology="$(python3 "$_RR_PROBE" worktrees "$common" "$dir")" || return 1
+    [[ "$topology" == ok ]] || return 1
     git -C "$dir" remote get-url origin >/dev/null 2>&1 || return 1
     # A rescue destination borrowing Git objects from the candidate is not an
     # independent backup: deleting the source would remove both copies.

@@ -55,6 +55,16 @@ printf 'dirty current branch\n' >"$T/branch/a.txt"
 [[ "$(rc rescue_push "$T/branch")" -ne 0 ]] && ok "unpublished branch blocks rescue push" || bad "unpublished branch was lost by rescue"
 [[ -z "$(git -C "$T/branch.git" for-each-ref refs/diskm-rescue)" ]] && ok "no rescue ref for unpublished branch" || bad "rescue ref created despite unpublished branch"
 
+# The candidate is the main worktree root; an external linked worktree shares
+# its common .git/worktrees admin directory and would be orphaned by deletion.
+mk main-topology; git -C "$T/main-topology" push -q origin main
+git -C "$T/main-topology" worktree add -q --detach "$T/external-linked" HEAD
+printf 'dirty\\n' >"$T/main-topology/local.txt"
+[[ "$(rc rescue_check "$T/main-topology")" -ne 0 ]] && ok "external linked worktree blocks rescue check" || bad "external linked worktree admin was ignored"
+[[ "$(rc rescue_push "$T/main-topology")" -ne 0 ]] && ok "external linked worktree blocks rescue push" || bad "external linked worktree was orphaned by rescue"
+[[ -z "$(git -C "$T/main-topology.git" for-each-ref refs/diskm-rescue)" ]] && ok "no rescue ref for orphaning candidate" || bad "rescue ref created for orphaning candidate"
+git -C "$T/main-topology" worktree remove -f "$T/external-linked"
+
 # Stashes and reflog-reachable commits are separate history, not HEAD's tree.
 mk stash; git -C "$T/stash" push -q origin main
 printf 'saved\n' >"$T/stash/a.txt"; git -C "$T/stash" stash push -qm saved
