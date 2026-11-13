@@ -1101,7 +1101,13 @@ def secrets(inv_file, kind=""):
     try:
         kind = os.environ.get("C14_SECRET_KIND") or kind
         entries = json.load(open(inv_file, encoding="utf-8"))
-        paths = (e.get("name", "") if e["path"] == "." else e["path"] for e in entries)
+        # Only regular files can carry secret bytes. The inventory also records
+        # `type: "dir"` rows, and a credential-named DIRECTORY cannot be exempted
+        # by a filename rule: grpc's `_credentials/` matched SECRET_RE and made
+        # every grpc-bearing venv read as secret-like even after roots.pem and
+        # the discovery documents were exempt (bead disk_magician-9ywq).
+        paths = (e.get("name", "") if e["path"] == "." else e["path"]
+                 for e in entries if e.get("type") != "dir")
         if kind == "xcode-derived-data":
             # Generated names such as NativeRequestCredentials.o are not secrets; anything
             # else in the root (a .env, secrets.json, *.p12) still is.
