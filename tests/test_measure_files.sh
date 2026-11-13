@@ -2,21 +2,44 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRATCH="$(diskm scratch-dir)"
+SCRATCH="$(bash "$ROOT/disk_magician.sh" scratch-dir)"
+[[ -n "$SCRATCH" && "$SCRATCH" != / && -d "$SCRATCH" ]] || {
+  echo "test_measure_files: resolved Scratch path is unavailable: $SCRATCH" >&2
+  exit 1
+}
 T="$(mktemp -d "$SCRATCH/.measure-files-test.XXXXXX")"
-trap 'chmod -R u+rwX "$T" 2>/dev/null; rm -rf "$T"' EXIT
+cleanup_fixture() {
+  case "$T" in
+    "$SCRATCH"/.measure-files-test.*) ;;
+    *) echo "test_measure_files: refusing unexpected fixture path: $T" >&2; return 1 ;;
+  esac
+  [[ -d "$T" && ! -L "$T" ]] || return 0
+  chmod -R u+rwX "$T" 2>/dev/null
+  rm -rf -- "$T"
+}
+trap cleanup_fixture EXIT
 PASS=0; FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 run() { bash "$ROOT/disk_magician.sh" measure-files "$@"; }
+sparse_file() {
+  python3 -c 'from pathlib import Path; import sys; f=Path(sys.argv[1]).open("wb"); f.truncate(int(sys.argv[2])); f.close()' "$1" "$2"
+}
 flag_for() { awk -F '\t' -v p="$1" '$5 == p {print $4}' <<<"$2"; }
 bytes_for() { awk -F '\t' -v p="$1" '$5 == p {print $1}' <<<"$2"; }
+
+help="$(run --help)"; rc=$?
+[[ "$rc" -eq 0 && "$help" == *"newest_epoch, flag, path"* \
+   && "$help" == *"A=aggregated"* && "$help" == *"G=opaque Git"* \
+   && "$help" == *"E=unreadable/unmeasured"* ]] \
+  && ok 'help documents TSV columns and unknown-value flags' \
+  || bad "help contract incomplete (rc=$rc)"
 
 # Large directories must be itemised recursively at the fixed 100 MiB floor.
 BIG="$T/big"
 mkdir -p "$BIG/nested"
-truncate -s 100M "$BIG/nested/a"
-truncate -s 1M "$BIG/nested/b"
+sparse_file "$BIG/nested/a" 104857600
+sparse_file "$BIG/nested/b" 1048576
 out="$(run "$BIG")"; rc=$?
 [[ "$rc" -eq 0 ]] && ok 'large tree measurement succeeds' || bad "large tree rc=$rc"
 [[ "$(flag_for "$BIG" "$out")" == "" && "$(flag_for "$BIG/nested" "$out")" == "" ]] \
@@ -29,7 +52,7 @@ out="$(run "$BIG")"; rc=$?
 # A directory strictly below 100 MiB may be represented by one aggregate row.
 SMALL="$T/small"
 mkdir -p "$SMALL"
-truncate -s 50M "$SMALL/a"
+sparse_file "$SMALL/a" 52428800
 out="$(run "$SMALL")"; rc=$?
 [[ "$rc" -eq 0 && "$(flag_for "$SMALL" "$out")" == A \
    && "$(bytes_for "$SMALL" "$out")" == 52428800 ]] \
@@ -48,8 +71,8 @@ out="$(run "$GIT")"; rc=$?
 # A symlink is measured as a link and its target is never followed.
 LINK="$T/link-root"
 mkdir -p "$LINK" "$T/target"
-truncate -s 100M "$LINK/real"
-truncate -s 120M "$T/target/payload"
+sparse_file "$LINK/real" 104857600
+sparse_file "$T/target/payload" 125829120
 ln -s "$T/target" "$LINK/linked"
 out="$(run "$LINK")"; rc=$?
 [[ "$rc" -eq 0 && "$(flag_for "$LINK/linked" "$out")" == L \

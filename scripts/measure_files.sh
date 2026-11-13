@@ -8,7 +8,22 @@ source "$SCRIPT_DIR/lib/scratch_budget.sh"
 usage() {
   echo "Usage: diskm measure-files PATH [--deadline-at MONOTONIC]" >&2
 }
+help() {
+  cat <<'EOF'
+Usage: diskm measure-files PATH [--deadline-at MONOTONIC]
 
+Outputs tab-separated rows: bytes, files, newest_epoch, flag, path.
+Sizes are file-summed apparent bytes; directories below 100 MiB may aggregate.
+Flags: A=aggregated, F=file, L=symlink, G=opaque Git, E=unreadable/unmeasured.
+G and E rows with zero values mean unknown, not empty or old; either makes the
+measurement incomplete. Symlinks are never followed.
+EOF
+}
+
+if [[ $# -eq 1 && "$1" == "--help" ]]; then
+  help
+  exit 0
+fi
 [[ $# -ge 1 && -n "$1" ]] || { usage; exit 2; }
 path="$1"
 shift
