@@ -748,6 +748,9 @@ mkdir -p "$PT/nm/repo/node_modules/pkg" && printf 'x' >"$PT/nm/repo/node_modules
 assert_eq "$(av "$PT/nm/repo")" remove "allowlisted node_modules in a pushed clean clone (no kind)"
 printf 'n' >"$PT/nm/notes.txt" && age "$PT/nm" 120
 assert_eq "$(av "$PT/nm")" kept:no-proof "the same clone beside a unique non-git file"
+mkdir -p "$PT/nm/repo/build" && printf 'src' >"$PT/nm/repo/build/keep.txt" && git -C "$PT/nm/repo" add build/keep.txt \
+    && git -C "$PT/nm/repo" -c user.email=t@t -c user.name=t commit -qm tracked-build && age "$PT/nm" 120
+assert_eq "$(av "$PT/nm/repo/build")" kept:no-proof "a tracked build/ dir is not rebuildable by name"
 echo "-- rebuildable (--kind rebuildable) and os_clone --"
 mkdir -p "$HOME/.cache/uv/archive-v0/x" "$HOME/.cache/other/x" "$HOME/Library/Developer/Xcode/DerivedData/App-1" \
     "$HOME/Library/Caches/ms-playwright/chromium-1248" "$HOME/Library/Caches/CocoaPods/Pods" \

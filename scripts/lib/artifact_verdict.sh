@@ -743,10 +743,10 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
             fi
         fi
     fi
-    # Proof 4: rebuildable artifact name (never a tree holding .git).
-    if [[ -d "$p" && ! -e "$p/.git" ]]; then
+    # Proof 4: rebuildable artifact name — never a tree holding .git, never tracked paths.
+    if [[ -d "$p" && -z "$(find "$p" -name .git -print -quit 2>/dev/null)" && -z "$(git -C "$p" ls-files -- . 2>/dev/null | head -1)" ]]; then
         case "${p##*/}" in
-            build|dist|out|target|coverage|artifacts|gradle|.gradle|android-sdk|avd|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods|node_modules|isolated-*|*-compilation-cache) reb=1 ;;
+            build|dist|out|target|coverage|gradle|.gradle|android-sdk|avd|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods|node_modules|isolated-*|*-compilation-cache) reb=1 ;;
         esac
     fi
     # Rebuildable proofs (kind-declared or name-scoped) keep the 1 h idle floor the

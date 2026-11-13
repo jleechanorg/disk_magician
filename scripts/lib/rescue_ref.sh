@@ -44,6 +44,9 @@ rescue_check() {
     # the parent's snapshot and then lose only the subdirectory's local state.
     [[ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$dir" && pwd -P)" ]] || return 1
     git -C "$dir" remote get-url origin >/dev/null 2>&1 || return 1
+    # A nested repository snapshots as a bare gitlink (none of its files or commits), so the
+    # push would succeed while its content is lost; keep such trees for on-origin or age.
+    [[ -z "$(find "$dir" -mindepth 2 -name .git -print -quit 2>/dev/null)" ]] || return 1
     _rr_secret_like "$dir" && return 1
     [[ "$cap_mb" =~ ^[0-9]+$ ]] || return 1
     size="$(_rr_size_bytes "$dir")" || return 1

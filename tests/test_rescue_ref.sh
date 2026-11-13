@@ -66,6 +66,9 @@ git init -q "$T/noor"; [[ "$(rc rescue_check "$T/noor")" -ne 0 && "$(rc rescue_p
 mkdir "$T/plain"; [[ "$(rc rescue_check "$T/plain")" -ne 0 ]] && ok "non-git fails" || bad "non-git passed"
 mk subdir-host; mkdir -p "$T/subdir-host/venv"; printf 'x' >"$T/subdir-host/venv/lib"
 [[ "$(rc rescue_check "$T/subdir-host/venv")" -ne 0 ]] && ok "subdirectory of a work tree is not rescuable" || bad "subdirectory passed rescue_check"
+mk nest-host; git init -q "$T/nest-host/inner"; printf 'unsaved' >"$T/nest-host/inner/work.txt"
+[[ "$(rc rescue_check "$T/nest-host")" -ne 0 && "$(rc rescue_push "$T/nest-host")" -ne 0 ]] \
+    && ok "a nested repository blocks rescue (it would snapshot as an empty gitlink)" || bad "nested repo passed rescue"
 
 # broken / read-only origin
 mk ro; chmod -R a-w "$T/ro.git"
