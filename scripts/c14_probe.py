@@ -1026,6 +1026,26 @@ def _public_ca_bundle(n):
     deploy.pem or any *.key/.p12/.pfx stays secret-like wherever it lives."""
     return n in _CA_BUNDLES
 
+# Google API *discovery documents*: public OAuth-scope/schema metadata published by
+# googleapiclient, shipped inside every venv that installs google-api-python-client.
+# Names like iamcredentials.v1.json match SECRET_RE only because the service is
+# called "...credentials"; the files contain scope descriptions, never key material
+# (verified: grep -ciE 'private_key|BEGIN .*PRIVATE|client_secret"' -> 0).
+# Matched narrowly: a discovery_cache/documents/ parent AND a <service>.<version>.json
+# basename, so creds.json / credentials.json / any *credentials* key file outside
+# that path stays secret-like.
+_DISCOVERY_DOC_RE = re.compile(r"^[a-z][a-z0-9]*\.[v0-9][a-z0-9]*\.json$")
+
+def _google_discovery_doc(parts, n):
+    """True only for vendored googleapiclient discovery JSON under dependency dirs."""
+    if len(parts) < 2:
+        return False
+    if parts[-2].lower() != "documents" or parts[-3].lower() != "discovery_cache":
+        return False
+    if not _DISCOVERY_DOC_RE.fullmatch(n):
+        return False
+    return bool(_DEP_DIRS & {c.lower() for c in parts[:-3]})
+
 def exempt_name(path):
     """Single owner of the secret-name exemption (relative path; used by every secret gate).
     Exempt only: a template suffix; .d.ts/.map/.json.schema whose stripped stem is not
@@ -1041,6 +1061,8 @@ def exempt_name(path):
         # under node_modules/venv/site-packages.
         return bool(_DEP_DIRS & {c.lower() for c in parts[:-1]}) and _public_ca_bundle(n)
     if not SECRET_RE.fullmatch(parts[-1]):
+        return True
+    if _google_discovery_doc(parts, n):
         return True
     # Source code is not secret material — but only when the secret word is part of a
     # longer identifier. A stem that IS the secret word (credentials.py, secrets.rb,
