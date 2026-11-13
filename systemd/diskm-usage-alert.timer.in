@@ -1,0 +1,12 @@
+[Unit]
+Description=Disk Magician free-space and Scratch headroom alert schedule
+
+[Timer]
+Unit=@UNIT_NAME@.service
+# Every 15 minutes. A Scratch volume can go from 20 GiB free to full inside
+# one build (measured: jeff-ubuntu fell to 115 MB free on 2026-11-12), so an
+# hourly cadence is too coarse to warn before it breaks live work.
+@CADENCE@
+
+[Install]
+WantedBy=timers.target
