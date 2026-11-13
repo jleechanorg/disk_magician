@@ -396,6 +396,14 @@ is_already_centralized_or_broken() {
 # snapshot_commit.sh's ~/.disk_magician_state/snapshot.lock. Contention =
 # log one line and skip this run entirely (exit 0) — never queue, never
 # block, matching the repo's stated concurrent-run policy.
+stat_mtime_epoch() {
+  local path="$1" fallback="$2" mtime
+  mtime="$(stat -c '%Y' "$path" 2>/dev/null)" || mtime=""
+  [[ "$mtime" =~ ^[0-9]+$ ]] || { mtime="$(stat -f '%m' "$path" 2>/dev/null)" || mtime=""; }
+  [[ "$mtime" =~ ^[0-9]+$ ]] || mtime="$fallback"
+  printf '%s\n' "$mtime"
+}
+
 acquire_cleanup_venvs_lock() {
   mkdir -p "$(dirname "$LOCK_DIR")"
   if mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -405,8 +413,8 @@ acquire_cleanup_venvs_lock() {
   fi
   local held_pid age now lock_mtime is_alive=0
   held_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-  lock_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || date +%s)
   now=$(date +%s)
+  lock_mtime="$(stat_mtime_epoch "$LOCK_DIR" "$now")"
   age=$(( now - lock_mtime ))
   if [[ -n "$held_pid" && "$held_pid" =~ ^[0-9]+$ ]]; then
     if ps -p "$held_pid" -o pid= >/dev/null 2>&1; then
@@ -418,7 +426,7 @@ acquire_cleanup_venvs_lock() {
     if mkdir "$reclaim_gate" 2>/dev/null; then
       local recheck_pid recheck_mtime recheck_alive=0
       recheck_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-      recheck_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || echo 0)
+      recheck_mtime="$(stat_mtime_epoch "$LOCK_DIR" "$now")"
       if [[ -n "$recheck_pid" && "$recheck_pid" =~ ^[0-9]+$ ]]; then
         if ps -p "$recheck_pid" -o pid= >/dev/null 2>&1; then
           recheck_alive=1
@@ -670,9 +678,17 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
     venv_pretty=$(fmt_kb "$venv_kb")
 
     if [[ "$DRY_RUN" == true ]]; then
-      log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
-      TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
-      STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
+      _c14_verdict=""
+      if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
+        echo "SAFETY-SKIP $venv_path ($_safety_reason)"
+      elif _c14_verdict="$(artifact_removal_verdict "$venv_path" --kind rebuildable 2>/dev/null)" && [[ "$_c14_verdict" == remove ]]; then
+        log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
+        TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
+        STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
+      else
+        [[ -n "${_c14_verdict:-}" ]] || _c14_verdict=kept:check-failed
+        log "    Preserved (C14 $_c14_verdict) $venv_path"
+      fi
     else
       log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
       if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
@@ -713,7 +729,7 @@ purge_bak_dirs() {
   log "=== PURGE STALE venv.bak.* DIRS (older than ${purge_days}d, parent worktree >= ${MIN_AGE_DAYS}d) ==="
 
   local bak_freed_kb=0 bak_count=0 skipped_young_wt=0 skipped_young_bak=0 skipped_not_wt=0 skipped_excluded=0
-  local wt bak_path parent real_parent _skip_reason bak_age_days bak_kb bak_pretty _safety_reason
+  local wt bak_path parent real_parent _skip_reason bak_age_days bak_kb bak_pretty bak_mtime _safety_reason _bak_verdict
 
   for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
     for bak_path in "$wt/venv.bak" "$wt"/venv.bak.* "$wt/.venv.bak" "$wt"/.venv.bak.*; do
@@ -737,7 +753,8 @@ purge_bak_dirs() {
       fi
 
       # The bak dir's own age: its rename/creation mtime, not the worktree's.
-      bak_age_days=$(( ( $(date +%s) - $(stat -f '%m' "$bak_path" 2>/dev/null || stat -c '%Y' "$bak_path" 2>/dev/null || date +%s) ) / 86400 ))
+      bak_mtime="$(stat_mtime_epoch "$bak_path" "$(date +%s)")"
+      bak_age_days=$(( ( $(date +%s) - bak_mtime ) / 86400 ))
       if (( bak_age_days < purge_days )); then
         skipped_young_bak=$(( skipped_young_bak + 1 ))
         continue
@@ -762,9 +779,17 @@ purge_bak_dirs() {
       bak_pretty=$(fmt_kb "$bak_kb")
 
       if [[ "$DRY_RUN" == true ]]; then
-        log "  [dry-run] would purge $bak_path (${bak_pretty}, ${bak_age_days}d old, parent worktree stale)"
-        bak_freed_kb=$(( bak_freed_kb + bak_kb ))
-        bak_count=$(( bak_count + 1 ))
+        _bak_verdict=""
+        if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then
+          echo "SAFETY-SKIP $bak_path ($_safety_reason)"
+        elif _bak_verdict="$(artifact_removal_verdict "$bak_path" --kind rebuildable 2>/dev/null)" && [[ "$_bak_verdict" == remove ]]; then
+          log "  [dry-run] would purge $bak_path (${bak_pretty}, ${bak_age_days}d old, parent worktree stale)"
+          bak_freed_kb=$(( bak_freed_kb + bak_kb ))
+          bak_count=$(( bak_count + 1 ))
+        else
+          [[ -n "${_bak_verdict:-}" ]] || _bak_verdict=kept:check-failed
+          log "    Preserved (C14 $_bak_verdict) $bak_path"
+        fi
       else
         log "  purging $bak_path (${bak_pretty}, ${bak_age_days}d old)"
         if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then
