@@ -75,6 +75,7 @@ Commands:
   cleanup-antigravity-brain Prune old Antigravity brain dirs, idle worktrees, .backup leftovers.
   cleanup-claude-state   Run the guarded Claude state maintenance helper.
   cleanup-codex-db       Maintain Codex SQLite databases (aliases: vacuum-codex-db, codex-vacuum).
+  prune-codex-sessions   Age-gated prune of old ~/.codex/sessions transcripts (dry-run; --clean to act).
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
   cleanup-supervisor-logs Prune rotated cmux-codex-launchd logs older than 7d (dry-run; --clean to act).
   cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
@@ -558,6 +559,9 @@ case "$CMD" in
     ;;
   cleanup_codex_documents|cleanup-codex-documents)
     "$SCRIPT_DIR/scripts/cleanup_codex_documents.sh" "$@"
+    ;;
+  prune_codex_sessions|prune-codex-sessions)
+    "$SCRIPT_DIR/scripts/prune_codex_sessions.sh" "$@"
     ;;
   prune_aside_sessions|prune-aside-sessions)
     "$SCRIPT_DIR/scripts/prune_aside_sessions.sh" "$@"
