@@ -180,6 +180,8 @@ rc=0
 arch_out="$(WORKTREE_APPROVED=1 bash "$SCRIPT" --clean --root "$HOME/mirror" \
   --archive-to "$ARCHIVE_DIR" 2>&1)" || rc=$?
 check "archive run exits 0" '[[ "$rc" -eq 0 ]]'
+check "unchanged source identity passes post-archive revalidation" \
+  '! grep -qF "KEEP [post-archive-identity-changed]" <<<"$arch_out"'
 check "archive run removed the source clone" '[[ ! -e "$ARCH_MIRROR" ]]'
 arch_file="$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'archive-mirror-*.tar.zst' | head -1)"
 check "archive file landed on the target volume" '[[ -f "$arch_file" ]]'

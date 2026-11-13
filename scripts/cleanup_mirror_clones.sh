@@ -470,7 +470,13 @@ ntfs_safe_name() {
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 file_dev_ino() {
-  stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null || true
+  local identity
+  if identity="$(stat -c '%d:%i' "$1" 2>/dev/null)" && [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
+    printf '%s\n' "$identity"
+  elif identity="$(stat -f '%d:%i' "$1" 2>/dev/null)" && [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
+    printf '%s\n' "$identity"
+  fi
+  return 0
 }
 
 # archive_target_available <basename>: rc 1 when an existing archive entry
