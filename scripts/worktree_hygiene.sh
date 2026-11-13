@@ -42,7 +42,8 @@ source "$SCRIPT_DIR/lib/lsof_linux.sh"
 source "$SCRIPT_DIR/safety_lib.sh"
 
 EXECUTE=false
-MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
+MIN_AGE_FLOOR_MIN=2880
 MIN_AGE_MINUTES=""
 REPOS=()
 SKIP_PUSH=false
@@ -75,12 +76,12 @@ Options:
   --execute     Actually delete SAFE-classified worktrees via
                 'git worktree remove --force' (default: dry-run/report-only).
                 Requires WORKTREE_APPROVED=1 in the environment.
-  --min-age N   Minimum worktree age in days for candidacy (default: 7).
+  --min-age N   Minimum worktree age in days for candidacy (may only raise the 48 h default).
   --days N      Alias for --min-age N.
   --min-age-minutes N
                 Explicit quiet period for preservation-only work. Uses the
                 canonical minute recency helper; it is not raised to the
-                normal seven-day cleanup floor.
+                normal 48 h cleanup floor.
   --preserve-only
                 Preserve eligible worktrees and never remove them. This mode
                 performs the existing commit/ref verification path and then
@@ -139,11 +140,11 @@ EOF
 # Sourceable functions (safe to `source` this file without running main).
 # ---------------------------------------------------------------------------
 
-# identify_candidates <repo_path> <min_age_days>
+# identify_candidates <repo_path> <min_age_minutes>
 # Echoes newline-separated worktree paths (excluding the main worktree)
-# whose most-recent non-ignored file mtime is older than min_age_days.
+# whose most-recent non-ignored file mtime is older than min_age_minutes.
 identify_candidates() {
-    local repo_path="$1" min_age_days="$2"
+    local repo_path="$1" min_age_min="$2"
     local repo_abs main_wt_abs
     repo_abs=$(cd "$repo_path" 2>/dev/null && pwd -P) || return 0
     main_wt_abs="$repo_abs"
@@ -189,8 +190,7 @@ identify_candidates() {
                             echo "$path"
                         fi
                     else
-                        age_days=$(worktree_age_days "$path")
-                        if (( age_days >= min_age_days )); then
+                        if ! worktree_is_recently_active_minutes "$path" "$min_age_min"; then
                             echo "$path"
                         fi
                     fi
@@ -477,7 +477,7 @@ hygiene_worktree_is_recently_active() {
     if [[ -n "$MIN_AGE_MINUTES" ]]; then
         worktree_is_recently_active_minutes "$1" "$MIN_AGE_MINUTES"
     else
-        worktree_is_recently_active "$1" "$MIN_AGE_DAYS"
+        worktree_is_recently_active_minutes "$1" "$MIN_AGE_FLOOR_MIN"
     fi
 }
 
@@ -1310,32 +1310,10 @@ main() {
     trap 'HYGIENE_STATUS=interrupted; exit 143' TERM
     trap 'hygiene_finish "$?"' EXIT
     HYGIENE_PHASE=configuration
-    # Staleness floor: read from safety.local.json (safety_min_stale_days), with a
-    # hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
-    # may only RAISE the floor, never lower it below 7.
-    local staleness_floor
-    staleness_floor=$(safety_min_stale_days 2>/dev/null || echo 7)
-    if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
-        staleness_floor=$((10#$staleness_floor))
-    else
-        staleness_floor=7
-    fi
-    [[ "$staleness_floor" -lt 7 ]] && staleness_floor=7
-
-    # Hard floor: staleness_floor days, may only be raised (env, CLI, or config), never
-    # lowered (CLAUDE.md invariant). Without this clamp, --min-age 0 would
-    # let every dormant worktree qualify for deletion regardless of age.
-    # Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a
-    # leading-zero numeral like "08" as octal (invalid digit -> arithmetic
-    # error), which would otherwise propagate as a fail-open crash into
-    # every downstream comparison, not just this clamp (found live by both
-    # /advice reviewers).
-    if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
-        MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
-    else
-        MIN_AGE_DAYS="$staleness_floor"
-    fi
-    [[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
+    # Staleness floor in minutes: safety_worktree_floor_minutes (default and minimum 2880 =
+    # 48 h, operator decision 2026-11-12). Config, --min-age and WORKTREE_MIN_AGE_DAYS may
+    # only RAISE it: --min-age 0 must not let every dormant worktree qualify.
+    MIN_AGE_FLOOR_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
 
     if [[ "$PRESERVE_ONLY" == true ]]; then
         echo "=== WORKTREE HYGIENE (PRESERVE-ONLY) ==="
@@ -1364,7 +1342,7 @@ main() {
         echo "--- ${repo_abs} ---"
 
         local all_candidates candidates capped=false
-        all_candidates="$(identify_candidates "$repo_abs" "$MIN_AGE_DAYS" || true)"
+        all_candidates="$(identify_candidates "$repo_abs" "$MIN_AGE_FLOOR_MIN" || true)"
         candidates="$all_candidates"
 
         if [[ "$MAX_CANDIDATES" -gt 0 ]]; then

@@ -263,7 +263,7 @@ assert_contains "agent-tree venv flagged for stripping" \
   "would strip $CLAUDE_WT/venv" "$OUT6_CONTENT"
 
 echo
-echo "=== Test 6b: default roots include \$HOME/.worktrees, 7-day rule still applies ==="
+echo "=== Test 6b: default roots include \$HOME/.worktrees, 48 h floor still applies (operator decision 2026-11-12; was 7-day) ==="
 STD_HOME="$TMP_ROOT/stdhome"
 STD_OLD="$STD_HOME/.worktrees/r/old"
 STD_YOUNG="$STD_HOME/.worktrees/r/young"
@@ -276,7 +276,7 @@ done
 for p in "$STD_OLD/README.md" "$STD_OLD/.git" "$STD_OLD/.venv/lib/site.py"; do
   age_path_days_ago "$p" 10
 done
-age_path_days_ago "$STD_YOUNG/README.md" 2
+age_path_days_ago "$STD_YOUNG/README.md" 1
 OUT6B="$TMP_ROOT/out6b.txt"
 env -i HOME="$STD_HOME" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
@@ -285,7 +285,7 @@ env -i HOME="$STD_HOME" PATH="$TEST_PATH" \
 OUT6B_CONTENT=$(cat "$OUT6B")
 assert_contains "default roots list \$HOME/.worktrees" "$STD_HOME/.worktrees" "$OUT6B_CONTENT"
 assert_contains "10d std-root venv flagged" "would strip $STD_OLD/.venv" "$OUT6B_CONTENT"
-assert_not_contains "2d std-root venv protected" "would strip $STD_YOUNG/.venv" "$OUT6B_CONTENT"
+assert_not_contains "1d std-root venv protected" "would strip $STD_YOUNG/.venv" "$OUT6B_CONTENT"
 
 echo
 echo "=== Test 7: hard floor clamp survives leading-zero and sub-floor overrides ==="
@@ -301,7 +301,7 @@ OUT7_ZERO=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=0 \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
-assert_contains "WORKTREE_MIN_AGE_DAYS=0 clamps to the 7-day floor" "Min age:    7 days" "$OUT7_ZERO"
+assert_contains "WORKTREE_MIN_AGE_DAYS=0 clamps to the 48 h floor (2026-11-12; was 7 days)" "Min age:    48 hours" "$OUT7_ZERO"
 
 OUT7_OCTAL=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=08 \

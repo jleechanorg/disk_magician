@@ -264,16 +264,18 @@ print(max(7, int(value)) if isinstance(value, (int, float)) else 7)
 PY
 }
 
-# safety_worktree_floor_days — worktree-removal staleness floor in days.
-# Default and hard minimum is 3 (user decision 2026-10-08, all worktrees);
-# `worktree_min_stale_days` (or a legacy `min_stale_days` above 7) may only RAISE it.
-safety_worktree_floor_days() {
+# safety_worktree_floor_minutes — worktree recency floor in minutes.
+# Default and hard minimum is 2880 (48 h; operator decision 2026-11-12, "Make this
+# default 48hr", superseding the 2026-10-08 3-day floor). Config may only RAISE it:
+# `worktree_min_stale_hours`, `worktree_min_stale_days`, or a legacy `min_stale_days`
+# above the old 7-day baseline. Lower or malformed values are ignored.
+safety_worktree_floor_minutes() {
   local safety_file
   if ! safety_file="$(safety_file_in_use)"; then
-    echo 3
+    echo 2880
     return 0
   fi
-  python3 - "$safety_file" <<'PY' || echo 3
+  python3 - "$safety_file" <<'PY' || echo 2880
 import json
 import sys
 
@@ -285,16 +287,46 @@ except (OSError, ValueError):
 def num(v):
     return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
-floor = 3
+floor = 2880
 legacy = num(cfg.get("min_stale_days"))
-# A legacy min_stale_days above the old 7-day baseline is an explicit raise.
 if legacy is not None and legacy > 7:
-    floor = max(floor, legacy)
-own = num(cfg.get("worktree_min_stale_days"))
-if own is not None:
-    floor = max(floor, own)
+    floor = max(floor, legacy * 1440)
+days = num(cfg.get("worktree_min_stale_days"))
+if days is not None:
+    floor = max(floor, days * 1440)
+hours = num(cfg.get("worktree_min_stale_hours"))
+if hours is not None:
+    floor = max(floor, hours * 60)
 print(floor)
 PY
 }
+
+# safety_worktree_floor_days — the same floor rounded up to whole days (compat).
+safety_worktree_floor_days() {
+  local m
+  m="$(safety_worktree_floor_minutes 2>/dev/null)" || m=2880
+  [[ "$m" =~ ^[0-9]+$ ]] || m=2880
+  echo $(( (m + 1439) / 1440 ))
+}
+
+# worktree_floor_resolve_minutes <floor_min> <requested_days|""> — prints the
+# effective floor in minutes: a CLI/env day request may only raise <floor_min>.
+worktree_floor_resolve_minutes() {
+  local floor="$1" req="${2:-}"
+  [[ "$floor" =~ ^[0-9]+$ ]] || floor=2880
+  floor=$((10#$floor)); (( floor < 2880 )) && floor=2880
+  if [[ "$req" =~ ^[0-9]+$ ]]; then
+    req=$(( 10#$req * 1440 ))
+    (( req > floor )) && floor=$req
+  fi
+  echo "$floor"
+}
+
+# worktree_floor_label <minutes> — "48h" for the default, "7d" when a longer whole-day floor.
+worktree_floor_label() {
+  local m="${1:-2880}"
+  if (( m > 2880 && m % 1440 == 0 )); then echo "$(( m / 1440 ))d"; else echo "$(( m / 60 ))h"; fi
+}
+
 # decision_approved <id>: rc 0 when a standing decision is recorded and not revoked (C11).
 decision_approved() { python3 "$_SAFETY_REPO_ROOT/scripts/policy_provenance.py" approved "$1" 2>/dev/null; }
