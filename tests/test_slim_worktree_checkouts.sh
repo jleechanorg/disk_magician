@@ -33,6 +33,7 @@ mkdir -p "$REPO/docs/user-stories-ui/shots" "$REPO/src" "$ROOTS"
 printf 'x' > "$REPO/src/keep.py"
 head -c 200000 /dev/zero > "$REPO/docs/user-stories-ui/shots/big.png"
 printf '# doc\n' > "$REPO/docs/user-stories-ui/readme.md"
+mkdir -p "$REPO/evidence"; head -c 150000 /dev/zero > "$REPO/evidence/run.bin"
 ( cd "$REPO" && git init -q . && git config user.email t@t && git config user.name t \
   && git config extensions.worktreeConfig true \
   && git add -A && git commit -qm init )
@@ -103,6 +104,21 @@ OUT4=$(APPROVED=1 env -i PATH="$TEST_PATH" HOME="$TMP_ROOT/home" WORKTREE_APPROV
         bash "$TARGET_SCRIPT" --roots "$ROOTS,$AO_PARENT" --clean 2>&1)
 assert_contains "AO-owned counted as skipped" "Skipped (ao-owned):     1" "$OUT4"
 assert_present  "AO worktree keeps its docs" "$AO_WT/docs/user-stories-ui"
+
+echo "== case 7: an already-sparse worktree gains a newly requested exclusion =="
+assert_present "evidence still checked out before" "$OLD/evidence/run.bin"
+OUT5=$(APPROVED=1 run --exclude docs,evidence --clean)
+assert_contains "already-sparse worktree is re-slimmed" "SLIMMED" "$OUT5"
+assert_absent   "new exclusion applied" "$OLD/evidence/run.bin"
+assert_absent   "existing exclusion kept" "$OLD/docs/user-stories-ui"
+assert_present  "non-excluded file survives" "$OLD/src/keep.py"
+SPARSE="$(git -C "$OLD" rev-parse --git-dir)/info/sparse-checkout"
+assert_contains "sparse file keeps docs" "!/docs/" "$(cat "$SPARSE")"
+assert_contains "sparse file adds evidence" "!/evidence/" "$(cat "$SPARSE")"
+[[ "$(grep -c '^!/docs/$' "$SPARSE")" -eq 1 ]] && record_pass "no duplicate docs pattern" || record_fail "no duplicate docs pattern" "$(cat "$SPARSE")"
+OUT6=$(APPROVED=1 run --exclude docs,evidence --clean)
+assert_contains "fully-excluded worktree is skipped next run" "already sparse): 1" "$OUT6"
+assert_present  "dirty worktree still untouched" "$DIRTY/docs/user-stories-ui/readme.md"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
