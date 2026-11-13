@@ -414,7 +414,7 @@ O11="$TMP_ROOT/o11"; RC=0
 HOME="$PL_HOME" DISK_MAGICIAN_QUARANTINE_LIB="$REAL_QUARANTINE_LIB" run_sweeper "$O11" --clean || RC=$?
 [[ "$RC" -eq 0 ]] && record_pass "T11: exits 0" || { record_fail "T11: exits 0" "rc=$RC"; cat "$O11"; }
 assert_exists "T11: provenance-less document kept" "$PL_TASK"
-assert_contains "T11: reports unproven content" "KEEP [unproven-content]" "$(cat "$O11")"
+assert_contains "T11: reports the missing removal proof" "KEEP [no-proof]" "$(cat "$O11")"
 
 echo "T12: real C14 keeps a dirty/unpushed nested repo"
 DR_HOME="$TMP_ROOT/dr-home"; DR_CODEX="$DR_HOME/Documents/Codex"; DR_TASK="$DR_CODEX/$D_OLD/t-nested"

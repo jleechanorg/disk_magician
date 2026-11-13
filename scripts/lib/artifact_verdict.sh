@@ -227,8 +227,7 @@ c14_ephemeral_retention() {
     else return 1; fi
 }
 # c14_archive_origin <candidate> <inventory>: E1 uses only a matching durable
-# origin receipt. `none` falls through to ordinary provenance; invalid identity
-# or a receipt whose E2/E3 retention has not elapsed stays kept.
+# origin receipt; missing or invalid identity stays kept.
 c14_archive_origin() (
     local p=$1 inv=$2 archive_root receipt info original archived_at retention expected_retention now minimum
     archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
@@ -236,7 +235,7 @@ c14_archive_origin() (
     archive_root="$(cd "$archive_root" 2>/dev/null && pwd -P)" || { echo kept:archive-identity; return 0; }
     [[ "$p" == "$archive_root/"* ]] || { echo none; return 0; }
     receipt="$p.c14-origin.json"
-    [[ -e "$receipt" || -L "$receipt" ]] || { echo none; return 0; }
+    [[ -e "$receipt" || -L "$receipt" ]] || { echo kept:archive-identity; return 0; }
     info="$(python3 "$_AV_DIR/../c14_probe.py" archive-info "$p" "$receipt" "$inv")"
     [[ "$info" != kept:* ]] || { echo kept:archive-identity; return 0; }
     IFS= read -r -d '' original < <(python3 -c 'import json,sys; sys.stdout.write(json.loads(sys.argv[1])["original_path"]); sys.stdout.write("\0")' "$info" 2>/dev/null) || { echo kept:archive-identity; return 0; }
@@ -253,12 +252,12 @@ c14_archive_origin() (
 )
 # _av_rebuildable <path> [<deadline>]: rc 0 under the cache-root table (§7.2 (b)) or,
 # as cleanup_worktree_venvs does, an untracked venv dir atop a linked worktree that
-# passes the content and push checks and is past the strict 7-day floor. Prints
+# passes the content and push checks and is past the configured worktree floor. Prints
 # `recent-activity` (and returns 1) when that floor protects the venv, or when
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
+    local h w g t floor re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
@@ -269,9 +268,11 @@ _av_rebuildable() (
         # The caller's deadline reaches the bounded shared remote/topology probes;
         # their kept/deferred verdict is propagated verbatim (never kept:-prefixed).
         pushed="$(c14_repo_pushed_ok "$w" "$w" "$deadline")" || { printf '%s\n' "${pushed:-kept:check-failed}"; return 1; }
-        # Canonical strict floor: no venv is stripped from a worktree touched
-        # within 7 days, and unmeasurable recency fails closed as active.
-        worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
+        # Use the same configured floor and minute-based fail-closed probe as the
+        # venv cleaner; higher local floors still protect the worktree.
+        floor="$(safety_worktree_floor_minutes 2>/dev/null)" || { printf 'kept:check-failed\n'; return 1; }
+        [[ "$floor" =~ ^[1-9][0-9]*$ ]] || { printf 'kept:check-failed\n'; return 1; }
+        worktree_is_recently_active_minutes "$w" "$floor" && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" ]] || return 1

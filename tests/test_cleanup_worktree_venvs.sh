@@ -135,7 +135,7 @@ assert_contains "(a) stale bak dir flagged in dry-run" \
 assert_not_contains "(a) C14-ineligible .venv bak dir NOT flagged in dry-run" \
   "would purge $STALE_WT/.venv.bak.20260101" "$OUT1_CONTENT"
 assert_contains "(a) C14-ineligible .venv bak dir reports its keep reason in dry-run" \
-  "Preserved (C14 kept:unproven-content) $STALE_WT/.venv.bak.20260101" "$OUT1_CONTENT"
+  "Preserved (C14 kept:no-proof) $STALE_WT/.venv.bak.20260101" "$OUT1_CONTENT"
 assert_not_contains "(b) recent-worktree bak dir NOT flagged" \
   "would purge $RECENT_WT/venv.bak.20251201" "$OUT1_CONTENT"
 assert_contains "(b) recent-worktree bak dir reported protected" \
@@ -193,7 +193,7 @@ else
   record_fail "eligible venv.bak dir actually removed with approval" "still present in: $STALE_WT/venv.bak.20260101"
 fi
 assert_contains "ineligible .venv.bak kept with explicit C14 reason" \
-  "C14 kept: $STALE_WT/.venv.bak.20260101 (kept:unproven-content)" "$OUT3_CONTENT"
+  "C14 kept: $STALE_WT/.venv.bak.20260101 (kept:no-proof)" "$OUT3_CONTENT"
 if [[ -d "$STALE_WT/.venv.bak.20260101" ]]; then
   record_pass "ineligible .venv.bak retained on disk (outside approved table)"
 else
@@ -265,7 +265,7 @@ OUT6_CONTENT=$(cat "$OUT6")
 assert_contains "roots log includes expanded .claude/worktrees dir" \
   "$ROOTS_DIR/some_repo/.claude/worktrees" "$OUT6_CONTENT"
 assert_contains "agent-tree venv discovered but C14 keeps the synthetic worktree" \
-  "Preserved (C14 kept:unproven-content) $CLAUDE_WT/venv" "$OUT6_CONTENT"
+  "Preserved (C14 kept:no-proof) $CLAUDE_WT/venv" "$OUT6_CONTENT"
 
 echo
 echo "=== Test 6b: default roots include \$HOME/.worktrees, 48 h floor still applies (operator decision 2026-11-12; was 7-day) ==="
@@ -375,9 +375,9 @@ env -i HOME="$TMP_ROOT/home" PATH="$FAKEBIN:$TEST_PATH" \
   >"$OUT8" 2>&1
 OUT8_CONTENT=$(cat "$OUT8")
 assert_contains "depth-1 worktree venv found; C14 keep is reported" \
-  "Preserved (C14 kept:unproven-content) $R8/plain_wt/.venv" "$OUT8_CONTENT"
+  "Preserved (C14 kept:no-proof) $R8/plain_wt/.venv" "$OUT8_CONTENT"
 assert_contains "depth-2 repo .claude/worktrees agent venv found" \
-  "Preserved (C14 kept:unproven-content) $R8/org/repoB/.claude/worktrees/agent1/.venv" "$OUT8_CONTENT"
+  "Preserved (C14 kept:no-proof) $R8/org/repoB/.claude/worktrees/agent1/.venv" "$OUT8_CONTENT"
 if "$GIT8" --version >/dev/null 2>&1; then
   assert_contains "git-registered nested worktree reports C14 keep" \
     "Preserved (C14 kept:" "$OUT8_CONTENT"

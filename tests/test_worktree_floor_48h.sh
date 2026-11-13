@@ -47,8 +47,9 @@ git init -q --bare -b main "$TMP_ROOT/origin.git"
 git -C "$REPO" init -q -b main
 git -C "$REPO" config user.email f@users.noreply.github.com
 git -C "$REPO" config user.name F
+printf '.venv/\nnode_modules/\n' > "$REPO/.gitignore"
 printf 'base\n' > "$REPO/README.md"; mkdir -p "$REPO/docs"; printf 'doc\n' > "$REPO/docs/a.md"
-git -C "$REPO" add README.md docs; git -C "$REPO" commit -q -m base
+git -C "$REPO" add .gitignore README.md docs; git -C "$REPO" commit -q -m base
 git -C "$REPO" remote add origin "$TMP_ROOT/origin.git"
 git -C "$REPO" push -q origin main
 git -C "$REPO" checkout -q -b ahead; printf 'ahead\n' >> "$REPO/README.md"; git -C "$REPO" commit -q -am ahead
@@ -117,8 +118,13 @@ check "deps: 49h worktree is the one stripped" "wt-s49/node_modules" "$OUT"
 [[ "$OUT" != *"wt-s47/node_modules"* ]] && { echo "  PASS  deps: 47h worktree kept"; PASS=$((PASS+1)); } || { echo "  FAIL  deps: 47h worktree listed"; FAIL=$((FAIL+1)); }
 
 OUT="$(sib bash "$SCRIPT_DIR/../scripts/cleanup_worktree_venvs.sh" --dry-run --roots "$WT")"
-check "venvs: 49h worktree venv would strip" "would strip $WT/wt-s49/.venv" "$OUT"
+check "venvs: 49h worktree venv would strip at the default 48h floor" "would strip $WT/wt-s49/.venv" "$OUT"
 [[ "$OUT" != *"would strip $WT/wt-s47/.venv"* ]] && { echo "  PASS  venvs: 47h worktree kept"; PASS=$((PASS+1)); } || { echo "  FAIL  venvs: 47h worktree listed"; FAIL=$((FAIL+1)); }
+
+printf '{"worktree_min_stale_days": 7}' > "$TMP_ROOT/safety.json"
+OUT="$(sib bash "$SCRIPT_DIR/../scripts/cleanup_worktree_venvs.sh" --dry-run --roots "$WT")"
+[[ "$OUT" != *"would strip $WT/wt-s49/.venv"* ]] && { echo "  PASS  venvs: configured 7d floor keeps 49h worktree"; PASS=$((PASS+1)); } || { echo "  FAIL  venvs: configured 7d floor listed 49h worktree"; FAIL=$((FAIL+1)); }
+printf '{"worktree_min_stale_days": 1}' > "$TMP_ROOT/safety.json"
 
 OUT="$(sib bash "$SCRIPT_DIR/../scripts/slim_worktree_checkouts.sh" --dry-run --roots "$WT")"
 check "slim: banner reports 48h" "floor 48h" "$OUT"

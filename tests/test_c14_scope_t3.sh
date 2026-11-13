@@ -16,8 +16,8 @@
 # Real fixture Git repositories and real owner-null lease files; the actual
 # artifact_removal_verdict is exercised, never a stub. Every fixture lives
 # under /tmp HOME/state; ambient Git/test env is unset. No secret/.env read.
-# 2026-11-12 operator decision: verdict = no veto AND at least one proof. Dirty, unpushed and
-# secret-like trees are no longer vetoes; they only lack proofs (kept:no-proof when young).
+# 2026-11-12 operator decision: removal needs no veto and one proof. Dirty and secret-like
+# content are vetoes; eligible unpushed work can be removed only after verified rescue.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -131,13 +131,13 @@ assert_ne "$(verdict "$HOME/.worktrees/worldarchitect.ai/foo" --kind ephemeral)"
 assert_eq "$(verdict "$HOME/.worktrees/worldarchitect.ai/foo")" remove \
     "same-named repo outside a scratch root reaches full C14 and is removable"
 
-# An archived copy under a scratch root is not protected either; it reaches the
-# declared-ephemeral rules and is kept there for want of provenance.
+# An archived copy under a scratch root requires its origin receipt; without one,
+# C14 preserves it because archive identity is unknown.
 mkdir -p "$PT/_disk_magician_archive/20200101T000000Z/worldarchitect.ai"
 printf 'archived\n' >"$PT/_disk_magician_archive/20200101T000000Z/worldarchitect.ai/foo"
 age "$PT/_disk_magician_archive/20200101T000000Z/worldarchitect.ai/foo" 50000
-assert_eq "$(verdict "$PT/_disk_magician_archive/20200101T000000Z/worldarchitect.ai/foo" --kind ephemeral)" remove \
-    "archived worldarchitect.ai copy is not protected; ordinary checks apply (old: age proof)"
+assert_eq "$(verdict "$PT/_disk_magician_archive/20200101T000000Z/worldarchitect.ai/foo" --kind ephemeral)" kept:archive-identity \
+    "unreceipted archived copy is preserved when archive identity cannot be proved"
 
 # Other defaults and a custom configured basename.
 mkdir -p "$PT/wa-missions/x" && age "$PT/wa-missions/x" 50000
@@ -158,7 +158,7 @@ assert_eq "$(verdict "$PT/parent-own/wt")" remove \
 assert_eq "$(verdict_t3 "$PT/parent-own/wt")" remove \
     "T3 frees the exact candidate worktree's own owner-null lease"
 # 2026-10-20 relax guards: idle floor is max(caller floor, 60 min); AO paths and an
-# unreadable AO config fail closed; unpushed/dirty keep.
+# unreadable AO config fails closed; dirty vetoes remain and unpushed work needs rescue.
 assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 300)" kept:recent-activity \
     "owner-null relax honors a caller idle floor above the tree's idle time"
 assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 5)" remove \
@@ -167,11 +167,29 @@ age "$PT/parent-own/wt" 45
 assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 5)" kept:recent-activity \
     "owner-null relax never goes below the 60-minute floor (45 min idle kept)"
 age "$PT/parent-own/wt" 120
-git -C "$PT/parent-own/wt" commit -q --allow-empty -m unpushed && age "$PT/parent-own/wt" 120
-assert_eq "$(verdict "$PT/parent-own/wt")" kept:no-proof "owner-null relax: unpushed worktree has no proof (not a veto)"
+printf 'unpublished content\n' >"$PT/parent-own/wt/unpublished.txt"
+git -C "$PT/parent-own/wt" add unpublished.txt && git -C "$PT/parent-own/wt" commit -q -m unpushed && age "$PT/parent-own/wt" 120
+before_head="$(git -C "$PT/parent-own/wt" rev-parse HEAD)"
+before_status="$(git -C "$PT/parent-own/wt" status --porcelain)"
+rescue_proof="$TMP/rescue-proof.txt"
+rescue_verdict="$(DISK_MAGICIAN_C14_PROOF_OUT="$rescue_proof" verdict "$PT/parent-own/wt")"
+assert_eq "$rescue_verdict" remove "owner-null relax removes unpushed work only after verified rescue"
+assert_eq "$(<"$rescue_proof")" rescued "C14 records the rescued proof"
+rescue_row="$(git -C "$PT/parent-own/wt" ls-remote origin 'refs/diskm-rescue/*')"
+if [[ -n "$rescue_row" ]]; then
+    rescue_commit="${rescue_row%%$'\t'*}"
+    rescue_ref="${rescue_row#*$'\t'}"
+    ok "independent rescue ref is published ($rescue_ref)"
+    assert_eq "$(git --git-dir="$TMP/remotes/base.git" show "$rescue_commit:unpublished.txt")" 'unpublished content' \
+        "rescue ref preserves the unpushed file contents"
+else
+    bad "independent rescue ref is published"
+fi
+assert_eq "$(git -C "$PT/parent-own/wt" rev-parse HEAD)" "$before_head" "rescue leaves source HEAD unchanged"
+assert_eq "$(git -C "$PT/parent-own/wt" status --porcelain)" "$before_status" "rescue leaves source worktree unchanged"
 git -C "$PT/parent-own/wt" push -q origin wtown && age "$PT/parent-own/wt" 120
 printf 'u\n' >"$PT/parent-own/wt/untracked.txt" && age "$PT/parent-own/wt" 120
-assert_eq "$(verdict "$PT/parent-own/wt")" kept:no-proof "owner-null relax: dirty worktree has no proof (not a veto)"
+assert_eq "$(verdict "$PT/parent-own/wt")" kept:dirty "owner-null relax: untracked content remains protected"
 rm -f "$PT/parent-own/wt/untracked.txt"; age "$PT/parent-own/wt" 120
 printf 'worktreeDir: [unterminated\n' >"$TMP/ao-bad.yaml"
 assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-bad.yaml" verdict "$PT/parent-own/wt")" kept:ao-config-unreadable \
@@ -231,7 +249,7 @@ wt_add "$PT/parent-dirty/wt" wtdirty || exit 2
 printf 'unpushed\n' >>"$PT/parent-dirty/wt/tracked.txt"
 null_lease "$PT/parent-dirty/wt"
 age "$PT/parent-dirty/wt" 120
-assert_eq "$(verdict_t3 "$PT/parent-dirty/wt")" kept:no-proof "T3: dirty tracked change gives no proof (not a veto)"
+assert_eq "$(verdict_t3 "$PT/parent-dirty/wt")" kept:dirty "T3: dirty tracked content remains protected"
 
 # T1-style (non-T3) behaviour is unchanged: no flag, no free.
 wt_add "$PT/parent-t1/wt" wtt1 || exit 2
@@ -267,13 +285,13 @@ assert_eq "$(verdict "$PT/rx-live/wt")" kept:live-owner "relax: live-owner lease
 
 wt_add "$PT/rx-dirty/wt" rxdirty || exit 2
 printf 'edit\n' >>"$PT/rx-dirty/wt/tracked.txt"; null_lease "$PT/rx-dirty/wt"; age "$PT/rx-dirty/wt" 120
-assert_eq "$(verdict "$PT/rx-dirty/wt")" kept:no-proof "relax: dirty worktree has no proof"
+assert_eq "$(verdict "$PT/rx-dirty/wt")" kept:dirty "relax: dirty worktree remains protected"
 
 wt_add "$PT/rx-sec/wt" rxsec || exit 2
 printf 'x\n' >"$PT/rx-sec/wt/deploy.pem"
 git -C "$PT/rx-sec/wt" add deploy.pem && git -C "$PT/rx-sec/wt" commit -qm sec && git -C "$PT/rx-sec/wt" push -q origin rxsec
 null_lease "$PT/rx-sec/wt"; age "$PT/rx-sec/wt" 120
-assert_eq "$(verdict "$PT/rx-sec/wt")" remove "relax: a secret-like file that is committed and pushed no longer vetoes (tracked = in history)"
+assert_eq "$(verdict "$PT/rx-sec/wt")" kept:secret-like "relax: committed secret-like content remains protected"
 
 wt_add "$PT/rx-unp/wt" rxunp || exit 2
 printf 'u\n' >"$PT/rx-unp/wt/new.txt"

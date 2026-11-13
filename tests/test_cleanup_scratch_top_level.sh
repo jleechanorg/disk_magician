@@ -238,7 +238,7 @@ mkdir -p "${f%/*}"
 printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s}\n" "$2" "$(python3 "$1/scripts/c14_probe.py" gitmeta "$gd")" >"$f"' _ "$ROOT" "$candidate/repo"
     old_stamp "$candidate" 13
     initial="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2"' _ "$ROOT" "$candidate")"
-    assert_eq "$initial" kept:no-proof "fixture reaches the no-proof verdict (secret-like blocks the rescue proof, age floor not met) ($pushed)"
+    assert_eq "$initial" kept:secret-like "fixture reaches the secret veto (secret-like blocks rescue proof) ($pushed)"
     provenance="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_repos_ok "$2"' _ "$ROOT" "$candidate")"
     if [[ "$pushed" == no ]]; then expected=kept:not-pushed; else expected=ok; fi
     assert_eq "$provenance" "$expected" "fixture has expected repository provenance ($pushed)"
@@ -252,7 +252,7 @@ printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s
       [[ -f "$candidate/repo/payload" ]] && grep -qF 'must preserve unpushed data' "$candidate/repo/payload" && ok "unpushed payload survives" || bad "unpushed payload survives"
       if grep -Fq "$candidate" "$LOG" 2>/dev/null; then bad "no deletion record for retained repository"; else ok "no deletion record for retained repository"; fi
     else
-      check "pushed control is eligible in preview" "would-remove:kept:no-proof $candidate" "$preview"
+      check "pushed secret-bearing control remains vetoed in preview" "kept:secret-like $candidate" "$preview"
       [[ ! -e "$candidate" ]] && ok "pushed control remains removable with explicit approval" || bad "pushed control remains removable with explicit approval" "$out"
     fi
   done
@@ -642,13 +642,13 @@ make_tree content-keep 72 '.env.example' >/dev/null
 make_tree secret-keep 73 '.env' >/dev/null
 out="$(run bash "$SCRIPT" --dry-run 2>&1)"
 check "no-proof is reported for this candidate" "kept:no-proof $SCRATCH_ROOT/content-keep" "$out"
-check "no-proof is reported for the secret-like candidate" "kept:no-proof $SCRATCH_ROOT/secret-keep" "$out"
+check "secret-like veto is reported for the secret candidate" "kept:secret-like $SCRATCH_ROOT/secret-keep" "$out"
 [[ -d "$SCRATCH_ROOT/content-keep" && -d "$SCRATCH_ROOT/secret-keep" ]] && ok "both unapproved content keeps preserved" || bad "both unapproved content keeps preserved"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 [[ ! -e "$SCRATCH_ROOT/content-keep" ]] && ok "approved override removes the unproven-content tree" || bad "approved override removes the unproven-content tree" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
 [[ ! -e "$SCRATCH_ROOT/secret-keep" ]] && ok "approved override removes the secret-like tree" || bad "approved override removes the secret-like tree" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
 check "the no-proof override is logged for the content candidate" "scratch-prune:kept:no-proof" "$(grep -F "$SCRATCH_ROOT/content-keep" "$LOG" 2>/dev/null)"
-check "the no-proof override is logged for the secret-like candidate" "scratch-prune:kept:no-proof" "$(grep -F "$SCRATCH_ROOT/secret-keep" "$LOG" 2>/dev/null)"
+check "the secret-like veto is logged for the secret candidate" "scratch-prune:kept:secret-like" "$(grep -F "$SCRATCH_ROOT/secret-keep" "$LOG" 2>/dev/null)"
 
 echo "Test 8: other content keeps are never overridden"
 use_root
@@ -675,7 +675,7 @@ printf 'change\n' > "$SCRATCH_ROOT/secret-dirty-repo/tracked.txt"
 git -C "$SCRATCH_ROOT/secret-dirty-repo" add tracked.txt 2>/dev/null
 old_stamp "$SCRATCH_ROOT/secret-dirty-repo" 72
 out="$(run bash "$SCRIPT" --dry-run 2>&1)"
-check "the single no-proof verdict is what C14 reports" "kept:no-proof $SCRATCH_ROOT/secret-dirty-repo" "$out"
+check "the secret-like veto is what C14 reports" "kept:secret-like $SCRATCH_ROOT/secret-dirty-repo" "$out"
 # A preview must not advertise a removal that --clean would refuse: the override
 # path runs the repository provenance re-check in preview mode too.
 out_prev="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --dry-run 2>&1)"
@@ -816,9 +816,9 @@ PYTHON
   out="$(lru_run env DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --dry-run --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
   printf '%s\n' "$out" | grep -E 'budget-(not-pushed|ignored|secret|unproven|dirty)|budget-known-build|budget_unmet=' || true
   [[ "$rc" == 0 ]] && ok "preserving budget dry-run completes without deletion" || bad "preserving budget dry-run completes without deletion" "rc=$rc"
-  check "secret-like content remains a keep" "kept:no-proof $SCRATCH_ROOT/budget-secret" "$out"
-  check "dirty repository remains a keep" "kept:no-proof $SCRATCH_ROOT/budget-dirty" "$out"
-  check "unpushed repository remains a keep" "kept:not-pushed $SCRATCH_ROOT/budget-not-pushed" "$out"
+  check "secret-like content remains a keep" "kept:secret-like $SCRATCH_ROOT/budget-secret" "$out"
+  check "dirty repository remains a keep" "kept:dirty $SCRATCH_ROOT/budget-dirty" "$out"
+  check "unpushed repository remains a keep without a dry-run rescue push" "kept:rescue-required $SCRATCH_ROOT/budget-not-pushed" "$out"
   check "ignored data remains a keep" "kept:ignored-data $SCRATCH_ROOT/budget-ignored" "$out"
   check "known disposable build remains eligible" "would-remove:remove $SCRATCH_ROOT/worldai_frontend/build/budget-known-build" "$out"
   check "dry-run reports no actual budget result" "budget_unmet=not-run projected_budget_unmet=unknown" "$out"

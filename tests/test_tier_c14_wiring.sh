@@ -4,8 +4,7 @@
 #
 # Each tier is exercised through its real script entry point (not a unit stub):
 #   * an eligible, past-retention entry is REMOVED, and
-#   * provenance-less / undeclared content is no longer kept for that reason alone (2026-11-12
-#     operator decision: no veto AND at least one proof); an aged fixture is removed by age.
+#   * provenance-less content remains protected without a proof; secret-like content is a veto.
 # No candidate is ever removed by a direct `rm`; removal is C14 +
 # quarantine_remove. Fixtures live only under /tmp (TMPDIR=/tmp).
 set -uo pipefail
@@ -57,7 +56,7 @@ echo keep >"$HOME/.gemini/tmp/provenance-less/payload"
 S="$(old_stamp)"; find "$HOME/.cache/uv" "$HOME/.gemini/tmp" -exec touch -t "$S" {} + 2>/dev/null
 DISK_MAGICIAN_STATE_DIR="$T/state-dc" bash "$REPO_ROOT/scripts/cleanup_dev_caches.sh" --clean >"$T/dc.out" 2>&1
 absent  "$HOME/.cache/uv/archive-v0/entry" "rebuildable ~/.cache/uv entry removed"
-absent  "$HOME/.gemini/tmp/provenance-less" "provenance-less ~/.gemini/tmp content past age floor is removed (no longer a veto)"
+present "$HOME/.gemini/tmp/provenance-less" "provenance-less ~/.gemini/tmp content is kept without kind or publication proof"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo
@@ -102,7 +101,7 @@ DISK_MAGICIAN_STATE_DIR="$T/state-pr" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$
   DISK_MAGICIAN_TEST_SANDBOX="$SCRATCH" \
   bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" --clean --tmp-dir "$SCRATCH" >"$T/pr.out" 2>&1
 absent  "$SCRATCH/pr-old" "past-retention E3 scratch entry removed"
-absent  "$SCRATCH/pr-secret" "secret-like scratch entry past retention is removed by age (not a veto)"
+present "$SCRATCH/pr-secret" "secret-like scratch entry remains protected past retention"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo
@@ -118,7 +117,7 @@ DISK_MAGICIAN_LSOF_BIN="$T/bin/lsof-aside" \
   python3 "$REPO_ROOT/scripts/prune_aside_sessions.py" --clean --days 7 \
   --aside-dir "$HOME/.aside" >"$T/aside.out" 2>&1
 absent  "$HOME/.aside/u/0/sessions/old-1" "past-retention E4 session removed"
-absent  "$HOME/.aside/u/0/sessions/secret-1" "secret-like session past retention is removed by age (not a veto)"
+present "$HOME/.aside/u/0/sessions/secret-1" "secret-like session remains protected past retention"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo
@@ -134,7 +133,7 @@ find "$B" -exec touch -t "$S" {} + 2>/dev/null
 DISK_MAGICIAN_STATE_DIR="$T/state-br" WORKTREE_APPROVED=1 DISK_MAGICIAN_WORKTREE_ROOTS="$HOME/empty-roots" \
   bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" --clean >"$T/br.out" 2>&1
 absent  "$B/old-uuid" "past-retention E5 brain dir removed"
-absent  "$B/secret-uuid" "secret-like brain dir past retention is removed by age (not a veto)"
+present "$B/secret-uuid" "secret-like brain dir remains protected past retention"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo
@@ -148,7 +147,7 @@ echo keep >"$C/notes.json"
 find "$C" -exec touch -t "$S" {} + 2>/dev/null
 DISK_MAGICIAN_STATE_DIR="$T/state-ll" bash "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" --clean >"$T/ll.out" 2>&1
 absent  "$C/capture-old.json" "past-retention E6 capture removed"
-absent  "$C/capture-credentials.json" "secret-like capture past retention is removed by age (not a veto)"
+present "$C/capture-credentials.json" "secret-like capture remains protected past retention"
 present "$C/notes.json" "non-capture file untouched"
 
 # ─────────────────────────────────────────────────────────────────────────────

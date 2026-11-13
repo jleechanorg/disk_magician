@@ -31,10 +31,10 @@ grep -Fq "kept:recent-activity $ENTRY" "$WORK/floor.log"
 grep -Fq '< 24h)' "$WORK/floor.log"
 run env DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 bash "$SCRIPT" --dry-run >"$WORK/manual.log" 2>&1
 cat "$WORK/manual.log"
-grep -Fq "kept:unproven-content $ENTRY" "$WORK/manual.log"
+grep -Fq "kept:no-proof $ENTRY" "$WORK/manual.log"
 run env DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 bash "$SCRIPT" --dry-run >"$WORK/minsize.log" 2>&1
 cat "$WORK/minsize.log"
-if grep -Fq "kept:unproven-content $ENTRY" "$WORK/minsize.log"; then
+if grep -Fq "kept:no-proof $ENTRY" "$WORK/minsize.log"; then
   echo 'FAIL: below-threshold entry reached C14 classification' >&2
   exit 1
 fi

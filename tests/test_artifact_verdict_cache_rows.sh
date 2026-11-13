@@ -10,8 +10,7 @@
 set -uo pipefail
 # 2026-11-12 operator decision: the verdict is "no veto AND at least one proof". An entry
 # outside the rebuildable rows, and one inside them but too young, is `kept:no-proof`
-# (was kept:unproven-content / kept:recent-activity); secret-like content is no longer a
-# veto.
+# (was kept:unproven-content / kept:recent-activity); secret-like content remains a veto.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB="$REPO_ROOT/scripts/lib/artifact_verdict.sh"
@@ -97,8 +96,8 @@ assert_eq "$(av "$HOME/.cache/huggingface/token" --kind rebuildable)" kept:no-pr
     "a credential FILE at the cache root is never classified by its parent's name"
 printf 'HF_TOKEN=abc' >"$HOME/.cache/huggingface/hub/models--org--m/.env"
 age "$HOME/.cache/huggingface/hub" 120
-assert_eq "$(av "$HOME/.cache/huggingface/hub" --kind rebuildable)" remove \
-    "a secret-like file inside the model cache no longer blocks (it only removes proofs)"
+assert_eq "$(av "$HOME/.cache/huggingface/hub" --kind rebuildable)" kept:secret-like \
+    "secret-like content inside the model cache is a veto"
 /bin/rm -f "$HOME/.cache/huggingface/hub/models--org--m/.env"
 age "$HOME/.cache/huggingface/hub" 120
 assert_eq "$(av "$HOME/.cache/huggingface/hub" --kind rebuildable)" remove \

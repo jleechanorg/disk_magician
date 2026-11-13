@@ -170,9 +170,9 @@ git -C "$SCRATCH_ROOT/dirty-repo" add tracked.txt
 age "$SCRATCH_ROOT/dirty-repo" 600
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
 gone dirty-repo
-check "deletion log line carries the dirty verdict" "scratch-lru:kept:no-proof+kept:dirty" "$(grep -F "$SCRATCH_ROOT/dirty-repo" "$LOG")"
+check "deletion log line carries the dirty verdict" "scratch-lru:kept:dirty" "$(grep -F "$SCRATCH_ROOT/dirty-repo" "$LOG")"
 check "summary counts the dirty eviction" "not_pushed_or_dirty=1" "$out"
-check "summary lists the prior verdict" "lru: prior_verdict kept:no-proof+kept:dirty=1" "$out"
+check "summary lists the prior verdict" "lru: prior_verdict kept:dirty=1" "$out"
 
 echo "Test 8b: a secret-like entry is kept when its repository check fails or defers"
 use_root
@@ -253,7 +253,7 @@ for n in dirty-first broken-first; do
   check "$n keeps on the unmeasured repository" "kept:check-failed $SCRATCH_ROOT/$n" "$out"
 done
 gone all-dirty
-check "every-repository-known entry logs each prior verdict" "scratch-lru:kept:no-proof+kept:dirty" "$(grep -F "$SCRATCH_ROOT/all-dirty" "$LOG")"
+check "every-repository-known entry logs each prior verdict" "scratch-lru:kept:dirty" "$(grep -F "$SCRATCH_ROOT/all-dirty" "$LOG")"
 
 echo "Test 8e: a repository whose remote cannot be queried keeps the entry"
 use_root
