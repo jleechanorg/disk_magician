@@ -494,7 +494,9 @@ for f in "$PT/cli_validation_gemini_1/o" "$HOME/.aside/u/a/sessions/s1/state" "$
 while read -r row ret p; do
     age "$p" $((ret + 60)) && assert_eq "$(eph "$p")" remove "$row 1 h past ${ret} min: ${p#"$TMPROOT"/}" \
         || bad "$row age-old fixture setup (${p#"$TMPROOT"/})"
-    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" kept:no-proof "$row 1 h short of ${ret} min" \
+    # Under an hour old is the idle veto; a clean pushed clone is removable by on-origin at any age.
+    exp=kept:no-proof; (( ret - 60 < 60 )) && exp=kept:recent-activity; [[ $p == */clones/repo ]] && exp=remove
+    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" "$exp" "$row 1 h short of ${ret} min" \
         || bad "$row age-fresh fixture setup (${p#"$TMPROOT"/})"
 done <<EOF
 E2 240 $PT/agent_prompt_1.txt
@@ -572,7 +574,7 @@ assert_eq "$(eph "$PT/custom-root/br")" remove "unlisted root at 400 min"
 assert_eq "$(eph "$PT/system-x")" kept:protected "system-* basename has no row"
 assert_eq "$(eph "$PT/com.apple.y")" kept:protected "com.apple.* basename has no row"
 age "$PT/pr-123" 180
-assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:recent-activity "sweeper configured below E3 retention"
+assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:no-proof "sweeper configured below E3 retention"
 age "$PT/pr-123" 43200
 printf '{}' >"$TMPROOT/invalid-inventory.json"
 assert_eq "$(python3 "$PROBE" newest-mtime "$TMPROOT/invalid-inventory.json")" kept:check-failed "malformed inventory cannot supply an mtime"
@@ -613,7 +615,7 @@ assert_eq "$(eph "$PT/agent_prompt_1.txt")" kept:open-file "open E2 agent_prompt
 assert_eq "$(eph "$PT/pr-cwd")" kept:live-cwd "a process with cwd inside"
 kill "$opid" "$cpid" 2>/dev/null; wait "$opid" "$cpid" 2>/dev/null
 age "$PT/pr-young" 10
-assert_eq "$(artifact_removal_verdict "$PT/pr-young")" kept:no-proof "content 10 min old"
+assert_eq "$(artifact_removal_verdict "$PT/pr-young")" kept:recent-activity "content 10 min old"
 assert_eq "$(eph "$HOME/.codex/sessions/s")" kept:protected "never-delete path (safety_check.sh)"
 # lease <dir> <released_at>: lease owned by this shell (pid + start epoch).
 lease() {
@@ -674,7 +676,10 @@ GCS="$TMPROOT/gcs" && mkdir -p "$GCS"
 # Stub for `gcloud storage objects describe`: fixture JSON per object, else 404 (rc 1); logs each call.
 printf '#!/bin/sh\nf="%s/$(printf %%s "$1" | tr "/:" "__").json"\necho "$1" >>"%s/calls"\n[ -f "$f" ] || { echo 404 >&2; exit 1; }\ncat "$f"\n' "$GCS" "$GCS" >"$TMPROOT/stub/describe"
 chmod +x "$TMPROOT/stub/describe" && export DISK_MAGICIAN_STAT_BIN="$TMPROOT/stub/describe"
-# publish <dir> [<url>] [<verified_at|->]: released lease marking every file under <dir> published
+# Publication is tested on an unreleased lease whose owner is dead: a released lease is itself
+# a removal proof (producer-released) and would mask every publication check below.
+sleep 0 & DEAD_PID=$!; wait "$DEAD_PID" 2>/dev/null; export DEAD_PID
+# publish <dir> [<url>] [<verified_at|->]: unreleased dead-owner lease marking every file under <dir> published
 # (upload_manifest: path, sha256, md5, crc32c, size, object, generation 1) plus matching remote objects.
 publish() {
     python3 - "$1" "$(lease_path_for "$1")" "${2:-gs://wa-test-evidence/agent-evidence/${1##*/}/}" "${3:-2026-10-01T00:00:00Z}" "$GCS" <<'PY'
@@ -688,7 +693,7 @@ for dp, _, fns in os.walk(d):
                       crc32c="AAAAAA==", size=len(b), object=url + rel, generation="1"))
         json.dump({"generation": "1", "md5_hash": m[-1]["md5"]}, open(os.path.join(gcs, (url + rel).replace("/", "_").replace(":", "_") + ".json"), "w"))
 os.makedirs(os.path.dirname(lease), exist_ok=True)
-json.dump({"path": d, "owner": {"pid": 1}, "released_at": "2026-10-01T00:00:00Z", "kind": "evidence", "published": True,
+json.dump({"path": d, "owner": {"pid": int(os.environ["DEAD_PID"])}, "kind": "evidence", "published": True,
            "published_at": "2026-10-01T00:00:00Z", "published_url": url, "verified_at": None if ver == "-" else ver,
            "upload_manifest": m}, open(lease, "w"))
 PY
@@ -704,7 +709,7 @@ assert_eq "$(av "$PT/deploy")" kept:no-proof "custom-named deploy_backup.txt"
 git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/evrepo" && mkdir -p "$PT/evrepo/evidence" && printf '{}' >"$PT/evrepo/evidence/results.json" && age "$PT/evrepo" 43200
 assert_eq "$(av "$PT/evrepo/evidence")" kept:no-proof "unpublished evidence/results.json"
 mkdir -p "$PT/inv" && printf 'r' >"$PT/inv/report.md" && age "$PT/inv" 43200 && f="$(lease_path_for "$PT/inv")"
-printf '{"path":"%s","owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
+printf '{"path":"%s","owner":{"pid":'"$DEAD_PID"'},"kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
     "$PT/inv" "$TMPROOT/remotes/wtbase.git" "$(git -C "$PT/evrepo" rev-parse HEAD)" "$(shasum -a 256 "$PT/inv/report.md" | cut -c1-64)" >"$f"
 assert_eq "$(av "$PT/inv")" kept:no-proof "manifest is not a copy (inventory only, never published)"
 for d in ev-ok ev-unver ev-added ev-byte ev-subset ev-nomf ev-del ev-regen ev-exp ev-miss; do
@@ -822,7 +827,7 @@ assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:no-proof "a non-
 # B1: the enclosing linked worktree's canonical 7-day floor protects its venv/.
 # Root, .git and venv/ are 30 days old, but the tracked content was touched 2h ago.
 venvw "$HOME/wt-young" && age "$HOME/wt-young" 43200 && age "$HOME/wt-young/tracked.txt" 120
-assert_eq "$(av "$HOME/wt-young/venv" --kind rebuildable)" kept:no-proof \
+assert_eq "$(av "$HOME/wt-young/venv" --kind rebuildable)" kept:recent-activity \
     "ignored venv/ in a worktree with 2h-old tracked content"
 [[ "$(cat "$HOME/wt-young/venv/bin/python")" == py ]] \
     && ok "young venv path bytes intact after the verdict" || bad "young venv path bytes changed"
@@ -832,7 +837,7 @@ assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" remove \
     "ignored venv/ in a worktree quiet for 8 days"
 # Canonical unmeasurable recency fails closed (reports active), so the venv stays.
 worktree_is_recently_active() { return 0; }
-assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" kept:no-proof \
+assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" kept:recent-activity \
     "ignored venv/ when canonical worktree recency cannot be measured"
 # shellcheck source=scripts/lib/worktree_recency.sh
 source "$REPO_ROOT/scripts/lib/worktree_recency.sh"
@@ -864,7 +869,7 @@ assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_thesis" --kind os_clon
 assert_eq "$(av "$x_clone")" kept:no-proof "the same clone without --kind os_clone"
 age "$PT/X" 10
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
-assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:no-proof "unknown kind"
+assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
 typo_candidate="$PT/agent_prompt_bad_deadline.txt"
 printf 'eligible only when every option parses' >"$typo_candidate"
 age "$typo_candidate" 50000
@@ -928,7 +933,7 @@ assert_eq "$(av "$later_row_entry" --kind ephemeral)" kept:archive-identity "E1 
 
 legacy_entry="$ARCHIVE_ROOT/20261010T020000Z/pre-receipt"
 mkdir -p "$legacy_entry" && printf 'legacy archive' >"$legacy_entry/payload" && age "$legacy_entry" 43200
-assert_eq "$(av "$legacy_entry" --kind ephemeral)" kept:no-proof "pre-receipt archive falls through to ordinary provenance"
+assert_eq "$(av "$legacy_entry" --kind ephemeral)" remove "pre-receipt archive falls through to ordinary provenance"
 
 replaced_source="$PT/pr-replaced-123"
 replaced_entry="$ARCHIVE_ROOT/20261010T030000Z/pr-replaced-123"
@@ -944,7 +949,7 @@ mkdir -p "$short_source" && printf 'short-row archive' >"$short_source/payload"
 age "$short_source" 50000
 archive_fixture "$short_source" "$short_entry" "$((NOW - 5 * 3600))"
 age "$short_entry" 50000
-assert_eq "$(av "$short_entry" --kind ephemeral)" kept:no-proof "E1 archive retains its 24 h minimum over a short E2 row"
+assert_eq "$(av "$short_entry" --kind ephemeral)" kept:recent-activity "E1 archive retains its 24 h minimum over a short E2 row"
 
 reused_source="$PT/unclassified-origin"
 reused_entry="$ARCHIVE_ROOT/20261010T050000Z/unclassified-origin"
@@ -1060,7 +1065,7 @@ assert entries["cache.bin"]["type"] == "file" and entries["cache.bin"]["size"] =
 PY
 mkdir -p "$PT/pr-inventory-kept" && printf 'unknown' >"$PT/pr-inventory-kept/data" && age "$PT/pr-inventory-kept" 43200
 kept_inv="$TMPROOT/kept-inventory.json"
-assert_eq "$(av "$PT/pr-inventory-kept" --kind bogus --inventory-out "$kept_inv")" kept:no-proof "unproven path stays kept"
+assert_eq "$(av "$PT/pr-inventory-kept" --kind bogus --inventory-out "$kept_inv")" kept:unproven-content "unproven path stays kept"
 [[ ! -e "$kept_inv" ]] && ok "inventory-out is written only on remove" || bad "inventory-out escaped a kept verdict"
 
 deadline_root="$TMPROOT/deadline-root"

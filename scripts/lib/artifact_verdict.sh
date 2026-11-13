@@ -737,7 +737,10 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
                 deferred:*|kept:external-worktree|kept:check-failed|kept:git-metadata|kept:linked-worktree) echo "$st"; return 0 ;;
             esac
             if [[ "$st" != ok && "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then echo "$st"; return 0; fi
-            case "$st" in ok|kept:git-unbaselined) proofs+=" on-origin" ;; esac
+            # Only the repository root itself: files beside a nested clone belong to no repo.
+            if [[ -e "$p/.git" || "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then
+                case "$st" in ok|kept:git-unbaselined) proofs+=" on-origin" ;; esac
+            fi
         fi
     fi
     # Proof 4: rebuildable artifact name (never a tree holding .git).

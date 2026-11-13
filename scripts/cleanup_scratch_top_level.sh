@@ -824,9 +824,10 @@ while IFS= read -r -d '' entry; do
     capped=1
     continue
   fi
-  # Before the verdict: a --clean run removes $entry, and a removed path cannot
-  # be itemised afterwards. Nothing here changes what gets removed.
-  report_candidate_detail "$entry" "$kb"
+  # Itemisation is reporting only, so only a preview pays for it: measured 2026-11-13 on
+  # Jeff-Ubuntu, one 196k-file entry took ~80 min (a stat subprocess per file) and the
+  # 15-min timer evicted nothing for days. A --clean run's removals go to the deletion log.
+  [[ "$DRY_RUN" == true ]] && report_candidate_detail "$entry" "$kb"
   automatic_logged=false
   if [[ "$SCRATCH_AUTOMATIC" == 1 ]]; then
     if [[ "$DRY_RUN" != true ]]; then
