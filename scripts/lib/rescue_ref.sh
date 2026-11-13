@@ -40,6 +40,9 @@ rescue_check() {
     local dir="${1:?rescue_check <dir>}" cap_mb="${DISK_MAGICIAN_RESCUE_CAP_MB:-200}" size
     [[ -d "$dir" && ! -L "$dir" ]] || return 1
     [[ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" == true ]] || return 1
+    # Only a work-tree root is rescuable: a subdirectory (e.g. venv/ inside a repo) would push
+    # the parent's snapshot and then lose only the subdirectory's local state.
+    [[ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$dir" && pwd -P)" ]] || return 1
     git -C "$dir" remote get-url origin >/dev/null 2>&1 || return 1
     _rr_secret_like "$dir" && return 1
     [[ "$cap_mb" =~ ^[0-9]+$ ]] || return 1

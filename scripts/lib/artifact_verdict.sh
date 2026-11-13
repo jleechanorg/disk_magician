@@ -721,15 +721,24 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ -n "$floor_class" || ! -f "$p/.git" ]] || floor=2880
     if [[ "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]+$ ]]; then floor=$DISK_MAGICIAN_AGE_FLOOR_MINUTES; fi
     (( floor >= 120 )) || floor=120
-    if [[ "$newest" =~ ^[0-9]+$ ]] && (( $(date +%s) - newest >= floor * 60 )); then proofs+=" age"; fi
-    # Proof 2: on-origin (clean work tree reachable from a live origin tip).
-    # A lease-less clone has no git_meta baseline, so the baseline verdicts at the end of
-    # c14_repo_pushed_ok do not count against this proof; clean + reachable does. A baseline that
-    # exists but mismatches (kept:git-metadata) is tampered evidence and gives no proof.
-    if [[ -d "$p" && -e "$p/.git" ]]; then
-        st="$(c14_repo_content_ok "$p")" && st="$(c14_repo_pushed_ok "$p" "$p" "$deadline")"
-        [[ "$st" == deferred:* ]] && { echo "$st"; return 0; }
-        case "$st" in ok|kept:git-unbaselined) proofs+=" on-origin" ;; esac
+    # Age proves only the declared-ephemeral classes (/tmp and Scratch). Other kinds keep
+    # their own shape/provenance proof: age must not bypass a caller's scope table.
+    if [[ "$kind" == ephemeral && "$newest" =~ ^[0-9]+$ ]] && (( $(date +%s) - newest >= floor * 60 )); then proofs+=" age"; fi
+    # Proof 2: on-origin, over every repository in the tree (nested repos included).
+    # A lease-less clone has no git_meta baseline, so kept:git-unbaselined still counts when the
+    # content is clean and pushed. Vetoes no proof can make safe: an external registered worktree
+    # whose admin lives here, a git-metadata mismatch, a failed check, and a bare repository
+    # that is not on origin (rescue_ref cannot snapshot it). Dirty/unpushed only lose this proof.
+    if [[ -d "$p" ]]; then
+        st="$(C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" | tr -d '\0')"
+        if [[ -n "$st" || -e "$p/.git" || "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then
+            st="$(c14_repos_ok "$p" "$inv" "$deadline")"
+            case "$st" in
+                deferred:*|kept:external-worktree|kept:check-failed|kept:git-metadata|kept:linked-worktree) echo "$st"; return 0 ;;
+            esac
+            if [[ "$st" != ok && "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then echo "$st"; return 0; fi
+            case "$st" in ok|kept:git-unbaselined) proofs+=" on-origin" ;; esac
+        fi
     fi
     # Proof 4: rebuildable artifact name (never a tree holding .git).
     if [[ -d "$p" && ! -e "$p/.git" ]]; then

@@ -106,8 +106,8 @@ assert_eq "$(av "$HOME/.cache/huggingface/hub" --kind rebuildable)" remove \
 
 echo "== recency gate still applies =="
 mkdir -p "$HOME/.cache/huggingface/xet-fresh/c" && printf 'x' >"$HOME/.cache/huggingface/xet-fresh/c/f"
-assert_eq "$(av "$HOME/.cache/huggingface/xet-fresh" --kind rebuildable)" kept:no-proof \
-    "a model-cache entry written minutes ago has no proof (1 h idle floor on rebuildable)"
+assert_eq "$(av "$HOME/.cache/huggingface/xet-fresh" --kind rebuildable)" kept:recent-activity \
+    "a model-cache entry written minutes ago is kept by the 1 h idle veto"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
