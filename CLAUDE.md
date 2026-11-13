@@ -542,6 +542,20 @@ exists to forbid.
 
 ## Operational gotchas (learned the hard way — details in roadmap/ and beads)
 
+### Removal verdict = no veto AND at least one proof (operator decision 2026-11-12)
+
+"maybe safe set should be OR vs AND" — `artifact_removal_verdict` keeps an entry only
+for a veto: protected/never-delete, `.diskm-ballast` and dot/OS top-level names, symlink,
+live or unknown lease owner, AO ownership, live cwd, open file, volume identity, content
+written within the last hour (`kept:recent-activity`), unmeasurable mtime. Otherwise one
+proof suffices: age (class floor, worktrees 48 h, `DISK_MAGICIAN_AGE_FLOOR_MINUTES` >= 120),
+on-origin, rescued (`scripts/lib/rescue_ref.sh` pushes `refs/diskm-rescue/...` first),
+rebuildable, producer-released, operator-named (`DISK_MAGICIAN_OPERATOR_TARGETS`). Secret-like
+files, dirty or unpushed git and a missing name-shape retention are no longer vetoes; with no
+proof the result is `kept:no-proof`. `diskm emergency --target-gb N` steps the age floor
+24 -> 12 -> 6 -> 2 h until the target is met. Design:
+`~/roadmap/reclaim-safe-set-or-design-2026-11-12.md`. The bullets below predate this change.
+
 ### Why scratch reclaim "reports success" and frees nothing (2026-10-29 → 11-03)
 
 Each of these was measured, and each looked like "the fix" until measurement

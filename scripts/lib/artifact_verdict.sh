@@ -14,6 +14,8 @@ source "$_AV_DIR/worktree_ignored.sh"
 source "$_AV_DIR/../worktree_remove_hook.sh" # has_hidden_state
 # shellcheck source=scripts/lib/scratch_roots.sh
 source "$_AV_DIR/scratch_roots.sh"
+# shellcheck source=scripts/lib/rescue_ref.sh
+[[ -f "$_AV_DIR/rescue_ref.sh" ]] && source "$_AV_DIR/rescue_ref.sh"  # proof 3 (rescued)
 
 # c14_discover_repos <root>: print every repository under <root> (itself
 # included), NUL-terminated and absolute: a dir holding a `.git` dir or file,
@@ -708,6 +710,12 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
         [[ "$newest" =~ ^[0-9]+$ ]] || { echo kept:mtime-unmeasurable; return 0; }
         (( $(date +%s) - newest >= min_idle * 60 )) || { echo kept:recent-activity; return 0; }
     fi
+    # Veto: content written within the last hour is treated as in use, whatever proves it.
+    # A producer can write through absolute paths with no cwd or open file inside
+    # (measured 2026-11-12: a 48.7 GiB Scratch tree written 12 min earlier, no live cwd).
+    # Unmeasurable newest mtime cannot prove idleness, so it fails closed.
+    [[ "$newest" =~ ^[0-9]+$ ]] || { echo kept:mtime-unmeasurable; return 0; }
+    (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
     # Proof 1: age. Per-child newest content mtime; unmeasurable is no proof.
     local floor=${floor_class:-1440}
     [[ -n "$floor_class" || ! -f "$p/.git" ]] || floor=2880

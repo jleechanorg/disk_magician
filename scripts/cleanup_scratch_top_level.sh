@@ -80,6 +80,22 @@ if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^
       echo "scratch-prune: cannot record recency override hours:$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS; using 24h floor" >&2
   fi
 fi
+# Emergency floor (operator decision 2026-11-12, `diskm emergency`): a manual run with
+# DISK_MAGICIAN_AGE_FLOOR_MINUTES (>= 120) may lower the floor to that many hours (rounded
+# up). Automatic mode never uses it; the verdict's 1 h idle veto and every other veto still run.
+if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[1-9][0-9]{2,4}$ ]] && (( DISK_MAGICIAN_AGE_FLOOR_MINUTES >= 120 )); then
+  _emergency_hours=$(( (DISK_MAGICIAN_AGE_FLOOR_MINUTES + 59) / 60 ))
+  if (( _emergency_hours < MIN_HOURS_FLOOR )); then
+    _guard_state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+    if { mkdir -p "$_guard_state_dir" && printf '%s scratch-prune: emergency age floor active: hours:%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_emergency_hours" >>"$_guard_state_dir/worktree_guard.log"; } 2>/dev/null; then
+      MIN_HOURS_FLOOR="$_emergency_hours"
+      RECENCY_SPEC="hours:$MIN_HOURS_FLOOR"
+    else
+      echo "scratch-prune: cannot record emergency floor hours:$_emergency_hours; keeping ${MIN_HOURS_FLOOR}h" >&2
+    fi
+  fi
+fi
 MIN_HOURS="${SCRATCH_PRUNE_MIN_HOURS:-$MIN_HOURS_FLOOR}"
 MAX_GIB="${SCRATCH_PRUNE_MAX_GIB:-25}"
 MAX_GIB_SET=false
