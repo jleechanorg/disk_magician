@@ -102,6 +102,8 @@ Commands:
                          Quarantine an exact stale empty lock or dead-PID partial lock past TTL; never deletes it.
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
   quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
+  quarantine verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]
+                         Read-only C14 eligibility check; never removes the path.
   worktree-quarantine {restore <id>|reconcile} Restore or reconcile quarantined git worktrees.
   quarantine-reconcile   Finish deferred C14 quarantine removals (--dry-run|--clean).
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
@@ -690,7 +692,32 @@ case "$CMD" in
     case "$subcommand" in
       restore) [[ $# -eq 1 ]] || { echo "Usage: diskm quarantine restore <id>" >&2; exit 2; }; exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" restore "$1" ;;
       reconcile) exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" reconcile "$@" ;;
-      *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]}" >&2; exit 2 ;;
+      verdict)
+        qv_usage() { echo "Usage: diskm quarantine verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]" >&2; exit 2; }
+        [[ $# -ge 1 && "${1:-}" != --* ]] || qv_usage
+        verdict_path="$1"; shift
+        verdict_kind_seen=0; verdict_deadline_seen=0; verdict_args_seen=0
+        verdict_args=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --kind)
+              [[ $# -ge 2 && "$verdict_kind_seen" -eq 0 && ( "$2" == rebuildable || "$2" == ephemeral ) ]] || qv_usage
+              verdict_args+=(--kind "$2"); verdict_kind_seen=1; verdict_args_seen=1; shift 2 ;;
+            --deadline-at)
+              [[ $# -ge 2 && "$verdict_deadline_seen" -eq 0 ]] || qv_usage
+              python3 -c 'import math,sys; x=float(sys.argv[1]); sys.exit(0 if math.isfinite(x) and x >= 0 else 1)' "$2" >/dev/null 2>&1 || qv_usage
+              verdict_args+=(--deadline-at "$2"); verdict_deadline_seen=1; verdict_args_seen=1; shift 2 ;;
+            *) qv_usage ;;
+          esac
+        done
+        source "$SCRIPT_DIR/scripts/lib/artifact_verdict.sh"
+        if [[ "$verdict_args_seen" == 1 ]]; then
+          DISK_MAGICIAN_C14_LEDGER= artifact_removal_verdict "$verdict_path" "${verdict_args[@]}" --no-rescue-push
+        else
+          DISK_MAGICIAN_C14_LEDGER= artifact_removal_verdict "$verdict_path" --no-rescue-push
+        fi
+        ;;
+      *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]|verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]}" >&2; exit 2 ;;
     esac
     ;;
   worktree_quarantine|worktree-quarantine)
