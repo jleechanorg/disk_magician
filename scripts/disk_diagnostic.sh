@@ -34,7 +34,13 @@ workers="${DISK_MAGICIAN_TOPDOWN_WORKERS:-8}"
 max_nodes="${DISK_MAGICIAN_TOPDOWN_MAX_NODES:-}"
 granularity="${DISK_MAGICIAN_GRANULARITY_GIB:-5}"
 quick_budget="${DISK_MAGICIAN_QUICK_BUDGET_SECONDS:-120}"
-topdown_root="${DISK_MAGICIAN_TOPDOWN_ROOT:-}"
+if [[ -n "${DISK_MAGICIAN_TOPDOWN_ROOT:-}" ]]; then
+  topdown_root="$DISK_MAGICIAN_TOPDOWN_ROOT"
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+  topdown_root=""
+else
+  topdown_root="/"
+fi
 
 (
   python3 - <<'PY'

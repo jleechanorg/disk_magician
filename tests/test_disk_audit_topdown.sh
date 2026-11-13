@@ -384,10 +384,17 @@ else
   bad "default whole-volume deadline is '$default_budget' (expected 900)"
 fi
 
-if ! grep -q '^--root$' "$FRONTIER_ARGS_CAPTURE"; then
-  ok "diagnostic leaves scanner root at its own default when no override is set"
+default_root=$(awk '/^--root$/{getline; print; exit}' "$FRONTIER_ARGS_CAPTURE" 2>/dev/null)
+if [[ "$OSTYPE" == darwin* ]]; then
+  if [[ -z "$default_root" ]]; then
+    ok "diagnostic leaves macOS scanner root at its default when no override is set"
+  else
+    bad "diagnostic changed macOS scanner root without an override ('$default_root')"
+  fi
+elif [[ "$default_root" == "/" ]]; then
+  ok "diagnostic selects the Linux filesystem root when no override is set"
 else
-  bad "diagnostic passed --root without DISK_MAGICIAN_TOPDOWN_ROOT set"
+  bad "diagnostic Linux root is '${default_root:-<absent>}' (expected /)"
 fi
 
 ROOT_OVERRIDE_CAPTURE="$WORK/frontier-args-root.txt"
