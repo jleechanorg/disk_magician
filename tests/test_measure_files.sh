@@ -1,23 +1,52 @@
 #!/usr/bin/env bash
 set -uo pipefail
+unset BASH_ENV ENV
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRATCH="$(bash "$ROOT/disk_magician.sh" scratch-dir)"
-[[ -n "$SCRATCH" && "$SCRATCH" != / && -d "$SCRATCH" ]] || {
+SCRATCH="$(bash "$ROOT/disk_magician.sh" scratch-dir)" || {
+  echo "test_measure_files: Scratch resolution failed" >&2
+  exit 1
+}
+[[ -n "$SCRATCH" && "$SCRATCH" == /* && "$SCRATCH" != / && -d "$SCRATCH" ]] || {
   echo "test_measure_files: resolved Scratch path is unavailable: $SCRATCH" >&2
   exit 1
 }
-T="$(mktemp -d "$SCRATCH/.measure-files-test.XXXXXX")"
+SCRATCH="$(cd -- "$SCRATCH" 2>/dev/null && pwd -P)" || {
+  echo "test_measure_files: Scratch path could not be canonicalized" >&2
+  exit 1
+}
+[[ -n "$SCRATCH" && "$SCRATCH" != / && -d "$SCRATCH" && ! -L "$SCRATCH" ]] || {
+  echo "test_measure_files: canonical Scratch path is unavailable" >&2
+  exit 1
+}
+T=""
 cleanup_fixture() {
+  [[ -n "${T:-}" && "$T" != / ]] || return 0
   case "$T" in
     "$SCRATCH"/.measure-files-test.*) ;;
     *) echo "test_measure_files: refusing unexpected fixture path: $T" >&2; return 1 ;;
   esac
   [[ -d "$T" && ! -L "$T" ]] || return 0
-  chmod -R u+rwX "$T" 2>/dev/null
+  chmod -R u+rwX "$T" 2>/dev/null || true
   rm -rf -- "$T"
 }
 trap cleanup_fixture EXIT
+T="$(mktemp -d "$SCRATCH/.measure-files-test.XXXXXX")" || {
+  echo "test_measure_files: fixture allocation failed under Scratch" >&2
+  exit 1
+}
+[[ -n "$T" && "$T" != / && "$T" == "$SCRATCH"/.measure-files-test.* && -d "$T" && ! -L "$T" ]] || {
+  echo "test_measure_files: refusing invalid fixture path: $T" >&2
+  exit 1
+}
+T="$(cd -- "$T" 2>/dev/null && pwd -P)" || {
+  echo "test_measure_files: fixture path could not be canonicalized" >&2
+  exit 1
+}
+[[ "$T" == "$SCRATCH"/.measure-files-test.* && -d "$T" && ! -L "$T" ]] || {
+  echo "test_measure_files: refusing escaped fixture path: $T" >&2
+  exit 1
+}
 PASS=0; FAIL=0
 ok() { echo "  PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -101,6 +130,14 @@ else
   bad 'symlink was followed or misreported'
   printf 'symlink_rows:\n%s\n' "$out"
 fi
+out="$(run "$LINK/linked/")"; rc=$?
+if [[ "$rc" -eq 0 && "$(flag_for "$LINK/linked" "$out")" == L \
+   && -z "$(awk -F '\t' -v p="$LINK/linked/" 'index($5,p)==1 {print}' <<<"$out")" ]]; then
+  ok 'trailing slash does not turn a symlink path into its target directory'
+else
+  bad 'trailing slash caused the symlink target to be traversed'
+  printf 'trailing_slash_rows:\n%s\n' "$out"
+fi
 
 # Unknown paths fail closed and deadlines use the shared monotonic parser.
 out="$(run "$T/missing" 2>"$T/missing.err")"; rc=$?
@@ -116,6 +153,12 @@ if [[ "$rc" -eq 124 && "$(flag_for "$BIG" "$out")" == E ]]; then
   ok 'expired shared deadline fails closed with an E row'
 else
   bad "expired deadline did not fail closed (rc=$rc)"
+fi
+out="$(run '////' --deadline-at 0 2>"$T/root-expired.err")"; rc=$?
+if [[ "$rc" -eq 124 && "$(flag_for / "$out")" == E ]]; then
+  ok 'trailing separators preserve the root path before an expired deadline fails closed'
+else
+  bad "root path was not normalized before deadline rejection (rc=$rc)"
 fi
 
 echo "PASS=$PASS FAIL=$FAIL"

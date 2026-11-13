@@ -27,6 +27,7 @@ fi
 [[ $# -ge 1 && -n "$1" ]] || { usage; exit 2; }
 path="$1"
 shift
+while [[ "$path" == */ && "$path" != / ]]; do path="${path%/}"; done
 act_parse_deadline_args "$@" || { usage; exit 2; }
 if ((${#ACT_ARGS[@]} != 0)) || [[ -n "$ACT_CURSOR" ]]; then
   usage
