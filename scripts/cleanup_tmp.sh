@@ -1776,7 +1776,7 @@ if [[ "$INCLUDE_AGED" == true && -n "$PRIVATE_TMP_ROOT" ]]; then
       continue
     fi
     if [[ "$DRY_RUN" == true ]]; then
-      result="$(artifact_removal_verdict "$f" --kind ephemeral)"
+      result="$(artifact_removal_verdict "$f" --kind ephemeral --no-rescue-push)"
       if [[ "$result" == remove ]]; then
         log "DRY RUN: would remove C14 agent prompt (>${AGED_TMP_ACTIVE_HOURS}h): $f (${aged_file_kb} KB)"
       else
