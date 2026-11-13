@@ -141,7 +141,23 @@ for root in "${ROOTS[@]}"; do
     seen+="$wt|"
 
     if [[ "$INCLUDE_AO" != 1 ]] && is_ao_owned "$wt"; then skipped_ao=$((skipped_ao+1)); continue; fi
-    if is_sparse "$wt"; then skipped_sparse=$((skipped_sparse+1)); continue; fi
+    # An already-sparse worktree keeps its existing exclusions and gains any requested
+    # one it lacks; it is skipped only when every requested exclusion is present.
+    # Measured 2026-11-13: 198 Mac worktrees were sparse on docs/ only and held
+    # ~40 GiB of other tracked trees (backup/, dashboards/, evidence) the skip hid.
+    existing=()
+    if is_sparse "$wt"; then
+      while IFS= read -r line; do
+        [[ "$line" =~ ^\!/(.+)/$ ]] && existing+=("${BASH_REMATCH[1]}")
+      done < "$(gitdir_of "$wt")/info/sparse-checkout"
+      missing=0
+      for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+        found=0
+        for e in ${existing[@]+"${existing[@]}"}; do [[ "$e" == "$ex" ]] && { found=1; break; }; done
+        (( found )) || missing=1
+      done
+      if (( ! missing )); then skipped_sparse=$((skipped_sparse+1)); continue; fi
+    fi
     if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then skipped_recent=$((skipped_recent+1)); continue; fi
     if is_live "$wt"; then skipped_live=$((skipped_live+1)); continue; fi
     if ! _reason="$(safety_gate "$wt" 2>/dev/null)"; then skipped_safety=$((skipped_safety+1)); echo "  SAFETY-SKIP $wt ($_reason)"; continue; fi
@@ -168,7 +184,12 @@ for root in "${ROOTS[@]}"; do
       echo "  WOULD-SLIM ${kb}KB $wt"
     else
       patterns=("/*")
-      for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do patterns+=("!/$ex/"); done
+      for e in ${existing[@]+"${existing[@]}"}; do patterns+=("!/$e/"); done
+      for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+        dup=0
+        for e in ${existing[@]+"${existing[@]}"}; do [[ "$e" == "$ex" ]] && { dup=1; break; }; done
+        (( dup )) || patterns+=("!/$ex/")
+      done
       if git -C "$wt" sparse-checkout set --no-cone "${patterns[@]}" >/dev/null 2>&1; then
         echo "  SLIMMED    ${kb}KB $wt"
         deletion_log "$(basename "$0")" slim "$kb" "$wt"

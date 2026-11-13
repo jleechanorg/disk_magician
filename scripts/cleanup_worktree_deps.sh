@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # cleanup_worktree_deps.sh — Strip rebuildable dependency dirs from dormant worktrees.
 #
-# Removes node_modules, Rust target/ (only beside a Cargo.toml) and .mypy_cache
+# Removes node_modules, Rust target/ (only beside a Cargo.toml), .mypy_cache, and
+# untracked iOS Pods/ (beside a Podfile) and build/ (beside an Xcode project)
 # from linked git worktrees (a `.git` FILE pointer) whose content saw no activity
 # within the worktree floor (safety_worktree_floor_days, default 3). Nested build
 # caches (e.g. daemon/target in a multi-crate tree) are stripped only when the
@@ -202,8 +203,22 @@ is_build_output_dir() {
     target) [[ -f "$parent/Cargo.toml" ]] ;;
     node_modules) [[ -f "$parent/package.json" ]] ;;
     __pycache__|.pytest_cache|.ruff_cache) return 0 ;;
+    # iOS (measured 2026-11-13: 5.7 GiB ios/build + 4.5 GiB ios/Pods across Mac
+    # worktrees). CocoaPods writes Pods/ beside Podfile; Xcode writes build/ beside
+    # the project. Either must be untracked: a repo that commits Pods keeps it.
+    Pods) [[ -f "$parent/Podfile" ]] && _untracked_dir "$parent" "$name" ;;
+    build) compgen -G "$parent/*.xcodeproj" >/dev/null || compgen -G "$parent/*.xcworkspace" >/dev/null || return 1
+      _untracked_dir "$parent" "$name" ;;
     *) return 1 ;;
   esac
+}
+
+# _untracked_dir <parent> <name>: rc 0 when git tracks nothing under parent/name.
+# A failed git lookup fails closed (treated as tracked).
+_untracked_dir() {
+  local out
+  out="$(git -C "$1" ls-files -- "$2" 2>/dev/null)" || return 1
+  [[ -z "$out" ]]
 }
 
 # Every target/, node_modules/, __pycache__, .pytest_cache, and .ruff_cache
@@ -213,7 +228,7 @@ is_build_output_dir() {
 nested_cache_dirs() {
   find "$1" \( -name .git -o -name venv -o -name .venv \) -prune -o \
     -type d \( -name node_modules -o -name target -o -name __pycache__ \
-    -o -name .pytest_cache -o -name .ruff_cache \) -prune -print 2>/dev/null || true
+    -o -name .pytest_cache -o -name .ruff_cache -o -name Pods -o -name build \) -prune -print 2>/dev/null || true
 }
 
 is_wt_active() {

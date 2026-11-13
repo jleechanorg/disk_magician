@@ -113,6 +113,19 @@ mkdir -p "$T/external_daemon/target/debug"
 echo 'fn main() {}' > "$T/external_daemon/Cargo.toml"
 echo bin > "$T/external_daemon/target/debug/app"
 ln -s "$T/external_daemon" "$T/roots/nested/linked_daemon"
+# iOS: untracked Pods/ beside Podfile and build/ beside an .xcodeproj are rebuildable;
+# a tracked Pods/ and a build/ with no Xcode project beside it are preserved.
+mkdir -p "$T/roots/nested/ios/Pods/hermes" "$T/roots/nested/ios/build/dd7" "$T/roots/nested/ios/App.xcodeproj"
+echo "platform :ios" > "$T/roots/nested/ios/Podfile"
+echo pod > "$T/roots/nested/ios/Pods/hermes/lib.a"
+echo obj > "$T/roots/nested/ios/build/dd7/app.o"
+mkdir -p "$T/roots/nested/vendored/Pods/x"
+echo "platform :ios" > "$T/roots/nested/vendored/Podfile"
+echo pod > "$T/roots/nested/vendored/Pods/x/lib.a"
+git -C "$T/roots/nested" add vendored/Pods/x/lib.a vendored/Podfile
+git -C "$T/roots/nested" -c user.email=t@t -c user.name=t commit -qm "vendor pods"
+mkdir -p "$T/roots/nested/py/build/lib"
+echo out > "$T/roots/nested/py/build/lib/mod.py"
 /usr/bin/find "$T/roots/nested" -exec touch -h -t "$(date -v-10d +%Y%m%d%H%M)" {} + 2>/dev/null
 OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" DISK_MAGICIAN_WORKTREE_ROOTS="$T/roots" bash "$SCRIPT" --dry-run 2>&1)"
 check "nested daemon/target (Cargo.toml sibling) listed" "$T/roots/nested/daemon/target" "$OUT"
@@ -126,6 +139,10 @@ OUT="$(env -i HOME="$T/home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" WO
 [[ -f "$T/roots/nested/not_build/target/debug/app" ]] && ok "manifest-less nested target survives --clean" || bad "manifest-less nested target removed"
 [[ ! -e "$T/roots/nested/target" && -f "$T/roots/nested/Cargo.toml" ]] && ok "root target removed beside its Cargo.toml" || bad "root target not removed"
 [[ -f "$T/external_daemon/target/debug/app" ]] && ok "external symlink target survives --clean" || bad "external symlink target damaged"
+[[ ! -e "$T/roots/nested/ios/Pods" && -f "$T/roots/nested/ios/Podfile" ]] && ok "untracked ios/Pods removed, Podfile kept" || bad "untracked ios/Pods not removed"
+[[ ! -e "$T/roots/nested/ios/build" && -d "$T/roots/nested/ios/App.xcodeproj" ]] && ok "untracked ios/build beside .xcodeproj removed" || bad "ios/build not removed"
+[[ -f "$T/roots/nested/vendored/Pods/x/lib.a" ]] && ok "tracked Pods/ preserved" || bad "tracked Pods/ removed"
+[[ -f "$T/roots/nested/py/build/lib/mod.py" ]] && ok "build/ without an Xcode project preserved" || bad "non-Xcode build/ removed"
 
 # Candidates >= 90d (>3 months) are stripped by --clean without WORKTREE_APPROVED=1, while < 90d are preserved.
 mkdir -p "$T/roots90"
