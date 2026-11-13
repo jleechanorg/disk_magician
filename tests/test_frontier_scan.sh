@@ -233,6 +233,7 @@ T2="$WORK/t2"
 mkdir -p "$T2/real"
 dd if=/dev/zero of="$T2/real/payload" bs=1024 count=200 >/dev/null 2>&1
 ln -s "$T2/real" "$T2/alias_to_real"
+real_target_kb=$(du -sk "$T2/real" | awk '{print $1}')
 
 OUT2="$WORK/out2.json"
 python3 "$SCANNER" --root "$T2" --no-sibling-volumes --no-purgeable \
@@ -241,11 +242,12 @@ python3 "$SCANNER" --root "$T2" --no-sibling-volumes --no-purgeable \
 measured_total=$(json_get "$OUT2" "d['measured_total_kb']")
 alias_kb=$(json_get "$OUT2" "d['measured'].get('$T2/alias_to_real', -1)")
 real_kb=$(json_get "$OUT2" "d['measured'].get('$T2/real', -1)")
+expected_total_kb=$((real_target_kb + alias_kb))
 
-if [[ "$measured_total" == "200" ]]; then
-  ok "measured_total_kb == 200 (payload counted exactly once, alias not double-counted)"
+if [[ "$measured_total" == "$expected_total_kb" ]]; then
+  ok "measured_total_kb == $real_target_kb (real target allocation counted exactly once, alias not double-counted)"
 else
-  bad "measured_total_kb == $measured_total (expected 200 — symlink alias was double-counted)"
+  bad "measured_total_kb == $measured_total (expected $real_target_kb — symlink alias was double-counted)"
 fi
 
 if [[ "$alias_kb" != "-1" && "$alias_kb" -lt 10 ]]; then
@@ -254,8 +256,8 @@ else
   bad "symlink alias size unexpected: $alias_kb (du -P may have followed the symlink)"
 fi
 
-if [[ "$real_kb" == "200" ]]; then
-  ok "real target measured once under its own path (200 KB)"
+if [[ "$real_kb" == "$real_target_kb" ]]; then
+  ok "real target measured once under its own path ($real_target_kb KB allocated)"
 else
   bad "real target size unexpected: $real_kb"
 fi
