@@ -46,6 +46,32 @@ _rr_history_captured() {
     return 0
 }
 
+# git add applies clean filters and content conversions to the throwaway
+# index. Require the exact working-tree bytes by refusing configured CRLF
+# conversion and any active conversion attribute on tracked or untracked paths.
+# --all reports only declared attributes, avoiding sentinel-value ambiguity;
+# unrelated attributes such as diff and merge remain allowed.
+_rr_no_content_conversion() {
+    local dir="$1" autocrlf config_rc=0 path attr value
+    autocrlf="$(git -C "$dir" config --bool --get core.autocrlf 2>/dev/null)" || config_rc=$?
+    (( config_rc == 0 || config_rc == 1 )) || return 1
+    [[ "$config_rc" == 1 || "$autocrlf" == false ]] || return 1
+
+    if ! (
+        set -o pipefail
+        git -C "$dir" ls-files -c -o --exclude-standard -z 2>/dev/null |
+            git -C "$dir" check-attr -z --all --stdin 2>/dev/null |
+            while IFS= read -r -d "" path && IFS= read -r -d "" attr && IFS= read -r -d "" value; do
+                case "$attr" in
+                    filter|text|eol|ident|working-tree-encoding) exit 1 ;;
+                esac
+            done
+    ); then
+        return 1
+    fi
+    return 0
+}
+
 # Snapshot size in bytes (tracked + untracked non-ignored); rc 1 on failure.
 _rr_size_bytes() {
     local dir="$1" total=0 n
@@ -64,6 +90,7 @@ rescue_check() {
     # the parent's snapshot and then lose only the subdirectory's local state.
     [[ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$dir" && pwd -P)" ]] || return 1
     _rr_history_captured "$dir" || return 1
+    _rr_no_content_conversion "$dir" || return 1
     local common topology
     common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
     topology="$(python3 "$_RR_PROBE" worktrees "$common" "$dir")" || return 1

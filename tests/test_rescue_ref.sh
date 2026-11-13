@@ -39,6 +39,36 @@ grep -qx u.txt <<<"$tree" && ok "untracked file captured" || bad "untracked miss
 [[ "$(git -C "$T/dirty.git" show "$ref:a.txt")" == changed ]] && ok "tracked change captured" || bad "tracked change missing"
 [[ "$(git -C "$T/dirty.git" rev-parse "$ref^")" == "$(git -C "$T/dirty" rev-parse HEAD)" ]] && ok "parent is HEAD" || bad "parent not HEAD"
 
+# Content conversion can make git add snapshot different bytes than the work tree.
+mk filter; printf '*.txt filter=drop\n' >"$T/filter/.gitattributes"
+git -C "$T/filter" config filter.drop.clean true
+printf 'nonempty source\n' >"$T/filter/a.txt"
+[[ "$(rc rescue_check "$T/filter")" -ne 0 ]] && ok "lossy clean filter blocks rescue check" || bad "lossy filter passed rescue_check"
+[[ "$(rc rescue_push "$T/filter")" -ne 0 ]] && ok "lossy clean filter blocks rescue push" || bad "lossy filter was pushed"
+[[ -z "$(git -C "$T/filter.git" for-each-ref refs/diskm-rescue)" ]] && ok "no rescue ref for lossy filter" || bad "lossy filter rescue ref was created"
+
+mk untracked-filter; printf 'u.txt filter=drop\n' >"$T/untracked-filter/.gitattributes"
+git -C "$T/untracked-filter" config filter.drop.clean true
+printf 'untracked nonempty source\n' >"$T/untracked-filter/u.txt"
+[[ "$(rc rescue_check "$T/untracked-filter")" -ne 0 && "$(rc rescue_push "$T/untracked-filter")" -ne 0 ]] && ok "filter on untracked path blocks rescue" || bad "untracked filtered path passed rescue"
+[[ -z "$(git -C "$T/untracked-filter.git" for-each-ref refs/diskm-rescue)" ]] && ok "no rescue ref for untracked filtered path" || bad "untracked filtered path rescue ref was created"
+
+mk sentinel-filter; printf '*.txt filter=unspecified\n' >"$T/sentinel-filter/.gitattributes"
+git -C "$T/sentinel-filter" config filter.unspecified.clean true
+[[ "$(rc rescue_check "$T/sentinel-filter")" -ne 0 ]] && ok "configured sentinel-named filter blocks rescue" || bad "sentinel-named filter passed"
+
+mk eol; printf '*.txt text eol=crlf\n' >"$T/eol/.gitattributes"
+[[ "$(rc rescue_check "$T/eol")" -ne 0 && "$(rc rescue_push "$T/eol")" -ne 0 ]] && ok "EOL conversion blocks rescue" || bad "EOL conversion passed rescue"
+
+mk encoding; printf '*.txt working-tree-encoding=UTF-16LE\n' >"$T/encoding/.gitattributes"
+[[ "$(rc rescue_check "$T/encoding")" -ne 0 && "$(rc rescue_push "$T/encoding")" -ne 0 ]] && ok "working-tree encoding blocks rescue" || bad "working-tree encoding passed rescue"
+
+mk autocrlf; git -C "$T/autocrlf" config core.autocrlf true
+[[ "$(rc rescue_check "$T/autocrlf")" -ne 0 && "$(rc rescue_push "$T/autocrlf")" -ne 0 ]] && ok "core.autocrlf blocks rescue" || bad "core.autocrlf passed rescue"
+
+mk unrelated-attr; printf '*.txt diff=custom merge=custom\n' >"$T/unrelated-attr/.gitattributes"
+[[ "$(rc rescue_check "$T/unrelated-attr")" -eq 0 ]] && ok "unrelated diff and merge attributes remain allowed" || bad "unrelated attributes blocked rescue"
+
 # unpushed commits
 mk unp; echo 2 >"$T/unp/b.txt"; git -C "$T/unp" add b.txt; git -C "$T/unp" commit -qm two
 ref="$(rescue_push "$T/unp")"; git -C "$T/unp.git" show "$ref:b.txt" >/dev/null 2>&1 && ok "unpushed commit rescued" || bad "unpushed commit missing"
