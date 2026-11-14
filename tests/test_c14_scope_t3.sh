@@ -58,6 +58,8 @@ mkdir -p "$TMP/remotes"
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=c14-t3 GIT_AUTHOR_EMAIL=c14-t3@invalid
 export GIT_COMMITTER_NAME=c14-t3 GIT_COMMITTER_EMAIL=c14-t3@invalid
+unset BASH_ENV
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES \
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS \
     GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_TEMPLATE_DIR GIT_EXEC_PATH \
@@ -152,11 +154,12 @@ echo "== (2) T3 owner-null transport =="
 # Candidate worktree with its OWN owner-null lease: default C14 keeps, T3 frees.
 wt_add "$PT/parent-own/wt" wtown || { echo "FATAL: worktree add failed" >&2; exit 2; }
 null_lease "$PT/parent-own/wt"
-age "$PT/parent-own/wt" 120
+age "$PT/parent-own/wt" 3000
 assert_eq "$(verdict "$PT/parent-own/wt")" remove \
     "default C14 frees an owner-null linked worktree (2026-10-20 relax)"
 assert_eq "$(verdict_t3 "$PT/parent-own/wt")" remove \
     "T3 frees the exact candidate worktree's own owner-null lease"
+age "$PT/parent-own/wt" 120
 # 2026-10-20 relax guards: idle floor is max(caller floor, 60 min); AO paths and an
 # unreadable AO config fails closed; dirty vetoes remain and unpushed work needs rescue.
 assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 300)" kept:recent-activity \
@@ -166,9 +169,9 @@ assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 5)" remove \
 age "$PT/parent-own/wt" 45
 assert_eq "$(verdict "$PT/parent-own/wt" --min-idle-minutes 5)" kept:recent-activity \
     "owner-null relax never goes below the 60-minute floor (45 min idle kept)"
-age "$PT/parent-own/wt" 120
+age "$PT/parent-own/wt" 3000
 printf 'unpublished content\n' >"$PT/parent-own/wt/unpublished.txt"
-git -C "$PT/parent-own/wt" add unpublished.txt && git -C "$PT/parent-own/wt" commit -q -m unpushed && age "$PT/parent-own/wt" 120
+git -C "$PT/parent-own/wt" add unpublished.txt && git -C "$PT/parent-own/wt" commit -q -m unpushed && age "$PT/parent-own/wt" 3000
 before_head="$(git -C "$PT/parent-own/wt" rev-parse HEAD)"
 before_status="$(git -C "$PT/parent-own/wt" status --porcelain)"
 rescue_proof="$TMP/rescue-proof.txt"
@@ -187,10 +190,10 @@ else
 fi
 assert_eq "$(git -C "$PT/parent-own/wt" rev-parse HEAD)" "$before_head" "rescue leaves source HEAD unchanged"
 assert_eq "$(git -C "$PT/parent-own/wt" status --porcelain)" "$before_status" "rescue leaves source worktree unchanged"
-git -C "$PT/parent-own/wt" push -q origin wtown && age "$PT/parent-own/wt" 120
-printf 'u\n' >"$PT/parent-own/wt/untracked.txt" && age "$PT/parent-own/wt" 120
+git -C "$PT/parent-own/wt" push -q origin wtown && age "$PT/parent-own/wt" 3000
+printf 'u\n' >"$PT/parent-own/wt/untracked.txt" && age "$PT/parent-own/wt" 3000
 assert_eq "$(verdict "$PT/parent-own/wt")" kept:dirty "owner-null relax: untracked content remains protected"
-rm -f "$PT/parent-own/wt/untracked.txt"; age "$PT/parent-own/wt" 120
+rm -f "$PT/parent-own/wt/untracked.txt"; age "$PT/parent-own/wt" 3000
 printf 'worktreeDir: [unterminated\n' >"$TMP/ao-bad.yaml"
 assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-bad.yaml" verdict "$PT/parent-own/wt")" kept:ao-config-unreadable \
     "AO config present but unparseable: owner-null relax fails closed"
@@ -199,7 +202,7 @@ assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-missing.yaml" verdict "$PT/parent-
 mkdir -p "$PT/aodir"
 printf 'projects:\n  proj:\n    path: /nonexistent/proj\n    worktreeDir: "%s/aodir"\n' "$PT" >"$TMP/ao-ok.yaml"
 wt_add "$PT/aodir/aowt" aowt || { echo "FATAL: ao worktree add failed" >&2; exit 2; }
-null_lease "$PT/aodir/aowt"; age "$PT/aodir/aowt" 120
+null_lease "$PT/aodir/aowt"; age "$PT/aodir/aowt" 3000
 assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-ok.yaml" verdict "$PT/aodir/aowt")" kept:ao-owned \
     "worktree under a configured AO worktreeDir stays protected from the owner-null relax"
 assert_eq "$(DISK_MAGICIAN_AO_CONFIG="$TMP/ao-ok.yaml" verdict "$PT/parent-own/wt")" remove \
@@ -217,7 +220,7 @@ fi
 mkdir -p "$PT/parent-anc"
 wt_add "$PT/parent-anc/wt" wtanc || exit 2
 null_lease "$PT/parent-anc"
-age "$PT/parent-anc/wt" 120
+age "$PT/parent-anc/wt" 3000
 assert_eq "$(verdict_t3 "$PT/parent-anc/wt")" kept:owner-unknown \
     "ancestor null lease still keeps under T3"
 
@@ -225,7 +228,7 @@ assert_eq "$(verdict_t3 "$PT/parent-anc/wt")" kept:owner-unknown \
 wt_add "$PT/parent-desc/wt" wtdesc || exit 2
 mkdir -p "$PT/parent-desc/wt/sub"
 null_lease "$PT/parent-desc/wt/sub"
-age "$PT/parent-desc/wt" 120
+age "$PT/parent-desc/wt" 3000
 assert_eq "$(verdict_t3 "$PT/parent-desc/wt")" kept:owner-unknown \
     "descendant null lease still keeps under T3"
 
@@ -234,13 +237,13 @@ wt_add "$PT/parent-live/wt" wtlive || exit 2
 f="$(lease_path_for "$PT/parent-live/wt")"; mkdir -p "${f%/*}"
 printf '{"path":"%s","owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24}\n' \
     "$PT/parent-live/wt" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" >"$f"
-age "$PT/parent-live/wt" 120
+age "$PT/parent-live/wt" 3000
 assert_eq "$(verdict_t3 "$PT/parent-live/wt")" kept:live-owner "live owner still keeps under T3"
 
 wt_add "$PT/parent-mal/wt" wtmal || exit 2
 f="$(lease_path_for "$PT/parent-mal/wt")"; mkdir -p "${f%/*}"
 printf '{"path":"%s","owner":5}\n' "$PT/parent-mal/wt" >"$f"
-age "$PT/parent-mal/wt" 120
+age "$PT/parent-mal/wt" 3000
 assert_eq "$(verdict_t3 "$PT/parent-mal/wt")" kept:owner-unknown "malformed owner still keeps under T3"
 
 # Every other C14 check still applies under T3: an owner-null worktree with an
@@ -248,28 +251,28 @@ assert_eq "$(verdict_t3 "$PT/parent-mal/wt")" kept:owner-unknown "malformed owne
 wt_add "$PT/parent-dirty/wt" wtdirty || exit 2
 printf 'unpushed\n' >>"$PT/parent-dirty/wt/tracked.txt"
 null_lease "$PT/parent-dirty/wt"
-age "$PT/parent-dirty/wt" 120
+age "$PT/parent-dirty/wt" 3000
 assert_eq "$(verdict_t3 "$PT/parent-dirty/wt")" kept:dirty "T3: dirty tracked content remains protected"
 
 # T1-style (non-T3) behaviour is unchanged: no flag, no free.
 wt_add "$PT/parent-t1/wt" wtt1 || exit 2
 null_lease "$PT/parent-t1/wt"
-age "$PT/parent-t1/wt" 120
+age "$PT/parent-t1/wt" 3000
 assert_eq "$(verdict "$PT/parent-t1/wt")" remove "no-flag C14 frees owner-null linked worktree (2026-10-20 relax)"
 
 echo "== (3) owner-unknown relaxed for clean pushed linked worktrees (2026-10-20 operator decision) =="
 # No --t3-owner-null flag anywhere below: the default verdict must free a
 # clean, pushed, idle, non-AO linked worktree whose lease has no owner.
 wt_add "$PT/rx-null/wt" rxnull || exit 2
-null_lease "$PT/rx-null/wt"; age "$PT/rx-null/wt" 120
+null_lease "$PT/rx-null/wt"; age "$PT/rx-null/wt" 3000
 assert_eq "$(verdict "$PT/rx-null/wt")" remove "relax: clean+pushed worktree with owner-null lease -> remove"
 
 wt_add "$PT/rx-nolease/wt" rxnolease || exit 2
-age "$PT/rx-nolease/wt" 120
+age "$PT/rx-nolease/wt" 3000
 assert_eq "$(verdict "$PT/rx-nolease/wt")" remove "relax: clean+pushed worktree with no lease -> remove"
 
 wt_add "$PT/rx-cwd/wt" rxcwd || exit 2
-null_lease "$PT/rx-cwd/wt"; age "$PT/rx-cwd/wt" 120
+null_lease "$PT/rx-cwd/wt"; age "$PT/rx-cwd/wt" 3000
 ( cd "$PT/rx-cwd/wt" && exec sleep 120 ) & rx_pid=$!
 sleep 1
 rx_v="$(verdict "$PT/rx-cwd/wt")"
@@ -280,28 +283,28 @@ wt_add "$PT/rx-live/wt" rxlive || exit 2
 f="$(lease_path_for "$PT/rx-live/wt")"; mkdir -p "${f%/*}"
 printf '{"path":"%s","owner":{"pid":%d,"start_epoch":%s,"comm":"%s"},"created_epoch":%d,"ttl_hours":24}\n' \
     "$PT/rx-live/wt" $$ "$(_lease_ps_lstart_epoch $$)" "$(_lease_full_comm $$)" "$NOW" >"$f"
-age "$PT/rx-live/wt" 120
+age "$PT/rx-live/wt" 3000
 assert_eq "$(verdict "$PT/rx-live/wt")" kept:live-owner "relax: live-owner lease still keeps"
 
 wt_add "$PT/rx-dirty/wt" rxdirty || exit 2
-printf 'edit\n' >>"$PT/rx-dirty/wt/tracked.txt"; null_lease "$PT/rx-dirty/wt"; age "$PT/rx-dirty/wt" 120
+printf 'edit\n' >>"$PT/rx-dirty/wt/tracked.txt"; null_lease "$PT/rx-dirty/wt"; age "$PT/rx-dirty/wt" 3000
 assert_eq "$(verdict "$PT/rx-dirty/wt")" kept:dirty "relax: dirty worktree remains protected"
 
 wt_add "$PT/rx-sec/wt" rxsec || exit 2
 printf 'x\n' >"$PT/rx-sec/wt/deploy.pem"
 git -C "$PT/rx-sec/wt" add deploy.pem && git -C "$PT/rx-sec/wt" commit -qm sec && git -C "$PT/rx-sec/wt" push -q origin rxsec
-null_lease "$PT/rx-sec/wt"; age "$PT/rx-sec/wt" 120
+null_lease "$PT/rx-sec/wt"; age "$PT/rx-sec/wt" 3000
 assert_eq "$(verdict "$PT/rx-sec/wt")" kept:secret-like "relax: committed secret-like content remains protected"
 
 wt_add "$PT/rx-unp/wt" rxunp || exit 2
 printf 'u\n' >"$PT/rx-unp/wt/new.txt"
 git -C "$PT/rx-unp/wt" add new.txt && git -C "$PT/rx-unp/wt" commit -qm unpushed
-null_lease "$PT/rx-unp/wt"; age "$PT/rx-unp/wt" 120
+null_lease "$PT/rx-unp/wt"; age "$PT/rx-unp/wt" 3000
 rx_v="$(verdict "$PT/rx-unp/wt")"
 [[ "$rx_v" == kept:* ]] && ok "relax: unpushed commit still keeps ($rx_v)" || bad "relax: unpushed commit not kept ($rx_v)"
 
 wt_add "$PT/.ao/data/worktrees/rx-ao/wt" rxao || exit 2
-null_lease "$PT/.ao/data/worktrees/rx-ao/wt"; age "$PT/.ao/data/worktrees/rx-ao/wt" 120
+null_lease "$PT/.ao/data/worktrees/rx-ao/wt"; age "$PT/.ao/data/worktrees/rx-ao/wt" 3000
 rx_v="$(verdict "$PT/.ao/data/worktrees/rx-ao/wt")"
 [[ "$rx_v" == kept:* ]] && ok "relax: AO-owned worktree still keeps ($rx_v)" || bad "relax: AO-owned not kept ($rx_v)"
 
