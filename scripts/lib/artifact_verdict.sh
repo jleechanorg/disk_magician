@@ -431,7 +431,11 @@ except Exception:
 # Only find rc 0 + filter rc 1 + stdout "none" means clean; every other outcome is secret-like.
 _av_secret_like() {
     local res
-    res="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+    # -type f matters: without it, `find` also matched credential-named DIRECTORIES
+    # (e.g. grpc's _credentials/). A directory carries no secret bytes and cannot be
+    # exempted by a filename rule, so it forced every grpc-bearing venv to read as
+    # secret-like (52 GB blocked on jeff-ubuntu 2026-11-13, bead disk_magician-9ywq).
+    res="$(find "$1" -type f \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
         -o -iname '*.pem.map' -o -iname '*.key.map' -o -iname '*.p12.map' -o -iname '*.pfx.map' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
         -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
