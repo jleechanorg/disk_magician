@@ -111,7 +111,18 @@ AGED_TMP_ACTIVE_HOURS=$((10#${AGED_TMP_ACTIVE_HOURS}))
 if [[ "$LARGE_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]] && (( 10#$LARGE_TMP_ACTIVE_HOURS > AGED_TMP_ACTIVE_HOURS )); then
   AGED_TMP_ACTIVE_HOURS=$((10#$LARGE_TMP_ACTIVE_HOURS))
 fi
+# Emergency floor (operator decision 2026-11-12, `diskm emergency`): DISK_MAGICIAN_AGE_FLOOR_MINUTES
+# (>= 120) lowers the large/aged activity floors to that many hours (rounded up) for this run.
+# Archive recovery retention keeps its own floor below; the C14 verdict's 1 h idle veto still runs.
+EMERGENCY_TMP_HOURS=""
+if [[ "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[1-9][0-9]{2,4}$ ]] && (( DISK_MAGICIAN_AGE_FLOOR_MINUTES >= 120 )); then
+  EMERGENCY_TMP_HOURS=$(( (DISK_MAGICIAN_AGE_FLOOR_MINUTES + 59) / 60 ))
+fi
 AGED_TMP_ARCHIVE_RETENTION_HOURS="$AGED_TMP_ACTIVE_HOURS"
+if [[ -n "$EMERGENCY_TMP_HOURS" ]]; then
+  (( EMERGENCY_TMP_HOURS < AGED_TMP_ACTIVE_HOURS )) && AGED_TMP_ACTIVE_HOURS="$EMERGENCY_TMP_HOURS"
+  [[ "$LARGE_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]] && (( EMERGENCY_TMP_HOURS < 10#$LARGE_TMP_ACTIVE_HOURS )) && LARGE_TMP_ACTIVE_HOURS="$EMERGENCY_TMP_HOURS"
+fi
 if [[ "$LARGE_TMP_ARCHIVE_RETENTION_HOURS" =~ ^[0-9]+$ ]] && (( 10#$LARGE_TMP_ARCHIVE_RETENTION_HOURS > AGED_TMP_ARCHIVE_RETENTION_HOURS )); then
   AGED_TMP_ARCHIVE_RETENTION_HOURS=$((10#$LARGE_TMP_ARCHIVE_RETENTION_HOURS))
 fi
@@ -1776,7 +1787,7 @@ if [[ "$INCLUDE_AGED" == true && -n "$PRIVATE_TMP_ROOT" ]]; then
       continue
     fi
     if [[ "$DRY_RUN" == true ]]; then
-      result="$(artifact_removal_verdict "$f" --kind ephemeral)"
+      result="$(artifact_removal_verdict "$f" --kind ephemeral --no-rescue-push)"
       if [[ "$result" == remove ]]; then
         log "DRY RUN: would remove C14 agent prompt (>${AGED_TMP_ACTIVE_HOURS}h): $f (${aged_file_kb} KB)"
       else

@@ -697,9 +697,88 @@ _dm_mf_emit_leaf() {
   printf '%s\t1\t%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$flag" "$path"
 }
 
+# Emit a contiguous run of file/symlink leaves with one bounded metadata pass.
+# The directory walk and its Git/symlink boundaries stay in Bash; only the
+# repeated per-leaf Python+stat process pair is batched.
+_dm_mf_emit_leaf_batch() {
+  local manifest="$1" parent="$2" out rc=0
+  [[ -s "$manifest" ]] || return 0
+  out="$_DM_MF_WORK/rows.$(( ++_DM_MF_SEQ ))"
+  if act_run_bounded python3 - "$manifest" "${ACT_DEADLINE_AT:-}" "$_DM_MF_WORK" >"$out" <<'PYMFSTAT'
+import os
+import sys
+import tempfile
+import time
+
+manifest, raw_deadline, spool_dir = sys.argv[1:]
+deadline = float(raw_deadline) if raw_deadline else None
+try:
+    raw = open(manifest, "rb").read()
+    if raw and not raw.endswith(b"\0"):
+        raise ValueError("unterminated metadata manifest")
+    items = raw[:-1].split(b"\0") if raw else []
+    if len(items) % 2:
+        raise ValueError("incomplete metadata manifest pair")
+    errors = False
+    with tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b", dir=spool_dir) as rows:
+        for index in range(0, len(items), 2):
+            if deadline and time.monotonic() >= deadline:
+                raise TimeoutError("metadata batch deadline")
+            flag, path = items[index], items[index + 1]
+            if flag not in (b"F", b"L") or not path:
+                raise ValueError("invalid metadata manifest entry")
+            try:
+                info = os.lstat(path)
+                if info.st_size < 0 or int(info.st_mtime) < 0:
+                    raise ValueError("invalid size or modification time")
+            except (OSError, ValueError) as error:
+                size, count, newest, row_flag = 0, 0, 0, b"E"
+                errors = True
+                print("scratch_budget_measure_files: unreadable: %s: %s" %
+                      (os.fsdecode(path), error), file=sys.stderr)
+            else:
+                size = info.st_size
+                count = 1
+                newest = int(info.st_mtime)
+                row_flag = flag
+            rows.write(str(size).encode() + b"\t" + str(count).encode() + b"\t" + str(newest).encode() +
+                       b"\t" + row_flag + b"\t" + path + b"\n")
+        if deadline and time.monotonic() >= deadline:
+            raise TimeoutError("metadata batch deadline")
+        rows.seek(0)
+        while True:
+            chunk = rows.read(1024 * 1024)
+            if not chunk:
+                break
+            sys.stdout.buffer.write(chunk)
+    sys.exit(1 if errors else 0)
+except TimeoutError as error:
+    print(str(error), file=sys.stderr)
+    sys.exit(124)
+except (OSError, ValueError) as error:
+    print("metadata batch failed: %s" % error, file=sys.stderr)
+    sys.exit(1)
+PYMFSTAT
+  then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [[ -s "$out" ]]; then cat "$out"; fi
+  if (( rc == 124 )); then
+    printf '0\t0\t0\tE\t%s\n' "$parent"
+    _dm_mf_report_err "$parent"
+    _DM_MF_RC=124
+  elif (( rc != 0 )); then
+    [[ -s "$out" ]] || printf '0\t0\t0\tE\t%s\n' "$parent"
+    _dm_mf_report_err "$parent"
+  fi
+  return 0
+}
+
 _dm_mf_walk() {
   local dir="$1" threshold_bytes="$2"
-  local bytes files newest child rc
+  local bytes files newest child rc batch
   if [[ -e "$dir/.git" || -L "$dir/.git" ]]; then
     printf '0\t0\t0\tG\t%s\n' "$dir"
     return 0
@@ -732,16 +811,23 @@ _dm_mf_walk() {
     if (( rc == 124 )); then _DM_MF_RC=124; fi
     return 0
   fi
+  batch="$_DM_MF_WORK/leaves.$(( ++_DM_MF_SEQ ))"
+  : >"$batch" || { _dm_mf_report_err "$dir"; return 0; }
   while IFS= read -r -d '' child; do
     if [[ -L "$child" ]]; then
-      _dm_mf_emit_leaf "$child" L
+      printf 'L\0%s\0' "$child" >>"$batch" || { _dm_mf_report_err "$dir"; return 0; }
     elif [[ -d "$child" ]]; then
+      _dm_mf_emit_leaf_batch "$batch" "$dir"
+      (( _DM_MF_RC == 124 )) && return 0
+      : >"$batch" || { _dm_mf_report_err "$dir"; return 0; }
       _dm_mf_walk "$child" "$threshold_bytes"
+      (( _DM_MF_RC == 124 )) && return 0
     else
-      _dm_mf_emit_leaf "$child" F
+      printf 'F\0%s\0' "$child" >>"$batch" || { _dm_mf_report_err "$dir"; return 0; }
     fi
     if (( _DM_MF_RC == 124 )); then return 0; fi
   done <"$_DM_MF_LIST"
+  _dm_mf_emit_leaf_batch "$batch" "$dir"
   return 0
 }
 

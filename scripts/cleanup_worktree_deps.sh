@@ -4,7 +4,7 @@
 # Removes node_modules, Rust target/ (only beside a Cargo.toml), .mypy_cache, and
 # untracked iOS Pods/ (beside a Podfile) and build/ (beside an Xcode project)
 # from linked git worktrees (a `.git` FILE pointer) whose content saw no activity
-# within the worktree floor (safety_worktree_floor_days, default 3). Nested build
+# within the worktree floor (safety_worktree_floor_minutes, default 2880 = 48 h). Nested build
 # caches (e.g. daemon/target in a multi-crate tree) are stripped only when the
 # dir that owns them holds the manifest that produces them. The worktree source
 # and .git are preserved; reinstall with npm ci / cargo build.
@@ -46,20 +46,15 @@ while [[ $# -gt 0 ]]; do
     --roots) IFS=',' read -r -a ROOTS <<< "$2"; shift 2 ;;
     -h|--help)
       echo "Usage: cleanup_worktree_deps.sh [--clean] [--dry-run] [--min-age N] [--roots A,B]"
-      echo "Strips node_modules, target (with Cargo.toml) and .mypy_cache from worktrees idle >= floor days."
+      echo "Strips node_modules, target (with Cargo.toml) and .mypy_cache from worktrees idle >= floor (default 48h)."
       echo "Nested caches are stripped only beside the manifest that builds them (Cargo.toml / package.json)."
       exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
-floor=$(safety_worktree_floor_days 2>/dev/null || echo 3)
-[[ "$floor" =~ ^[0-9]+$ ]] || floor=3
-floor=$((10#$floor))
-[[ "$floor" -lt 3 ]] && floor=3
-[[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]] || MIN_AGE_DAYS="$floor"
-MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
-[[ "$MIN_AGE_DAYS" -lt "$floor" ]] && MIN_AGE_DAYS="$floor"
+# 48 h default floor (operator decision 2026-11-12); config/CLI/env may only raise it.
+MIN_AGE_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
 
 FLOOR_HOURS=""
 if [[ "${DISK_MAGICIAN_WORKTREE_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS" -ge 12 ]]; then
@@ -75,13 +70,13 @@ AUTO_APPROVE_AGE_DAYS=$((10#$AUTO_APPROVE_AGE_DAYS))
 [[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
 
 if [[ "$DRY_RUN" == true ]]; then
-  echo "=== WORKTREE DEPS CLEANUP (DRY-RUN) — floor ${FLOOR_HOURS:+${FLOOR_HOURS}h}${FLOOR_HOURS:-${MIN_AGE_DAYS}d} ==="
+  echo "=== WORKTREE DEPS CLEANUP (DRY-RUN) — floor ${FLOOR_HOURS:+${FLOOR_HOURS}h}${FLOOR_HOURS:-$(worktree_floor_label "$MIN_AGE_MIN")} ==="
 else
-  echo "=== WORKTREE DEPS CLEANUP — floor ${FLOOR_HOURS:+${FLOOR_HOURS}h}${FLOOR_HOURS:-${MIN_AGE_DAYS}d} ==="
+  echo "=== WORKTREE DEPS CLEANUP — floor ${FLOOR_HOURS:+${FLOOR_HOURS}h}${FLOOR_HOURS:-$(worktree_floor_label "$MIN_AGE_MIN")} ==="
   if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
     echo "Refusing to delete: set WORKTREE_APPROVED=1 (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)."
     FLOOR_HOURS=""
-    [[ "$MIN_AGE_DAYS" -lt "$AUTO_APPROVE_AGE_DAYS" ]] && MIN_AGE_DAYS="$AUTO_APPROVE_AGE_DAYS"
+    [[ "$MIN_AGE_MIN" -lt $(( AUTO_APPROVE_AGE_DAYS * 1440 )) ]] && MIN_AGE_MIN=$(( AUTO_APPROVE_AGE_DAYS * 1440 ))
   fi
 fi
 
@@ -236,7 +231,7 @@ is_wt_active() {
   if [[ -n "${FLOOR_HOURS:-}" ]]; then
     worktree_is_recently_active_minutes "$wt" "$(( FLOOR_HOURS * 60 ))" "$now"
   else
-    worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"
+    worktree_is_recently_active_minutes "$wt" "$MIN_AGE_MIN" "$now"
   fi
 }
 

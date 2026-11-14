@@ -35,7 +35,7 @@ if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 [[ -z "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]] || { echo "--deadline-at requires --cursor" >&2; exit 2; }
 
 DRY_RUN=true
-MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-3}"
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 REPO_LOCAL_REPOS=()
 MANUAL_DISCARD=false
 MANUAL_INCLUDE_LIVE=false
@@ -59,7 +59,7 @@ usage() {
   cat <<'EOF'
 Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [--discard-local-state [--include-live] --targets-file FILE] [-h|--help]
 
-Safely prunes stale linked git worktrees (default: >=3 days old, merged or pristine).
+Safely prunes stale linked git worktrees (default: >=48 hours idle, merged or pristine).
 
 Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
@@ -83,7 +83,7 @@ Options:
 Environment:
   WORKTREE_APPROVED=1      Required for --clean deletions.
   CLAUDE_WORKTREE_REPOS    Comma-separated repo paths.
-  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: 3).
+  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: unset = 48h floor).
 EOF
 }
 
@@ -144,29 +144,13 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     fi
 fi
 
-# Staleness floor: safety_worktree_floor_days (default and minimum 3 days; the
-# configured worktree_min_stale_days may only RAISE it).
-staleness_floor=$(safety_worktree_floor_days 2>/dev/null || echo 3)
-if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
-  staleness_floor=$((10#$staleness_floor))
-else
-  staleness_floor=3
-fi
-[[ "$staleness_floor" -lt 3 ]] && staleness_floor=3
-
-# Hard floor: staleness_floor days, may only be raised (env, CLI, or config), never
-# lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0
-# or --min-age 0 would delete every dormant worktree regardless of age.
-# Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
-# zero numeral like "08" as octal (invalid digit -> arithmetic error), which
-# would otherwise propagate as a fail-open crash into every downstream
-# comparison, not just this clamp (found live by both /advice reviewers).
-if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
-  MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
-else
-  MIN_AGE_DAYS="$staleness_floor"
-fi
-[[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
+# Staleness floor in minutes: safety_worktree_floor_minutes (default and minimum 2880 =
+# 48 h, operator decision 2026-11-12; the configured worktree_min_stale_* keys may only
+# RAISE it). --min-age/--days/WORKTREE_MIN_AGE_DAYS may only raise it too: without the
+# clamp, --min-age 0 would delete every dormant worktree regardless of age.
+# worktree_floor_resolve_minutes normalizes via 10# (leading-zero numerals are octal).
+MIN_AGE_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
+MIN_AGE_DAYS=$(( MIN_AGE_MIN / 1440 ))   # display/legacy day figure (floor of days)
 
 # Bead plf: merged + clean worktrees use this floor instead; clamped to [3,7].
 MERGED_MIN_DAYS="${DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS:-3}"
@@ -245,7 +229,7 @@ else
         fi
     fi
 fi
-echo "Merged clean worktree floor: ${MERGED_MIN_DAYS}d (others: ${MIN_AGE_DAYS}d)"
+echo "Merged clean worktree floor: ${MERGED_MIN_DAYS}d (others: $(worktree_floor_label "$MIN_AGE_MIN"))"
 if [[ "$MANUAL_DISCARD" == true ]]; then
     echo "MANUAL DISCARD MODE: exact targets only; local changes and ignored data may be lost; 12h newest-content cutoff; live/AO/locked/safety gates remain active."
     if [[ "$MANUAL_INCLUDE_LIVE" == true ]]; then
@@ -446,18 +430,18 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    local min_age=$MIN_AGE_DAYS now recently_active=false
-    # AO-managed sessions keep the 7-day inactivity bar; the 3-day floor is for
+    local min_age=$MIN_AGE_MIN now recently_active=false
+    # AO-managed sessions keep the 7-day inactivity bar; the 48 h floor is for
     # human-created worktrees.
-    if [[ "$wt_path" == *"ao/data/worktrees/"* && "$min_age" -lt 7 ]]; then
-        min_age=7
+    if [[ "$wt_path" == *"ao/data/worktrees/"* && "$min_age" -lt 10080 ]]; then
+        min_age=10080
     fi
     now="$(date +%s)"
     if [[ -n "$FLOOR_HOURS" && "$wt_path" != *"ao/data/worktrees/"* ]]; then
         if worktree_is_recently_active_minutes "$wt_path" $(( FLOOR_HOURS * 60 )) "$now"; then
             recently_active=true
         fi
-    elif worktree_is_recently_active "$wt_path" "$min_age" "$now"; then
+    elif worktree_is_recently_active_minutes "$wt_path" "$min_age" "$now"; then
         recently_active=true
     fi
 
@@ -474,7 +458,7 @@ classify_repo_local_worktree() {
     if [[ "$recently_active" == true ]]; then
         # Bead plf: a merged, fully clean, non-AO worktree may go at
         # MERGED_MIN_DAYS. Any failed or unknown condition stays "young".
-        if (( min_age == 7 )) \
+        if (( min_age == 10080 )) \
             && ! worktree_is_recently_active "$wt_path" "$MERGED_MIN_DAYS" "$now" \
             && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
             && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
@@ -735,8 +719,8 @@ process_antigravity_orphan() {
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
-    if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
-        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (< ${MIN_AGE_DAYS} days)"
+    if worktree_is_recently_active_minutes "$abs_subdir" "$MIN_AGE_MIN"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (< $(l=$(worktree_floor_label "$MIN_AGE_MIN"); echo "${l/%d/ days}"))"
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi

@@ -83,9 +83,9 @@ use_root
 make_tree a 600; make_tree b 3000; make_tree c 1800; make_tree d 300; make_tree e 1200
 out="$(run bash "$SCRIPT" --dry-run --budget-pct 35 2>&1)"; rc=$?
 [[ "$rc" == 0 ]] && ok "dry-run exits 0" || bad "dry-run exits 0" "rc=$rc"
-check "dry-run previews the oldest entry" "would-remove:kept:unproven-content $SCRATCH_ROOT/b" "$out"
-check "dry-run previews the second-oldest entry" "would-remove:kept:unproven-content $SCRATCH_ROOT/c" "$out"
-[[ "$out" != *"would-remove:kept:unproven-content $SCRATCH_ROOT/e"* ]] && ok "dry-run stops once the target would hold" || bad "dry-run stops once the target would hold" "$out"
+check "dry-run previews the oldest entry" "would-remove:kept:no-proof $SCRATCH_ROOT/b" "$out"
+check "dry-run previews the second-oldest entry" "would-remove:kept:no-proof $SCRATCH_ROOT/c" "$out"
+[[ "$out" != *"would-remove:kept:no-proof $SCRATCH_ROOT/e"* ]] && ok "dry-run stops once the target would hold" || bad "dry-run stops once the target would hold" "$out"
 check "dry-run reports the target stop" "lru: stop=target-reached would_evict=2" "$out"
 for n in a b c d e; do kept "$n"; done
 [[ ! -s "$LOG" ]] && ok "dry-run wrote no deletion-log row" || bad "dry-run wrote no deletion-log row"
@@ -103,8 +103,8 @@ b_line="$(printf '%s\n' "$out" | grep -n "^removed:.*/b " | cut -d: -f1)"
 c_line="$(printf '%s\n' "$out" | grep -n "^removed:.*/c " | cut -d: -f1)"
 [[ -n "$b_line" && -n "$c_line" && "$b_line" -lt "$c_line" ]] && ok "oldest entry is evicted first" || bad "oldest entry is evicted first" "b=$b_line c=$c_line"
 check "clean reports the target stop" "lru: stop=target-reached evicted=2" "$out"
-check "deletion log records the prior C14 verdict" "scratch-lru:kept:unproven-content" "$(cat "$LOG")"
-check "summary tallies prior verdicts" "lru: prior_verdict kept:unproven-content=2" "$out"
+check "deletion log records the prior C14 verdict" "scratch-lru:kept:no-proof" "$(cat "$LOG")"
+check "summary tallies prior verdicts" "lru: prior_verdict kept:no-proof=2" "$out"
 # Field-position guard: every value in this fixture is distinct and non-zero, so
 # a duplicated or dropped printf argument (which silently shifts removable=,
 # removed= and eligible_estimate= into each other) fails here. A fixture of all

@@ -2,6 +2,10 @@
 # test_artifact_verdict.sh — C14 (spec §7.2) repository discovery and
 # per-repository content checks in scripts/lib/artifact_verdict.sh, function
 # level. Temp dirs and temp repos only; nothing is removed.
+# 2026-11-12 operator decision: artifact_removal_verdict is 'no veto AND at least one proof'.
+# Secret-like, dirty, unpushed, ignored and unverified remote content remain
+# protected even when a separate age or producer-release proof exists.
+# macOS-only (`date -r`): not runnable on the Linux dev host.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -490,7 +494,9 @@ for f in "$PT/cli_validation_gemini_1/o" "$HOME/.aside/u/a/sessions/s1/state" "$
 while read -r row ret p; do
     age "$p" $((ret + 60)) && assert_eq "$(eph "$p")" remove "$row 1 h past ${ret} min: ${p#"$TMPROOT"/}" \
         || bad "$row age-old fixture setup (${p#"$TMPROOT"/})"
-    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" kept:recent-activity "$row 1 h short of ${ret} min" \
+    # Under an hour old is the idle veto; a clean pushed clone is removable by on-origin at any age.
+    exp=kept:no-proof; (( ret - 60 < 60 )) && exp=kept:recent-activity; [[ $p == */clones/repo ]] && exp=remove
+    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" "$exp" "$row 1 h short of ${ret} min" \
         || bad "$row age-fresh fixture setup (${p#"$TMPROOT"/})"
 done <<EOF
 E2 240 $PT/agent_prompt_1.txt
@@ -565,10 +571,10 @@ done
 assert_eq "$(eph "$PT/worldarchitect.ai/br")" kept:protected "default protected tmp root"
 assert_eq "$(DISK_MAGICIAN_PROTECTED_TMP_ROOTS='x custom-root' eph "$PT/custom-root/br")" kept:protected "env protected tmp root"
 assert_eq "$(eph "$PT/custom-root/br")" remove "unlisted root at 400 min"
-assert_eq "$(eph "$PT/system-x")" kept:unproven-content "system-* basename has no row"
-assert_eq "$(eph "$PT/com.apple.y")" kept:unproven-content "com.apple.* basename has no row"
+assert_eq "$(eph "$PT/system-x")" kept:protected "system-* basename has no row"
+assert_eq "$(eph "$PT/com.apple.y")" kept:protected "com.apple.* basename has no row"
 age "$PT/pr-123" 180
-assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:recent-activity "sweeper configured below E3 retention"
+assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:no-proof "sweeper configured below E3 retention"
 age "$PT/pr-123" 43200
 printf '{}' >"$TMPROOT/invalid-inventory.json"
 assert_eq "$(python3 "$PROBE" newest-mtime "$TMPROOT/invalid-inventory.json")" kept:check-failed "malformed inventory cannot supply an mtime"
@@ -586,7 +592,7 @@ assert_eq "$(python3 "$PROBE" secrets "$root_file_inventory")" yes "secret-like 
 mkdir -p "$PT/pr-git" && mkrepo "$PT/pr-git/repo" && age "$PT/pr-git" 43200
 assert_eq "$(eph "$PT/pr-git")" kept:not-pushed "git repo with an unpushed commit in an E3 dir at 30 d"
 mkdir -p "$HOME/work/run-9" && printf 'r' >"$HOME/work/run-9/report.md" && age "$HOME/work/run-9" 43200
-assert_eq "$(eph "$HOME/work/run-9")" kept:unproven-content "unique report.md under ~/work/run-9/"
+assert_eq "$(eph "$HOME/work/run-9")" remove "unique report.md under ~/work/run-9/"
 # '.'/'..' basenames must not resolve to the parent and inherit a row's retention (§7.2 globs).
 mkdir -p "$HOME/.gemini/antigravity/conversations" "$HOME/.aside/u/a/profile" && printf 'c' >"$HOME/.gemini/antigravity/conversations/important.pb"
 printf 'c' >"$HOME/.aside/u/a/profile/Cookies" && age "$HOME/.gemini" 43200 && age "$HOME/.aside" 43200
@@ -670,7 +676,10 @@ GCS="$TMPROOT/gcs" && mkdir -p "$GCS"
 # Stub for `gcloud storage objects describe`: fixture JSON per object, else 404 (rc 1); logs each call.
 printf '#!/bin/sh\nf="%s/$(printf %%s "$1" | tr "/:" "__").json"\necho "$1" >>"%s/calls"\n[ -f "$f" ] || { echo 404 >&2; exit 1; }\ncat "$f"\n' "$GCS" "$GCS" >"$TMPROOT/stub/describe"
 chmod +x "$TMPROOT/stub/describe" && export DISK_MAGICIAN_STAT_BIN="$TMPROOT/stub/describe"
-# publish <dir> [<url>] [<verified_at|->]: released lease marking every file under <dir> published
+# Publication is tested on an unreleased lease whose owner is dead: a released lease is itself
+# a removal proof (producer-released) and would mask every publication check below.
+sleep 0 & DEAD_PID=$!; wait "$DEAD_PID" 2>/dev/null; export DEAD_PID
+# publish <dir> [<url>] [<verified_at|->]: unreleased dead-owner lease marking every file under <dir> published
 # (upload_manifest: path, sha256, md5, crc32c, size, object, generation 1) plus matching remote objects.
 publish() {
     python3 - "$1" "$(lease_path_for "$1")" "${2:-gs://wa-test-evidence/agent-evidence/${1##*/}/}" "${3:-2026-10-01T00:00:00Z}" "$GCS" <<'PY'
@@ -684,7 +693,7 @@ for dp, _, fns in os.walk(d):
                       crc32c="AAAAAA==", size=len(b), object=url + rel, generation="1"))
         json.dump({"generation": "1", "md5_hash": m[-1]["md5"]}, open(os.path.join(gcs, (url + rel).replace("/", "_").replace(":", "_") + ".json"), "w"))
 os.makedirs(os.path.dirname(lease), exist_ok=True)
-json.dump({"path": d, "owner": {"pid": 1}, "released_at": "2026-10-01T00:00:00Z", "kind": "evidence", "published": True,
+json.dump({"path": d, "owner": {"pid": int(os.environ["DEAD_PID"])}, "kind": "evidence", "published": True,
            "published_at": "2026-10-01T00:00:00Z", "published_url": url, "verified_at": None if ver == "-" else ver,
            "upload_manifest": m}, open(lease, "w"))
 PY
@@ -695,14 +704,14 @@ gobj() { printf '%s/%s.json' "$GCS" "$(printf %s "gs://wa-test-evidence/agent-ev
 av() { artifact_removal_verdict "$@"; }
 mkdir -p "$PT/advice-x" "$PT/deploy" && printf 'n' >"$PT/advice-x/notes.txt" && printf 'TOKEN=abc' >"$PT/deploy/deploy_backup.txt"
 age "$PT/advice-x" 90 && age "$PT/deploy" 43200
-assert_eq "$(av "$PT/advice-x")" kept:unproven-content "unique notes.txt under \$TMPDIR/advice-x/"
-assert_eq "$(av "$PT/deploy")" kept:unproven-content "custom-named deploy_backup.txt"
+assert_eq "$(av "$PT/advice-x")" kept:no-proof "unique notes.txt under \$TMPDIR/advice-x/"
+assert_eq "$(av "$PT/deploy")" kept:no-proof "custom-named deploy_backup.txt"
 git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/evrepo" && mkdir -p "$PT/evrepo/evidence" && printf '{}' >"$PT/evrepo/evidence/results.json" && age "$PT/evrepo" 43200
-assert_eq "$(av "$PT/evrepo/evidence")" kept:unproven-content "unpublished evidence/results.json"
+assert_eq "$(av "$PT/evrepo/evidence")" kept:no-proof "unpublished evidence/results.json"
 mkdir -p "$PT/inv" && printf 'r' >"$PT/inv/report.md" && age "$PT/inv" 43200 && f="$(lease_path_for "$PT/inv")"
-printf '{"path":"%s","owner":{"pid":1},"released_at":"2026-10-01T00:00:00Z","kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
+printf '{"path":"%s","owner":{"pid":'"$DEAD_PID"'},"kind":"scratch","source":"git:%s@%s","manifest":[{"path":"report.md","sha256":"%s"}]}\n' \
     "$PT/inv" "$TMPROOT/remotes/wtbase.git" "$(git -C "$PT/evrepo" rev-parse HEAD)" "$(shasum -a 256 "$PT/inv/report.md" | cut -c1-64)" >"$f"
-assert_eq "$(av "$PT/inv")" kept:unproven-content "manifest is not a copy (inventory only, never published)"
+assert_eq "$(av "$PT/inv")" kept:no-proof "manifest is not a copy (inventory only, never published)"
 for d in ev-ok ev-unver ev-added ev-byte ev-subset ev-nomf ev-del ev-regen ev-exp ev-miss; do
     mkdir -p "$PT/$d/sub" && printf 'report' >"$PT/$d/report.md" && printf 'mp4data' >"$PT/$d/sub/recording.mp4" && printf 'j' >"$PT/$d/results.json"
     publish "$PT/$d" "" "$([[ $d == ev-unver ]] && echo - || echo 2026-10-01T00:00:00Z)" && age "$PT/$d" 120
@@ -710,35 +719,38 @@ done
 : >"$GCS/calls"
 assert_eq "$(av "$PT/ev-ok")" remove "published evidence with verified_at, every file matching"
 assert_eq "$(wc -l <"$GCS/calls" | tr -d ' ')" 3 "one objects describe per object"
-assert_eq "$(av "$PT/ev-unver")" kept:unproven-content "unverified publication (no verified_at)"
+assert_eq "$(av "$PT/ev-unver")" kept:no-proof "unverified publication (no verified_at)"
 printf 'mine' >"$PT/ev-added/private_notes.txt" && age "$PT/ev-added" 120
-assert_eq "$(av "$PT/ev-added")" kept:unproven-content "publish, then add private_notes.txt"
+assert_eq "$(av "$PT/ev-added")" kept:no-proof "publish, then add private_notes.txt"
 printf 'mp4dato' >"$PT/ev-byte/sub/recording.mp4" && age "$PT/ev-byte" 120
-assert_eq "$(av "$PT/ev-byte")" kept:unproven-content "publish, then change one byte of recording.mp4"
+assert_eq "$(av "$PT/ev-byte")" kept:no-proof "publish, then change one byte of recording.mp4"
 lease_edit "$PT/ev-subset" 'd["upload_manifest"]=d["upload_manifest"][:2]'
-assert_eq "$(av "$PT/ev-subset")" kept:unproven-content "manifest lists a subset"
+assert_eq "$(av "$PT/ev-subset")" kept:no-proof "manifest lists a subset"
 lease_edit "$PT/ev-nomf" 'd["upload_manifest"]=None'
-assert_eq "$(av "$PT/ev-nomf")" kept:unproven-content "URL with no manifest"
+assert_eq "$(av "$PT/ev-nomf")" kept:no-proof "URL with no manifest"
 rm -f "$(gobj ev-del/report.md)" "$(gobj ev-del/results.json)" "$(gobj ev-del/sub/recording.mp4)"
-assert_eq "$(av "$PT/ev-del")" kept:unproven-content "objects deleted after publication"
+assert_eq "$(av "$PT/ev-del")" kept:no-proof "objects deleted after publication"
 printf '{"generation":"2","md5_hash":"x"}' >"$(gobj ev-regen/report.md)"
-assert_eq "$(av "$PT/ev-regen")" kept:unproven-content "object replaced by a new generation"
+assert_eq "$(av "$PT/ev-regen")" kept:no-proof "object replaced by a new generation"
 printf '{"generation":"1","md5_hash":"bm90IHRoZSBzYW1l"}' >"$(gobj ev-exp/results.json)"
-assert_eq "$(av "$PT/ev-exp")" kept:unproven-content "object hash differs from the manifest"
+assert_eq "$(av "$PT/ev-exp")" kept:no-proof "object hash differs from the manifest"
 rm -f "$(gobj ev-exp/results.json)"
-assert_eq "$(av "$PT/ev-exp")" kept:unproven-content "object past its 30-day lifecycle (stat stub 404)"
+assert_eq "$(av "$PT/ev-exp")" kept:no-proof "object past its 30-day lifecycle (stat stub 404)"
 rm -f "$(gobj ev-miss/sub/recording.mp4)"
-assert_eq "$(av "$PT/ev-miss")" kept:unproven-content "one of three objects missing"
+assert_eq "$(av "$PT/ev-miss")" kept:no-proof "one of three objects missing"
 lease_edit "$PT/ev-ok" 'd["verified_at"]=""'
-assert_eq "$(av "$PT/ev-ok")" kept:unproven-content "empty verified_at"
+assert_eq "$(av "$PT/ev-ok")" kept:no-proof "empty verified_at"
 mkdir -p "$PT/ev-link" && printf 'r' >"$PT/ev-link/report.md" && publish "$PT/ev-link" && ln -s /etc "$PT/ev-link/l" && age "$PT/ev-link" 120
-assert_eq "$(av "$PT/ev-link")" kept:unproven-content "unlisted symlink in a published dir"
+assert_eq "$(av "$PT/ev-link")" kept:no-proof "unlisted symlink in a published dir"
 mkdir -p "$PT/nm" && git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/nm/repo" && baseline "$PT/nm/repo"
 lease_edit "$PT/nm/repo" 'd.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z")'
 mkdir -p "$PT/nm/repo/node_modules/pkg" && printf 'x' >"$PT/nm/repo/node_modules/pkg/i.js" && age "$PT/nm" 120
 assert_eq "$(av "$PT/nm/repo")" remove "allowlisted node_modules in a pushed clean clone (no kind)"
 printf 'n' >"$PT/nm/notes.txt" && age "$PT/nm" 120
-assert_eq "$(av "$PT/nm")" kept:unproven-content "the same clone beside a unique non-git file"
+assert_eq "$(av "$PT/nm")" kept:no-proof "the same clone beside a unique non-git file"
+mkdir -p "$PT/nm/repo/build" && printf 'src' >"$PT/nm/repo/build/keep.txt" && git -C "$PT/nm/repo" add build/keep.txt \
+    && git -C "$PT/nm/repo" -c user.email=t@t -c user.name=t commit -qm tracked-build && age "$PT/nm" 120
+assert_eq "$(av "$PT/nm/repo/build")" kept:no-proof "a tracked build/ dir is not rebuildable by name"
 echo "-- rebuildable (--kind rebuildable) and os_clone --"
 mkdir -p "$HOME/.cache/uv/archive-v0/x" "$HOME/.cache/other/x" "$HOME/Library/Developer/Xcode/DerivedData/App-1" \
     "$HOME/Library/Caches/ms-playwright/chromium-1248" "$HOME/Library/Caches/CocoaPods/Pods" \
@@ -758,13 +770,13 @@ assert_eq "$(av "$HOME/Library/Caches/CocoaPods/Pods" --kind rebuildable)" remov
 assert_eq "$(av "$HOME/Library/Caches/@granolaelectron-updater/pending" --kind rebuildable)" remove "rebuildable @granolaelectron-updater entry"
 assert_eq "$(av "$HOME/Library/Caches/claude-cli-nodejs/cache-a" --kind rebuildable)" remove "rebuildable claude-cli-nodejs entry"
 assert_eq "$(av "$HOME/Library/Caches/go-build/00" --kind rebuildable)" remove "rebuildable go-build entry"
-assert_eq "$(av "$HOME/.cache/ezgha-recovery-target-20261004/sub" --kind rebuildable)" kept:unproven-content "recovery target subpath is NOT rebuildable (unproven recovery data)"
-assert_eq "$(av "$HOME/.cache/ezgha-recovery-target-20261004" --kind rebuildable)" kept:unproven-content "recovery target dir itself is NOT rebuildable"
-assert_eq "$(av "$HOME/.cache/uv" --kind rebuildable)" kept:unproven-content "the cache root itself is not an entry"
-assert_eq "$(av "$HOME/Library/Caches/ms-playwright" --kind rebuildable)" kept:unproven-content "ms-playwright cache root itself is not an entry"
-assert_eq "$(av "$HOME/.local/share/cursor-agent/versions/2026.02-stale" --kind rebuildable)" kept:unproven-content "installed cursor-agent versions stay outside rebuildable cache allowlist"
-assert_eq "$(av "$HOME/.cache/other/x" --kind rebuildable)" kept:unproven-content "a path outside the cache-root table"
-assert_eq "$(av "$HOME/.cache/uv/archive-v0/x")" kept:unproven-content "cache entry without --kind rebuildable"
+assert_eq "$(av "$HOME/.cache/ezgha-recovery-target-20261004/sub" --kind rebuildable)" kept:no-proof "recovery target subpath is NOT rebuildable (unproven recovery data)"
+assert_eq "$(av "$HOME/.cache/ezgha-recovery-target-20261004" --kind rebuildable)" kept:no-proof "recovery target dir itself is NOT rebuildable"
+assert_eq "$(av "$HOME/.cache/uv" --kind rebuildable)" kept:no-proof "the cache root itself is not an entry"
+assert_eq "$(av "$HOME/Library/Caches/ms-playwright" --kind rebuildable)" kept:no-proof "ms-playwright cache root itself is not an entry"
+assert_eq "$(av "$HOME/.local/share/cursor-agent/versions/2026.02-stale" --kind rebuildable)" kept:no-proof "installed cursor-agent versions stay outside rebuildable cache allowlist"
+assert_eq "$(av "$HOME/.cache/other/x" --kind rebuildable)" kept:no-proof "a path outside the cache-root table"
+assert_eq "$(av "$HOME/.cache/uv/archive-v0/x")" kept:no-proof "cache entry without --kind rebuildable"
 echo "-- sparkle update staging (--kind sparkle-update-staging) --"
 SPK="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
 mkdir -p "$SPK/tokA/tokB/ChatGPT.app/Contents" "$SPK/tokC/tokD/Ghost.app/Contents" \
@@ -787,16 +799,16 @@ printf 'x' >"$SPK/tokJ/JklMnoPq/ChatGPT.app/Contents/Info.plist"
 printf 'x' >"$SPK/tokJ/notes.txt"
 age "$HOME/Library/Caches/com.openai.codex" 43200
 assert_eq "$(av "$SPK/tokA/tokB/ChatGPT.app" --kind sparkle-update-staging)" remove "staged update whose app is installed outside the cache"
-assert_eq "$(av "$SPK/tokC/tokD/Ghost.app" --kind sparkle-update-staging)" kept:unproven-content "staged update with no installed twin is kept"
-assert_eq "$(av "$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/PersistentDownloads/leftover.app" --kind sparkle-update-staging)" kept:unproven-content "a .app outside Installation/ is not sparkle staging"
-assert_eq "$(av "$SPK/loose.app" --kind sparkle-update-staging)" kept:unproven-content "a direct child of Installation/ is not the staged shape"
-assert_eq "$(av "$SPK/tokA/tokB/ChatGPT.app" --kind rebuildable)" kept:unproven-content "sparkle staging is not a plain rebuildable cache"
-assert_eq "$(av "$SPK/tokA/tokB/ChatGPT.app")" kept:unproven-content "sparkle staging without --kind stays unproven"
+assert_eq "$(av "$SPK/tokC/tokD/Ghost.app" --kind sparkle-update-staging)" kept:no-proof "staged update with no installed twin is kept"
+assert_eq "$(av "$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/PersistentDownloads/leftover.app" --kind sparkle-update-staging)" kept:no-proof "a .app outside Installation/ is not sparkle staging"
+assert_eq "$(av "$SPK/loose.app" --kind sparkle-update-staging)" kept:no-proof "a direct child of Installation/ is not the staged shape"
+assert_eq "$(av "$SPK/tokA/tokB/ChatGPT.app" --kind rebuildable)" kept:no-proof "sparkle staging is not a plain rebuildable cache"
+assert_eq "$(av "$SPK/tokA/tokB/ChatGPT.app")" kept:no-proof "sparkle staging without --kind stays unproven"
 assert_eq "$(av "$SPK/tokA" --kind sparkle-update-staging)" remove "a token dir holding only a proven staged app is removable"
-assert_eq "$(av "$SPK/tokE" --kind sparkle-update-staging)" kept:unproven-content "a token dir with payload outside the bundle is kept"
+assert_eq "$(av "$SPK/tokE" --kind sparkle-update-staging)" kept:no-proof "a token dir with payload outside the bundle is kept"
 assert_eq "$(av "$SPK/tokI" --kind sparkle-update-staging)" remove "a token dir with its downloaded update zip and a proven bundle is removable"
-assert_eq "$(av "$SPK/tokJ" --kind sparkle-update-staging)" kept:unproven-content "a zip alongside non-archive payload is kept"
-assert_eq "$(av "$SPK" --kind sparkle-update-staging)" kept:unproven-content "the Installation root is kept while any token lacks an installed twin"
+assert_eq "$(av "$SPK/tokJ" --kind sparkle-update-staging)" kept:no-proof "a zip alongside non-archive payload is kept"
+assert_eq "$(av "$SPK" --kind sparkle-update-staging)" kept:no-proof "the Installation root is kept while any token lacks an installed twin"
 
 # venvw <wt>: linked worktree of wtbase with venv/ ignored on a pushed branch.
 venvw() {
@@ -814,7 +826,7 @@ import json, sys
 rows = json.load(open(sys.argv[1], encoding="utf-8"))
 assert rows and all(row.get("type") != "admin" for row in rows)
 PY
-assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:unproven-content "a non-venv dir"
+assert_eq "$(av "$HOME/plain/notvenv" --kind rebuildable)" kept:no-proof "a non-venv dir"
 # B1: the enclosing linked worktree's canonical 7-day floor protects its venv/.
 # Root, .git and venv/ are 30 days old, but the tracked content was touched 2h ago.
 venvw "$HOME/wt-young" && age "$HOME/wt-young" 43200 && age "$HOME/wt-young/tracked.txt" 120
@@ -827,7 +839,7 @@ venvw "$HOME/wt-eligible" && age "$HOME/wt-eligible" 11520
 assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" remove \
     "ignored venv/ in a worktree quiet for 8 days"
 # Canonical unmeasurable recency fails closed (reports active), so the venv stays.
-worktree_is_recently_active() { return 0; }
+worktree_last_activity_epoch() { printf 'unmeasurable\n'; }
 assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" kept:recent-activity \
     "ignored venv/ when canonical worktree recency cannot be measured"
 # shellcheck source=scripts/lib/worktree_recency.sh
@@ -839,12 +851,12 @@ venvw "$HOME/wt-dirty" && printf 'x\n' >>"$HOME/wt-dirty/tracked.txt"
 venvw "$HOME/wt-tracked" && git -C "$HOME/wt-tracked" add -f venv && git -C "$HOME/wt-tracked" commit -qm tracked-venv && git -C "$HOME/wt-tracked" push -q 2>/dev/null
 git clone -q "$TMPROOT/remotes/wtbase.git" "$HOME/base" && printf 'venv/\n' >>"$HOME/base/.git/info/exclude" && mkdir -p "$HOME/base/venv" && printf 'py' >"$HOME/base/venv/python"
 for d in "$HOME/projects" "$HOME/Documents" "$HOME/wt-dirty" "$HOME/wt-tracked" "$HOME/base"; do age "$d" 43200; done
-assert_eq "$(av "$HOME/projects/app/venv" --kind rebuildable)" kept:unproven-content "tracked, unpushed and dirty venv/ in a base repo"
-assert_eq "$(av "$HOME/Documents/venv" --kind rebuildable)" kept:unproven-content "venv/ outside any repository"
-assert_eq "$(av "$HOME/Documents/venv.bak.old" --kind rebuildable)" kept:unproven-content "venv.bak.old outside any repository"
-assert_eq "$(av "$HOME/wt-dirty/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a dirty worktree"
-assert_eq "$(av "$HOME/wt-tracked/venv" --kind rebuildable)" kept:unproven-content "tracked venv/ in a clean pushed worktree"
-assert_eq "$(av "$HOME/base/venv" --kind rebuildable)" kept:unproven-content "ignored venv/ in a base repo, not a linked worktree"
+assert_eq "$(av "$HOME/projects/app/venv" --kind rebuildable)" kept:no-proof "tracked, unpushed and dirty venv/ in a base repo"
+assert_eq "$(av "$HOME/Documents/venv" --kind rebuildable)" kept:no-proof "venv/ outside any repository"
+assert_eq "$(av "$HOME/Documents/venv.bak.old" --kind rebuildable)" kept:no-proof "venv.bak.old outside any repository"
+assert_eq "$(av "$HOME/wt-dirty/venv" --kind rebuildable)" kept:no-proof "ignored venv/ in a dirty worktree"
+assert_eq "$(av "$HOME/wt-tracked/venv" --kind rebuildable)" kept:no-proof "tracked venv/ in a clean pushed worktree"
+assert_eq "$(av "$HOME/base/venv" --kind rebuildable)" kept:no-proof "ignored venv/ in a base repo, not a linked worktree"
 mkdir -p "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" && printf 'bin' >"$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1/app" && age "$PT/X" 43200
 assert_eq "$(av "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" --kind os_clone)" kept:check-failed "os_clone without a frozen-identity proof"
 x_thesis="$HOME/Documents/thesis"
@@ -857,7 +869,7 @@ x_candidate_id="$(stat -f '%d:%i:%u' "$x_clone" 2>/dev/null || stat -c '%d:%i:%u
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" remove "os_clone with matching frozen candidate, parent and X-root identities"
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_parent_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone identity mismatch is kept"
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_thesis" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:check-failed "os_clone proof outside the frozen X scan root is kept"
-assert_eq "$(av "$x_clone")" kept:unproven-content "the same clone without --kind os_clone"
+assert_eq "$(av "$x_clone")" kept:no-proof "the same clone without --kind os_clone"
 age "$PT/X" 10
 assert_eq "$(DISK_MAGICIAN_CODE_SIGN_X_DIR="$PT/X" av "$x_clone" --kind os_clone --frozen-identity "$x_candidate_id" --frozen-parent-identity "$x_parent_id" --frozen-root-identity "$x_id")" kept:recent-activity "os_clone still runs every-kind checks"
 assert_eq "$(av "$PT/advice-x" --kind bogus)" kept:unproven-content "unknown kind"
@@ -924,7 +936,7 @@ assert_eq "$(av "$later_row_entry" --kind ephemeral)" kept:archive-identity "E1 
 
 legacy_entry="$ARCHIVE_ROOT/20261010T020000Z/pre-receipt"
 mkdir -p "$legacy_entry" && printf 'legacy archive' >"$legacy_entry/payload" && age "$legacy_entry" 43200
-assert_eq "$(av "$legacy_entry" --kind ephemeral)" kept:unproven-content "pre-receipt archive falls through to ordinary provenance"
+assert_eq "$(av "$legacy_entry" --kind ephemeral)" kept:archive-identity "pre-receipt archive is preserved without origin proof"
 
 replaced_source="$PT/pr-replaced-123"
 replaced_entry="$ARCHIVE_ROOT/20261010T030000Z/pr-replaced-123"

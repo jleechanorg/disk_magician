@@ -2,7 +2,7 @@
 # cleanup_worktree_venvs.sh — Strip Python venvs from dormant Git worktrees.
 #
 # Walks configured roots (default: ~/projects) and removes venv/.venv directories
-# whose parent worktree is older than --min-age days (default 7, per the
+# whose parent worktree is older than --min-age days (default floor 48 h, per the
 # project worktree safety rule). The worktree shell (source + .git) is preserved;
 # only the venv is removed. Re-create with `python -m venv .venv && pip install -r
 # requirements.txt` if the worktree is revisited.
@@ -59,7 +59,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=true
-MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 if [[ -n "${DISK_MAGICIAN_WORKTREE_ROOTS:-}" ]]; then
   IFS=',' read -r -a ROOTS <<< "$DISK_MAGICIAN_WORKTREE_ROOTS"
 else
@@ -83,13 +83,13 @@ Usage: cleanup_worktree_venvs.sh [--clean] [--dry-run] [--min-age N] [--days N]
                                 [--roots PATH,...] [--purge-bak-days N]
                                 [-h|--help]
 
-Safely prunes Python virtual environments in stale git worktrees (>7 days old).
+Safely prunes Python virtual environments in stale git worktrees (>=48 h idle).
 
 Options:
   --clean                Actually strip the venvs (default: dry-run).
                          Requires WORKTREE_APPROVED=1 in env.
   --dry-run              Print what would be stripped without touching disk.
-  --min-age N            Minimum worktree age in days to qualify (default: 7).
+  --min-age N            Minimum worktree age in days to qualify (may only raise the 48 h floor).
   --days N               Alias for --min-age N.
   --roots p1,p2,...      Comma-separated root dirs to scan (default: $HOME/projects).
                          Each root's <repo>/.claude/worktrees/* agent working
@@ -151,30 +151,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Staleness floor: read from safety.local.json (safety_min_stale_days), with a
-# hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
-# may only RAISE the floor, never lower it below 7.
-staleness_floor=$(safety_min_stale_days 2>/dev/null || echo 7)
-if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
-  staleness_floor=$((10#$staleness_floor))
-else
-  staleness_floor=7
-fi
-[[ "$staleness_floor" -lt 7 ]] && staleness_floor=7
-
-# Hard floor: staleness_floor days, may only be raised (env, CLI, or config), never
-# lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0
-# or --min-age 0 would delete every dormant worktree regardless of age.
-# Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
-# zero numeral like "08" as octal (invalid digit -> arithmetic error), which
-# would otherwise propagate as a fail-open crash into every downstream
-# comparison, not just this clamp (found live by both /advice reviewers).
-if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
-  MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
-else
-  MIN_AGE_DAYS="$staleness_floor"
-fi
-[[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
+# Staleness floor in minutes: safety_worktree_floor_minutes (default and minimum 2880 =
+# 48 h, operator decision 2026-11-12). Config, --min-age and WORKTREE_MIN_AGE_DAYS may
+# only RAISE it, never lower it (--min-age 0 must not delete every dormant worktree).
+MIN_AGE_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
+MIN_AGE_DAYS=$(( MIN_AGE_MIN / 1440 ))   # display figure
 
 FLOOR_HOURS=""
 if [[ "${DISK_MAGICIAN_WORKTREE_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS" -ge 12 ]]; then
@@ -396,6 +377,14 @@ is_already_centralized_or_broken() {
 # snapshot_commit.sh's ~/.disk_magician_state/snapshot.lock. Contention =
 # log one line and skip this run entirely (exit 0) — never queue, never
 # block, matching the repo's stated concurrent-run policy.
+stat_mtime_epoch() {
+  local path="$1" fallback="$2" mtime
+  mtime="$(stat -c '%Y' "$path" 2>/dev/null)" || mtime=""
+  [[ "$mtime" =~ ^[0-9]+$ ]] || { mtime="$(stat -f '%m' "$path" 2>/dev/null)" || mtime=""; }
+  [[ "$mtime" =~ ^[0-9]+$ ]] || mtime="$fallback"
+  printf '%s\n' "$mtime"
+}
+
 acquire_cleanup_venvs_lock() {
   mkdir -p "$(dirname "$LOCK_DIR")"
   if mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -405,8 +394,8 @@ acquire_cleanup_venvs_lock() {
   fi
   local held_pid age now lock_mtime is_alive=0
   held_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-  lock_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || date +%s)
   now=$(date +%s)
+  lock_mtime="$(stat_mtime_epoch "$LOCK_DIR" "$now")"
   age=$(( now - lock_mtime ))
   if [[ -n "$held_pid" && "$held_pid" =~ ^[0-9]+$ ]]; then
     if ps -p "$held_pid" -o pid= >/dev/null 2>&1; then
@@ -418,7 +407,7 @@ acquire_cleanup_venvs_lock() {
     if mkdir "$reclaim_gate" 2>/dev/null; then
       local recheck_pid recheck_mtime recheck_alive=0
       recheck_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-      recheck_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || echo 0)
+      recheck_mtime="$(stat_mtime_epoch "$LOCK_DIR" "$now")"
       if [[ -n "$recheck_pid" && "$recheck_pid" =~ ^[0-9]+$ ]]; then
         if ps -p "$recheck_pid" -o pid= >/dev/null 2>&1; then
           recheck_alive=1
@@ -577,7 +566,7 @@ if [[ "$DRY_RUN" == true ]]; then
 else
   log "Mode: CLEAN (destructive)"
 fi
-log "Min age:    ${MIN_AGE_DAYS} days"
+if (( MIN_AGE_MIN > 2880 && MIN_AGE_MIN % 1440 == 0 )); then log "Min age:    $(( MIN_AGE_MIN / 1440 )) days"; else log "Min age:    $(( MIN_AGE_MIN / 60 )) hours"; fi
 log "Roots:      ${ROOTS[*]}"
 if (( ${#ROOTS[@]} > 0 )); then
   collect_candidate_worktrees "${ROOTS[@]}"
@@ -646,7 +635,7 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
         SKIPPED_TOO_YOUNG=$(( SKIPPED_TOO_YOUNG + 1 ))
         continue
       fi
-    elif (( age_days < MIN_AGE_DAYS )); then
+    elif worktree_is_recently_active_minutes "$parent" "$MIN_AGE_MIN"; then
       SKIPPED_TOO_YOUNG=$(( SKIPPED_TOO_YOUNG + 1 ))
       continue
     fi
@@ -670,9 +659,17 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
     venv_pretty=$(fmt_kb "$venv_kb")
 
     if [[ "$DRY_RUN" == true ]]; then
-      log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
-      TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
-      STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
+      _c14_verdict=""
+      if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
+        echo "SAFETY-SKIP $venv_path ($_safety_reason)"
+      elif _c14_verdict="$(artifact_removal_verdict "$venv_path" --kind rebuildable --no-rescue-push 2>/dev/null)" && [[ "$_c14_verdict" == remove ]]; then
+        log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
+        TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
+        STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
+      else
+        [[ -n "${_c14_verdict:-}" ]] || _c14_verdict=kept:check-failed
+        log "    Preserved (C14 $_c14_verdict) $venv_path"
+      fi
     else
       log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
       if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
@@ -692,7 +689,7 @@ log "=== Summary ==="
 log "  Inspected venv dirs:    $INSPECTED"
 log "  Stripped:               $STRIPPED_COUNT  ($(fmt_kb "$TOTAL_FREED_KB"))"
 log "  Skipped (not worktree): $SKIPPED_NOT_WORKTREE"
-log "  Skipped (too young):    $SKIPPED_TOO_YOUNG  (< ${MIN_AGE_DAYS} days old)"
+log "  Skipped (too young):    $SKIPPED_TOO_YOUNG  (< $(l=$(worktree_floor_label "$MIN_AGE_MIN"); echo "${l/%d/ days}") old)"
 log "  Skipped (centralized):  $SKIPPED_ALREADY_CENTRALIZED  (symlink / broken)"
 log "  Skipped (excluded):     $SKIPPED_EXCLUDED  (ao-owned / live-cwd / unknown)"
 log "  Skipped (tracked):      $SKIPPED_TRACKED  (venv files committed to git)"
@@ -710,10 +707,10 @@ fi
 purge_bak_dirs() {
   local purge_days="$1"
   log ""
-  log "=== PURGE STALE venv.bak.* DIRS (older than ${purge_days}d, parent worktree >= ${MIN_AGE_DAYS}d) ==="
+  log "=== PURGE STALE venv.bak.* DIRS (older than ${purge_days}d, parent worktree >= $(worktree_floor_label "$MIN_AGE_MIN")) ==="
 
   local bak_freed_kb=0 bak_count=0 skipped_young_wt=0 skipped_young_bak=0 skipped_not_wt=0 skipped_excluded=0
-  local wt bak_path parent real_parent _skip_reason bak_age_days bak_kb bak_pretty _safety_reason
+  local wt bak_path parent real_parent _skip_reason bak_age_days bak_kb bak_pretty bak_mtime _safety_reason _bak_verdict
 
   for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
     for bak_path in "$wt/venv.bak" "$wt"/venv.bak.* "$wt/.venv.bak" "$wt"/.venv.bak.*; do
@@ -730,14 +727,15 @@ purge_bak_dirs() {
       # Hard gate: parent worktree must be past the recency floor. Fails
       # closed — an unmeasurable parent reads as age 0, i.e. "recently
       # active", i.e. protected.
-      if worktree_is_recently_active "$parent" "$MIN_AGE_DAYS"; then
+      if worktree_is_recently_active_minutes "$parent" "$MIN_AGE_MIN"; then
         skipped_young_wt=$(( skipped_young_wt + 1 ))
-        log "  skip (parent worktree < ${MIN_AGE_DAYS}d, protected): $bak_path"
+        log "  skip (parent worktree < $(worktree_floor_label "$MIN_AGE_MIN"), protected): $bak_path"
         continue
       fi
 
       # The bak dir's own age: its rename/creation mtime, not the worktree's.
-      bak_age_days=$(( ( $(date +%s) - $(stat -f '%m' "$bak_path" 2>/dev/null || stat -c '%Y' "$bak_path" 2>/dev/null || date +%s) ) / 86400 ))
+      bak_mtime="$(stat_mtime_epoch "$bak_path" "$(date +%s)")"
+      bak_age_days=$(( ( $(date +%s) - bak_mtime ) / 86400 ))
       if (( bak_age_days < purge_days )); then
         skipped_young_bak=$(( skipped_young_bak + 1 ))
         continue
@@ -762,9 +760,17 @@ purge_bak_dirs() {
       bak_pretty=$(fmt_kb "$bak_kb")
 
       if [[ "$DRY_RUN" == true ]]; then
-        log "  [dry-run] would purge $bak_path (${bak_pretty}, ${bak_age_days}d old, parent worktree stale)"
-        bak_freed_kb=$(( bak_freed_kb + bak_kb ))
-        bak_count=$(( bak_count + 1 ))
+        _bak_verdict=""
+        if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then
+          echo "SAFETY-SKIP $bak_path ($_safety_reason)"
+        elif _bak_verdict="$(artifact_removal_verdict "$bak_path" --kind rebuildable --no-rescue-push 2>/dev/null)" && [[ "$_bak_verdict" == remove ]]; then
+          log "  [dry-run] would purge $bak_path (${bak_pretty}, ${bak_age_days}d old, parent worktree stale)"
+          bak_freed_kb=$(( bak_freed_kb + bak_kb ))
+          bak_count=$(( bak_count + 1 ))
+        else
+          [[ -n "${_bak_verdict:-}" ]] || _bak_verdict=kept:check-failed
+          log "    Preserved (C14 $_bak_verdict) $bak_path"
+        fi
       else
         log "  purging $bak_path (${bak_pretty}, ${bak_age_days}d old)"
         if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then
@@ -784,7 +790,7 @@ purge_bak_dirs() {
   log "=== venv.bak purge summary ==="
   log "  Purged:                    $bak_count  ($(fmt_kb "$bak_freed_kb"))"
   log "  Skipped (not worktree):    $skipped_not_wt"
-  log "  Skipped (parent < ${MIN_AGE_DAYS}d):    $skipped_young_wt"
+  log "  Skipped (parent < $(worktree_floor_label "$MIN_AGE_MIN")):    $skipped_young_wt"
   log "  Skipped (excluded):        $skipped_excluded"
   log "  Skipped (bak dir < ${purge_days}d): $skipped_young_bak"
   if [[ "$DRY_RUN" == true ]]; then

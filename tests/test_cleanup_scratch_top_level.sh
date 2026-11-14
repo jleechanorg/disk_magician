@@ -238,7 +238,7 @@ mkdir -p "${f%/*}"
 printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s}\n" "$2" "$(python3 "$1/scripts/c14_probe.py" gitmeta "$gd")" >"$f"' _ "$ROOT" "$candidate/repo"
     old_stamp "$candidate" 13
     initial="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2"' _ "$ROOT" "$candidate")"
-    assert_eq "$initial" kept:secret-like "fixture reaches the real secret-like C14 gate ($pushed)"
+    assert_eq "$initial" kept:secret-like "fixture reaches the secret veto (secret-like blocks rescue proof) ($pushed)"
     provenance="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_repos_ok "$2"' _ "$ROOT" "$candidate")"
     if [[ "$pushed" == no ]]; then expected=kept:not-pushed; else expected=ok; fi
     assert_eq "$provenance" "$expected" "fixture has expected repository provenance ($pushed)"
@@ -252,7 +252,7 @@ printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s
       [[ -f "$candidate/repo/payload" ]] && grep -qF 'must preserve unpushed data' "$candidate/repo/payload" && ok "unpushed payload survives" || bad "unpushed payload survives"
       if grep -Fq "$candidate" "$LOG" 2>/dev/null; then bad "no deletion record for retained repository"; else ok "no deletion record for retained repository"; fi
     else
-      check "pushed control is eligible in preview" "would-remove:kept:secret-like $candidate" "$preview"
+      check "pushed secret-bearing control remains vetoed in preview" "kept:secret-like $candidate" "$preview"
       [[ ! -e "$candidate" ]] && ok "pushed control remains removable with explicit approval" || bad "pushed control remains removable with explicit approval" "$out"
     fi
   done
@@ -306,22 +306,32 @@ make_tree unknown-25h 25 >/dev/null
 make_managed_tree recent-23h 23 >/dev/null
 make_managed_tree eligible-25h 25 >/dev/null
 make_managed_tree secret-25h 25 'placeholder.pem' >/dev/null
+make_managed_tree secret-5h 5 'placeholder.pem' >/dev/null
+mkdir -p "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h"
+git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h" init -q 2>/dev/null
+printf 'change\n' > "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h/tracked.txt"
+git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h" add tracked.txt 2>/dev/null
+old_stamp "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h" 5
 mkdir -p "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h"
 git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" init -q 2>/dev/null
 printf 'change\n' > "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h/tracked.txt"
 git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" add tracked.txt 2>/dev/null
 old_stamp "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" 25
 assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/eligible-25h")" remove "C14 accepts a known Scratch build artifact after 24h"
-assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/recent-23h")" kept:recent-activity "C14 preserves a known Scratch build artifact before 24h"
+assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/recent-23h")" kept:no-proof "C14 preserves a known Scratch build artifact before 24h (no proof yet)"
 preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 bash "$SCRIPT" --dry-run 2>&1)"
 check "automatic preview marks the 25h managed artifact removable" "would-remove:remove $SCRATCH_ROOT/worldai_frontend/build/eligible-25h" "$preview"
 check "automatic preview keeps the 23h managed artifact" "kept:recent-activity $SCRATCH_ROOT/worldai_frontend/build/recent-23h" "$preview"
+check "automatic preview refuses secret-bearing content after 24h" "kept:secret-like $SCRATCH_ROOT/worldai_frontend/build/secret-25h" "$preview"
+check "automatic preview refuses dirty repository content after 24h" "kept:dirty $SCRATCH_ROOT/worldai_frontend/build/dirty-25h" "$preview"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 bash "$SCRIPT" --clean 2>&1)"; rc=$?
 [[ "$rc" == 0 ]] && ok "automatic cleanup completes without override approval" || bad "automatic cleanup completes without override approval" "rc=$rc"
 [[ -d "$SCRATCH_ROOT/worldai_frontend/build/recent-23h" ]] && ok "23h candidate preserved by the 24h default" || bad "23h candidate preserved by the 24h default"
 [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/eligible-25h" ]] && ok "25h registered ephemeral candidate removed through C14" || bad "25h registered ephemeral candidate removed through C14" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
-[[ -e "$SCRATCH_ROOT/worldai_frontend/build/secret-25h/placeholder.pem" ]] && ok "secret-like content remains protected in automatic mode" || bad "secret-like content remains protected in automatic mode"
-[[ -e "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h/.git" ]] && ok "dirty repository remains protected in automatic mode" || bad "dirty repository remains protected in automatic mode"
+[[ -e "$SCRATCH_ROOT/worldai_frontend/build/secret-25h/placeholder.pem" ]] && ok "secret-like content past the age floor remains protected" || bad "secret-like content past the age floor remains protected"
+[[ -e "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h/.git" ]] && ok "dirty repository past the age floor remains protected" || bad "dirty repository past the age floor remains protected"
+[[ -e "$SCRATCH_ROOT/worldai_frontend/build/secret-5h/placeholder.pem" ]] && ok "secret-like content younger than the floor remains protected in automatic mode" || bad "secret-like content younger than the floor remains protected in automatic mode"
+[[ -e "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h/.git" ]] && ok "dirty repository younger than the floor remains protected in automatic mode" || bad "dirty repository younger than the floor remains protected in automatic mode"
 # E8 (artifact_verdict.sh:189-197) declares a direct child of the registered
 # scratch volume ephemeral at 1440 min whatever its name, so an aged unknown
 # top-level tree is now removable in automatic mode. Every other gate still ran.
@@ -335,6 +345,7 @@ make_tree e8-unleased-26h 26 >/dev/null
 mkdir -p "$E8_ROOT/e8-unleased-26h/nested"; old_stamp "$E8_ROOT/e8-unleased-26h" 26
 make_tree e8-recent-23h 23 >/dev/null
 make_tree e8-secret-26h 26 'placeholder.pem' >/dev/null
+make_tree e8-secret-5h 5 'placeholder.pem' >/dev/null
 make_tree e8-live-cwd-26h 26 >/dev/null
 make_tree e8-leased-26h 26 >/dev/null
 mkdir -p "$E8_ROOT/.dot-26h"; old_stamp "$E8_ROOT/.dot-26h" 26
@@ -346,6 +357,12 @@ printf 'work\n' > "$E8_ROOT/e8-unpushed-26h/tracked.txt"
 git -C "$E8_ROOT/e8-unpushed-26h" add tracked.txt 2>/dev/null
 git -C "$E8_ROOT/e8-unpushed-26h" -c user.email=t@t -c user.name=t commit -qm work 2>/dev/null
 old_stamp "$E8_ROOT/e8-unpushed-26h" 26
+mkdir -p "$E8_ROOT/e8-unpushed-5h"
+git -C "$E8_ROOT/e8-unpushed-5h" init -q 2>/dev/null
+printf 'work\n' > "$E8_ROOT/e8-unpushed-5h/tracked.txt"
+git -C "$E8_ROOT/e8-unpushed-5h" add tracked.txt 2>/dev/null
+git -C "$E8_ROOT/e8-unpushed-5h" -c user.email=t@t -c user.name=t commit -qm work 2>/dev/null
+old_stamp "$E8_ROOT/e8-unpushed-5h" 5
 # The symlink target is a plain tree: a target holding .git would match the
 # pre-existing <name>-holds-.git volume row and prove nothing about E8.
 make_tree e8-symlink-target-26h 26 >/dev/null
@@ -364,16 +381,18 @@ assert_eq "$(eph_retention "$E8_ROOT/worldai_frontend/build/e2-probe")" 1440 "th
 preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --dry-run 2>&1)"
 check "automatic preview marks the unleased E8 candidate removable" "would-remove:remove $E8_ROOT/e8-unleased-26h" "$preview"
 check "automatic preview keeps the under-24h E8 candidate" "kept:recent-activity $E8_ROOT/e8-recent-23h" "$preview"
-check "automatic preview keeps the secret-like E8 candidate" "kept:secret-like $E8_ROOT/e8-secret-26h" "$preview"
+check "automatic preview preserves secret-like E8 content past the floor" "kept:secret-like $E8_ROOT/e8-secret-26h" "$preview"
+check "automatic preview keeps the secret-like E8 candidate younger than the floor" "kept:recent-activity $E8_ROOT/e8-secret-5h" "$preview"
 check "automatic preview keeps the live-cwd E8 candidate" "kept:live-cwd $E8_ROOT/e8-live-cwd-26h" "$preview"
 check "automatic preview keeps the leased E8 candidate" "kept:live-owner $E8_ROOT/e8-leased-26h" "$preview"
 check "automatic preview keeps the symlinked entry as unproven" "kept:unproven-content $E8_ROOT/e8-link-26h" "$preview"
-if printf '%s\n' "$preview" | grep -qE "^would-remove:[^ ]* $E8_ROOT/e8-unpushed-26h$"; then
-  bad "the unpushed repository is never advertised for removal" "$(printf '%s' "$preview" | grep -F "e8-unpushed-26h" | tr '\n' ' ' | cut -c1-200)"
+check "the unpushed repository without rescue remains protected past the floor" "kept:not-pushed $E8_ROOT/e8-unpushed-26h" "$preview"
+if printf '%s\n' "$preview" | grep -qE "^would-remove:[^ ]* $E8_ROOT/e8-unpushed-5h$"; then
+  bad "the unpushed repository younger than the floor is never advertised for removal" "$(printf '%s' "$preview" | grep -F "e8-unpushed-5h" | tr '\n' ' ' | cut -c1-200)"
 else
-  ok "the unpushed repository is never advertised for removal"
+  ok "the unpushed repository younger than the floor is never advertised for removal"
 fi
-check "the unpushed repository keeps through the repository gate, not the class row" "kept:not-pushed $E8_ROOT/e8-unpushed-26h" "$preview"
+check "the unpushed repository younger than the floor keeps as recent-activity" "kept:recent-activity $E8_ROOT/e8-unpushed-5h" "$preview"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean 2>&1)"; rc=$?
 kill "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true; wait "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true
 [[ "$rc" == 0 ]] && ok "automatic E8 cleanup exits 0" || bad "automatic E8 cleanup exits 0" "rc=$rc"
@@ -381,8 +400,10 @@ kill "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true; wait "$e8_lease_pid" "$e
 [[ -e "$E8_ROOT/e8-recent-23h" ]] && ok "the 24h floor is still honoured by default" || bad "the 24h floor is still honoured by default"
 [[ -e "$E8_ROOT/e8-leased-26h" ]] && ok "a leased volume child is preserved" || bad "a leased volume child is preserved"
 [[ -e "$E8_ROOT/e8-live-cwd-26h" ]] && ok "a live-cwd volume child is preserved" || bad "a live-cwd volume child is preserved"
-[[ -e "$E8_ROOT/e8-unpushed-26h/tracked.txt" ]] && ok "a volume child holding unpushed commits is preserved" || bad "a volume child holding unpushed commits is preserved"
-[[ -e "$E8_ROOT/e8-secret-26h/placeholder.pem" ]] && ok "a secret-like volume child is preserved" || bad "a secret-like volume child is preserved"
+[[ -e "$E8_ROOT/e8-unpushed-26h/.git" ]] && ok "a volume child holding unpushed commits past the floor stays protected" || bad "a volume child holding unpushed commits past the floor stays protected"
+[[ -e "$E8_ROOT/e8-secret-26h/placeholder.pem" ]] && ok "a secret-like volume child past the floor stays protected" || bad "a secret-like volume child past the floor stays protected"
+[[ -e "$E8_ROOT/e8-unpushed-5h/tracked.txt" ]] && ok "a volume child holding unpushed commits younger than the floor is preserved" || bad "a volume child holding unpushed commits younger than the floor is preserved"
+[[ -e "$E8_ROOT/e8-secret-5h/placeholder.pem" ]] && ok "a secret-like volume child younger than the floor is preserved" || bad "a secret-like volume child younger than the floor is preserved"
 [[ -L "$E8_ROOT/e8-link-26h" ]] && ok "a symlinked top-level entry is never followed or reclaimed" || bad "a symlinked top-level entry is never followed or reclaimed"
 fi
 
@@ -407,6 +428,35 @@ then ok "expired batch leaves a zero-progress cursor that retries discovery"; el
 FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"
 [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "the next scheduled pass resumes and removes the eligible item" || bad "the next scheduled pass resumes and removes the eligible item" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+fi
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract ]]; then
+  echo "Test 4d: public scratch-prune dry-run does not publish a dirty-source rescue"
+  use_root
+  register_test_volume
+  origin="$T/dry-run-rescue-origin.git"
+  candidate="$SCRATCH_ROOT/dirty-public-preview"
+  git init -q --bare "$origin"
+  mkdir -p "$candidate"
+  git -C "$candidate" init -q -b main
+  git -C "$candidate" config user.name fixture
+  git -C "$candidate" config user.email fixture@example.invalid
+  printf 'base\\n' >"$candidate/tracked.txt"
+  git -C "$candidate" add tracked.txt
+  git -C "$candidate" commit -qm base
+  git -C "$candidate" remote add origin "$origin"
+  git -C "$candidate" push -q origin main
+  printf 'local changes\\n' >"$candidate/local.txt"
+  old_stamp "$candidate" 72
+  refs_before="$(git --git-dir "$origin" for-each-ref --format='%(refname) %(objectname)')"
+  objects_before="$(git --git-dir "$origin" count-objects -v)"
+  out="$(run bash "$ROOT/disk_magician.sh" scratch-prune --dry-run 2>&1)"; rc=$?
+  [[ "$rc" == 0 ]] && ok "public CLI dry-run completes" || bad "public CLI dry-run completes" "rc=$rc"
+  check "dirty-source preview requires a real rescue" "kept:rescue-required $candidate" "$out"
+  [[ -f "$candidate/local.txt" ]] && ok "dry-run preserves the dirty source" || bad "dry-run preserves the dirty source"
+  refs_after="$(git --git-dir "$origin" for-each-ref --format='%(refname) %(objectname)')"
+  objects_after="$(git --git-dir "$origin" count-objects -v)"
+  [[ "$refs_after" == "$refs_before" ]] && ok "dry-run leaves remote refs unchanged" || bad "dry-run leaves remote refs unchanged"
+  [[ "$objects_after" == "$objects_before" ]] && ok "dry-run leaves remote objects unchanged" || bad "dry-run leaves remote objects unchanged"
 fi
 if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == cursor-contract ]]; then
   echo "test_cleanup_scratch_top_level (${SCRATCH_PRUNE_TEST_FILTER}): $PASS passed, $FAIL failed"
@@ -591,14 +641,14 @@ use_root
 make_tree content-keep 72 '.env.example' >/dev/null
 make_tree secret-keep 73 '.env' >/dev/null
 out="$(run bash "$SCRIPT" --dry-run 2>&1)"
-check "unproven-content is reported for this candidate" "kept:unproven-content $SCRATCH_ROOT/content-keep" "$out"
-check "secret-like is reported for this candidate" "kept:secret-like $SCRATCH_ROOT/secret-keep" "$out"
+check "no-proof is reported for this candidate" "kept:no-proof $SCRATCH_ROOT/content-keep" "$out"
+check "secret-like veto is reported for the secret candidate" "kept:secret-like $SCRATCH_ROOT/secret-keep" "$out"
 [[ -d "$SCRATCH_ROOT/content-keep" && -d "$SCRATCH_ROOT/secret-keep" ]] && ok "both unapproved content keeps preserved" || bad "both unapproved content keeps preserved"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"
 [[ ! -e "$SCRATCH_ROOT/content-keep" ]] && ok "approved override removes the unproven-content tree" || bad "approved override removes the unproven-content tree" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
 [[ ! -e "$SCRATCH_ROOT/secret-keep" ]] && ok "approved override removes the secret-like tree" || bad "approved override removes the secret-like tree" "$(printf %s "$out" | tr "\n" " " | cut -c1-300)"
-check "the unproven-content override is logged" "scratch-prune:kept:unproven-content" "$(cat "$LOG" 2>/dev/null)"
-check "the secret-like override is logged" "scratch-prune:kept:secret-like" "$(cat "$LOG" 2>/dev/null)"
+check "the no-proof override is logged for the content candidate" "scratch-prune:kept:no-proof" "$(grep -F "$SCRATCH_ROOT/content-keep" "$LOG" 2>/dev/null)"
+check "the secret-like veto is logged for the secret candidate" "scratch-prune:kept:secret-like" "$(grep -F "$SCRATCH_ROOT/secret-keep" "$LOG" 2>/dev/null)"
 
 echo "Test 8: other content keeps are never overridden"
 use_root
@@ -625,7 +675,7 @@ printf 'change\n' > "$SCRATCH_ROOT/secret-dirty-repo/tracked.txt"
 git -C "$SCRATCH_ROOT/secret-dirty-repo" add tracked.txt 2>/dev/null
 old_stamp "$SCRATCH_ROOT/secret-dirty-repo" 72
 out="$(run bash "$SCRIPT" --dry-run 2>&1)"
-check "the secret-like verdict is what C14 reports first" "kept:secret-like $SCRATCH_ROOT/secret-dirty-repo" "$out"
+check "the secret-like veto is what C14 reports" "kept:secret-like $SCRATCH_ROOT/secret-dirty-repo" "$out"
 # A preview must not advertise a removal that --clean would refuse: the override
 # path runs the repository provenance re-check in preview mode too.
 out_prev="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --dry-run 2>&1)"
@@ -719,7 +769,7 @@ PYTHON
   old_stamp "$SCRATCH_ROOT/budget-unproven" 13
   out="$(lru_run env -u DISK_MAGICIAN_CONFIG DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --dry-run --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
   [[ "$rc" == 0 ]] && ok "unconfigured user content dry-run completes without deletion" || bad "unconfigured user content dry-run completes without deletion" "rc=$rc"
-  check "unclassified user content remains unproven" "kept:unproven-content $SCRATCH_ROOT/budget-unproven" "$out"
+  check "unclassified user content has no proof" "kept:no-proof $SCRATCH_ROOT/budget-unproven" "$out"
   [[ -d "$SCRATCH_ROOT/budget-unproven" ]] && ok "unclassified user content remains present" || bad "unclassified user content remains present"
 
   use_root
@@ -768,7 +818,7 @@ PYTHON
   [[ "$rc" == 0 ]] && ok "preserving budget dry-run completes without deletion" || bad "preserving budget dry-run completes without deletion" "rc=$rc"
   check "secret-like content remains a keep" "kept:secret-like $SCRATCH_ROOT/budget-secret" "$out"
   check "dirty repository remains a keep" "kept:dirty $SCRATCH_ROOT/budget-dirty" "$out"
-  check "unpushed repository remains a keep" "kept:not-pushed $SCRATCH_ROOT/budget-not-pushed" "$out"
+  check "unpushed repository remains a keep without a dry-run rescue push" "kept:rescue-required $SCRATCH_ROOT/budget-not-pushed" "$out"
   check "ignored data remains a keep" "kept:ignored-data $SCRATCH_ROOT/budget-ignored" "$out"
   check "known disposable build remains eligible" "would-remove:remove $SCRATCH_ROOT/worldai_frontend/build/budget-known-build" "$out"
   check "dry-run reports no actual budget result" "budget_unmet=not-run projected_budget_unmet=unknown" "$out"

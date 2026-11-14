@@ -80,6 +80,22 @@ if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^
       echo "scratch-prune: cannot record recency override hours:$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS; using 24h floor" >&2
   fi
 fi
+# Emergency floor (operator decision 2026-11-12, `diskm emergency`): a manual run with
+# DISK_MAGICIAN_AGE_FLOOR_MINUTES (>= 120) may lower the floor to that many hours (rounded
+# up). Automatic mode never uses it; the verdict's 1 h idle veto and every other veto still run.
+if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[1-9][0-9]{2,4}$ ]] && (( DISK_MAGICIAN_AGE_FLOOR_MINUTES >= 120 )); then
+  _emergency_hours=$(( (DISK_MAGICIAN_AGE_FLOOR_MINUTES + 59) / 60 ))
+  if (( _emergency_hours < MIN_HOURS_FLOOR )); then
+    _guard_state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+    if { mkdir -p "$_guard_state_dir" && printf '%s scratch-prune: emergency age floor active: hours:%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_emergency_hours" >>"$_guard_state_dir/worktree_guard.log"; } 2>/dev/null; then
+      MIN_HOURS_FLOOR="$_emergency_hours"
+      RECENCY_SPEC="hours:$MIN_HOURS_FLOOR"
+    else
+      echo "scratch-prune: cannot record emergency floor hours:$_emergency_hours; keeping ${MIN_HOURS_FLOOR}h" >&2
+    fi
+  fi
+fi
 MIN_HOURS="${SCRATCH_PRUNE_MIN_HOURS:-$MIN_HOURS_FLOOR}"
 MAX_GIB="${SCRATCH_PRUNE_MAX_GIB:-25}"
 MAX_GIB_SET=false
@@ -89,7 +105,7 @@ BUDGET_PRESERVE_CONTENT_KEEPS=false
 BUDGET_FLOOR_MINUTES=120
 # Known content/provenance keeps budget mode may override; anything else keeps,
 # including remote-unverified (a failed ls-remote is an unknown, not a keep).
-BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
+BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:no-proof|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
 DRY_RUN=true
 
 usage() {
@@ -385,7 +401,7 @@ _verdict_and_maybe_remove() {
   fi
   case "$verdict" in
     remove) ;;
-    kept:secret-like|kept:unproven-content)
+    kept:secret-like|kept:unproven-content|kept:no-proof)
       # Ordered-gate guarantee: C14 evaluates owner lease, live cwd, open files
       # and recent activity BEFORE these content checks, so both are already
       # proven for this candidate when this branch runs.
@@ -808,9 +824,10 @@ while IFS= read -r -d '' entry; do
     capped=1
     continue
   fi
-  # Before the verdict: a --clean run removes $entry, and a removed path cannot
-  # be itemised afterwards. Nothing here changes what gets removed.
-  report_candidate_detail "$entry" "$kb"
+  # Itemisation is reporting only, so only a preview pays for it: measured 2026-11-13 on
+  # Jeff-Ubuntu, one 196k-file entry took ~80 min (a stat subprocess per file) and the
+  # 15-min timer evicted nothing for days. A --clean run's removals go to the deletion log.
+  [[ "$DRY_RUN" == true ]] && report_candidate_detail "$entry" "$kb"
   automatic_logged=false
   if [[ "$SCRATCH_AUTOMATIC" == 1 ]]; then
     if [[ "$DRY_RUN" != true ]]; then
@@ -824,7 +841,7 @@ while IFS= read -r -d '' entry; do
       outcome="$(scratch_budget_quarantine_remove "$entry")"
       automatic_logged=true
     else
-      preview_args=(--kind ephemeral)
+      preview_args=(--kind ephemeral --no-rescue-push)
       [[ -n "$ACT_DEADLINE_AT" ]] && preview_args+=(--deadline-at "$ACT_DEADLINE_AT")
       auto_verdict="$(artifact_removal_verdict "$entry" "${preview_args[@]}")"
       case "$auto_verdict" in

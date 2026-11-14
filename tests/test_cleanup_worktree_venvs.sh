@@ -121,7 +121,7 @@ mkdir -p "$UNMEASURABLE_WT/venv.bak.20250101"
 age_path_days_ago "$UNMEASURABLE_WT/venv.bak.20250101" 60
 
 echo
-echo "=== Test 1: dry-run --purge-bak-days flags only the stale worktree's bak dir ==="
+echo "=== Test 1: dry-run --purge-bak-days applies the C14 rebuildable table ==="
 OUT1="$TMP_ROOT/out1.txt"
 env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
@@ -132,8 +132,10 @@ OUT1_CONTENT=$(cat "$OUT1")
 
 assert_contains "(a) stale bak dir flagged in dry-run" \
   "would purge $STALE_WT/venv.bak.20260101" "$OUT1_CONTENT"
-assert_contains "(a) stale .venv bak dir flagged in dry-run" \
+assert_not_contains "(a) C14-ineligible .venv bak dir NOT flagged in dry-run" \
   "would purge $STALE_WT/.venv.bak.20260101" "$OUT1_CONTENT"
+assert_contains "(a) C14-ineligible .venv bak dir reports its keep reason in dry-run" \
+  "Preserved (C14 kept:no-proof) $STALE_WT/.venv.bak.20260101" "$OUT1_CONTENT"
 assert_not_contains "(b) recent-worktree bak dir NOT flagged" \
   "would purge $RECENT_WT/venv.bak.20251201" "$OUT1_CONTENT"
 assert_contains "(b) recent-worktree bak dir reported protected" \
@@ -191,7 +193,7 @@ else
   record_fail "eligible venv.bak dir actually removed with approval" "still present in: $STALE_WT/venv.bak.20260101"
 fi
 assert_contains "ineligible .venv.bak kept with explicit C14 reason" \
-  "C14 kept: $STALE_WT/.venv.bak.20260101 (kept:unproven-content)" "$OUT3_CONTENT"
+  "C14 kept: $STALE_WT/.venv.bak.20260101 (kept:no-proof)" "$OUT3_CONTENT"
 if [[ -d "$STALE_WT/.venv.bak.20260101" ]]; then
   record_pass "ineligible .venv.bak retained on disk (outside approved table)"
 else
@@ -213,17 +215,20 @@ echo "=== Test 4 (w7m): concurrent invocation skips instead of running alongside
 mkdir -p "$STATE_DIR/cleanup_worktree_venvs.lock"
 echo 999999 > "$STATE_DIR/cleanup_worktree_venvs.lock/pid"   # pid unlikely to exist -> but lock is fresh (age 0), so TTL steal must NOT kick in
 OUT4="$TMP_ROOT/out4.txt"
+set +e
 env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --roots "$ROOTS_DIR" --min-age 14 --dry-run \
   >"$OUT4" 2>&1
 RC4=$?
+set -e
 OUT4_CONTENT=$(cat "$OUT4")
-if [[ "$RC4" -eq 0 ]]; then record_pass "held-lock run exits 0 (skip, not error)"; else record_fail "held-lock run exits 0 (skip, not error)" "rc=$RC4"; fi
+if [[ "$RC4" -eq 0 ]]; then record_pass "held-lock run exits 0 (skip, not error)"; else record_fail "held-lock run exits 0 (skip, not error)" "rc=$RC4; output: $OUT4_CONTENT"; fi
 assert_contains "held-lock run logs skip message" "skipped, lock held" "$OUT4_CONTENT"
 assert_not_contains "held-lock run does not scan" "=== STRIP DORMANT WORKTREE VENVS ===" "$OUT4_CONTENT"
-rm -rf "${STATE_DIR:?}/cleanup_worktree_venvs.lock"
+rm -f "${STATE_DIR:?}/cleanup_worktree_venvs.lock/pid"
+rmdir "${STATE_DIR:?}/cleanup_worktree_venvs.lock"
 
 echo
 echo "=== Test 5 (w7m): lock is released after a normal run, so a second run proceeds ==="
@@ -259,11 +264,11 @@ env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
 OUT6_CONTENT=$(cat "$OUT6")
 assert_contains "roots log includes expanded .claude/worktrees dir" \
   "$ROOTS_DIR/some_repo/.claude/worktrees" "$OUT6_CONTENT"
-assert_contains "agent-tree venv flagged for stripping" \
-  "would strip $CLAUDE_WT/venv" "$OUT6_CONTENT"
+assert_contains "agent-tree venv discovered but C14 keeps the synthetic worktree" \
+  "Preserved (C14 kept:no-proof) $CLAUDE_WT/venv" "$OUT6_CONTENT"
 
 echo
-echo "=== Test 6b: default roots include \$HOME/.worktrees, 7-day rule still applies ==="
+echo "=== Test 6b: default roots include \$HOME/.worktrees, 48 h floor still applies (operator decision 2026-11-12; was 7-day) ==="
 STD_HOME="$TMP_ROOT/stdhome"
 STD_OLD="$STD_HOME/.worktrees/r/old"
 STD_YOUNG="$STD_HOME/.worktrees/r/young"
@@ -276,7 +281,7 @@ done
 for p in "$STD_OLD/README.md" "$STD_OLD/.git" "$STD_OLD/.venv/lib/site.py"; do
   age_path_days_ago "$p" 10
 done
-age_path_days_ago "$STD_YOUNG/README.md" 2
+age_path_days_ago "$STD_YOUNG/README.md" 1
 OUT6B="$TMP_ROOT/out6b.txt"
 env -i HOME="$STD_HOME" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
@@ -284,8 +289,9 @@ env -i HOME="$STD_HOME" PATH="$TEST_PATH" \
   bash "$TARGET_SCRIPT" --dry-run >"$OUT6B" 2>&1
 OUT6B_CONTENT=$(cat "$OUT6B")
 assert_contains "default roots list \$HOME/.worktrees" "$STD_HOME/.worktrees" "$OUT6B_CONTENT"
-assert_contains "10d std-root venv flagged" "would strip $STD_OLD/.venv" "$OUT6B_CONTENT"
-assert_not_contains "2d std-root venv protected" "would strip $STD_YOUNG/.venv" "$OUT6B_CONTENT"
+assert_contains "10d std-root venv discovered but C14 keeps the synthetic worktree" \
+  "Preserved (C14 kept:no-proof) $STD_OLD/.venv" "$OUT6B_CONTENT"
+assert_not_contains "1d std-root venv protected" "would strip $STD_YOUNG/.venv" "$OUT6B_CONTENT"
 
 echo
 echo "=== Test 7: hard floor clamp survives leading-zero and sub-floor overrides ==="
@@ -301,7 +307,7 @@ OUT7_ZERO=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=0 \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
   bash "$TARGET_SCRIPT" --dry-run --roots "$TMP_ROOT/nonexistent" 2>&1)
-assert_contains "WORKTREE_MIN_AGE_DAYS=0 clamps to the 7-day floor" "Min age:    7 days" "$OUT7_ZERO"
+assert_contains "WORKTREE_MIN_AGE_DAYS=0 clamps to the 48 h floor (2026-11-12; was 7 days)" "Min age:    48 hours" "$OUT7_ZERO"
 
 OUT7_OCTAL=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" WORKTREE_MIN_AGE_DAYS=08 \
@@ -368,11 +374,15 @@ env -i HOME="$TMP_ROOT/home" PATH="$FAKEBIN:$TEST_PATH" \
   bash "$TARGET_SCRIPT" --roots "$R8" --min-age 14 --purge-bak-days 5 --dry-run \
   >"$OUT8" 2>&1
 OUT8_CONTENT=$(cat "$OUT8")
-assert_contains "depth-1 worktree venv found" "would strip $R8/plain_wt/.venv" "$OUT8_CONTENT"
+assert_contains "depth-1 worktree venv found; C14 keep is reported" \
+  "Preserved (C14 kept:no-proof) $R8/plain_wt/.venv" "$OUT8_CONTENT"
 assert_contains "depth-2 repo .claude/worktrees agent venv found" \
-  "would strip $R8/org/repoB/.claude/worktrees/agent1/.venv" "$OUT8_CONTENT"
+  "Preserved (C14 kept:no-proof) $R8/org/repoB/.claude/worktrees/agent1/.venv" "$OUT8_CONTENT"
 if "$GIT8" --version >/dev/null 2>&1; then
-  assert_contains "git-registered nested worktree venv found" "deep/wtA/.venv (" "$OUT8_CONTENT"
+  assert_contains "git-registered nested worktree reports C14 keep" \
+    "Preserved (C14 kept:" "$OUT8_CONTENT"
+  assert_contains "git-registered nested worktree path remains visible" \
+    "$R8/repoA/nested/deep/wtA/.venv" "$OUT8_CONTENT"
 fi
 assert_not_contains "deep node_modules worktree NOT flagged" "would strip $DEEP_WT/.venv" "$OUT8_CONTENT"
 if grep -qxF "$R8" "$FIND_LOG" || grep -qF "$R8/node_modules" "$FIND_LOG" \

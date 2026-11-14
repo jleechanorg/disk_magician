@@ -2,12 +2,15 @@
 # Model-cache rows of C14's cache-root table (scripts/lib/artifact_verdict.sh,
 # _av_rebuildable): a Hugging Face (hub/modules/xet) or Hunyuan3D (tencent) entry is
 # rebuildable ONLY under its registered $HOME root. The same shape under an arbitrary
-# path stays kept:unproven-content, a client's credential file beside the cache is not
+# path stays kept:no-proof, a client's credential file beside the cache is not
 # classified by its parent's name, and secret-like content still blocks.
 #
 # Portable on purpose (Python sets mtimes), so it runs on the Linux host where the
 # macOS-only tests/test_artifact_verdict.sh cannot (`date -r <epoch>`).
 set -uo pipefail
+# 2026-11-12 operator decision: the verdict is "no veto AND at least one proof". An entry
+# outside the rebuildable rows, and one inside them but too young, is `kept:no-proof`
+# (was kept:unproven-content / kept:recent-activity); secret-like content remains a veto.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB="$REPO_ROOT/scripts/lib/artifact_verdict.sh"
@@ -71,30 +74,30 @@ done
 age "$HOME/Downloads" 120
 age "$HOME/.cache/unregistered" 120
 age "$T/scratch" 120
-assert_eq "$(av "$HOME/Downloads/hub" --kind rebuildable)" kept:unproven-content \
+assert_eq "$(av "$HOME/Downloads/hub" --kind rebuildable)" kept:no-proof \
     "a \`hub\` dir under an arbitrary \$HOME path"
-assert_eq "$(av "$HOME/.cache/unregistered/hub" --kind rebuildable)" kept:unproven-content \
+assert_eq "$(av "$HOME/.cache/unregistered/hub" --kind rebuildable)" kept:no-proof \
     "a \`hub\` dir under an unregistered cache root"
-assert_eq "$(av "$T/scratch/hub" --kind rebuildable)" kept:unproven-content \
+assert_eq "$(av "$T/scratch/hub" --kind rebuildable)" kept:no-proof \
     "a \`hub\` dir outside \$HOME"
-assert_eq "$(av "$T/scratch/tencent" --kind rebuildable)" kept:unproven-content \
+assert_eq "$(av "$T/scratch/tencent" --kind rebuildable)" kept:no-proof \
     "a \`tencent\` dir outside \$HOME"
-assert_eq "$(av "$HOME/.cache/huggingface" --kind rebuildable)" kept:unproven-content \
+assert_eq "$(av "$HOME/.cache/huggingface" --kind rebuildable)" kept:no-proof \
     "the cache root itself is not an entry"
 mkdir -p "$HOME/.cache/huggingface/stored_tokens/x" && printf 'payload' >"$HOME/.cache/huggingface/stored_tokens/x/blob"
 age "$HOME/.cache/huggingface/stored_tokens" 120
-assert_eq "$(av "$HOME/.cache/huggingface/stored_tokens" --kind rebuildable)" kept:unproven-content \
+assert_eq "$(av "$HOME/.cache/huggingface/stored_tokens" --kind rebuildable)" kept:no-proof \
     "an undeclared dir under huggingface cache root stays unproven"
 
 echo "== credential files and secret-like content =="
 printf 'hf_token=abc' >"$HOME/.cache/huggingface/token"
 age "$HOME/.cache/huggingface" 120
-assert_eq "$(av "$HOME/.cache/huggingface/token" --kind rebuildable)" kept:unproven-content \
+assert_eq "$(av "$HOME/.cache/huggingface/token" --kind rebuildable)" kept:no-proof \
     "a credential FILE at the cache root is never classified by its parent's name"
 printf 'HF_TOKEN=abc' >"$HOME/.cache/huggingface/hub/models--org--m/.env"
 age "$HOME/.cache/huggingface/hub" 120
 assert_eq "$(av "$HOME/.cache/huggingface/hub" --kind rebuildable)" kept:secret-like \
-    "a secret-like file inside the model cache still blocks"
+    "secret-like content inside the model cache is a veto"
 /bin/rm -f "$HOME/.cache/huggingface/hub/models--org--m/.env"
 age "$HOME/.cache/huggingface/hub" 120
 assert_eq "$(av "$HOME/.cache/huggingface/hub" --kind rebuildable)" remove \
@@ -103,7 +106,7 @@ assert_eq "$(av "$HOME/.cache/huggingface/hub" --kind rebuildable)" remove \
 echo "== recency gate still applies =="
 mkdir -p "$HOME/.cache/huggingface/xet-fresh/c" && printf 'x' >"$HOME/.cache/huggingface/xet-fresh/c/f"
 assert_eq "$(av "$HOME/.cache/huggingface/xet-fresh" --kind rebuildable)" kept:recent-activity \
-    "a model-cache entry written minutes ago is kept by the 1 h idle floor"
+    "a model-cache entry written minutes ago is kept by the 1 h idle veto"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
