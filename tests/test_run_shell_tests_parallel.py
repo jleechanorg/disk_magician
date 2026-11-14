@@ -141,7 +141,7 @@ class TestRunShellTestsParallel(unittest.TestCase):
             self.assertEqual(len(set(observed_tmpdirs)), 3, msg=f"TMPDIRs collided: {observed_tmpdirs}")
             for d in observed_tmpdirs:
                 per_test_tmp = Path(d)
-                self.assertEqual(per_test_tmp.parent.parent, scratch_root)
+                self.assertEqual(per_test_tmp.parent.parent, scratch_root.resolve())
                 self.assertTrue(per_test_tmp.parent.name.startswith("dm-ci-shard-"))
                 self.assertFalse(per_test_tmp.exists(), msg=f"Per-test TMPDIR was not cleaned up: {d}")
 
@@ -151,6 +151,8 @@ class TestRunShellTestsParallel(unittest.TestCase):
             tmp_dir = Path(tmp)
             scratch_root = tmp_dir / "scratch-root"
             scratch_root.mkdir()
+            scratch_alias = tmp_dir / "scratch-alias"
+            scratch_alias.symlink_to(scratch_root, target_is_directory=True)
             record = tmp_dir / "child-tmpdir.txt"
             script = self._write_script(
                 tmp_dir,
@@ -162,7 +164,7 @@ class TestRunShellTestsParallel(unittest.TestCase):
                 """,
             )
             env = os.environ.copy()
-            env["TMPDIR"] = str(scratch_root)
+            env["TMPDIR"] = str(scratch_alias)
             proc = subprocess.run(
                 [
                     sys.executable,
@@ -180,7 +182,7 @@ class TestRunShellTestsParallel(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
             child_tmpdir = Path(record.read_text(encoding="utf-8").strip())
-            self.assertEqual(child_tmpdir.parent.parent, scratch_root)
+            self.assertEqual(child_tmpdir.parent.parent, scratch_root.resolve())
             self.assertTrue(child_tmpdir.parent.name.startswith("dm-ci-shard-"))
             self.assertFalse(child_tmpdir.exists(), msg=f"Per-test TMPDIR was not cleaned up: {child_tmpdir}")
 
