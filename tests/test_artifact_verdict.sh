@@ -463,6 +463,10 @@ PT="$TMPROOT/ptmp" && mkdir -p "$PT" "$TMPROOT/utmp"
 export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
 export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMPROOT/utmp"
 NOW="$(date +%s)"
+# The default disposable-content recency floor is 48 h. Exercise row-specific
+# retention at its effective threshold, and keep short-floor behavior below as
+# an explicit emergency override case.
+DEFAULT_RECENCY_MINUTES=2880
 # age <path> <minutes>: every entry under <path> last modified <minutes> ago.
 age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
 eph() { artifact_removal_verdict "$1" --kind ephemeral; }
@@ -492,11 +496,13 @@ for f in "$PT/cli_validation_gemini_1/o" "$HOME/.aside/u/a/sessions/s1/state" "$
     "$HOME/.gemini/antigravity-cli/brain/b2/t.log" "$HOME/.gemini/antigravity/implicit.backup/i" "$HOME/.llm-inspector/captures/capture-1.json" \
     "$HOME/.llm-inspector/captures/x.summary.json" "$HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log"; do printf 'x' >"$f"; done
 while read -r row ret p; do
-    age "$p" $((ret + 60)) && assert_eq "$(eph "$p")" remove "$row 1 h past ${ret} min: ${p#"$TMPROOT"/}" \
+    floor="$ret"
+    (( floor < DEFAULT_RECENCY_MINUTES )) && floor=$DEFAULT_RECENCY_MINUTES
+    age "$p" $((floor + 1)) && assert_eq "$(eph "$p")" remove "$row 1 min past ${floor} min: ${p#"$TMPROOT"/}" \
         || bad "$row age-old fixture setup (${p#"$TMPROOT"/})"
-    # Under an hour old is the idle veto; a clean pushed clone is removable by on-origin at any age.
-    exp=kept:no-proof; (( ret - 60 < 60 )) && exp=kept:recent-activity; [[ $p == */clones/repo ]] && exp=remove
-    age "$p" $((ret - 60)) && assert_eq "$(eph "$p")" "$exp" "$row 1 h short of ${ret} min" \
+    exp=kept:no-proof
+    (( floor - 1 < DEFAULT_RECENCY_MINUTES )) && exp=kept:recent-activity
+    age "$p" $((floor - 1)) && assert_eq "$(eph "$p")" "$exp" "$row 1 min short of ${floor} min" \
         || bad "$row age-fresh fixture setup (${p#"$TMPROOT"/})"
 done <<EOF
 E2 240 $PT/agent_prompt_1.txt
@@ -512,6 +518,14 @@ E6 4320 $HOME/.llm-inspector/captures/capture-1.json
 E6 4320 $HOME/.llm-inspector/captures/x.summary.json
 E7 10080 $HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log
 EOF
+# An explicit emergency floor may lower the default for ephemeral candidates,
+# but it still enforces its 2 h minimum and the 48 h default remains the normal path.
+age "$PT/agent_prompt_1.txt" 121
+assert_eq "$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 eph "$PT/agent_prompt_1.txt")" remove \
+    "explicit emergency age floor lowers the default to its 2 h minimum"
+age "$PT/agent_prompt_1.txt" 119
+assert_eq "$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 eph "$PT/agent_prompt_1.txt")" kept:recent-activity \
+    "explicit emergency age floor still protects content younger than 2 h"
 # An exact-worktree-root receipt binds only that candidate's own admin rows.
 # The admin channel is per-call: a caller-owned C14_INVENTORY_OUT is neither
 # appended to nor removed, a stale row planted there cannot bind, and a second
@@ -522,7 +536,7 @@ printf '{"admin":"%s/other-admin","path":"HEAD","mode":"100644","dev":1,"ino":1,
 caller_before="$(shasum -a 256 "$caller_channel" | awk '{print $1}')"
 export C14_INVENTORY_OUT="$caller_channel"
 av_tmp="$TMPROOT/av-tmp" && mkdir -p "$av_tmp" && export TMPDIR="$av_tmp"
-age "$PT/wtp" 120
+age "$PT/wtp" $((DEFAULT_RECENCY_MINUTES + 1))
 wt_gd="$(git -C "$PT/wtp" rev-parse --absolute-git-dir)"
 wt_inv_one="$TMPROOT/wt-root-inventory-one.json"
 assert_eq "$(artifact_removal_verdict "$PT/wtp" --kind ephemeral --inventory-out "$wt_inv_one")" remove "exact worktree root is eligible and writes its receipt"
@@ -566,7 +580,7 @@ unset TMPDIR
 for d in worldarchitect.ai/br custom-root/br system-x com.apple.y; do
     git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/$d" && baseline "$PT/$d"
     python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f)); d.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z"); json.dump(d,open(f,"w"))' "$(lease_path_for "$PT/$d")"
-    age "$PT/${d%%/*}" 400
+    age "$PT/${d%%/*}" $((DEFAULT_RECENCY_MINUTES + 1))
 done
 assert_eq "$(eph "$PT/worldarchitect.ai/br")" kept:protected "default protected tmp root"
 assert_eq "$(DISK_MAGICIAN_PROTECTED_TMP_ROOTS='x custom-root' eph "$PT/custom-root/br")" kept:protected "env protected tmp root"
@@ -574,7 +588,7 @@ assert_eq "$(eph "$PT/custom-root/br")" remove "unlisted root at 400 min"
 assert_eq "$(eph "$PT/system-x")" kept:protected "system-* basename has no row"
 assert_eq "$(eph "$PT/com.apple.y")" kept:protected "com.apple.* basename has no row"
 age "$PT/pr-123" 180
-assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:no-proof "sweeper configured below E3 retention"
+assert_eq "$(DISK_MAGICIAN_PR_SCRATCH_MIN_AGE_HOURS=1 eph "$PT/pr-123")" kept:recent-activity "default 48 h floor protects content despite a shorter E3 setting"
 age "$PT/pr-123" 43200
 printf '{}' >"$TMPROOT/invalid-inventory.json"
 assert_eq "$(python3 "$PROBE" newest-mtime "$TMPROOT/invalid-inventory.json")" kept:check-failed "malformed inventory cannot supply an mtime"
@@ -703,7 +717,7 @@ lease_edit() { python3 -c 'import json,sys; f=sys.argv[1]; d=json.load(open(f));
 gobj() { printf '%s/%s.json' "$GCS" "$(printf %s "gs://wa-test-evidence/agent-evidence/$1" | tr '/:' '__')"; }
 av() { artifact_removal_verdict "$@"; }
 mkdir -p "$PT/advice-x" "$PT/deploy" && printf 'n' >"$PT/advice-x/notes.txt" && printf 'TOKEN=abc' >"$PT/deploy/deploy_backup.txt"
-age "$PT/advice-x" 90 && age "$PT/deploy" 43200
+age "$PT/advice-x" $((DEFAULT_RECENCY_MINUTES + 1)) && age "$PT/deploy" 43200
 assert_eq "$(av "$PT/advice-x")" kept:no-proof "unique notes.txt under \$TMPDIR/advice-x/"
 assert_eq "$(av "$PT/deploy")" kept:no-proof "custom-named deploy_backup.txt"
 git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/evrepo" && mkdir -p "$PT/evrepo/evidence" && printf '{}' >"$PT/evrepo/evidence/results.json" && age "$PT/evrepo" 43200
@@ -714,15 +728,15 @@ printf '{"path":"%s","owner":{"pid":'"$DEAD_PID"'},"kind":"scratch","source":"gi
 assert_eq "$(av "$PT/inv")" kept:no-proof "manifest is not a copy (inventory only, never published)"
 for d in ev-ok ev-unver ev-added ev-byte ev-subset ev-nomf ev-del ev-regen ev-exp ev-miss; do
     mkdir -p "$PT/$d/sub" && printf 'report' >"$PT/$d/report.md" && printf 'mp4data' >"$PT/$d/sub/recording.mp4" && printf 'j' >"$PT/$d/results.json"
-    publish "$PT/$d" "" "$([[ $d == ev-unver ]] && echo - || echo 2026-10-01T00:00:00Z)" && age "$PT/$d" 120
+    publish "$PT/$d" "" "$([[ $d == ev-unver ]] && echo - || echo 2026-10-01T00:00:00Z)" && age "$PT/$d" $((DEFAULT_RECENCY_MINUTES + 1))
 done
 : >"$GCS/calls"
 assert_eq "$(av "$PT/ev-ok")" remove "published evidence with verified_at, every file matching"
 assert_eq "$(wc -l <"$GCS/calls" | tr -d ' ')" 3 "one objects describe per object"
 assert_eq "$(av "$PT/ev-unver")" kept:no-proof "unverified publication (no verified_at)"
-printf 'mine' >"$PT/ev-added/private_notes.txt" && age "$PT/ev-added" 120
+printf 'mine' >"$PT/ev-added/private_notes.txt" && age "$PT/ev-added" $((DEFAULT_RECENCY_MINUTES + 1))
 assert_eq "$(av "$PT/ev-added")" kept:no-proof "publish, then add private_notes.txt"
-printf 'mp4dato' >"$PT/ev-byte/sub/recording.mp4" && age "$PT/ev-byte" 120
+printf 'mp4dato' >"$PT/ev-byte/sub/recording.mp4" && age "$PT/ev-byte" $((DEFAULT_RECENCY_MINUTES + 1))
 assert_eq "$(av "$PT/ev-byte")" kept:no-proof "publish, then change one byte of recording.mp4"
 lease_edit "$PT/ev-subset" 'd["upload_manifest"]=d["upload_manifest"][:2]'
 assert_eq "$(av "$PT/ev-subset")" kept:no-proof "manifest lists a subset"
@@ -740,16 +754,16 @@ rm -f "$(gobj ev-miss/sub/recording.mp4)"
 assert_eq "$(av "$PT/ev-miss")" kept:no-proof "one of three objects missing"
 lease_edit "$PT/ev-ok" 'd["verified_at"]=""'
 assert_eq "$(av "$PT/ev-ok")" kept:no-proof "empty verified_at"
-mkdir -p "$PT/ev-link" && printf 'r' >"$PT/ev-link/report.md" && publish "$PT/ev-link" && ln -s /etc "$PT/ev-link/l" && age "$PT/ev-link" 120
+mkdir -p "$PT/ev-link" && printf 'r' >"$PT/ev-link/report.md" && publish "$PT/ev-link" && ln -s /etc "$PT/ev-link/l" && age "$PT/ev-link" $((DEFAULT_RECENCY_MINUTES + 1))
 assert_eq "$(av "$PT/ev-link")" kept:no-proof "unlisted symlink in a published dir"
 mkdir -p "$PT/nm" && git clone -q "$TMPROOT/remotes/wtbase.git" "$PT/nm/repo" && baseline "$PT/nm/repo"
 lease_edit "$PT/nm/repo" 'd.update(owner={"pid":1}, released_at="2026-10-01T00:00:00Z")'
-mkdir -p "$PT/nm/repo/node_modules/pkg" && printf 'x' >"$PT/nm/repo/node_modules/pkg/i.js" && age "$PT/nm" 120
+mkdir -p "$PT/nm/repo/node_modules/pkg" && printf 'x' >"$PT/nm/repo/node_modules/pkg/i.js" && age "$PT/nm" $((DEFAULT_RECENCY_MINUTES + 1))
 assert_eq "$(av "$PT/nm/repo")" remove "allowlisted node_modules in a pushed clean clone (no kind)"
-printf 'n' >"$PT/nm/notes.txt" && age "$PT/nm" 120
+printf 'n' >"$PT/nm/notes.txt" && age "$PT/nm" $((DEFAULT_RECENCY_MINUTES + 1))
 assert_eq "$(av "$PT/nm")" kept:no-proof "the same clone beside a unique non-git file"
 mkdir -p "$PT/nm/repo/build" && printf 'src' >"$PT/nm/repo/build/keep.txt" && git -C "$PT/nm/repo" add build/keep.txt \
-    && git -C "$PT/nm/repo" -c user.email=t@t -c user.name=t commit -qm tracked-build && age "$PT/nm" 120
+    && git -C "$PT/nm/repo" -c user.email=t@t -c user.name=t commit -qm tracked-build && age "$PT/nm" $((DEFAULT_RECENCY_MINUTES + 1))
 assert_eq "$(av "$PT/nm/repo/build")" kept:no-proof "a tracked build/ dir is not rebuildable by name"
 echo "-- rebuildable (--kind rebuildable) and os_clone --"
 mkdir -p "$HOME/.cache/uv/archive-v0/x" "$HOME/.cache/other/x" "$HOME/Library/Developer/Xcode/DerivedData/App-1" \

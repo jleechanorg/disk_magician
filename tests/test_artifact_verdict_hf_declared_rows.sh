@@ -6,7 +6,8 @@ T="$(mktemp -d "${TMPDIR:?admitted Scratch TMPDIR required}/pr316-declared-rows.
 export HOME="$T/home" DISK_MAGICIAN_STATE_DIR="$T/state"
 mkdir -p "$HOME" "$DISK_MAGICIAN_STATE_DIR"
 # All payload names are ordinary; classification, not a secret-name match,
-# must keep the unproven directories. Retain fixtures for parent inspection.
+# must keep the unproven directories after the 48 h recency floor. Retain
+# fixtures for parent inspection.
 python3 - "$HOME" <<'PY_FIXTURE'
 import os, pathlib, sys, time
 home = pathlib.Path(sys.argv[1])
@@ -18,10 +19,9 @@ for rel in rows:
     (d / "payload.txt").write_bytes(b"ordinary fixture payload\n")
 (home / ".cache/huggingface/token").write_bytes(b"fixture-not-a-real-token\n")
 # 2026-11-12 operator decision: no veto AND at least one proof. The undeclared rows
-# must therefore be young (below the 1440 min age proof) to stay kept:no-proof.
+# must remain kept:no-proof even when older than the 48 h recency floor.
 def when_for(path):
-    old = not any(k in path for k in ("stored_tokens", "user_notes", "huggingface/token"))
-    return time.time() - (4 * 86400 if old else 2 * 3600)
+    return time.time() - 4 * 86400
 for root, dirs, files in os.walk(home, topdown=False):
     for name in files + dirs:
         p = os.path.join(root, name); w = when_for(p)
