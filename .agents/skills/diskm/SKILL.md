@@ -61,8 +61,17 @@ copy** (different inodes, not hardlinks): each worktree measured 10,079 MB, 82 G
 It **cannot be deleted** — `prw_metrics.py:543 export_published_telemetry()` reads
 it from `origin/main` via `git ls-tree`. Exclude, never remove:
 
+**Preview the exact command you will apply, with the same roots and exclusions.**
+`cleanup-worktrees` and `slim_worktree_checkouts.sh` are different tools with
+different default roots, so previewing one and applying the other shows you a
+target list that is not the one that will change.
+
 ```bash
-WORKTREE_APPROVED=1 diskm cleanup-worktrees --dry-run          # preview first
+# preview — same script, same explicit scope, dry-run
+WORKTREE_APPROVED=1 bash scripts/slim_worktree_checkouts.sh --dry-run \
+  --exclude 'docs,dashboards/prw/telemetry'
+
+# apply — identical arguments, only --dry-run -> --clean
 WORKTREE_APPROVED=1 bash scripts/slim_worktree_checkouts.sh --clean \
   --exclude 'docs,dashboards/prw/telemetry'
 ```
@@ -100,15 +109,24 @@ diskm tmp-scratch-sweep --scratch-only --clean
 diskm volume status --json --snapshot          # confirm trim + free
 ```
 
-Manual fallback only when the sweep is lock-starved (see step 3):
+When `sudo` has no cached credential, use the **approved administrative route** —
+`diskm volume trim` — not a hand-rolled privileged container:
 
 ```bash
 losetup -a | grep scratch
-sudo /usr/sbin/fstrim -v /home/jleechan/Scratch
-# no password? docker group is root-equivalent (verify with `docker ps` first):
-docker run --rm --privileged -v /:/host --pid=host alpine \
-  chroot /host /usr/sbin/fstrim -v /home/jleechan/Scratch
+diskm volume trim scratch --admin-transport docker \
+  --admin-image-id sha256:<64-hex-digest> --execute
 ```
+
+`scripts/volume.py:1520 linux_trim_cmd` pins that image by **digest**
+(`^sha256:[0-9a-f]{64}$`) and confines the mount and capabilities. Never
+substitute `docker run --privileged -v /:/host --pid=host` plus a mutable image
+tag: that escalates to uncontrolled host root and is strictly weaker than the
+route the tool already provides. If no pinned `trim_admin_image_id` is configured,
+report the missing configuration rather than improvising one.
+
+`sudo /usr/sbin/fstrim -v <mountpoint>` remains correct when you already hold an
+approved credential. It is not permitted as a password-bypass step.
 
 **macOS** `/Volumes/diskm-scratch` is a real APFS volume, not an image: deletion
 returns host bytes directly and there is no trim step. **Never** `fstrim --all`
@@ -177,20 +195,37 @@ Measured: 39.5 GB → 6.2 GB (17 devices removed, 2 Booted kept).
 
 ---
 
-## Step 5 — Deliberate manual reclaim (only after gates refuse)
+## Step 5 — When a gate refuses: FAIL CLOSED
 
-Four proofs before any hand deletion:
+**A cleaner's refusal is the answer, not an obstacle to route around.** The C14
+verdict encodes lease, secret, content-preservation and ownership reasoning that
+four ad-hoc probes cannot reproduce. `lsof -D | wc -l` in particular prints `0`
+when `lsof` itself fails, so it can manufacture false confidence.
+
+When a gate returns `kept:*`, do this in order:
+
+1. **Resolve the reason** — `grep -oE 'kept:[a-z-]+' | sort | uniq -c`, then reason
+   about each one (see the table at the end of this step).
+2. **Fix the classifier if the reason is wrong** — that is a code change with tests,
+   not a deletion. That is how the grpc `_credentials` case was solved.
+3. **Report and stop** when the reason is correct.
+
+Deleting past a refusal requires an **explicit, scoped operator decision for that
+named path** — a human saying yes to that path. It is never implied by a general
+"clean disk" instruction, by the agent's own judgement, or by a prior approval for
+a different target. Do not perform it on your own initiative.
+
+If an operator does authorize a specific path, the mechanical form is a **literal
+path** (both `cc-safety-net` and `destructive_path_guard.py` reject `rm -rf "$VAR"`
+and any loop over a computed target), and record the four independent proofs for
+that exact path in the report so the decision is auditable:
 
 ```bash
-lsof +D "$D" | wc -l                                            # 0 open fds
-lsof -a -d cwd -n -P | awk '$NF ~ /<name>/'                      # 0 live cwd
-find "$D" -type f -exec stat -f '%m' {} + | sort -rn | head -1   # newest-file age
-bash scripts/safety_check.sh "$D"                               # must print OK
+lsof -D "$D" | wc -l      # note: 0 can mean lsof failed — check its exit status
+lsof -a -d cwd -n -P | awk '$NF ~ /<name>/'
+find "$D" -type f -exec stat -f '%m' {} + | sort -rn | head -1
+bash scripts/safety_check.sh "$D"
 ```
-
-Use **literal paths**. Both `cc-safety-net` and `destructive_path_guard.py` reject
-`rm -rf "$VAR"` and any loop over a computed target; a literal
-`rm -rf /path/one /path/two` per item is the only form that passes.
 
 **`kept:` reasons are not all bugs.** Resolve each one before believing a number:
 
