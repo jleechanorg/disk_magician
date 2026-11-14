@@ -65,7 +65,7 @@ Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
                 Requires WORKTREE_APPROVED=1 in the environment.
   --dry-run     Print actions without touching disk (default).
-  --min-age N   Minimum worktree age in days for repo-local removal (default: 3).
+  --min-age N   Minimum worktree age in days for repo-local removal (default: 2 days / 48h).
   --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 $HOME/projects/worldarchitect.ai).
