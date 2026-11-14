@@ -82,7 +82,7 @@ check "default: 47h-idle clean pushed worktree is kept (young)" "wt-h47 | young"
 check "default: 49h-idle clean pushed worktree is ELIGIBLE" "ELIGIBLE  $WT/wt-h49 |" "$OUT"
 check "default: 8d-idle worktree is ELIGIBLE" "ELIGIBLE  $WT/wt-d8 |" "$OUT"
 [[ "$(id -u)" -eq 0 ]] || check "default: unmeasurable worktree is kept" "PRESERVE  $WT/wt-unmeas |" "$OUT"
-check "banner reports the 48h floor" "others: 48h" "$OUT"
+check "banner reports the 48h floor" "Worktree content floor: 48h" "$OUT"
 
 OUT="$(run WORKTREE_MIN_AGE_DAYS=0)"
 check "WORKTREE_MIN_AGE_DAYS=0 cannot lower the floor" "wt-h47 | young" "$OUT"

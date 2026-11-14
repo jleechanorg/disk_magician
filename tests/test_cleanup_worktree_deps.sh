@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/cleanup_worktree_deps.sh (3-day floor, dormant worktrees only).
+# Tests for scripts/cleanup_worktree_deps.sh (48h default floor, dormant worktrees only).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SCRIPT_DIR/../scripts/cleanup_worktree_deps.sh"

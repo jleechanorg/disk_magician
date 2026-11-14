@@ -107,6 +107,35 @@ assert_eq "$(proofs)" "" "recent unpublished commit requires no removal rescue"
 clone_fixture git-index-fresh; age "$T/s/git-index-fresh" 2881; git -C "$T/s/git-index-fresh" status --porcelain >/dev/null
 assert_eq "$(av "$T/s/git-index-fresh")" remove "fresh .git/index metadata does not make 49h-old content recent"
 
+echo "== rebuildable venv child in locally changed worktree =="
+venv_verdict() (
+  wrh_live_cwd_reason() { WRH_LIVE_CWD_REASON=""; return 0; }
+  _av_open_file() { printf "no\n"; return 0; }
+  artifact_removal_verdict "$1" --kind rebuildable
+)
+
+git -C "$T/seed" worktree add -q -b venv-parent-wip "$T/s/venv-parent-wip" main
+mkdir -p "$T/s/venv-parent-wip/venv/bin"
+printf 'rebuildable\n' >"$T/s/venv-parent-wip/venv/bin/python"
+# Keep a local unpushed commit and a separate dirty source edit beside the untracked venv.
+printf 'local-only commit\n' >>"$T/s/venv-parent-wip/a"
+git -C "$T/s/venv-parent-wip" -c user.name=t -c user.email=t@example.invalid commit -qam local-unpushed
+printf 'dirty-source\n' >>"$T/s/venv-parent-wip/a"
+age "$T/s/venv-parent-wip" 2881
+source_commit_before="$(git -C "$T/s/venv-parent-wip" rev-parse HEAD)"
+source_status_before="$(git -C "$T/s/venv-parent-wip" status --porcelain)"
+assert_eq "$(venv_verdict "$T/s/venv-parent-wip/venv")" remove "49h idle untracked rebuildable venv can be stripped despite local parent work"
+assert_eq "$(git -C "$T/s/venv-parent-wip" rev-parse HEAD)" "$source_commit_before" "unpublished parent commit remains"
+assert_eq "$(git -C "$T/s/venv-parent-wip" status --porcelain)" "$source_status_before" "dirty parent status remains"
+git -C "$T/s/venv-parent-wip" show HEAD:a | grep -q local-only && ok "local unpushed parent content remains intact" || bad "local parent commit disappeared"
+grep -q dirty-source "$T/s/venv-parent-wip/a" && ok "dirty parent worktree content remains intact" || bad "dirty parent edit disappeared"
+printf 'recent\n' >"$T/s/venv-parent-wip/venv/bin/python"
+age "$T/s/venv-parent-wip/venv" 120
+git -C "$T/s/venv-parent-wip" status --porcelain >"$T/parent-dirty.before-recent"
+assert_eq "$(venv_verdict "$T/s/venv-parent-wip/venv")" kept:recent-activity "2h recent venv content remains protected"
+git -C "$T/s/venv-parent-wip" status --porcelain >"$T/parent-dirty.after-recent"
+assert_eq "$(cat "$T/parent-dirty.after-recent")" "$(cat "$T/parent-dirty.before-recent")" "young venv verdict leaves parent unchanged"
+
 echo "== proof 3: rescued (only when nothing else proves, push must succeed) =="
 PUSHED="$T/pushed.log"
 (
