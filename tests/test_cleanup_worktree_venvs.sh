@@ -687,10 +687,20 @@ for f in "$DIRTY48/README.md" "$DIRTY48/parent-note.txt" "$DIRTY48/.venv/lib/sit
 age_path_hours_ago "$YOUNG48/README.md" 2; age_path_hours_ago "$YOUNG48/.venv/lib/site.py" 49
 HEAD48=$(git -C "$DIRTY48" rev-parse HEAD); STATUS48=$(git -C "$DIRTY48" status --porcelain -uno)
 SAFE48="$TMP_ROOT/bin48"; mkdir -p "$SAFE48"
-printf "#!/bin/sh\\nprintf 'p1\\nn/\\n'\\n" > "$SAFE48/lsof"; chmod +x "$SAFE48/lsof"
+cat > "$SAFE48/lsof" <<'SH'
+#!/bin/sh
+case "$*" in *+D*) exit 1 ;; esac
+printf 'p1\nn/\n'
+SH
+chmod +x "$SAFE48/lsof"
 OUT13=$(env -i HOME="$TMP_ROOT/home" PATH="$SAFE48:$TEST_PATH" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=48 DISK_MAGICIAN_LOAD5_OVERRIDE=0.1000 WORKTREE_APPROVED=1 bash "$TARGET_SCRIPT" --roots "$R48" --clean 2>&1)
 assert_contains "49h untracked venv is eligible" "stripping $DIRTY48/.venv" "$OUT13"
-[[ ! -d "$DIRTY48/.venv" ]] && record_pass "49h untracked venv removed" || record_fail "49h untracked venv removed" "still present"
+if [[ ! -d "$DIRTY48/.venv" ]]; then
+  record_pass "49h untracked venv removed"
+else
+  record_fail "49h untracked venv removed" "still present"
+  printf '%s\n' "$OUT13" | sed 's/^/        /'
+fi
 [[ "$(git -C "$DIRTY48" rev-parse HEAD)" == "$HEAD48" && "$(git -C "$DIRTY48" status --porcelain -uno)" == "$STATUS48" && -f "$DIRTY48/parent-note.txt" ]] && record_pass "unpublished parent HEAD/status and untracked file preserved" || record_fail "unpublished parent Git state preserved" "parent state changed"
 [[ -d "$YOUNG48/.venv" ]] && record_pass "2h parent venv preserved" || record_fail "2h parent venv preserved" "removed"
 [[ -f "$TRACKED48/.venv/lib/site.py" ]] && record_pass "tracked venv content preserved" || record_fail "tracked venv content preserved" "removed"

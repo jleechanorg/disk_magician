@@ -84,23 +84,22 @@ echo "=== Suite 1: cleanup_worktrees.sh ==="
 # Case 1: min_stale_days=14, --min-age 0 -> clamped to 14d
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_14" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" --min-age 0 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=14 clamps --min-age 0 to 14d" "(others: 14d)" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=14 clamps --min-age 0 to 14d" "Worktree content floor: 14d" "$out"
 
 # Case 2: min_stale_days=14, no --min-age flag -> defaults to 14d
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_14" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=14 defaults to 14d" "(others: 14d)" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=14 defaults to 14d" "Worktree content floor: 14d" "$out"
 
 # Case 3: min_stale_days=14, --min-age 21 -> preserves 21d
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_14" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" --min-age 21 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=14 respects higher --min-age 21d" "(others: 21d)" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=14 respects higher --min-age 21d" "Worktree content floor: 21d" "$out"
 
-# Case 4: min_stale_days=3 cannot lower the 48h worktree floor; merged floor remains 3d.
+# Case 4: min_stale_days=3 cannot lower the common 48h worktree floor.
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_3" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" --min-age 0 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=3 cannot lower others floor below 48h" "(others: 48h)" "$out"
-assert_contains "cleanup_worktrees.sh: merged floor remains 3d" "Merged clean worktree floor: 3d" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=3 cannot lower the floor below 48h" "Worktree content floor: 48h" "$out"
 
 
 echo "=== Suite 2: cleanup_worktree_venvs.sh ==="

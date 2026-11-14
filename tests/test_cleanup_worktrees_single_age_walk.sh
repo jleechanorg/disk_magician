@@ -609,8 +609,8 @@ batch_equivalent() {
   run_cleanup branch "$F/branch.out"
   # The amendment intentionally removes exact age labels from PRESERVE rows.
   # Keep every other byte in the batch baseline comparison unchanged.
-  sed -E 's/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/baseline.out" > "$F/baseline.batch-normalized"
-  sed -E 's/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/branch.out" > "$F/branch.batch-normalized"
+  sed -E '/^(Merged clean worktree floor:|Worktree content floor:)/d; s/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/baseline.out" > "$F/baseline.batch-normalized"
+  sed -E '/^(Merged clean worktree floor:|Worktree content floor:)/d; s/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/branch.out" > "$F/branch.batch-normalized"
   require diff -u "$F/baseline.batch-normalized" "$F/branch.batch-normalized"
 }
 
