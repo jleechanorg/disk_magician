@@ -84,7 +84,7 @@ CLI_TMP_DIRS=()
 CLI_PATTERNS=()
 # Size-budget mode (bead disk_magician-d45): 0 disables.
 BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
-BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
+BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-$(safety_disposable_recency_floor_minutes)}"
 
 usage() {
   cat <<EOF
@@ -104,7 +104,7 @@ Options:
                       env DISK_MAGICIAN_SCRATCH_BUDGET_GB).
   --budget-floor-minutes <N>
                       Never evict anything younger than N minutes under
-                      budget mode (default 120, hard minimum 60; env
+                      budget mode (default 48h, hard minimum 60m for explicit overrides; env
                       DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES).
   -h, --help          Show this help message.
 EOF
@@ -470,8 +470,19 @@ fi
 # just validated; rc 0 on removed:*. Unlike c14_remove it keeps the verdict, so
 # the caller can report the specific reason instead of a generic failure.
 pr_scratch_remove() {
-  local verdict
-  verdict="$(DM_DELETION_LOGGED=1 quarantine_remove "$1" --kind ephemeral 2>/dev/null)" || verdict="kept:check-failed"
+  local verdict floor_minutes default_floor
+  default_floor="$(safety_disposable_recency_floor_minutes)"
+  floor_minutes=$((MIN_AGE_HOURS * 60))
+  (( floor_minutes < 120 )) && floor_minutes=120
+  if (( floor_minutes < default_floor )); then
+    # The operator-selected age already passed this cleaner's content/use
+    # gates. Carry that explicit floor into both C14's idle veto and age proof;
+    # scheduled/default calls continue to use the shared 48h floor.
+    verdict="$(DISK_MAGICIAN_AGE_FLOOR_MINUTES="$floor_minutes" DM_DELETION_LOGGED=1 \
+      quarantine_remove "$1" --kind ephemeral --min-idle-minutes "$floor_minutes" 2>/dev/null)" || verdict="kept:check-failed"
+  else
+    verdict="$(DM_DELETION_LOGGED=1 quarantine_remove "$1" --kind ephemeral 2>/dev/null)" || verdict="kept:check-failed"
+  fi
   PR_SCRATCH_LAST_VERDICT="${verdict:-kept:check-failed}"
   [[ "$PR_SCRATCH_LAST_VERDICT" == removed:* ]]
 }

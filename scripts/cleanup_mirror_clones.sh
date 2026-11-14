@@ -475,16 +475,14 @@ registry_hit() {
 }
 
 # reader_clone_verdict <clone>: the mounted reader supplies no content decision.
-# The canonical content-mtime helper protects recent or unreadable trees, with
-# the machine's safety floor allowed only to raise seven days; C14 then decides
-# whether the clone and its leases are actually removable.
+# The shared worktree floor defaults to 48 hours and honors raised machine config;
+# C14 independently checks whether the clone and its leases are removable.
 reader_clone_verdict() {
-  local dir="$1" min_days rc=0 verdict
-  min_days="$(safety_min_stale_days 2>/dev/null)" || min_days=7
-  [[ "$min_days" =~ ^[0-9]+$ ]] || min_days=7
-  (( min_days >= 7 )) || min_days=7
-  declare -F worktree_is_recently_active >/dev/null || { echo c14:check-failed; return 0; }
-  worktree_is_recently_active "$dir" "$min_days" || rc=$?
+  local dir="$1" min_minutes rc=0 verdict
+  min_minutes="$(safety_worktree_floor_minutes 2>/dev/null)" || min_minutes=2880
+  [[ "$min_minutes" =~ ^[1-9][0-9]*$ ]] || min_minutes=2880
+  declare -F worktree_is_recently_active_minutes >/dev/null || { echo c14:check-failed; return 0; }
+  worktree_is_recently_active_minutes "$dir" "$min_minutes" || rc=$?
   if (( rc == 0 )); then
     echo recent-activity
     return 0
@@ -494,7 +492,6 @@ reader_clone_verdict() {
   verdict="$(artifact_removal_verdict "$dir" 2>/dev/null)" || verdict=kept:check-failed
   [[ "$verdict" == remove ]] || echo "c14:$verdict"
 }
-
 # ── Live-cwd snapshot (one lsof observation per run) ───────────────────────
 CWD_KNOWN=true
 if ! lsof_snapshot_cwds; then

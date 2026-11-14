@@ -156,6 +156,8 @@ mk big; head -c 2097152 /dev/zero >"$T/big/blob"
 [[ "$(DISK_MAGICIAN_RESCUE_CAP_MB=1 rc rescue_check "$T/big")" -ne 0 ]] && ok "over cap blocks check" || bad "over cap passed"
 [[ "$(DISK_MAGICIAN_RESCUE_CAP_MB=1 rc rescue_push "$T/big")" -ne 0 ]] && ok "over cap blocks push" || bad "over cap pushed"
 [[ "$(DISK_MAGICIAN_RESCUE_CAP_MB=5 rc rescue_check "$T/big")" -eq 0 ]] && ok "under raised cap passes" || bad "raised cap failed"
+( _rr_size_bytes() { : >"$T/default-cap-size-check.called"; printf '%s\n' "$((201 * 1024 * 1024))"; }; unset DISK_MAGICIAN_RESCUE_CAP_MB; rescue_check "$T/big" ) && [[ ! -e "$T/default-cap-size-check.called" ]] && ok "default rescue has no 200MiB cap or size walk" || bad "implicit rescue cap/size walk remains"
+( _rr_size_bytes() { printf '%s\n' "$((201 * 1024 * 1024))"; }; unset DISK_MAGICIAN_RESCUE_CAP_MB; rescue_check "$T/big" ) && ok "default rescue accepts complete source larger than 200 MiB" || bad "implicit 200 MiB rescue cap remains"
 
 # no origin / not git
 git init -q "$T/noor"; [[ "$(rc rescue_check "$T/noor")" -ne 0 && "$(rc rescue_push "$T/noor")" -ne 0 ]] && ok "no origin fails closed" || bad "no origin passed"

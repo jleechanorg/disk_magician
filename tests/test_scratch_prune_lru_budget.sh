@@ -78,10 +78,13 @@ run() {
     "$@"
 }
 
+# These legacy manual-budget scenarios select their prior 120-minute floor explicitly.
+legacy_budget() { run "$@" --budget-floor-minutes 120; }
+
 echo "Test 1: dry-run previews oldest-first eviction to the target and deletes nothing"
 use_root
 make_tree a 600; make_tree b 3000; make_tree c 1800; make_tree d 300; make_tree e 1200
-out="$(run bash "$SCRIPT" --dry-run --budget-pct 35 2>&1)"; rc=$?
+out="$(legacy_budget bash "$SCRIPT" --dry-run --budget-pct 35 2>&1)"; rc=$?
 [[ "$rc" == 0 ]] && ok "dry-run exits 0" || bad "dry-run exits 0" "rc=$rc"
 check "dry-run previews the oldest entry" "would-remove:kept:no-proof $SCRATCH_ROOT/b" "$out"
 check "dry-run previews the second-oldest entry" "would-remove:kept:no-proof $SCRATCH_ROOT/c" "$out"
@@ -91,11 +94,11 @@ for n in a b c d e; do kept "$n"; done
 [[ ! -s "$LOG" ]] && ok "dry-run wrote no deletion-log row" || bad "dry-run wrote no deletion-log row"
 
 echo "Test 2: --clean without approval refuses"
-out="$(run bash "$SCRIPT" --clean --budget-pct 35 2>&1)"; rc=$?
+out="$(legacy_budget bash "$SCRIPT" --clean --budget-pct 35 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "unapproved clean refuses with rc=2" || bad "unapproved clean refuses with rc=2" "rc=$rc"
 
 echo "Test 3: approved clean evicts least-recently-used first and stops at the target"
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 35 2>&1)"; rc=$?
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 35 2>&1)"; rc=$?
 [[ "$rc" == 0 ]] && ok "clean exits 0" || bad "clean exits 0" "rc=$rc"
 gone b; gone c
 kept e; kept a; kept d
@@ -118,17 +121,23 @@ summary_removed="$(printf '%s\n' "$summary_line" | grep -o ' removed=[0-9]*' | c
   || bad "summary removed= matches the removals actually performed ($removed_events)" "$summary_line"
 
 echo "Test 4: under target is a no-op"
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 90 2>&1)"; rc=$?
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 90 2>&1)"; rc=$?
 [[ "$rc" == 0 ]] && ok "no-op exits 0" || bad "no-op exits 0" "rc=$rc"
 check "no-op names the met target" "skipped:budget-target-met" "$out"
 kept a
 
-echo "Test 5: the recency floor exempts young entries; the floor never drops below 60 minutes"
+echo "Test 5: manual budget defaults to 48h and honors its explicit 120m/60m floors"
 use_root
 make_tree old 600; make_tree young 90; make_tree fresh 45
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+kept old; kept young; kept fresh
+check "the 48h default keeps a 10h-old entry" "kept:recent-activity $SCRATCH_ROOT/old" "$out"
+
+use_root
+make_tree old 600; make_tree young 90; make_tree fresh 45
+out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 --budget-floor-minutes 120 2>&1)"
 gone old; kept young; kept fresh
-check "young entry keeps as recent activity" "kept:recent-activity $SCRATCH_ROOT/young" "$out"
+check "explicit 120m floor keeps a 90m-old entry" "kept:recent-activity $SCRATCH_ROOT/young" "$out"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 --budget-floor-minutes 10 2>&1)"
 gone young; kept fresh
 check "a floor below 60 minutes is clamped up" "kept:recent-activity $SCRATCH_ROOT/fresh" "$out"
@@ -142,7 +151,7 @@ lease_write "$2" "$2" "" scratch-lru-test --owner-pid "$3" >/dev/null' _ "$ROOT"
 ( cd "$SCRATCH_ROOT/cwd-held" && exec sleep 300 ) & cwd_pid=$!
 ( exec 3<"$SCRATCH_ROOT/open-held/payload.bin"; exec sleep 300 ) & open_pid=$!
 sleep 1
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
 kill "$lease_pid" "$cwd_pid" "$open_pid" 2>/dev/null; wait "$lease_pid" "$cwd_pid" "$open_pid" 2>/dev/null
 gone plain; kept leased; kept cwd-held; kept open-held
 check "live lease is the keep reason" "kept:live-owner $SCRATCH_ROOT/leased" "$out"
@@ -157,7 +166,7 @@ check "unmet target emits the partial marker" "partial:budget-target-unmet" "$ou
 echo "Test 7: unmeasurable recency is kept"
 use_root
 make_tree unmeasurable-tree 600; make_tree measurable 600
-out="$(RUN_PATH="$SHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+out="$(RUN_PATH="$SHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
 kept unmeasurable-tree; gone measurable
 check "unmeasurable entry reports its keep" "kept:mtime-unmeasurable $SCRATCH_ROOT/unmeasurable-tree" "$out"
 
@@ -168,7 +177,7 @@ git -C "$SCRATCH_ROOT/dirty-repo" init -q
 printf 'change\n' >"$SCRATCH_ROOT/dirty-repo/tracked.txt"
 git -C "$SCRATCH_ROOT/dirty-repo" add tracked.txt
 age "$SCRATCH_ROOT/dirty-repo" 600
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
 gone dirty-repo
 check "deletion log line carries the dirty verdict" "scratch-lru:kept:dirty" "$(grep -F "$SCRATCH_ROOT/dirty-repo" "$LOG")"
 check "summary counts the dirty eviction" "not_pushed_or_dirty=1" "$out"
@@ -191,7 +200,7 @@ case "\$*" in *secret-unknown*status*|*status*secret-unknown*) exit 3 ;; esac
 exec "$real_git" "\$@"
 EOF2
 chmod +x "$GSHIM/git"
-out="$(RUN_PATH="$GSHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+out="$(RUN_PATH="$GSHIM:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
 kept secret-unknown
 gone secret-known
 check "unknown repository state keeps the secret-like entry" "kept:" "$(printf '%s\n' "$out" | grep -E "^kept:.* $SCRATCH_ROOT/secret-unknown")"
@@ -208,7 +217,7 @@ git -C "$HOST" -c user.email=t@example.invalid -c user.name=t commit -qm base
 git -C "$HOST" worktree add -q -b nested-wt "$SCRATCH_ROOT/nested-wt/wt" HEAD
 printf 'unsaved\n' >>"$SCRATCH_ROOT/nested-wt/wt/tracked.txt"
 age "$SCRATCH_ROOT/nested-wt" 600
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
 kept nested-wt
 grep -qs unsaved "$SCRATCH_ROOT/nested-wt/wt/tracked.txt" && ok "nested worktree's uncommitted change survives" || bad "nested worktree's uncommitted change survives"
 check "nested linked worktree is the keep reason" "kept:linked-worktree $SCRATCH_ROOT/nested-wt" "$out"
@@ -228,7 +237,7 @@ mkdir -p "$SCRATCH_ROOT/clean-linked"
 git -C "$HOST" worktree add -q -b clean-linked "$SCRATCH_ROOT/clean-linked/wt" HEAD
 git -C "$SCRATCH_ROOT/clean-linked/wt" push -qu origin HEAD
 age "$SCRATCH_ROOT/clean-linked" 15000
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
 kept clean-linked
 check "clean pushed linked worktree is the keep reason" "kept:linked-worktree $SCRATCH_ROOT/clean-linked" "$out"
 
@@ -246,7 +255,7 @@ make_tree dirty-first 600; mk_repo "$SCRATCH_ROOT/dirty-first/a-dirty" dirty; mk
 make_tree broken-first 600; mk_repo "$SCRATCH_ROOT/broken-first/a-broken" broken; mk_repo "$SCRATCH_ROOT/broken-first/z-dirty" dirty
 make_tree all-dirty 600; mk_repo "$SCRATCH_ROOT/all-dirty/a-dirty" dirty; mk_repo "$SCRATCH_ROOT/all-dirty/z-dirty" dirty
 for n in dirty-first broken-first all-dirty; do age "$SCRATCH_ROOT/$n" 600; done
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
 kept dirty-first; kept broken-first
 [[ -d "$SCRATCH_ROOT/dirty-first/z-broken/.git" ]] && ok "unmeasured repository after a dirty one survives" || bad "unmeasured repository after a dirty one survives"
 for n in dirty-first broken-first; do
@@ -264,24 +273,24 @@ git -C "$SCRATCH_ROOT/remote-down" add tracked.txt
 git -C "$SCRATCH_ROOT/remote-down" -c user.email=t@example.invalid -c user.name=t commit -qm work
 git -C "$SCRATCH_ROOT/remote-down" remote add origin "$T/no-such-remote-${ROOT_SEQ}.git"
 age "$SCRATCH_ROOT/remote-down" 600
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"
 kept remote-down
 check "unverifiable remote is the keep reason" "kept:remote-unverified $SCRATCH_ROOT/remote-down" "$out"
 
 echo "Test 9: usage that cannot be measured fails closed"
 use_root
 make_tree a 600
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 FAKE_STATUS_FAIL=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 FAKE_STATUS_FAIL=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
 [[ "$rc" == 75 ]] && ok "unmeasurable usage exits 75" || bad "unmeasurable usage exits 75" "rc=$rc"
 check "unmeasurable usage is reported" "skipped:measurement-unavailable" "$out"
 kept a
 
 echo "Test 10: budget mode refuses the automatic and available-floor modes"
-out="$(run env DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --dry-run --budget-pct 50 2>&1)"; rc=$?
+out="$(legacy_budget env DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --dry-run --budget-pct 50 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "automatic + budget refuses" || bad "automatic + budget refuses" "rc=$rc"
-out="$(run bash "$SCRIPT" --dry-run --available-floor --budget-pct 50 2>&1)"; rc=$?
+out="$(legacy_budget bash "$SCRIPT" --dry-run --available-floor --budget-pct 50 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "available-floor + budget refuses" || bad "available-floor + budget refuses" "rc=$rc"
-out="$(run bash "$SCRIPT" --dry-run --budget-pct 100 2>&1)"; rc=$?
+out="$(legacy_budget bash "$SCRIPT" --dry-run --budget-pct 100 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "budget percent above 99 refuses" || bad "budget percent above 99 refuses" "rc=$rc"
 
 echo "Test 10b: one unreadable top-level entry does not void the whole scan"
@@ -295,7 +304,7 @@ make_tree plain 2880
 mkdir -p "$SCRATCH_ROOT/locked" && head -c 1024000 /dev/urandom >"$SCRATCH_ROOT/locked/payload.bin"
 age "$SCRATCH_ROOT/locked" 2880
 chmod 000 "$SCRATCH_ROOT/locked"
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
+out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
 chmod 700 "$SCRATCH_ROOT/locked"
 if [[ "$(id -u)" == 0 ]]; then
   ok "unreadable-candidate case skipped under privileged test user"
@@ -322,7 +331,7 @@ for kind in build evidence; do
       mkdir -p "$SCRATCH_ROOT/worldai_frontend"
       ln -s "$outside/$kind" "$SCRATCH_ROOT/worldai_frontend/$kind"
     fi
-    out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
+    out="$(legacy_budget env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 2>&1)"; rc=$?
     [[ -f "$outside/$kind/old-unit/payload.bin" ]] && ok "$parent $kind symlink target survives" || bad "$parent $kind symlink target survives"
     [[ "$out" != *"removed:"* ]] && ok "$parent $kind symlink is not traversed for removal" || bad "$parent $kind symlink is not traversed for removal" "$out"
     [[ "$rc" == 75 ]] && ok "$parent $kind preserves unmet target (75 partial)" || bad "$parent $kind preserves unmet target (75 partial)" "rc=$rc"
@@ -333,7 +342,7 @@ echo "Test 12: managed units already discovered are not counted twice in a previ
 use_root
 make_tree worldai_frontend/build/old-unit 600
 make_tree pressure 45
-out="$(run bash "$SCRIPT" --dry-run --budget-pct 1 2>&1)"; rc=$?
+out="$(legacy_budget bash "$SCRIPT" --dry-run --budget-pct 1 2>&1)"; rc=$?
 count="$(printf '%s\n' "$out" | grep -c "^would-remove:.* $SCRATCH_ROOT/worldai_frontend/build/old-unit ")"
 [[ "$count" == 1 ]] && ok "managed unit previewed exactly once" || bad "managed unit previewed exactly once" "count=$count"
 check "preview reports one unit rather than duplicates" "would_evict=1" "$out"

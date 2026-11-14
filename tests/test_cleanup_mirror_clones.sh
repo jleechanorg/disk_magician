@@ -645,6 +645,8 @@ python3 - "$RECENT_READER_CLONE" <<'PY'
 import os, sys, time
 os.utime(sys.argv[1], (time.time() - 10 * 86400, time.time() - 10 * 86400))
 PY
+age_clone_content_days "$RECENT_READER_CLONE" 3
+age_clone_content_days "$RECENT_READER_CLONE" 3
 
 printf '{"min_stale_days":10}\n' >"$DISK_MAGICIAN_SAFETY_FILE"
 rc=0
@@ -672,6 +674,13 @@ with open(lease, "w") as f:
 PY
 }
 c14_baseline "$OLD_READER_CLONE"
+c14_baseline "$RECENT_READER_CLONE"
+default_floor_out="$(env "${c14_reader_env[@]}" MOCK_READER_MODE=empty bash "$SCRIPT" --dry-run --root "$C14_ROOT" --max-depth 12 --registry-reader-image "$READER_IMAGE" 2>&1)"
+check "3d-idle clone qualifies at the 48h default" '[[ "$rc" -eq 0 ]] && grep -qF "DRY RUN: would remove: $RECENT_READER_CLONE" <<<"$default_floor_out"'
+c14_baseline "$RECENT_READER_CLONE"
+rc=0
+default_floor_out="$(env "${c14_reader_env[@]}" MOCK_READER_MODE=empty bash "$SCRIPT" --dry-run --root "$C14_ROOT" --max-depth 12 --registry-reader-image "$READER_IMAGE" 2>&1)" || rc=$?
+check "3d-idle clean clone passes the shared 48h default" '[[ "$rc" -eq 0 ]] && grep -qF "DRY RUN: would remove: $RECENT_READER_CLONE" <<<"$default_floor_out"'
 old_c14_verdict="$(artifact_removal_verdict "$OLD_READER_CLONE")"
 check "old clone with released C14 git baseline receives an exact remove verdict" '[[ "$old_c14_verdict" == remove ]]'
 unbaselined_c14_verdict="$(artifact_removal_verdict "$UNBASELINED_CLONE")"

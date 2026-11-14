@@ -216,14 +216,14 @@ c14_ephemeral_retention() {
         # (see _av_artifact_removal_verdict), so it bypasses nothing. Depth stays
         # one component, the OS-owned basenames the tmp-root loop excludes (:179)
         # stay excluded, and a symlink is never followed.
-        if [[ "$rel" =~ ^[^./][^/]*$ && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) && -d "$content" && ! -L "$p" ]]; then echo 1440; return 0; fi
+        if [[ "$rel" =~ ^[^./][^/]*$ && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) && -d "$content" && ! -L "$p" ]]; then safety_disposable_recency_floor_minutes; return 0; fi
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
     elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
-    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then echo 10080
-    elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
+    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then safety_disposable_recency_floor_minutes
+    elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then safety_disposable_recency_floor_minutes
     else return 1; fi
 }
 # c14_archive_origin <candidate> <inventory>: E1 uses only a matching durable
@@ -257,21 +257,24 @@ c14_archive_origin() (
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t floor re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
+    local h w g t floor caller_min_idle="${3:-}" caller_min_idle_explicit="${4:-0}" re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
             g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" &&
             [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] &&
-            t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] &&
-            c14_repo_content_ok "$w" >/dev/null || return 1
-        # The caller's deadline reaches the bounded shared remote/topology probes;
-        # their kept/deferred verdict is propagated verbatim (never kept:-prefixed).
-        pushed="$(c14_repo_pushed_ok "$w" "$w" "$deadline")" || { printf '%s\n' "${pushed:-kept:check-failed}"; return 1; }
+            t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] || return 1
+        # User instruction (2026-11-13): dirty/unpushed parent work is not a
+        # deletion reason when only its untracked rebuildable venv is removed.
+        # The caller and C14 still apply parent lease/AO/live-cwd and 48h age;
+        # the target venv still passes candidate-scoped secrets/open-file checks.
         # Use the same configured floor and minute-based fail-closed probe as the
         # venv cleaner; higher local floors still protect the worktree.
         floor="$(safety_worktree_floor_minutes 2>/dev/null)" || { printf 'kept:check-failed\n'; return 1; }
         [[ "$floor" =~ ^[1-9][0-9]*$ ]] || { printf 'kept:check-failed\n'; return 1; }
+        if [[ "$caller_min_idle_explicit" == 1 && "$caller_min_idle" =~ ^[0-9]+$ ]] && (( caller_min_idle >= 60 )); then
+            floor="$caller_min_idle"
+        fi
         worktree_is_recently_active_minutes "$w" "$floor" && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
@@ -431,7 +434,11 @@ except Exception:
 # Only find rc 0 + filter rc 1 + stdout "none" means clean; every other outcome is secret-like.
 _av_secret_like() {
     local res
-    res="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+    # -type f matters: without it, `find` also matched credential-named DIRECTORIES
+    # (e.g. grpc's _credentials/). A directory carries no secret bytes and cannot be
+    # exempted by a filename rule, so it forced every grpc-bearing venv to read as
+    # secret-like (52 GB blocked on jeff-ubuntu 2026-11-13, bead disk_magician-9ywq).
+    res="$(find "$1" -type f \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
         -o -iname '*.pem.map' -o -iname '*.key.map' -o -iname '*.p12.map' -o -iname '*.pfx.map' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
         -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
@@ -572,7 +579,7 @@ _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
     # A caller-provided dry-run marker is an unconditional no-push boundary.
     [[ "${DRY_RUN:-}" != true ]] || C14_NO_RESCUE_PUSH=1
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 min_idle_explicit=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -588,7 +595,7 @@ _av_artifact_removal_verdict() (
                     --deadline-at) deadline=$2 ;;
                     --inventory-out) inventory_out=$2 ;;
                     --own-reuse-claim) own_claim=$2 ;;
-                    --min-idle-minutes) [[ "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }; min_idle=$2 ;;
+                    --min-idle-minutes) [[ "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }; min_idle=$2; min_idle_explicit=1 ;;
                 esac
                 shift 2 ;;
             *) echo kept:check-failed; return 0 ;;
@@ -596,6 +603,10 @@ _av_artifact_removal_verdict() (
     done
     # A named reuse claim must be an absolute, existing lease file; never a
     # bare name that could resolve against the caller's cwd.
+    # User authority: default disposable content is protected for 48h, even when
+    # another proof (on-origin/rebuildable/released) is present. A named caller floor
+    # remains explicit; the emergency env override applies only to ephemeral rows.
+    if (( min_idle == 0 )); then min_idle="$(safety_disposable_recency_floor_minutes)"; fi
     if [[ -n "$own_claim" ]]; then
         [[ "$own_claim" == /* && -f "$own_claim" && ! -L "$own_claim" ]] || { echo kept:check-failed; return 0; }
         own_claim="$(cd "$(dirname "$own_claim")" 2>/dev/null && pwd -P)/${own_claim##*/}"
@@ -695,7 +706,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
             if [[ "$ret" == ok ]]; then proofs+=" age"
             elif [[ "$ret" != none ]]; then echo "$ret"; return 0; fi
             floor_class="$(c14_ephemeral_retention "$p")" || floor_class='' ;;
-        rebuildable) ret="$(_av_rebuildable "$p" "$deadline")" && reb=1 || {
+        rebuildable) ret="$(_av_rebuildable "$p" "$deadline" "$min_idle" "$min_idle_explicit")" && reb=1 || {
             case "$ret" in
                 deferred:*|kept:*) echo "$ret"; return 0 ;;
                 recent-activity) echo kept:recent-activity; return 0 ;;  # caller-owned venv floor
@@ -714,6 +725,13 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
             fi ;;
         *) echo kept:unproven-content; return 0 ;;
     esac
+    if (( min_idle_explicit == 0 )) && [[ "$kind" == ephemeral && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]{1,7}$ ]]; then
+        local emergency_floor=$((10#$DISK_MAGICIAN_AGE_FLOOR_MINUTES))
+        (( emergency_floor < 120 )) && emergency_floor=120
+        if [[ ! "$floor_class" =~ ^[0-9]+$ ]] || (( floor_class <= $(safety_disposable_recency_floor_minutes) )); then
+            min_idle=$emergency_floor
+        fi
+    fi
     # A caller that names --min-idle-minutes owns that idle floor (worktree_remove_hook's
     # recency window): it vetoes whatever proofs hold, and unmeasurable fails closed.
     if (( min_idle > 0 )); then
@@ -728,9 +746,10 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ "$newest" =~ ^[0-9]+$ ]] || { echo kept:mtime-unmeasurable; return 0; }
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
     # Proof 1: age. Per-child newest content mtime; unmeasurable is no proof.
-    local floor=${floor_class:-1440}
-    [[ -n "$floor_class" || ! -f "$p/.git" ]] || floor=2880
-    if [[ "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]+$ ]]; then floor=$DISK_MAGICIAN_AGE_FLOOR_MINUTES; fi
+    local floor
+    floor="$(safety_disposable_recency_minimum_minutes "${floor_class:-$(safety_disposable_recency_floor_minutes)}")"
+    [[ -n "$floor_class" || ! -f "$p/.git" ]] || floor="$(safety_disposable_recency_floor_minutes)"
+    if [[ "$kind" == ephemeral && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]{1,7}$ ]] && { [[ ! "$floor_class" =~ ^[0-9]+$ ]] || (( floor_class <= $(safety_disposable_recency_floor_minutes) )); }; then floor=$DISK_MAGICIAN_AGE_FLOOR_MINUTES; fi
     (( floor >= 120 )) || floor=120
     # Age proves only the declared-ephemeral classes (/tmp and Scratch). Other kinds keep
     # their own shape/provenance proof: age must not bypass a caller's scope table.

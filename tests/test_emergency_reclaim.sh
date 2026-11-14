@@ -67,47 +67,45 @@ run_emergency() {
   RC=$?
 }
 
-# 1. Early stop at the floor where the target is met; lower floors never run.
-run_emergency 5 "tmp:24=$((2 * GIB_KB))" "scratch:24=$((1 * GIB_KB))" "tmp:12=$((3 * GIB_KB))" "scratch:12=$((9 * GIB_KB))" -- --target-gb 10
-check "early stop exits 0 with target_met" '[[ $RC -eq 0 && "$OUT" == *"result: target_met"* ]]' "rc=$RC"
-check "stops after tmp 12h; scratch 12h and 6h/2h never run" \
-  '! grep -q "scratch mode=clean hours=12" "$W/calls.log" && ! grep -q "hours=6\|hours=2 " "$W/calls.log" && grep -q "tmp mode=clean hours=12" "$W/calls.log"'
-check "prints running freed_so_far / target lines" '[[ "$OUT" == *"freed_so_far 2.00GiB / 10GiB"* && "$OUT" == *"freed_so_far 6.00GiB / 10GiB"* ]]'
-check "receipt reports per-lane df bytes" '[[ "$OUT" == *"lane tmp=5.00GiB lane scratch=1.00GiB lane worktrees=0.00GiB"* ]]'
-check "approval vars reach cleaners only" 'grep -q "ltp=1" "$W/calls.log" && grep -q "stp=1" "$W/calls.log" && [[ -z "${LARGE_TMP_APPROVED:-}${SCRATCH_TOP_LEVEL_APPROVED:-}" ]]'
-check "floor passed as DISK_MAGICIAN_AGE_FLOOR_MINUTES" 'grep -q "tmp mode=clean hours=24" "$W/calls.log"'
+# 1. Default emergency age is 48h, one pass; explicit target stopping still works.
+run_emergency 5 "tmp:48=$((5 * GIB_KB))" "scratch:48=$((9 * GIB_KB))" -- --target-gb 10
+check "default48h pass meets the target" '[[ $RC -eq 0 && "$OUT" == *"result: target_met"* ]]' "rc=$RC"
+check "default emergency performs one tmp pass at48h" '[[ $(grep -c "mode=clean" "$W/calls.log") -eq 1 ]] && grep -q "tmp mode=clean hours=48" "$W/calls.log" && ! grep -q "^scratch" "$W/calls.log"'
+check "freed-space receipt tracks tmp pass" '[[ "$OUT" == *"freed_so_far 5.00GiB / 10GiB"* ]]'
+check "receipt reports per-lane df bytes" '[[ "$OUT" == *"lane tmp=5.00GiB lane scratch=0.00GiB lane worktrees=0.00GiB"* ]]'
+check "approval vars reach cleaners only" 'grep -q "ltp=1" "$W/calls.log" && [[ -z "${LARGE_TMP_APPROVED:-}${SCRATCH_TOP_LEVEL_APPROVED:-}" ]]'
+check "48h floor passed to cleaner" 'grep -q "tmp mode=clean hours=48" "$W/calls.log"'
 check "one lock hold: every cleaner saw the same lock fd" \
   '[[ $(grep -o "lockfd=[0-9]*" "$W/calls.log" | sort -u | wc -l) -eq 1 && "$(grep -o "lockfd=[a-z0-9]*" "$W/calls.log" | head -1)" != lockfd=none ]]'
 
-# 2. target_unmet: every floor runs, 0 B is never success, 2 h is the minimum.
+# 2. target_unmet at the default48h floor; lower age requires an explicit flag.
 run_emergency 5 -- --target-gb 50
 check "target_unmet exits nonzero" '[[ $RC -ne 0 && "$OUT" == *"target_unmet"* ]]' "rc=$RC"
-check "descends 24,12,6,2 then stops" \
-  'for h in 24 12 6 2; do grep -q "tmp mode=clean hours=$h " "$W/calls.log" || exit 1; done; ! grep -q "hours=1 \|hours=0 " "$W/calls.log"'
-check "receipt names the 2h floor" '[[ "$OUT" == *"floor_reached=2h"* ]]'
+check "default invocation runs one48h pass" '[[ $(grep -c "tmp mode=clean" "$W/calls.log") -eq 1 ]] && grep -q "tmp mode=clean hours=48" "$W/calls.log"'
+check "receipt names default48h floor" '[[ "$OUT" == *"floor_reached=48h"* ]]'
 
 run_emergency 5 -- --target-gb 50 --max-age-hours 1
-check "--max-age-hours below 2 is raised to 2" '[[ $(grep -c "tmp mode=clean" "$W/calls.log") -eq 1 ]] && grep -q "tmp mode=clean hours=2 " "$W/calls.log"'
+check "explicit max age below2 is raised to2" '[[ $(grep -c "tmp mode=clean" "$W/calls.log") -eq 1 ]] && grep -q "tmp mode=clean hours=2" "$W/calls.log"'
 
 run_emergency 5 -- --target-gb 50 --max-age-hours 6
-check "--max-age-hours 6 runs 6 then 2" '[[ $(grep -c "tmp mode=clean" "$W/calls.log") -eq 2 ]]'
+check "explicit max age6 uses one6h pass" '[[ $(grep -c "tmp mode=clean" "$W/calls.log") -eq 1 ]] && grep -q "tmp mode=clean hours=6" "$W/calls.log"'
 
 # 3. Already met: no cleaner runs.
 run_emergency 100 -- --target-gb 10
 check "already-met target runs no cleaner" '[[ $RC -eq 0 && ! -s "$W/calls.log" ]]'
 
 # 4. Dry-run: dry-run args, no approvals, no lock, projections per floor, df unchanged.
-run_emergency 5 "tmp:24=$((2 * GIB_KB))" "scratch:12=$((4 * GIB_KB))" -- --target-gb 50 --dry-run
+run_emergency 5 "tmp:48=$((2 * GIB_KB))" "scratch:48=$((4 * GIB_KB))" -- --target-gb 50 --dry-run
 check "dry-run exits 0 and leaves free space alone" '[[ $RC -eq 0 && "$(cat "$W/free_kb")" -eq $((5 * GIB_KB)) ]]'
 check "dry-run cleaners get --dry-run, no approvals, no lock" \
   '! grep -q "mode=clean" "$W/calls.log" && ! grep -q "ltp=1\|stp=1\|wta=1" "$W/calls.log" && ! grep -q "lockfd=[0-9]" "$W/calls.log"'
 check "dry-run prints projected bytes per floor" \
-  '[[ "$OUT" == *"projected tmp 24h: 2.00GiB"* && "$OUT" == *"projected scratch 12h: 4.00GiB"* && "$OUT" == *"projected tmp 2h"* ]]'
+  '[[ "$OUT" == *"projected tmp 48h: 2.00GiB"* && "$OUT" == *"projected scratch 48h: 4.00GiB"* ]]'
 
 # 5. Worktrees: only with the flag, only last, with WORKTREE_APPROVED.
-run_emergency 5 "tmp:2=$((1 * GIB_KB))" -- --target-gb 50
+run_emergency 5 "tmp:48=$((1 * GIB_KB))" -- --target-gb 50
 check "worktrees not run without --include-worktrees" '! grep -q "^worktrees" "$W/calls.log"'
-run_emergency 5 "worktrees:2=$((60 * GIB_KB))" -- --target-gb 50 --include-worktrees
+run_emergency 5 "worktrees:48=$((60 * GIB_KB))" -- --target-gb 50 --include-worktrees
 check "--include-worktrees runs cleanup-worktrees last with WORKTREE_APPROVED=1" \
   'tail -1 "$W/calls.log" | grep -q "^worktrees mode=clean.*wta=1" && [[ $(grep -c "^worktrees" "$W/calls.log") -eq 1 ]] && [[ "$OUT" == *"result: target_met"* ]]'
 run_emergency 100 -- --target-gb 10 --include-worktrees

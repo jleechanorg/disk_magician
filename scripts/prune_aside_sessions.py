@@ -13,21 +13,19 @@ Defaults to dry-run (pass --clean or --apply to execute).
 """
 
 import argparse
-import datetime
 import hashlib
 import json
 import os
-import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-DEFAULT_MAX_AGE_DAYS = 7
+DEFAULT_MAX_AGE_DAYS = 2
 DEFAULT_MIN_DEDUP_SIZE = 1024  # 1 KB
-DATE_PREFIX_REGEX = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:_.*)?$")
 
 
 def format_size(bytes_val: int) -> str:
@@ -76,50 +74,33 @@ def quarantine_remove(path: Path, *extra: str) -> Tuple[bool, str]:
 
 
 def get_dir_max_mtime(dir_path: Path) -> float:
-    """Return the most recent mtime of any file inside dir_path, or dir mtime."""
-    max_mtime = 0.0
+    """Return the newest regular-file mtime; unknown for opaque or unreadable trees."""
+    newest = 0.0
+    def failed(error: OSError) -> None:
+        raise error
     try:
-        max_mtime = dir_path.stat().st_mtime
+        for root, dirs, files in os.walk(dir_path, onerror=failed, followlinks=False):
+            if any((Path(root) / name).is_symlink() for name in dirs):
+                return 0.0
+            for name in files:
+                path = Path(root) / name
+                item = path.lstat()
+                if stat.S_ISLNK(item.st_mode):
+                    return 0.0
+                if stat.S_ISREG(item.st_mode):
+                    newest = max(newest, item.st_mtime)
     except OSError:
         return 0.0
-
-    try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    mt = (Path(root) / f).stat().st_mtime
-                    if mt > max_mtime:
-                        max_mtime = mt
-                except OSError:
-                    continue
-    except OSError:
-        pass
-    return max_mtime
+    return newest
 
 
 def parse_session_age_days(session_dir: Path, ref_time: Optional[float] = None) -> Tuple[float, str]:
-    """Determine session age in days and the method used ('date_prefix' or 'mtime')."""
+    """Measure from session content, not a date-named directory or directory mtime."""
     now = ref_time if ref_time is not None else time.time()
-    name = session_dir.name
-    m = DATE_PREFIX_REGEX.match(name)
-    if m:
-        date_str = m.group(1)
-        try:
-            dt = datetime.datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
-            session_epoch = dt.timestamp()
-            age_days = (now - session_epoch) / 86400.0
-            if age_days >= 0:
-                return age_days, "date_prefix"
-        except (ValueError, OverflowError):
-            pass
-
-    # Fallback to mtime
-    max_mtime = get_dir_max_mtime(session_dir)
-    if max_mtime <= 0.0:
+    newest = get_dir_max_mtime(session_dir)
+    if newest <= 0.0:
         return 0.0, "unknown"
-    age_days = max(0.0, (now - max_mtime) / 86400.0)
-    return age_days, "mtime"
-
+    return max(0.0, (now - newest) / 86400.0), "mtime"
 
 def get_open_session_paths(container: Path, lsof_bin: Optional[str] = None) -> Tuple[bool, Set[Path]]:
     """Query open file descriptors under a sessions container using a single batch lsof call.

@@ -191,7 +191,7 @@ clear_contents() {
 # cannot be measured, are kept.
 # These are safety retention floors, not operator tuning knobs. Keep them fixed
 # so an ambient environment cannot make freshly-written build output eligible.
-CUSTOM_DD_IDLE_MINUTES=60
+CUSTOM_DD_IDLE_MINUTES="$(safety_disposable_recency_floor_minutes)"
 
 clean_custom_derived_data() {
   local ptmp utmp cand target seen=$'\n' before_kb
@@ -240,7 +240,7 @@ clean_custom_derived_data() {
 # (kept: they await App Store Connect processing). Only a finished dir (receipts/export.json)
 # whose newest content is idle IOS_RELEASE_IDLE_MINUTES loses those two children, through
 # the same C14 verdict (live cwd, open files, secrets).
-IOS_RELEASE_IDLE_MINUTES=1440
+IOS_RELEASE_IDLE_MINUTES="$(safety_disposable_recency_floor_minutes)"
 
 clean_ios_release_scratch() {
   local ptmp dir sub before_kb _safety_reason

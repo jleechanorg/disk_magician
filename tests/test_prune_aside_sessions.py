@@ -116,21 +116,38 @@ exit 0
         mock_bin.chmod(mock_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         return mock_bin
 
-    def test_parse_session_age_date_prefix(self):
-        """Verify date-prefixed folder names compute exact day age from ref_time."""
-        # 2026-08-09 is 14 days before 2026-08-23
-        sdir = self.u0_sessions / "2026-08-09_abc123"
-        sdir.mkdir(parents=True)
-        age, method = parse_session_age_days(sdir, self.ref_time)
-        self.assertEqual(method, "date_prefix")
-        self.assertAlmostEqual(age, 14.0, places=2)
+    def test_session_date_prefix_does_not_override_content_mtime(self):
+        """A dated session name does not prove that its contents are stale."""
+        old_named = self.u0_sessions / "2026-08-09_abc123"
+        old_named.mkdir(parents=True)
+        path = old_named / "messages.jsonl"
+        path.write_text("new content")
+        os.utime(path, (self.ref_time - self.day_secs, self.ref_time - self.day_secs))
+        age, method = parse_session_age_days(old_named, self.ref_time)
+        self.assertEqual(method, "mtime")
+        self.assertAlmostEqual(age, 1.0, delta=0.1)
 
-        # 2026-08-20 is 3 days before 2026-08-23
-        sdir2 = self.u0_sessions / "2026-08-20_xyz789"
-        sdir2.mkdir(parents=True)
-        age2, method2 = parse_session_age_days(sdir2, self.ref_time)
-        self.assertEqual(method2, "date_prefix")
-        self.assertAlmostEqual(age2, 3.0, places=2)
+        new_named = self.u0_sessions / "2026-08-22_xyz789"
+        new_named.mkdir(parents=True)
+        path = new_named / "messages.jsonl"
+        path.write_text("old content")
+        os.utime(path, (self.ref_time - 3 * self.day_secs, self.ref_time - 3 * self.day_secs))
+        age, method = parse_session_age_days(new_named, self.ref_time)
+        self.assertEqual(method, "mtime")
+        self.assertAlmostEqual(age, 3.0, delta=0.1)
+
+    def test_unmeasurable_session_content_fails_closed(self):
+        empty = self.u0_sessions / "empty_session"
+        empty.mkdir(parents=True)
+        self.assertEqual(parse_session_age_days(empty, self.ref_time), (0.0, "unknown"))
+
+        target = self.u0_sessions / "target.jsonl"
+        target.write_text("old target")
+        os.utime(target, (self.ref_time - 20 * self.day_secs, self.ref_time - 20 * self.day_secs))
+        opaque = self.u0_sessions / "opaque_session"
+        opaque.mkdir()
+        (opaque / "messages.jsonl").symlink_to(target)
+        self.assertEqual(parse_session_age_days(opaque, self.ref_time), (0.0, "unknown"))
 
     def test_parse_session_age_mtime_fallback(self):
         """Verify non-date folders fall back to file/folder mtime."""
@@ -152,6 +169,7 @@ exit 0
             self.u0_sessions,
             "2026-07-20_old_session",
             {"messages.jsonl": "test message content", "tmp/screenshot.png": b"PNG_DATA" * 500},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
         recent_session = self._create_mock_session(
             self.u0_sessions,
@@ -254,6 +272,7 @@ exit 0
             self.u0_sessions,
             "2026-07-15_old_session",
             {"data.txt": "data"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
 
         mock_lsof = self._create_mock_lsof_script(fail=True)
@@ -280,6 +299,7 @@ exit 0
             self.u0_sessions,
             "2026-07-15_old_session",
             {"data.txt": "data"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
 
         mock_lsof = self._create_mock_lsof_script(rc1_with_stderr=True)
@@ -306,6 +326,7 @@ exit 0
             self.u0_sessions,
             "2026-07-15_old_session",
             {"data.txt": "data"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
         )
 
         mock_lsof = self._create_mock_lsof_script(rc0_with_stderr=True)
@@ -410,18 +431,18 @@ exit 0
         child.mkdir()
         self.assertTrue(pruner.is_safe_session_path(child, self.u0_sessions))
 
-    def test_default_max_age_days_is_7(self):
-        """Default max_age_days must be 7 days."""
+    def test_default_max_age_days_is_two_and_uses_file_mtime(self):
         pruner = AsideSessionPruner(aside_dir=self.aside_dir)
-        self.assertEqual(pruner.max_age_days, 7)
+        self.assertEqual(pruner.max_age_days, 2)
 
-        # Session 8 days old (2026-08-15) vs ref_time 2026-08-23
-        s_8d = self._create_mock_session(
-            self.u0_sessions, "2026-08-15_old", {"msg.txt": "8d"},
-            mtime_epoch=self.ref_time - (30 * self.day_secs),
+        old_named = self._create_mock_session(
+            self.u0_sessions, "2026-08-18_looks_recent", {"msg.txt": "3d"},
+            mtime_epoch=self.ref_time - (3 * self.day_secs),
         )
-        # Session 5 days old (2026-08-18) vs ref_time 2026-08-23
-        s_5d = self._create_mock_session(self.u0_sessions, "2026-08-18_recent", {"msg.txt": "5d"})
+        recent_named = self._create_mock_session(
+            self.u0_sessions, "2026-08-01_looks_old", {"msg.txt": "1d"},
+            mtime_epoch=self.ref_time - self.day_secs,
+        )
 
         mock_lsof = self._create_mock_lsof_script()
         pruner = AsideSessionPruner(
@@ -434,8 +455,8 @@ exit 0
         self.assertEqual(stats["sessions_scanned"], 2)
         self.assertEqual(stats["sessions_pruned"], 1)
         self.assertEqual(stats["sessions_retained_recent"], 1)
-        self.assertFalse(s_8d.exists())
-        self.assertTrue(s_5d.exists())
+        self.assertFalse(old_named.exists())
+        self.assertTrue(recent_named.exists())
 
     def test_retention_boundary_prunes_past_and_keeps_inside(self):
         """A session past the retention floor is pruned; one inside it stays.
@@ -446,15 +467,15 @@ exit 0
         now = time.time()
         s_past = self._create_mock_session(
             self.u0_sessions,
-            "session_past_8d",
+            "session_past_3d",
             {"state.json": "past"},
-            mtime_epoch=now - (8.0 * self.day_secs),
+            mtime_epoch=now - (3.0 * self.day_secs),
         )
         s_inside = self._create_mock_session(
             self.u0_sessions,
-            "session_inside_6d",
+            "session_inside_1d",
             {"state.json": "young"},
-            mtime_epoch=now - (6.0 * self.day_secs),
+            mtime_epoch=now - (1.0 * self.day_secs),
         )
 
         mock_lsof = self._create_mock_lsof_script()
@@ -464,7 +485,27 @@ exit 0
             lsof_bin=str(mock_lsof),
             ref_time=now,
         )
-        stats = pruner.run()
+        # Make C14's live-CWD/open-file probe deterministic for these synthetic
+        # paths; host-wide lsof visibility can be incomplete in containers.
+        import shlex
+        from unittest.mock import patch
+        lsof_alias = mock_lsof.parent / "lsof"
+        lsof_alias.write_text(
+            "#!/bin/sh\n"
+            + 'case " $* " in *" -d cwd "*) printf "p1\\nfcwd\\nn/\\n"; exit 0;; esac\n'
+            + "exec " + shlex.quote(str(mock_lsof)) + ' "$@"\n'
+        )
+        lsof_alias.chmod(0o755)
+        cwd_scan = mock_lsof.parent / "cwd_scan.sh"
+        cwd_scan.write_bytes(b"#!/bin/sh\nprintf '1\\t0\\t/\\0'\n")
+        cwd_scan.chmod(0o755)
+        with patch.dict(os.environ, {
+            "DISK_MAGICIAN_LSOF_BIN": str(mock_lsof),
+            "DISK_MAGICIAN_TEST_SANDBOX": str(self.temp_dir),
+            "DISK_MAGICIAN_CWD_SCAN_CMD": str(cwd_scan),
+            "PATH": f"{mock_lsof.parent}:{os.environ.get('PATH', '')}",
+        }):
+            stats = pruner.run()
 
         self.assertEqual(stats["sessions_scanned"], 2)
         self.assertEqual(stats["sessions_pruned"], 1)
@@ -490,7 +531,7 @@ exit 0
         with unittest.mock.patch("sys.argv", ["prune_aside_sessions.py", "--dry-run"]):
             args = parse_args()
             self.assertFalse(args.clean)
-            self.assertEqual(args.max_age_days, 7)
+            self.assertEqual(args.max_age_days, 2)
 
     def test_format_size_and_helpers(self):
         """Test format_size formatting."""

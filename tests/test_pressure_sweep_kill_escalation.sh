@@ -92,6 +92,7 @@ PIDFILE="$TMP_ROOT/fixture.pid"
 MARKFILE="$TMP_ROOT/fixture.mark"
 mkdir -p "$MOCK_BIN" "$STATE_DIR"
 cp "$SOURCE_SCRIPT" "$MOCK_BIN/pressure_sweep.sh"
+cp "$REPO_ROOT/scripts/safety_lib.sh" "$MOCK_BIN/safety_lib.sh"
 cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
 # The script derives SCRIPT_DIR from its own path and then sources $SCRIPT_DIR/lib/*.sh
 # (actuator_receipt.sh today). A fixture that mirrors only the top-level script fails

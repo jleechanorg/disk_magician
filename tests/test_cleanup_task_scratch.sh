@@ -5,7 +5,7 @@
 # 1. CLI dispatch via disk_magician.sh cleanup-task-scratch --help / --dry-run and python3 -m disk_magician.cli
 # 2. Dry-run vs --clean behavior (default is dry-run, no deletion, no manifest write)
 # 3. Skipping real top-level git repos and linked worktrees in ~/projects (and non-matching dir names)
-# 4. Skipping task-scratch containers touched <12h ago
+# 4. Skipping task-scratch containers touched <48h ago
 # 5. Preserving containers with dirty nested repo, unpushed nested repo, secret-like files, or open files
 # 6. Removing clean aged task-scratch containers (clean linked worktree + non-git scratch files/dirs)
 #    and recording manifest entries in $DISK_MAGICIAN_STATE_DIR/task_scratch_cleanup_manifest.txt
@@ -152,13 +152,13 @@ assert_rc "T2: default invocation exits 0" 0 "$DEF_RC"
 assert_exists "T2: default invocation preserves container" "$DRY_CONTAINER"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 3: Skipping task-scratch containers touched <12h ago
+# Test 3: Skipping task-scratch containers touched <48h ago
 # ─────────────────────────────────────────────────────────────────────────────
-echo "Test 3: Skipping task-scratch containers touched <12h ago"
+echo "Test 3: Skipping task-scratch containers touched <48h ago"
 RECENT_CONTAINER="$HOME/projects/pr9946-recent-scratch"
 mkdir -p "$RECENT_CONTAINER/nested"
 set_old_mtime "$RECENT_CONTAINER"
-# Touch one nested file to current time (<12h)
+# Touch one nested file to current time (<48h)
 touch "$RECENT_CONTAINER/nested/fresh.json"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -290,7 +290,7 @@ fi
 assert_exists "T3/5: real top-level git repo preserved" "$BASE_REPO"
 assert_exists "T3/5: top-level linked worktree preserved" "$TOP_WT"
 assert_exists "T3/5: non-matching directory preserved" "$NON_MATCH_DIR"
-assert_exists "T3/5: recent (<12h) container preserved" "$RECENT_CONTAINER"
+assert_exists "T3/5: recent (<48h) container preserved" "$RECENT_CONTAINER"
 assert_exists "T4a: dirty nested worktree container preserved" "$DIRTY_CONTAINER"
 assert_exists "T4a: dirty nested worktree itself preserved" "$DIRTY_CONTAINER/worktree/dirty.txt"
 assert_exists "T4b: unpushed nested repo container preserved" "$UNPUSHED_CONTAINER"

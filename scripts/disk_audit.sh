@@ -28,6 +28,8 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/safety_lib.sh
+source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=lib/degraded_gate.sh
 source "$SCRIPT_DIR/lib/degraded_gate.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -360,21 +362,22 @@ print_category_summary() {
 # can trigger an authorized budget policy, but never creates policy or approval.
 scratch_clean_dispatch() {
     local clean_arg="$1" status_json status_rc=0 policy reason="" mode="fallback"
-    local floor_hours floor_minutes measurements host_free scratch_used scratch_quota
+    local floor_hours floor_minutes floor_default_minutes measurements host_free scratch_used scratch_quota
     local diskm_bin="${DISK_MAGICIAN_DISKM_BIN:-$REPO_ROOT/disk_magician.sh}"
     local cleaner="$SCRIPT_DIR/cleanup_scratch_top_level.sh"
     local -a args env_args
     policy="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
 
-    # Match the cleaner's default and 24-hour floor before converting to minutes.
+    # Match the shared disposable-content floor before converting caller hours.
     # Reject malformed and overflowing values before launching any cleanup.
-    floor_hours="${SCRATCH_PRUNE_MIN_HOURS:-24}"
+    floor_default_minutes="$(safety_disposable_recency_floor_minutes)"
+    floor_hours="${SCRATCH_PRUNE_MIN_HOURS:-$((floor_default_minutes / 60))}"
     floor_minutes="$(python3 -c 'import re,sys
-s=sys.argv[1]
+s=sys.argv[1]; floor=int(sys.argv[2],10)
 if not re.fullmatch(r"[0-9]+", s): raise SystemExit(1)
-h=max(24,int(s,10))
+h=max((floor+59)//60,int(s,10))
 if h > ((2**63-1)//60): raise SystemExit(1)
-print(max(1440,h*60))' "$floor_hours" 2>/dev/null)" || {
+print(max(floor,h*60))' "$floor_hours" "$floor_default_minutes" 2>/dev/null)" || {
         echo "scratch-budget: reason=invalid-floor; cleaner not launched"
         CATEGORY_TOTAL=$(( CATEGORY_TOTAL + 1 ))
         CATEGORY_FAILED=$(( CATEGORY_FAILED + 1 ))
@@ -615,7 +618,7 @@ aside_dir="$HOME/.aside"
 if [[ -d "$aside_dir/u" ]]; then
     size_kb=$(du -sk "$aside_dir/u" 2>/dev/null | awk '{print $1+0}' || echo 0)
     if [[ $size_kb -gt $((500 * 1024)) ]]; then
-        printf "  %-50s %8s  %s\n" "Aside browser sessions" "$(fmt_size "$size_kb")" "RUN: prune_aside_sessions.sh --clean (prunes >=7d and dedups)"
+        printf "  %-50s %8s  %s\n" "Aside browser sessions" "$(fmt_size "$size_kb")" "RUN: prune_aside_sessions.sh --clean (prunes >=48h and dedups)"
     fi
 fi
 
@@ -704,11 +707,11 @@ if [[ "$MODE" == "clean" ]]; then
     fi
 
     # Codex task documents (Tier 5: ~/Documents/Codex per-task clones, C14-gated and
-    # >=7d dormant). config/sweeper_roots.txt registers this script as the owner of
+    # >=48h dormant). config/sweeper_roots.txt registers this script as the owner of
     # the <YYYY-MM-DD>/<task-dir> pattern, so the routine must actually run it
     # (bead disk_magician-cxut: the registry claimed coverage that did not exist).
     if [[ -f "$SCRIPT_DIR/cleanup_codex_documents.sh" ]]; then
-        run_category "Codex task documents (>=7d)" "$SCRIPT_DIR/cleanup_codex_documents.sh" $clean_arg
+        run_category "Codex task documents (>=48h)" "$SCRIPT_DIR/cleanup_codex_documents.sh" $clean_arg
     fi
 
     # Run Supervisor Launchd Logs Cleanup (Tier 5: Rotated Logs)
@@ -730,22 +733,22 @@ if [[ "$MODE" == "clean" ]]; then
         fi
     fi
 
-    # Slim dormant git worktree checkouts (>=7d dormant) before worktree removal
+    # Slim dormant git worktree checkouts (>=48h dormant) before worktree removal
     if [[ -f "$SCRIPT_DIR/slim_worktree_checkouts.sh" ]]; then
         if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
             echo "  Slim worktrees: skipped (requires WORKTREE_APPROVED=1)"
         else
-            run_category "Slim dormant worktrees (>=7d)" "$SCRIPT_DIR/slim_worktree_checkouts.sh" $clean_arg
+            run_category "Slim dormant worktrees (>=48h)" "$SCRIPT_DIR/slim_worktree_checkouts.sh" $clean_arg
         fi
     fi
 
-    # Worktree dependency dirs (node_modules/target/.mypy_cache, >=3d dormant) — run before
+    # Worktree dependency dirs (node_modules/target/.mypy_cache, >=48h dormant) — run before
     # Worktrees so package files like @firebase/auth/.../credentials/*.d.ts do not trip has_hidden_state.
     if [[ -f "$SCRIPT_DIR/cleanup_worktree_deps.sh" ]]; then
         if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
             echo "  Worktree deps: skipped (requires WORKTREE_APPROVED=1)"
         else
-            run_category "Worktree deps (>=3d dormant)" "$SCRIPT_DIR/cleanup_worktree_deps.sh" $clean_arg
+            run_category "Worktree deps (>=48h dormant)" "$SCRIPT_DIR/cleanup_worktree_deps.sh" $clean_arg
         fi
     fi
 
@@ -761,16 +764,16 @@ if [[ "$MODE" == "clean" ]]; then
         if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
             echo "  Worktree venvs: skipped (requires WORKTREE_APPROVED=1)"
         else
-            run_category "Worktree venvs (>=7d dormant)" "$SCRIPT_DIR/cleanup_worktree_venvs.sh" $clean_arg
+            run_category "Worktree venvs (>=48h dormant)" "$SCRIPT_DIR/cleanup_worktree_venvs.sh" $clean_arg
         fi
     fi
 
     # ~/.claude/state per-task work dirs (Tier 6: Claude state, bead disk_magician-isw)
     if [[ -f "$SCRIPT_DIR/cleanup_claude_state.sh" ]]; then
         if [[ "$DRY_RUN" == false && "${CLAUDE_STATE_APPROVED:-0}" != "1" ]]; then
-            echo "  Claude state (>=7d dormant): skipped (requires CLAUDE_STATE_APPROVED=1)"
+            echo "  Claude state (>=48h dormant): skipped (requires CLAUDE_STATE_APPROVED=1)"
         else
-            run_category "Claude state (>=7d dormant)" "$SCRIPT_DIR/cleanup_claude_state.sh" $clean_arg
+            run_category "Claude state (>=48h dormant)" "$SCRIPT_DIR/cleanup_claude_state.sh" $clean_arg
         fi
     fi
 
@@ -819,7 +822,7 @@ if [[ "$MODE" == "clean-all" ]]; then
         echo "  Sessions: skipped (requires SESSIONS_APPROVED=1)"
     fi
 
-    # Aside browser sessions (prune stale >=7d and dedup static assets)
+    # Aside browser sessions (prune stale >=48h and dedup static assets)
     if [[ -f "$SCRIPT_DIR/prune_aside_sessions.sh" ]]; then
         run_category "Aside browser sessions" "$SCRIPT_DIR/prune_aside_sessions.sh" $clean_arg
     fi

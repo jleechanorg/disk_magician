@@ -8,7 +8,7 @@
 #
 # Behavior:
 #   1. docker system prune -f               (always; removes dangling images/containers)
-#   2. docker builder prune -f --filter "until=24h"  (only when builder cache > threshold)
+#   2. docker builder prune -f --filter "until=48h"  (only when builder cache > threshold)
 #
 # Defaults to LIVE prune. Use --dry-run to preview the commands and the
 # threshold check without running them.
@@ -206,10 +206,10 @@ ensure_log_dir
 
   if [[ "$current_mb" -gt "$MAX_CACHE_MB" ]]; then
     if [[ "$DRY_RUN" == true ]]; then
-      log "[dry-run] would run: docker builder prune -f --filter \"until=24h\""
+      log "[dry-run] would run: docker builder prune -f --filter \"until=48h\""
     else
-      log "running: docker builder prune -f --filter \"until=24h\""
-      if ! docker builder prune -f --filter "until=24h" 2>&1; then
+      log "running: docker builder prune -f --filter \"until=48h\""
+      if ! docker builder prune -f --filter "until=48h" 2>&1; then
         log "WARN: docker builder prune failed (continuing)"
       fi
     fi

@@ -30,16 +30,17 @@ CONFIG_FILE="$REPO_ROOT/config.json"
 [[ -f "$CONFIG_FILE" ]] || CONFIG_FILE="$REPO_ROOT/config.json.template"
 
 # Default thresholds (minutes unless noted)
-GIT_CLONE_MIN=240
-AGENT_PROMPT_MIN=240
-CLI_VALIDATION_MIN=60
-WORKTREE_POINTER_MIN=30
+CONTENT_RECENCY_DEFAULT_MINUTES="$(safety_disposable_recency_floor_minutes)"
+GIT_CLONE_MIN="$CONTENT_RECENCY_DEFAULT_MINUTES"
+AGENT_PROMPT_MIN="$CONTENT_RECENCY_DEFAULT_MINUTES"
+CLI_VALIDATION_MIN="$CONTENT_RECENCY_DEFAULT_MINUTES"
+WORKTREE_POINTER_MIN="$CONTENT_RECENCY_DEFAULT_MINUTES"
 WORKTREE_POINTER_MIN_KB=51200
 # --large branch safety (hours): a top-level /private/tmp dir with any file
 # mtime within this window is considered "active use" and is skipped
 # regardless of size or protected-root status.
-LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-24}"
-AGED_TMP_ACTIVE_HOURS="${AGED_TMP_ACTIVE_HOURS:-72}"
+LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-48}"
+AGED_TMP_ACTIVE_HOURS="${AGED_TMP_ACTIVE_HOURS:-48}"
 # --large branch: how long an archived dir sits under
 # /private/tmp/_disk_magician_archive/<ts>/ before a later --large run may
 # permanently rm -rf it and actually reclaim the space.
@@ -73,13 +74,11 @@ LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
 ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
 # Same env var and default as cleanup_worktrees.sh / cleanup_worktree_venvs.sh
 # / worktree_hygiene.sh, for the orphaned /tmp worktree-pointer guard below --
-# this was a bare hardcoded 14 that neither tracked the repo's 7-day floor
-# change nor honored the override the sibling scripts respect (found in
-# /advice review of PR #55).
-WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
-# Hard floor: 7 days, may only be raised, never lowered (CLAUDE.md
+# this guard uses the shared 48-hour content floor and still accepts higher values.
+WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-2}"
+# Hard floor: 48 hours, may only be raised, never lowered (CLAUDE.md
 # invariant). Missed in the sibling scripts' clamp sweep (found in /advice
-# re-review of PR #55) -- WORKTREE_MIN_AGE_DAYS=0 would otherwise let this
+# old 7-day checks allowed an age below the current 48-hour floor. --
 # script's orphaned-worktree-pointer guard qualify every pointer for removal.
 # Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
 # zero numeral like "08" as octal (invalid digit -> arithmetic error), which
@@ -88,23 +87,25 @@ WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 if [[ "$WORKTREE_MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
   WORKTREE_MIN_AGE_DAYS=$((10#$WORKTREE_MIN_AGE_DAYS))
 else
-  WORKTREE_MIN_AGE_DAYS=7
+  WORKTREE_MIN_AGE_DAYS=2
 fi
-[[ "$WORKTREE_MIN_AGE_DAYS" -lt 7 ]] && WORKTREE_MIN_AGE_DAYS=7
+[[ "$WORKTREE_MIN_AGE_DAYS" -lt 2 ]] && WORKTREE_MIN_AGE_DAYS=2
+WORKTREE_MIN_AGE_MINUTES=$((WORKTREE_MIN_AGE_DAYS * 1440))
+WORKTREE_MIN_AGE_LABEL="$(worktree_floor_label "$WORKTREE_MIN_AGE_MINUTES")"
 
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS LARGE_TMP_ARCHIVE_MAX_HOURS AGED_TMP_ACTIVE_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24 168 72"
+  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS LARGE_TMP_ARCHIVE_MAX_HOURS AGED_TMP_ACTIVE_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "2880 2880 2880 2880 51200 48 24 168 48"
 import json, os, sys
 data = json.load(open(sys.argv[1]))
 t = data.get("cleanup_thresholds", {})
-print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_MAX_HOURS', t.get('large_tmp_archive_max_hours', 168))} {os.environ.get('AGED_TMP_ACTIVE_HOURS', t.get('aged_tmp_active_hours', 72))}")
+print(f"{t.get('git_clone_minutes', 2880)} {t.get('agent_prompt_minutes', 2880)} {t.get('cli_validation_minutes', 2880)} {t.get('worktree_pointer_minutes', 2880)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 48))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_MAX_HOURS', t.get('large_tmp_archive_max_hours', 168))} {os.environ.get('AGED_TMP_ACTIVE_HOURS', t.get('aged_tmp_active_hours', 48))}")
 PY
 )"
 fi
-if [[ ! "$AGED_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]]; then AGED_TMP_ACTIVE_HOURS=72; fi
+if [[ ! "$AGED_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]]; then AGED_TMP_ACTIVE_HOURS=48; fi
 AGED_TMP_ACTIVE_HOURS=$((10#${AGED_TMP_ACTIVE_HOURS}))
-(( AGED_TMP_ACTIVE_HOURS < 72 )) && AGED_TMP_ACTIVE_HOURS=72
+(( AGED_TMP_ACTIVE_HOURS < 48 )) && AGED_TMP_ACTIVE_HOURS=48
 # The hourly aged mode broadens size eligibility, not existing safety policy.
 # Preserve higher legacy activity and archive-recovery overrides after config/env
 # resolution. Persist the effective recovery floor in each aged archive receipt.
@@ -114,6 +115,15 @@ fi
 # Emergency floor (operator decision 2026-11-12, `diskm emergency`): DISK_MAGICIAN_AGE_FLOOR_MINUTES
 # (>= 120) lowers the large/aged activity floors to that many hours (rounded up) for this run.
 # Archive recovery retention keeps its own floor below; the C14 verdict's 1 h idle veto still runs.
+# Machine config can raise disposable ages, but legacy lower values follow 48h.
+GIT_CLONE_MIN="$(safety_disposable_recency_minimum_minutes "$GIT_CLONE_MIN")"
+AGENT_PROMPT_MIN="$(safety_disposable_recency_minimum_minutes "$AGENT_PROMPT_MIN")"
+CLI_VALIDATION_MIN="$(safety_disposable_recency_minimum_minutes "$CLI_VALIDATION_MIN")"
+WORKTREE_POINTER_MIN="$(safety_disposable_recency_minimum_minutes "$WORKTREE_POINTER_MIN")"
+LARGE_TMP_ACTIVE_HOURS=$(( $(safety_disposable_recency_minimum_minutes "$((LARGE_TMP_ACTIVE_HOURS * 60))") / 60 ))
+AGED_TMP_ACTIVE_HOURS=$(( $(safety_disposable_recency_minimum_minutes "$((AGED_TMP_ACTIVE_HOURS * 60))") / 60 ))
+# Machine config can raise disposable ages, but legacy lower values follow 48h.
+
 EMERGENCY_TMP_HOURS=""
 if [[ "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[1-9][0-9]{2,4}$ ]] && (( DISK_MAGICIAN_AGE_FLOOR_MINUTES >= 120 )); then
   EMERGENCY_TMP_HOURS=$(( (DISK_MAGICIAN_AGE_FLOOR_MINUTES + 59) / 60 ))
@@ -189,8 +199,8 @@ LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
 # pressure_sweep.sh and launchd jobs enable it without a CLI edit.
 BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
 # Hard floor (minutes): never evict anything younger than this, regardless
-# of budget pressure. Default 2h; clamped to a 1h minimum in scratch_budget.sh.
-BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
+# of budget pressure. Default 48h; explicit operator floors retain the 1h minimum.
+BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-$(safety_disposable_recency_floor_minutes)}"
 # The lock helper re-execs this script with its original arguments, including
 # governor flags, so preserve the complete argv before stripping those flags.
 SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
@@ -221,7 +231,7 @@ Options:
                DISK_MAGICIAN_SCRATCH_BUDGET_GB).
   --budget-floor-minutes N
                Never evict anything younger than N minutes under budget
-               mode (default 120, hard minimum 60; env
+               mode (default 2880, hard minimum 60; env
                DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES).
   -h, --help   Show this help
 EOF
@@ -1450,8 +1460,8 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
 
     # Worktree safety rule floor (same WORKTREE_MIN_AGE_DAYS as the other
     # worktree-cleanup scripts)
-    if worktree_is_recently_active "$subdir" "$WORKTREE_MIN_AGE_DAYS"; then
-      log "Skipping recently active worktree pointer (<${WORKTREE_MIN_AGE_DAYS}d): $subdir"
+    if worktree_is_recently_active_minutes "$subdir" "$WORKTREE_MIN_AGE_MINUTES"; then
+      log "Skipping recently active worktree pointer (<${WORKTREE_MIN_AGE_LABEL}): $subdir"
       continue
     fi
 
@@ -1594,9 +1604,9 @@ container_child_has_protected_repository() {
 
   while IFS= read -r -d '' marker; do
     repo="${marker%/.git}"
-    if worktree_is_recently_active "$repo" "$WORKTREE_MIN_AGE_DAYS"; then
+    if worktree_is_recently_active_minutes "$repo" "$WORKTREE_MIN_AGE_MINUTES"; then
       rm -f "$marker_file"
-      log "Skipping container child with recently active nested repository/worktree (<${WORKTREE_MIN_AGE_DAYS}d): $repo (child: $child)"
+      log "Skipping container child with recently active nested repository/worktree (<${WORKTREE_MIN_AGE_LABEL}): $repo (child: $child)"
       return 0
     fi
     if worktree_has_unsaved_work "$repo"; then
@@ -1817,8 +1827,8 @@ else
 fi
 
 # Size-budget mode (bead disk_magician-d45): evicts oldest-first,
-# independent of the 24h/4h age gates above, so 0-24h scratch growth is no
-# longer structurally invisible to every sweeper. Runs last so the normal
+# independent of the 48h content floor above, so explicit budget callers can
+# still select a lower floor. Runs last after normal age-based passes. Runs last so the normal
 # age-based passes above get first crack at reclaiming space cheaply.
 BUDGET_DIRS_DELETED=0
 BUDGET_FILES_DELETED=0

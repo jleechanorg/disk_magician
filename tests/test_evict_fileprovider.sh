@@ -29,11 +29,13 @@ chmod +x "$T/helper.sh"
 export DM_FILEPROVIDER_HELPER="$T/helper.sh"
 
 D="$T/cloud"
+set_mtime_hours() { python3 -c 'import os,sys,time; p=sys.argv[1]; t=time.time()-int(sys.argv[2])*3600; os.utime(p,(t,t))' "$1" "$2"; }
 fixture() {
   rm -rf -- "${D:?}"; mkdir -p "$D/sub"
   head -c 65536 /dev/urandom >"$D/old.bin";          touch -t 202601010000 "$D/old.bin"
   head -c 65536 /dev/urandom >"$D/sub/old2.bin";     touch -t 202601010000 "$D/sub/old2.bin"
   head -c 65536 /dev/urandom >"$D/recent.bin"
+  head -c 65536 /dev/urandom >"$D/mid-age.bin"; set_mtime_hours "$D/mid-age.bin" 36
   head -c 65536 /dev/urandom >"$D/pending.bin";      touch -t 202601010000 "$D/pending.bin"
   : >"$D/dataless.bin"; truncate -s 65536 "$D/dataless.bin"; touch -t 202601010000 "$D/dataless.bin"
   rm -f "$DISK_MAGICIAN_DELETION_LOG"
@@ -45,8 +47,8 @@ fixture
 out="$(bash "${SH_[@]}" 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "dry-run default exits 0" || bad "dry-run rc=$rc: $out"
 grep -q '^\[DRY-RUN\]' <<<"$out" && ok "dry-run labelled" || bad "dry-run label missing: $out"
-grep -q 'would evict.*: 2 files' <<<"$out" && ok "dry-run counts 2 evictable" || bad "evictable count: $out"
-grep -q 'skipped recent.*: 1 files' <<<"$out" && ok "dry-run reports recent skip" || bad "recent skip: $out"
+grep -q 'would evict.*: 2 files' <<<"$out" && ok "48h default excludes 36h file" || bad "evictable count: $out"
+grep -q 'skipped recent.*: 2 files' <<<"$out" && ok "dry-run reports recent and 36h skips" || bad "recent skip: $out"
 grep -q 'not_uploaded' <<<"$out" && ok "dry-run reports not_uploaded reason" || bad "not_uploaded reason: $out"
 [[ "$(blocks "$D/old.bin")" -gt 0 && ! -f "$DISK_MAGICIAN_DELETION_LOG" ]] && ok "dry-run changes nothing, logs nothing" || bad "dry-run mutated state"
 
@@ -62,6 +64,7 @@ out="$(FILEPROVIDER_EVICT_APPROVED=1 bash "${SH_[@]}" --clean 2>&1)"; rc=$?
 [[ "$(blocks "$D/old.bin")" -eq 0 && "$(blocks "$D/sub/old2.bin")" -eq 0 ]] && ok "aged uploaded files evicted" || bad "old files not evicted: $out"
 [[ "$(fsize "$D/old.bin")" -eq 65536 ]] && ok "logical size preserved" || bad "size changed"
 [[ "$(blocks "$D/recent.bin")" -gt 0 ]] && ok "recent file skipped" || bad "recent file evicted"
+[[ "$(blocks "$D/mid-age.bin")" -gt 0 ]] && ok "36h file remains under default" || bad "36h file evicted"
 [[ "$(blocks "$D/pending.bin")" -gt 0 ]] && ok "not-uploaded file skipped" || bad "pending file evicted"
 n="$(awk -F'\t' '$2=="evict_fileprovider.sh" && $3=="evict_fileprovider"' "$DISK_MAGICIAN_DELETION_LOG" | wc -l | tr -d ' ')"
 [[ "$n" == 2 ]] && grep -q "$D/old.bin" "$DISK_MAGICIAN_DELETION_LOG" && ok "each eviction logged to deletion log" || bad "deletion log: $(cat "$DISK_MAGICIAN_DELETION_LOG" 2>&1)"
@@ -72,6 +75,10 @@ exec 9<"$D/old.bin"
 out="$(FILEPROVIDER_EVICT_APPROVED=1 bash "${SH_[@]}" --clean 2>&1)"
 exec 9<&-
 [[ "$(blocks "$D/old.bin")" -gt 0 && "$(blocks "$D/sub/old2.bin")" -eq 0 ]] && ok "file open by a process is skipped" || bad "open-file skip: $out"
+
+fixture
+out="$(bash "${SH_[@]}" --min-age-hours 24 2>&1)"
+grep -q 'would evict.*: 3 files' <<<"$out" && ok "explicit 24h override applies" || bad "explicit override: $out"
 
 fixture
 out="$(bash "${SH_[@]}" --min-age-hours 100000 2>&1)"
