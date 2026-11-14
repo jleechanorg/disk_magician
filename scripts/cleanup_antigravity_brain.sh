@@ -62,7 +62,7 @@ AG_BACKUPS=(
 )
 
 BRAIN_AGE_DAYS=21
-WORKTREE_AGE_DAYS=14
+WORKTREE_AGE_DAYS=2
 BACKUP_AGE_DAYS=30
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

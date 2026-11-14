@@ -20,7 +20,7 @@ MIN_KB="${CODE_SIGN_CLONE_MIN_KB:-102400}"
 # judged individually (no longer shielded by a mapped sibling under the same
 # parent), so require a minimum age before a candidate is even eligible —
 # guards against deleting a clone mid-extraction/mid-launch.
-MIN_AGE_SEC="${CODE_SIGN_CLONE_MIN_AGE_SEC:-600}"
+MIN_AGE_SEC="${CODE_SIGN_CLONE_MIN_AGE_SEC:-172800}"
 # One bounded liveness pass replaces one `lsof +D` per candidate. Per-dir
 # probes cost seconds each and, on real trees, exceeded any sane per-dir
 # budget — every timeout fail-closed to ACTIVE and preserved reclaimable

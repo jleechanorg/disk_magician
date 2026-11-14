@@ -10,7 +10,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 CAPTURES_DIR="$HOME/.llm-inspector/captures"
 INSPECTOR_DIR="$HOME/.llm-inspector"
 
-AGE_THRESHOLD_DAYS=3
+AGE_THRESHOLD_DAYS=2
 SIZE_CAP_KB=$(( 2 * 1024 * 1024 ))  # 2 GB cap
 
 LAUNCHD_LOG="$INSPECTOR_DIR/launchd.log"
