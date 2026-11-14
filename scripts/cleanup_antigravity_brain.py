@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import sys
+import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -38,39 +39,52 @@ def format_size(bytes_val: int) -> str:
 
 
 def get_dir_mtime(dir_path: Path) -> float:
-    """Return the most recent mtime of any file inside dir_path, or dir mtime."""
-    max_mtime = 0.0
+    """Newest metadata mtime, failing closed and never following symlinks."""
+    def failed(error):
+        raise error
     try:
-        max_mtime = dir_path.stat().st_mtime
+        newest = dir_path.lstat().st_mtime
+        if dir_path.is_symlink():
+            return float("inf")
+        for root, dirs, files in os.walk(dir_path, followlinks=False, onerror=failed):
+            for name in dirs + files:
+                path = Path(root) / name
+                st = path.lstat()
+                if path.is_symlink():
+                    return float("inf")
+                newest = max(newest, st.st_mtime)
+        return newest
     except OSError:
-        return 0.0
+        return float("inf")
 
+
+def report_measurement(path: Path) -> bool:
+    """Publish shared metadata leaves; failed measurement cannot authorize cleanup."""
+    lib = Path(__file__).resolve().parent / "lib" / "scratch_budget.sh"
     try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    mt = (Path(root) / f).stat().st_mtime
-                    if mt > max_mtime:
-                        max_mtime = mt
-                except OSError:
-                    continue
-    except OSError:
-        pass
-    return max_mtime
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; scratch_budget_report_measurement "$2"',
+             "_", str(lib), str(path)], check=False, timeout=300,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"measurement_status=incomplete path={path}: {exc}", file=sys.stderr)
+        return False
 
 
 def get_dir_size(dir_path: Path) -> int:
-    """Return total bytes of all files in dir_path."""
+    """Unique-inode metadata bytes; never follow links or conceal read errors."""
     total = 0
-    try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    total += (Path(root) / f).stat().st_size
-                except OSError:
-                    continue
-    except OSError:
-        pass
+    seen = set()
+    def failed(error):
+        raise error
+    for root, dirs, files in os.walk(dir_path, followlinks=False, onerror=failed):
+        for name in files + [name for name in dirs if (Path(root) / name).is_symlink()]:
+            st = (Path(root) / name).lstat()
+            inode = (st.st_dev, st.st_ino)
+            if inode not in seen:
+                seen.add(inode)
+                total += st.st_size
     return total
 
 
@@ -97,6 +111,7 @@ class BrainCompactor:
         self.now = float(now) if now is not None else time.time()
 
         self.stats = {
+            "measurement_failures": 0,
             "total_sessions": 0,
             "active_skipped": 0,
             "too_recent_skipped": 0,
@@ -125,10 +140,14 @@ class BrainCompactor:
         return False, "eligible for compaction"
 
     def scan_and_compact(self) -> Dict[str, any]:
+        if self.brain_dir.is_symlink():
+            if not report_measurement(self.brain_dir):
+                self.stats["measurement_failures"] += 1
+            return self.stats
         if not self.brain_dir.exists() or not self.brain_dir.is_dir():
             return self.stats
 
-        session_dirs = [d for d in self.brain_dir.iterdir() if d.is_dir()]
+        session_dirs = [d for d in self.brain_dir.iterdir() if d.is_dir() and not d.is_symlink()]
         self.stats["total_sessions"] = len(session_dirs)
 
         for sdir in session_dirs:
@@ -138,7 +157,17 @@ class BrainCompactor:
 
     def _process_session(self, sdir: Path) -> None:
         sid = sdir.name
-        sess_size = get_dir_size(sdir)
+        if not report_measurement(sdir):
+            self.stats["measurement_failures"] += 1
+            self.stats["active_skipped"] += 1
+            return
+        try:
+            sess_size = get_dir_size(sdir)
+        except OSError as exc:
+            print(f"measurement_status=incomplete path={sdir}: {exc}", file=sys.stderr)
+            self.stats["measurement_failures"] += 1
+            self.stats["active_skipped"] += 1
+            return
         latest_mtime = get_dir_mtime(sdir)
         self.stats["bytes_before"] += sess_size
 
@@ -318,6 +347,8 @@ def main():
     if is_dry_run and stats["bytes_reclaimed"] > 0:
         print("Run with --clean to execute the compaction.")
 
+    return 75 if stats["measurement_failures"] else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

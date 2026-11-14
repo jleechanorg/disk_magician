@@ -34,7 +34,7 @@ wrh_log() {
 }
 
 wrh_live_cwd_reason() {
-    local target=$1 out err err_text blocks rc=0 line pid= status path seen=0 live=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID stderr_status=0
+    local target=$1 ancestor_root=${2:-} out err err_text blocks rc=0 line pid= status path seen=0 live=0 caller_chain=" $$ $PPID " walk=$$ parent steps=0 caller_pid=$PPID stderr_status=0
     WRH_LIVE_CWD_REASON=
     if [[ ${DISK_MAGICIAN_LIFECYCLE_PARENT_PID:-} =~ ^[0-9]+$ ]]; then
         ancestry=$(ps -Ao pid=,ppid= 2>/dev/null | awk -v start="$$" -v wanted="$DISK_MAGICIAN_LIFECYCLE_PARENT_PID" '
@@ -81,7 +81,19 @@ wrh_live_cwd_reason() {
         case "$(lsof_cwd_value_verdict "$path")" in
             resolved)
                 seen=1
-                case " $caller_chain " in *" $pid "*) ;; *) [[ $path != "$target" && $path != "$target"/* ]] || live=1 ;; esac ;;
+                case " $caller_chain " in
+                    *" $pid "*) ;;
+                    *)
+                        if [[ "$path" == "$target" || "$path" == "$target/"* ]]; then
+                            live=1
+                        elif [[ -n "$ancestor_root" && "$path" != "$ancestor_root" &&
+                                "$path" == "$ancestor_root/"* && "$target" == "$path/"* ]]; then
+                            # Protect candidates beneath a live cwd inside the
+                            # registered Scratch volume; a cwd at the volume
+                            # root itself must not veto every Scratch item.
+                            live=1
+                        fi ;;
+                esac ;;
             ignorable) ;;
             *) WRH_LIVE_CWD_REASON=cwd-unknown; return ;;
         esac

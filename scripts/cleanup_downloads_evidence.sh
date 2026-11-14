@@ -23,6 +23,8 @@
 #   - DRY-RUN by default; pass --clean to actually delete.
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=scripts/safety_lib.sh
@@ -136,7 +138,8 @@ rc=0
 while IFS= read -r -d '' d; do
   base="$(basename "$d")"
   matches_pattern "$base" || continue
-  mtime="$(stat -f %m "$d" 2>/dev/null)" || { rc=1; break; }
+  scratch_budget_report_measurement "$d" || exit $?
+  mtime="$(scratch_budget_content_mtime "$d" --strict 2>/dev/null)" || { rc=1; break; }
   printf '%s\t%s\n' "$mtime" "$d" >> "$CANDIDATE_FILE"
 done < <(/usr/bin/find "$EVIDENCE_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 if (( rc != 0 )); then

@@ -4,6 +4,9 @@
 # Defaults to dry-run (use --clean to actually delete).
 set -euo pipefail
 
+# Read-only detail is independent of lifecycle/removal eligibility.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 
@@ -83,7 +86,12 @@ session_is_active() {
 dir_age_days() {
   local path="$1"
   local mtime now
-  mtime=$(stat -f '%m' "$path" 2>/dev/null) || return 1
+  if [[ -d "$path" ]]; then
+    mtime=$(scratch_budget_content_mtime "$path" --strict) || return 1
+  else
+    mtime=$(scratch_budget_content_mtime "$path") || return 1
+  fi
+  [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
   now=$(date +%s)
   echo $(( (now - mtime) / 86400 ))
 }
@@ -91,6 +99,12 @@ dir_age_days() {
 size_human() {
   du -sh "$1" 2>/dev/null | cut -f1
 }
+
+if [[ -L "$AO_SESSIONS_DIR" ]]; then
+  scratch_budget_report_measurement "$AO_SESSIONS_DIR" || exit $?
+  log "SKIP root: symlink boundary $AO_SESSIONS_DIR"
+  exit 0
+fi
 
 if [[ ! -d "$AO_SESSIONS_DIR" ]]; then
   log "No ~/.ao-sessions directory — nothing to do."
@@ -109,8 +123,14 @@ log ""
 total_reclaimable_kb=0
 
 for session_dir in "${AO_SESSIONS_DIR}"/*/; do
+  session_dir="${session_dir%/}"
   [[ -d "$session_dir" ]] || continue
   sid=$(basename "$session_dir")
+  scratch_budget_report_measurement "$session_dir" || exit $?
+  if [[ -L "$session_dir" ]]; then
+    log "SKIP $sid: symlink boundary"
+    continue
+  fi
 
   age=$(dir_age_days "$session_dir") || { log "SKIP $sid: cannot stat"; skipped_count=$(( skipped_count + 1 )); continue; }
 
@@ -131,7 +151,8 @@ for session_dir in "${AO_SESSIONS_DIR}"/*/; do
   
   session_tmp="${TMP_DIR}ao-${sid}"
   tmp_size_kb=0
-  if [[ -d "$session_tmp" ]]; then
+  if [[ -d "$session_tmp" && ! -L "$session_tmp" ]]; then
+    scratch_budget_report_measurement "$session_tmp" || exit $?
     tmp_size_kb=$(du -sk "$session_tmp" 2>/dev/null | cut -f1 || echo 0)
   fi
 
@@ -139,7 +160,7 @@ for session_dir in "${AO_SESSIONS_DIR}"/*/; do
   total_reclaimable_kb=$(( total_reclaimable_kb + total_session_kb ))
   total_session_gb=$(awk "BEGIN {printf \"%.1f\", $total_session_kb / 1048576}")
 
-  log "CANDIDATE $sid: ${age}d old, ${session_size_h} (plus ${total_session_gb} GB in tmp)"
+  log "CANDIDATE $sid: lifecycle-age=${age}d, aggregate=${session_size_h} (plus ${total_session_gb} GB in tmp)"
 
   if [[ "$DRY_RUN" == false ]]; then
     if ! _safety_reason="$(safety_gate "$session_dir" 2>/dev/null)"; then
@@ -147,7 +168,7 @@ for session_dir in "${AO_SESSIONS_DIR}"/*/; do
     else
       rm_logged "$session_dir"
     fi
-    if [[ -d "$session_tmp" ]]; then
+    if [[ -d "$session_tmp" && ! -L "$session_tmp" ]]; then
       if ! _safety_reason="$(safety_gate "$session_tmp" 2>/dev/null)"; then
         echo "SAFETY-SKIP "$session_tmp" ($_safety_reason)"
       else
@@ -182,7 +203,10 @@ total_reclaimable_gb=$(awk "BEGIN {printf \"%.1f\", $total_reclaimable_kb / 1048
 HERMES_CRON_OUTPUT_DIR="$HOME/.hermes/cron/output"
 HERMES_CRON_OUTPUT_DAYS=7
 
-if [[ ! -d "$HERMES_CRON_OUTPUT_DIR" ]]; then
+if [[ -L "$HERMES_CRON_OUTPUT_DIR" ]]; then
+  scratch_budget_report_measurement "$HERMES_CRON_OUTPUT_DIR" || exit $?
+  log "SKIP root: symlink boundary $HERMES_CRON_OUTPUT_DIR"
+elif [[ ! -d "$HERMES_CRON_OUTPUT_DIR" ]]; then
   log "No ~/.hermes/cron/output directory — nothing to do."
 else
   log "=== Section: ~/.hermes/cron/output/ (${HERMES_CRON_OUTPUT_DAYS}d mtime) ==="
@@ -190,6 +214,8 @@ else
   cron_freed_kb=0
   while IFS= read -r -d '' entry; do
     [[ -e "$entry" ]] || continue
+    scratch_budget_report_measurement "$entry" || exit $?
+    [[ -L "$entry" ]] && continue
     entry_size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1 || echo 0)
     entry_age=$(dir_age_days "$entry") || continue
     if (( entry_age < HERMES_CRON_OUTPUT_DAYS )); then
@@ -238,7 +264,10 @@ if [[ "$DRY_RUN" == false && "${SESSIONS_APPROVED:-0}" != "1" ]] && (( HERMES_SE
   HERMES_SESSIONS_DAYS="$AUTO_APPROVE_AGE_DAYS"
 fi
 
-if [[ ! -d "$HERMES_SESSIONS_DIR" ]]; then
+if [[ -L "$HERMES_SESSIONS_DIR" ]]; then
+  scratch_budget_report_measurement "$HERMES_SESSIONS_DIR" || exit $?
+  log "SKIP root: symlink boundary $HERMES_SESSIONS_DIR"
+elif [[ ! -d "$HERMES_SESSIONS_DIR" ]]; then
   log "No ~/.hermes/sessions directory — nothing to do."
 else
   log "=== Section: ~/.hermes/sessions/*.jsonl (${HERMES_SESSIONS_DAYS}d mtime) ==="
@@ -246,6 +275,8 @@ else
   sess_freed_kb=0
   while IFS= read -r -d '' entry; do
     [[ -e "$entry" ]] || continue
+    scratch_budget_report_measurement "$entry" || exit $?
+    [[ -L "$entry" ]] && continue
     entry_size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1 || echo 0)
     entry_age=$(dir_age_days "$entry") || continue
     if (( entry_age < HERMES_SESSIONS_DAYS )); then

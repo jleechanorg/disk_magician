@@ -39,17 +39,59 @@ def format_size(bytes_val: int) -> str:
 
 
 def get_dir_size(dir_path: Path) -> int:
-    """Return total bytes of all files in dir_path."""
-    total = 0
+    """Return unique apparent bytes from the shared metadata walker.
+
+    A Git or unreadable boundary has unknown size; do not replace that unknown
+    with zero or follow links to report their targets.
+    """
+    lib = Path(__file__).resolve().parent / "lib" / "scratch_budget.sh"
+    command = ["bash", "-c", 'source "$1"; scratch_budget_measure_files "$2" 100 --nul',
+               "_", str(lib), str(dir_path)]
     try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    total += (Path(root) / f).stat().st_size
-                except OSError:
-                    continue
-    except OSError:
-        pass
+        result = subprocess.run(command, capture_output=True, timeout=300, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"size measurement unavailable for {dir_path}: {exc}") from exc
+    fields = result.stdout.split(b"\0")
+    if not fields or fields[0] != b"diskm-measure-leaves-v1":
+        raise OSError(f"size measurement protocol missing for {dir_path}")
+    fields = fields[1:]
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 6:
+        raise OSError(f"size measurement record incomplete for {dir_path}")
+    total = 0
+    incomplete = result.returncode != 0
+    incomplete_reason = result.stderr.decode(errors="replace")[:512]
+    print(f"measurement_method=inode-deduplicated-file-summed-apparent threshold_mib=100 path={dir_path}", file=sys.stderr)
+    for offset in range(0, len(fields), 6):
+        size, files, newest, flag, path, apparent = fields[offset:offset + 6]
+        decoded_path = os.fsdecode(path)
+        if flag in (b"G", b"E"):
+            incomplete = True
+            label = flag.decode("ascii")
+            print(f"detail:{label} bytes=0 files=0 newest=0 size_method=unmeasured size_known=false age_known=false threshold_mib=100 {decoded_path}", file=sys.stderr)
+            incomplete_reason = incomplete_reason or f"opaque/unmeasured at {decoded_path}"
+            continue
+        if flag not in (b"A", b"F", b"L"):
+            incomplete = True
+            incomplete_reason = f"unknown measurement flag {flag!r} at {decoded_path}"
+            continue
+        try:
+            unique_bytes = int(size)
+            apparent_bytes = int(apparent)
+            total += unique_bytes
+        except ValueError as exc:
+            incomplete = True
+            incomplete_reason = f"invalid measured bytes at {decoded_path}: {exc}"
+            continue
+        print(f"detail:{flag.decode('ascii')} bytes={unique_bytes} files={files.decode('ascii')} newest={newest.decode('ascii')} size_method=inode-deduplicated-file-summed-apparent threshold_mib=100 apparent_bytes={apparent_bytes} unique_bytes={unique_bytes} {decoded_path}", file=sys.stderr)
+    if incomplete:
+        rc = result.returncode or 1
+        print(f"measurement_status=incomplete rc={rc} path={dir_path}", file=sys.stderr)
+        if incomplete_reason:
+            print(f"measurement_error={incomplete_reason}", file=sys.stderr)
+        raise OSError(f"size measurement incomplete for {dir_path}: {incomplete_reason}")
+    print(f"measurement_status=complete rc=0 path={dir_path}", file=sys.stderr)
     return total
 
 
@@ -266,6 +308,7 @@ class AsideSessionPruner:
             "sessions_scanned": 0,
             "sessions_retained_recent": 0,
             "sessions_retained_in_use": 0,
+            "sessions_retained_unmeasured": 0,
             "sessions_pruned": 0,
             "bytes_pruned": 0,
             "assets_scanned": 0,
@@ -424,6 +467,13 @@ class AsideSessionPruner:
                     continue
 
                 self.stats["sessions_scanned"] += 1
+                try:
+                    size = get_dir_size(entry)
+                except OSError as exc:
+                    self.stats["sessions_retained_unmeasured"] += 1
+                    if self.verbose:
+                        print(f"Retaining session with incomplete size measurement: {entry}: {exc}", file=sys.stderr)
+                    continue
                 age_days, method = parse_session_age_days(entry, self.ref_time)
 
                 # Signal A: Age check
@@ -457,7 +507,6 @@ class AsideSessionPruner:
                         print(f"Safety guard: path rejected for deletion: {entry}")
                     continue
 
-                size = get_dir_size(entry)
                 stale_candidates.append((entry, container, age_days, size))
 
         # Execute Session Pruning
@@ -577,6 +626,7 @@ def main() -> int:
         print(f"Sessions Scanned:          {stats['sessions_scanned']}")
         print(f"Recent Sessions Retained:  {stats['sessions_retained_recent']}")
         print(f"In-Use Sessions Retained:  {stats['sessions_retained_in_use']}")
+        print(f"Unmeasured Sessions Kept:  {stats['sessions_retained_unmeasured']}")
         print(f"Stale Sessions Pruned:     {stats['sessions_pruned']}")
         print(f"Space Freed (Pruned):      {format_size(stats['bytes_pruned'])}")
         if args.dedup_assets:
@@ -587,7 +637,7 @@ def main() -> int:
         prefix = "Would Reclaim" if not args.clean else "Total Reclaimed"
         print(f"{prefix}:             {format_size(total_freed)}")
 
-    return 0
+    return 1 if stats["sessions_retained_unmeasured"] else 0
 
 
 if __name__ == "__main__":

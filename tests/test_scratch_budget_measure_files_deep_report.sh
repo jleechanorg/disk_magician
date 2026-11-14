@@ -34,7 +34,7 @@ assert rc == "0", rc
 assert len(reached) == 1 and reached[0].get("bytes") == "209715200", lines
 assert not substitutes, substitutes
 assert reached[0].get("threshold_mib") == "100", reached
-assert reached[0].get("size_method") == "file-summed-apparent", reached
+assert reached[0].get("size_method") == "inode-deduplicated-file-summed-apparent", reached
 PY
 then
   echo 'PASS=1 FAIL=0'

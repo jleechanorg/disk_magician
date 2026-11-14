@@ -16,13 +16,13 @@ import argparse, datetime, json, math, os, sys, tempfile
 
 STALE_HOURS = 36
 GIB_KB = 1024 * 1024
-GRANULARITY_CEILING_KB = 5 * GIB_KB
+GRANULARITY_CEILING_KB = 100 * 1024
 LEDGER_JSON = "topdown-5g.json"
 LEDGER_MD = "topdown-5g.md"
 STATUS_JSON = "topdown-5g.status.json"
 PARTIAL_LEDGER_JSON = "topdown-5g.partial.json"
 SCHEMA_VERSION = 2
-BUCKET_KINDS = {"dir", "file", "direct_allocation_segment"}
+BUCKET_KINDS = {"dir", "file"}
 INTRINSIC_GATE_KEYS = {"path", "reason", "verification", "reclaimable"}
 INTRINSIC_GATE_OPTIONAL_KEYS = {"errno", "root_device", "path_device"}
 SIZE_KEYS = {"measured_kb", "size_kb", "size_mb", "allocated_kb", "bytes"}
@@ -336,6 +336,11 @@ def complete_coverage_envelope(report):
     intrinsic_gates = report.get("opaque_intrinsic_gates")
     if not isinstance(intrinsic_gates, list):
         return False
+    # Legacy scanners promoted these measurement failures to opaque gates.
+    # Attesting a failure does not establish complete byte attribution.
+    failed_boundary_reasons = {
+        "permission_denied_intrinsic", "vanished_during_scan", "cross_device_boundary",
+    }
     allowed_gate_keys = INTRINSIC_GATE_KEYS | INTRINSIC_GATE_OPTIONAL_KEYS
     if any(
         not isinstance(item, dict)
@@ -345,6 +350,7 @@ def complete_coverage_envelope(report):
             isinstance(item.get(key), str) and item[key]
             for key in ("path", "reason", "verification")
         )
+        or item["reason"] in failed_boundary_reasons
         or type(item.get("reclaimable")) is not bool
         or item["reclaimable"] is not False
         or SIZE_KEYS.intersection(item)
@@ -361,7 +367,10 @@ def complete_coverage_envelope(report):
         or not item.get("path")
         or type(item.get("measured_kb")) is not int
         or item["measured_kb"] < 0
-        or item["measured_kb"] > GRANULARITY_CEILING_KB
+        or ("apparent_bytes" in item and (
+            type(item["apparent_bytes"]) is not int or item["apparent_bytes"] < 0))
+        or (item.get("apparent_bytes", item["measured_kb"] * 1024) >= GRANULARITY_CEILING_KB * 1024
+            and item.get("kind", "dir") != "file")
         or item.get("kind", "dir") not in BUCKET_KINDS
         for item in buckets
     ):
@@ -468,6 +477,15 @@ def build_ledger_dict(report, captured_at):
         buckets = report.get("buckets")
     oversize = report.get("oversize_indivisible_files")
     equation = report.get("accounting_equation")
+    terminal_file_paths = {
+        item["path"] for item in (buckets if isinstance(buckets, list) else [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+        and item.get("kind") == "file"
+    }
+    terminal_file_paths.update(
+        item["path"] for item in (oversize if isinstance(oversize, list) else [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    )
 
     ledger = {
         "schema_version": schema_version,
@@ -487,6 +505,11 @@ def build_ledger_dict(report, captured_at):
         "residual_kb": report.get("residual_kb"),
         "purgeable_kb": report.get("purgeable_kb"),
         "granularity_buckets": buckets,
+        "file_leaves": [item for item in (report.get("file_leaves") or [])
+                        if isinstance(item, dict) and item.get("path") in terminal_file_paths],
+        "measurement_method": (report.get("config") or {}).get(
+            "directory_subdivision_method", "legacy allocation (apparent metadata unavailable)"),
+        "directory_ceiling_mib": 100,
         "oversize_indivisible_files": oversize,
         "accounting_equation": equation,
     }
@@ -661,19 +684,26 @@ def main():
     atomic_write_json(args.out_dir, LEDGER_JSON, canonical_ledger)
 
     lines = [
-        f"# Top-down 5 GiB ledger — {report.get('hostname', 'unknown')}",
+        f"# Top-down 100 MiB ledger — {report.get('hostname', 'unknown')}",
         f"Captured: {captured_at}",
         "",
-        "| Size (GiB) | Path |",
-        "|---:|---|",
+        f"Method: {ledger['measurement_method']}. Directory ceiling: below 100 MiB; files are indivisible leaves.",
+        "Allocated sizes are filesystem accounting, not apparent sizes.",
+        "",
+        "| Allocated (GiB) | Apparent (MiB) | Path |",
+        "|---:|---:|---|",
     ]
     for item in sorted(buckets, key=lambda b: -(b.get("measured_kb") or 0)):
-        lines.append(f"| {gib(item.get('measured_kb')):.1f} | {item.get('path')} |")
+        apparent = item.get("apparent_bytes")
+        apparent_text = f"{apparent / 1024 ** 2:.1f}" if apparent is not None else "unknown"
+        lines.append(f"| {gib(item.get('measured_kb')):.1f} | {apparent_text} | {item.get('path')} |")
     for item in oversize:
+        apparent = item.get("apparent_bytes")
+        apparent_text = f"{apparent / 1024 ** 2:.1f}" if apparent is not None else "unknown"
         lines.append(
-            f"| {gib(item.get('measured_kb')):.1f} | {item.get('path')} (indivisible file) |"
+            f"| {gib(item.get('measured_kb')):.1f} | {apparent_text} | {item.get('path')} (indivisible file) |"
         )
-    lines.append(f"| {gib(report.get('residual_kb')):.1f} | _residual (unattributed)_ |")
+    lines.append(f"| {gib(report.get('residual_kb')):.1f} | unknown | _residual (unattributed)_ |")
     lines.append("")
     lines.append(f"Balanced: {str(bool(equation.get('displayed_balanced'))).lower()}")
     with open(os.path.join(args.out_dir, LEDGER_MD), "w") as f:

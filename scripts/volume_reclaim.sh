@@ -111,7 +111,7 @@ fi
 reserve_before="$(reserve_available "$before" 2>/dev/null)" || reserve_before=0
 reserve_before_json=false
 [[ "$reserve_before" == 1 ]] && reserve_before_json=true
-AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0 pressure_failed=0 reserve_after=$reserve_before reserve_after_json=$reserve_before_json
+AGED=0 REMOVED=0 BALLAST_RELEASE_ATTEMPTED=0 BALLAST_RESTORE_FAILURES=0 TOP_REASON=none AFTER_PCT=$pct now_used=$used now_quota=$quota measurement_error=0 metadata_incomplete=0 pressure_failed=0 reserve_after=$reserve_before reserve_after_json=$reserve_before_json intentional_target_stop=0
 [[ "$available_floor_reached" == true ]] && TOP_REASON=available-floor
 receipt="$SCRIPT_DIR/job_receipt.py"
 precondition="{\"allocated_bytes\":$used,\"quota_bytes\":$quota,\"used_pct\":$pct,\"reserve_available\":$reserve_before_json}"
@@ -229,12 +229,23 @@ if [[ "$below_trigger" != true && "$available_floor_reached" != true ]] && (( ! 
  mkfifo "$DISCOVERY_DIR/candidates" || { rmdir "$DISCOVERY_DIR"; exit 1; }
  # A FIFO lets C14 process each candidate before discovery reaches a later
  # wedged subtree. Per-entry printf avoids find's pipe-output stdio buffering.
- act_run_bounded find "$root" -mindepth 3 -maxdepth 3 -type d ! -name '.*' -exec printf '%s\0' {} \; >"$DISCOVERY_DIR/candidates" &
+ # Stream independent generic lifecycle leaves; source boundaries stay atomic.
+ # A later discovery failure is unfinished even after earlier safe removals.
+ act_run_bounded python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" stream-generic-leaves "$root" "${ACT_DEADLINE_AT:-}" >"$DISCOVERY_DIR/candidates" &
  discovery_pid=$!
 while IFS= read -r -d '' entry; do
  [[ -n "$entry" ]] || continue
- rel="${entry#"$root"/}"
- [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]] || continue
+ [[ -d "$entry" && ! -L "$entry" ]] || continue
+ detail_rc=0
+ scratch_budget_report_measurement "$entry" || detail_rc=$?
+ if (( detail_rc != 0 )); then
+  metadata_incomplete=1
+  measurement_error=1
+  TOP_REASON=measurement-incomplete
+  echo "kept:measurement-incomplete:$entry"
+  if (( detail_rc == 124 )); then TOP_REASON=deadline-before-unit; break; fi
+  continue
+ fi
  # Keep the potentially slow content-mtime walk in this consumer loop. If it
  # runs in a producer/subshell, that producer can scan later paths and exhaust
  # the shared deadline while the first eligible artifact is still in C14.
@@ -267,16 +278,25 @@ while IFS= read -r -d '' entry; do
  AFTER_PCT=$((now_used * 100 / now_quota))
  if [[ "$available_floor" == true ]]; then
   pressure_measure || { TOP_REASON=measurement-unavailable; measurement_error=1; pressure_failed=1; break; }
-  (( free_bytes < 53687091200 )) || break
+  if (( free_bytes >= 53687091200 )); then intentional_target_stop=1; break; fi
  else
-  (( now_used * 100 > now_quota * target_pct )) || break
+  if (( now_used * 100 <= now_quota * target_pct )); then intentional_target_stop=1; break; fi
  fi
 done <"$DISCOVERY_DIR/candidates"
 # Reap the bounded producer even after an early consumer stop. It remains
 # covered by the same deadline and lock; closing the FIFO also stops writes.
 wait "$discovery_pid"; discovery_rc=$?
-rm -f "$DISCOVERY_DIR/candidates"
+rm -f "$DISCOVERY_DIR/candidates" "$DISCOVERY_DIR/records"
 rmdir "$DISCOVERY_DIR"
+if (( discovery_rc == 73 && intentional_target_stop )); then
+ echo "measurement_status=stopped-target-met producer_rc=73 path=$root" >&2
+ discovery_rc=0
+fi
+if (( discovery_rc != 0 )); then
+ metadata_incomplete=1
+ measurement_error=1
+ echo "measurement_status=incomplete rc=$discovery_rc path=$root" >&2
+fi
 if (( discovery_rc == 124 )); then
  TOP_REASON=deadline-before-unit
  echo "deferred:deadline-before-unit:candidate-discovery-timeout:$root"
@@ -295,7 +315,8 @@ if [[ "$clean" == true ]]; then
  # A successful final measurement supersedes an earlier transient probe error;
  # an unknown final allocation remains fail-closed.
  if [[ "$available_floor" == true ]]; then pressure_failed=$measurement_error; fi
- measurement_error=0
+ # A quota probe can recover, but discovery/metadata incompleteness is sticky.
+ measurement_error=$metadata_incomplete
  current="$(status_json)" || { TOP_REASON=measurement-unavailable; measurement_error=1; }
  if (( ! measurement_error )); then
   read -r now_used now_quota < <(usage_pair "$current" 2>/dev/null) || { TOP_REASON=measurement-unavailable; measurement_error=1; }

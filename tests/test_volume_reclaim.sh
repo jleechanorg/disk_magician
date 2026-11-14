@@ -104,6 +104,48 @@ esac
 MOCK
 chmod +x "$DISK_MAGICIAN_DISKM_BIN"
 
+if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == target-met-broken-pipe || "${VOLUME_RECLAIM_TEST_FILTER:-}" == target-met-real-error ]]; then
+  export BALLAST_LOG="$T/ballast.log"
+  export REAL_PYTHON3="$(command -v python3)"
+  export STREAM_FIRST="$TEST_ROOT/repo/evidence/oldest"
+  : >"$STATUS_CALLS_FILE"
+  mkdir "$T/target-bin"
+  cat >"$T/target-bin/python3" <<'FIND'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */scratch_budget_artifact_children.py && "${2:-}" == stream-generic-leaves ]]; then
+  if [[ "$VOLUME_RECLAIM_TEST_FILTER" == target-met-real-error ]]; then
+    printf '%s\0' "$STREAM_FIRST"
+    exit 1
+  fi
+  exec "$REAL_PYTHON3" -c 'import os,sys; first=os.fsencode(os.environ["STREAM_FIRST"])+b"\0"; os.write(1,first); payload=first*10000
+try:
+    while True: os.write(1,payload)
+except BrokenPipeError:
+    raise SystemExit(73)'
+else
+  exec "$REAL_PYTHON3" "$@"
+fi
+FIND
+  chmod +x "$T/target-bin/python3"
+  set +e
+  PATH="$T/target-bin:/usr/bin:/bin:/usr/sbin:/sbin" TEST_STATUS_SEQUENCE="900 800 800" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/target-stop.out" 2>&1
+  target_rc=$?
+  set -e
+  cat "$T/target-stop.out"
+  if [[ "$VOLUME_RECLAIM_TEST_FILTER" == target-met-real-error ]]; then
+    [[ "$target_rc" == 1 && ! -e "$STREAM_FIRST" ]] || { echo "FAIL: real producer error rc=$target_rc"; exit 1; }
+    grep -q 'measurement_status=incomplete rc=1' "$T/target-stop.out"
+    python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="error" and r["candidates"]["removed"]==1 and r["postcondition"]["target_reached"] is None'
+    echo 'PASS: actual producer failure stays incomplete after target reached'
+  else
+    [[ "$target_rc" == 0 && ! -e "$STREAM_FIRST" ]] || { echo "FAIL: target stop rc=$target_rc"; exit 1; }
+    ! grep -q 'measurement_status=incomplete' "$T/target-stop.out"
+    python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="success" and r["candidates"]["removed"]==1 and r["postcondition"]["target_reached"]'
+    echo 'PASS: intentional target-met FIFO close is successful'
+  fi
+  exit 0
+fi
+
 if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == available-floor-trim ]]; then
   [[ "$(uname -s)" == Linux ]] || { echo 'SKIP: Linux Scratch trim contract'; exit 0; }
   mkdir -p "$T/pressure-bin"
@@ -157,34 +199,37 @@ PYTHON_PRESSURE
 
   expired="$(python3 -c 'import time; print(time.monotonic()-1)')"
   : >"$TEST_TRIM_CALLS_FILE"
-  if PATH="$T/pressure-bin:$PATH" TEST_USED=950 ACT_DEADLINE_AT="$expired" \
-    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean >"$T/available-floor-trim-expired.out" 2>&1; then
-    echo 'FAIL: expired trim deadline unexpectedly succeeded'; exit 1
-  fi
+  PATH="$T/pressure-bin:$PATH" TEST_USED=950 ACT_DEADLINE_AT="$expired" \
+    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean >"$T/available-floor-trim-expired.out" 2>&1
   [[ ! -s "$TEST_TRIM_CALLS_FILE" ]]
   python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["reason"]=="deadline-before-trim"'
   echo 'PASS: expired shared deadline prevents starting trim and writes a partial receipt'
 
   mkdir -p "$T/slow-bin"
-  REAL_FIND="$(command -v find)"
-  export REAL_FIND
-  cat >"$T/slow-bin/find" <<'FIND_TIMEOUT'
+  REAL_PYTHON3="$(command -v python3)"
+  export REAL_PYTHON3
+  cat >"$T/slow-bin/python3" <<'FIND_TIMEOUT'
 #!/usr/bin/env bash
-if [[ " $* " == *" -mindepth "* ]]; then
+if [[ "${1:-}" == */scratch_budget_artifact_children.py && "${2:-}" == stream-generic-leaves ]]; then
   printf '%s\0' "$TEST_ROOT/repo/evidence/oldest"
   sleep 15
+elif [[ "${1:-}" == */scratch_pressure.py ]]; then
+  printf '%s\n' "${TEST_PRESSURE_FREE_BYTES:-70000000000}"
 else
-  exec "$REAL_FIND" "$@"
+  exec "$REAL_PYTHON3" "$@"
 fi
 FIND_TIMEOUT
-  chmod +x "$T/slow-bin/find"
+  chmod +x "$T/slow-bin/python3"
   : >"$TEST_TRIM_CALLS_FILE"
   slow_deadline="$(python3 -c 'import time; print(time.monotonic()+4)')"
-  out="$(PATH="$T/slow-bin:$T/pressure-bin:$PATH" TEST_PRESSURE_FREE_BYTES=1 TEST_USED=950 \
+  if out="$(PATH="$T/slow-bin:$T/pressure-bin:$PATH" TEST_PRESSURE_FREE_BYTES=1 TEST_USED=950 \
     TEST_TRIM_OUTPUT='{"status":"trimmed","host_free_delta_bytes":100}' ACT_DEADLINE_AT="$slow_deadline" \
-    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean 2>&1)"
+    "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean 2>&1)"; then
+    echo 'FAIL: incomplete discovery unexpectedly succeeded'; exit 1
+  fi
   grep -q '^trim$' "$TEST_TRIM_CALLS_FILE"
   grep -q 'candidate-discovery-timeout' <<<"$out"
+  python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="error" and r["postcondition"]["target_reached"] is None'
   echo 'PASS: low-free trim happens before a bounded slow-discovery timeout'
 
   : >"$TEST_TRIM_CALLS_FILE"
@@ -203,19 +248,19 @@ fi
 
 if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == streaming-find ]]; then
   export BALLAST_LOG="$T/ballast.log"
-  export REAL_FIND="$(command -v find)"
+  export REAL_PYTHON3="$(command -v python3)"
   export STREAM_FIRST="$TEST_ROOT/repo/evidence/oldest"
   mkdir "$T/find-bin"
-  cat > "$T/find-bin/find" <<'FIND'
+  cat > "$T/find-bin/python3" <<'FIND'
 #!/bin/bash
-if [[ " $* " == *" -mindepth "* ]]; then
+if [[ "${1:-}" == */scratch_budget_artifact_children.py && "${2:-}" == stream-generic-leaves ]]; then
   printf '%s\0' "$STREAM_FIRST"
   sleep 60
 else
-  exec "$REAL_FIND" "$@"
+  exec "$REAL_PYTHON3" "$@"
 fi
 FIND
-  chmod +x "$T/find-bin/find"
+  chmod +x "$T/find-bin/python3"
   deadline="$(python3 -c 'import time; print(time.monotonic()+30)')"
   PATH="$T/find-bin:$PATH" ACT_DEADLINE_AT="$deadline" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/stream.out" 2>&1 &
   reclaim_pid=$!
@@ -224,7 +269,9 @@ FIND
     if [[ ! -d "$STREAM_FIRST" ]]; then progressed=true; break; fi
     sleep 0.1
   done
-  wait "$reclaim_pid"
+  stream_rc=0
+  wait "$reclaim_pid" || stream_rc=$?
+  [[ "$stream_rc" -eq 1 ]]  # unfinished discovery is an explicit failure
   cat "$T/stream.out"
   [[ "$progressed" == true ]] || { echo 'FAIL: first candidate starved behind later discovery wedge'; exit 1; }
   grep -q 'candidate-discovery-timeout' "$T/stream.out"
@@ -335,12 +382,14 @@ chmod +x "$EXP_BIN/find"
 DEADLINE="$(python3 -c 'import time; print(time.monotonic()-1)')"
 : >"$STATUS_CALLS_FILE"
 EXP_START="$(date +%s)"
-EXP_MARKER="$EXP_MARKER" PATH="$EXP_BIN:$PATH" ACT_DEADLINE_AT="$DEADLINE" TEST_STATUS_SEQUENCE="900 900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-deadline.out"
+expired_rc=0
+EXP_MARKER="$EXP_MARKER" PATH="$EXP_BIN:$PATH" ACT_DEADLINE_AT="$DEADLINE" TEST_STATUS_SEQUENCE="900 900 900" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/c14-deadline.out" || expired_rc=$?
+[[ "$expired_rc" -eq 1 ]]
 (( $(date +%s) - EXP_START < 3 ))
 [[ ! -e "$EXP_MARKER" ]]
 grep -q 'deferred:deadline-before-unit' "$T/c14-deadline.out"
 [[ -e "$TEST_ROOT/repo/evidence/oldest" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
-python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="deadline-before-unit"'
+python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="error" and r["postcondition"]["target_reached"] is None and r["candidates"]["top_kept_reason"]=="deadline-before-unit"'
 fi
 # A later candidate's mtime probe must not make the earlier eligible candidate
 # wait behind eager candidate pre-scanning. The fake clock advances
@@ -377,7 +426,7 @@ if [[ "${1:-}" == -c && "${2:-}" == *'time.monotonic()'* ]]; then
 fi
 if [[ "${1:-}" == - ]]; then
   code="$(cat)"
-  if [[ "$code" == *'time.monotonic()'* ]]; then
+  if [[ "$code" == *'time.monotonic() + budget'* ]]; then
     deadline="${2:-0}"; budget="${3:-0}"
     (( now + budget <= deadline )) && exit 0 || exit 1
   fi
@@ -650,11 +699,14 @@ python3 - "$LEASE_FILE" "$TEST_ROOT/repo/evidence/pressure/content" "$OWNER_JSON
 import json,sys,time
 json.dump(dict(path=sys.argv[2],owner=json.loads(sys.argv[3]),pending=False,creator='test',kind='scratch',created_epoch=int(time.time()),ttl_hours=24,released_at=None),open(sys.argv[1],'w'))
 PYP
-PATH="$T/pressure-bin:$PATH" TEST_USED=1 "$ROOT/scripts/volume_reclaim.sh" --available-floor --clean > "$T/pressure-live.out"
+PATH="$T/pressure-bin:$PATH" TEST_USED=1 bash "$ROOT/disk_magician.sh" volume reclaim --available-floor --clean > "$T/pressure-live.out"
 grep -q 'kept:live-owner:' "$T/pressure-live.out"
 [[ -f "$TEST_ROOT/repo/evidence/pressure/content" && ! -s "$BALLAST_LOG" ]]
 echo 'available-floor: live producer lease retained by real C14 path'
 # Actual C14 removal stops between whole artifacts at recovered availability.
+# Isolate this causal case from older protected/leased candidates; traversal order
+# is not part of the free-space signal contract.
+mv "$TEST_ROOT/repo" "$T/repo-before-pressure-stop"
 mkdir -p "$TEST_ROOT/repo/evidence/pressure-first" "$TEST_ROOT/repo/evidence/pressure-second"
 python3 - "$TEST_ROOT/repo/evidence" <<'PYP'
 import os,sys,time
@@ -706,7 +758,12 @@ echo 'available-floor: typed pending low-space recovery permits C14, then retrie
 # The manual deadline must bound candidate discovery itself: a wedged `find`
 # (stubbed to sleep 60) is killed at the deadline and the run defers truthfully.
 HANG_BIN="$T/hang-find-bin"; mkdir -p "$HANG_BIN"
-printf '#!/usr/bin/env bash\nexec sleep 60\n' >"$HANG_BIN/find"; chmod +x "$HANG_BIN/find"
+cat >"$HANG_BIN/python3" <<'HANG'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */scratch_budget_artifact_children.py && "${2:-}" == stream-generic-leaves ]]; then exec sleep 60; fi
+exec "$REAL_PYTHON" "$@"
+HANG
+chmod +x "$HANG_BIN/python3"
 : >"$STATUS_CALLS_FILE"
 start_s=$SECONDS
 PATH="$HANG_BIN:$PATH" ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic()+3)')" TEST_STATUS_SEQUENCE="900 900 900" \

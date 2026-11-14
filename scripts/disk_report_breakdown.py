@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""disk_report_breakdown.py — build a full >=5GiB-granularity disk breakdown
-tree from a ledger/frontier snapshot, list opaque >5GiB leaves for parallel
+"""disk_report_breakdown.py — build a full 100MiB-granularity disk breakdown
+tree from a ledger/frontier snapshot, list opaque >=100MiB leaves for parallel
 drill-down, and render the final reconciled markdown report.
 
 Two subcommands:
@@ -35,7 +35,7 @@ import re
 import sys
 
 GIB_KB = 1024 * 1024
-THRESHOLD_KB = 5 * GIB_KB  # 5 GiB — the repo-wide bucket granularity floor
+THRESHOLD_KB = 100 * 1024  # Directories at this ceiling must descend.
 EPSILON_KB = int(0.05 * GIB_KB)  # rounding tolerance for reconciliation gaps
 BRACKET_SUFFIX_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
 DATA_VOLUME_PREFIX = "/System/Volumes/Data"
@@ -79,10 +79,12 @@ def load_snapshot(snapshot_path):
 def extract_direct_kb(snapshot):
     """Build path->kb map from granularity_buckets + oversize_indivisible_files.
     Both lists are non-overlapping by construction (build_granularity_buckets
-    only ever returns nodes <=5GiB; oversize_indivisible_files are the >5GiB
+    only ever returns nodes <100MiB; oversize_indivisible_files are the >=100MiB
     indivisible remainder measured separately), so summing them is safe."""
     direct = {}
     for bucket in (snapshot.get("granularity_buckets") or []):
+        if bucket.get("kind") == "direct_allocation_segment":
+            continue  # Historical synthetic allocations are not measured leaves.
         path = bucket_path(bucket)
         if not path:
             continue
@@ -142,7 +144,7 @@ def find_opaque_leaves(node, path_stack=None, out=None):
         out = []
     if not node.children:
         total = node.kb
-        if total > THRESHOLD_KB:
+        if total >= THRESHOLD_KB:
             out.append({"path": full_path(path_stack), "subtree_kb": total})
         return out
     for name, child in node.children.items():
@@ -184,12 +186,12 @@ def render_rows(node, path_stack, depth, scratch_map, rows, gaps):
     path = full_path(path_stack)
     total = subtree_kb(node)
 
-    if total <= THRESHOLD_KB:
+    if total < THRESHOLD_KB:
         rows.append({"depth": depth, "path": path, "kb": total, "expanded": False, "opaque": False})
         return
 
     if not node.children:
-        # Opaque >5GiB leaf — splice in scratch drill-down results if present.
+        # Opaque >=100MiB leaf — splice in scratch drill-down results if present.
         scratch = scratch_map.get(path)
         if scratch is not None:
             children_total = sum(c["kb"] for c in scratch["children"])
@@ -313,7 +315,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=doc.splitlines()[0] if doc else "")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p1 = sub.add_parser("list-opaque-leaves", help="print JSON array of opaque >5GiB leaves to drill down")
+    p1 = sub.add_parser("list-opaque-leaves", help="print JSON array of opaque >=100MiB leaves to drill down")
     p1.add_argument("--snapshot", required=True, help="path to ledger or frontier_last.json snapshot")
     p1.set_defaults(func=cmd_list_opaque_leaves)
 

@@ -26,9 +26,17 @@ user_probes = {
     "mail": f"{user_home}/Library/Mail",
     "messages": f"{user_home}/Library/Messages",
 }
-buckets = [{"path": "/a", "measured_kb": 4 * gib}]
+state_root = os.path.dirname(os.path.dirname(path))
+base_file = os.path.join(os.path.dirname(state_root), "fixture-a.bin")
+base_bytes = 4 * gib * 1024
+with open(base_file, "wb") as f:
+    f.truncate(base_bytes)
+buckets = [{"path": base_file, "kind": "file", "apparent_bytes": base_bytes, "measured_kb": 4 * gib}]
 if gib_count > 4:
-    buckets.append({"path": "/fixture_growth", "measured_kb": 4 * gib})
+    growth_file = os.path.join(os.path.dirname(state_root), "fixture_growth.bin")
+    with open(growth_file, "wb") as f:
+        f.truncate(base_bytes)
+    buckets.append({"path": growth_file, "kind": "file", "apparent_bytes": base_bytes, "measured_kb": 4 * gib})
 total_kb = gib_count * gib
 ledger = {
     "schema_version": 2,
@@ -79,7 +87,15 @@ user_probes = {
     "mail": f"{user_home}/Library/Mail",
     "messages": f"{user_home}/Library/Messages",
 }
-buckets = [{"path": "/a", "measured_kb": 4 * gib}, {"path": "/fixture_growth", "measured_kb": 4 * gib}]
+state_root = os.path.dirname(os.path.dirname(path))
+base_file = os.path.join(os.path.dirname(state_root), "fixture-a.bin")
+growth_file = os.path.join(os.path.dirname(state_root), "fixture_growth.bin")
+base_bytes = 4 * gib * 1024
+with open(base_file, "wb") as f:
+    f.truncate(base_bytes)
+with open(growth_file, "wb") as f:
+    f.truncate(base_bytes)
+buckets = [{"path": base_file, "kind": "file", "apparent_bytes": base_bytes, "measured_kb": 4 * gib}, {"path": growth_file, "kind": "file", "apparent_bytes": base_bytes, "measured_kb": 4 * gib}]
 total_kb = gib_count * gib
 ledger = {
     "schema_version": 2,

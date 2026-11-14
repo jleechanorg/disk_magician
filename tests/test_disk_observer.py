@@ -52,14 +52,14 @@ class DiskObserverTest(unittest.TestCase):
         self.assertIn("<key>DOCKER_HOST</key>", text)
         self.assertIn("unix://@HOME@/.colima/default/docker.sock", text)
 
-    def test_frontier_launchd_requests_five_gib_buckets(self):
+    def test_frontier_launchd_requests_100_mib_buckets(self):
         relative = Path(
             "launchd/com.jleechanorg.disk-magician-frontier-nightly.plist.template"
         )
         for template in [p for p in (ROOT / relative, ROOT / "src" / "disk_magician" / relative) if p.exists()]:
             text = template.read_text(encoding="utf-8")
             self.assertIn(
-                "<string>--granularity-gib</string>\n    <string>5</string>",
+                "<string>--granularity-gib</string>\n    <string>0.09765625</string>",
                 text,
                 str(template),
             )

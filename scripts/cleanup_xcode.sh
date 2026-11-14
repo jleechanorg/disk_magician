@@ -2,6 +2,9 @@
 # cleanup_xcode.sh — Clear rebuildable Xcode and simulator caches.
 set -euo pipefail
 
+# Read-only detail is independent of lifecycle/removal eligibility.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _AV_DIR="$SCRIPT_DIR/lib"
 # shellcheck source=scripts/safety_lib.sh
@@ -97,6 +100,7 @@ log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*"; }
 size_kb() {
   local path="$1"
   [[ -e "$path" ]] || { echo 0; return; }
+  scratch_budget_report_measurement "$path" || exit $?
   du -sk "$path" 2>/dev/null | awk '{print $1+0}' || echo 0
 }
 
@@ -152,6 +156,11 @@ artifact_removal_verdict() {
 
 clear_contents() {
   local label="$1" path="$2"
+  if [[ -L "$path" ]]; then
+    scratch_budget_report_measurement "$path" || exit $?
+    log "$label: symlink boundary, keeping $path"
+    return 0
+  fi
   if [[ ! -d "$path" ]]; then
     log "$label: missing, skipping ($path)"
     return
@@ -221,6 +230,7 @@ clean_custom_derived_data() {
       log "Custom Xcode DerivedData: SAFETY-SKIP $target ($_safety_reason)"
       continue
     fi
+    scratch_budget_report_measurement "$target" || exit $?
     if worktree_is_recently_active_minutes "$target" "$CUSTOM_DD_IDLE_MINUTES"; then
       log "Custom Xcode DerivedData: written within ${CUSTOM_DD_IDLE_MINUTES}m or recency unmeasurable, keeping $target"
       continue
@@ -248,6 +258,7 @@ clean_ios_release_scratch() {
   [[ -n "$ptmp" ]] || return 0
   for dir in "$ptmp"/worldai-ios-release-*-*; do
     [[ "${dir##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ && -d "$dir" && ! -L "$dir" ]] || continue
+    scratch_budget_report_measurement "$dir" || exit $?
     if [[ ! -f "$dir/receipts/export.json" || -L "$dir/receipts/export.json" ]]; then
       log "iOS release scratch: no completion receipt, keeping $dir"
       continue

@@ -396,10 +396,10 @@ set_old_mtime "$T13_DIR"
 # backdated $T13_EXTERNAL (the target); backdate the symlink's own mtime
 # with `-h` so the recency check doesn't see it as freshly created.
 touch -h -t 202001010000 "$T13_DIR/pr-stale-symlink"
-T13_PERMS_BEFORE="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
+T13_PERMS_BEFORE="$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$T13_EXTERNAL")"
 
 T13_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T13_DIR" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T13_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T13_DIR" 2>&1)
-T13_PERMS_AFTER="$(stat -f '%Lp' "$T13_EXTERNAL" 2>/dev/null || stat -c '%a' "$T13_EXTERNAL")"
+T13_PERMS_AFTER="$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$T13_EXTERNAL")"
 chmod u+w "$T13_EXTERNAL" 2>/dev/null || true
 assert_exists "T13: stale symlink preserved (C14 never removes symlinks)" "$T13_DIR/pr-stale-symlink"
 assert_contains "T13: C14 kept the symlink candidate (specific verdict reported)" "SKIP (removal failed: kept:check-failed): $T13_DIR/pr-stale-symlink" "$T13_OUT"
@@ -428,12 +428,12 @@ chmod 444 "$T14_EXTERNAL_DIR/file.txt"
 ln -s "$T14_EXTERNAL_DIR" "$T14_DIR/pr-stale-dir-symlink"
 set_old_mtime "$T14_DIR"
 touch -h -t 202001010000 "$T14_DIR/pr-stale-dir-symlink"
-T14_DIR_PERMS_BEFORE="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR")"
-T14_FILE_PERMS_BEFORE="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
+T14_DIR_PERMS_BEFORE="$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$T14_EXTERNAL_DIR")"
+T14_FILE_PERMS_BEFORE="$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$T14_EXTERNAL_DIR/file.txt")"
 
 T14_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T14_DIR" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T14_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T14_DIR" 2>&1)
-T14_DIR_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR")"
-T14_FILE_PERMS_AFTER="$(stat -f '%Lp' "$T14_EXTERNAL_DIR/file.txt" 2>/dev/null || stat -c '%a' "$T14_EXTERNAL_DIR/file.txt")"
+T14_DIR_PERMS_AFTER="$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$T14_EXTERNAL_DIR")"
+T14_FILE_PERMS_AFTER="$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$T14_EXTERNAL_DIR/file.txt")"
 chmod -R u+w "$T14_EXTERNAL_DIR" 2>/dev/null || true
 assert_exists "T14: stale directory symlink preserved (C14 never removes symlinks)" "$T14_DIR/pr-stale-dir-symlink"
 assert_contains "T14: C14 kept the directory-symlink candidate (specific verdict reported)" "SKIP (removal failed: kept:check-failed): $T14_DIR/pr-stale-dir-symlink" "$T14_OUT"

@@ -57,14 +57,16 @@ run() {
     DISK_MAGICIAN_DELETION_LOG="$T/deletions.log" bash "$SCRIPT" "$@"
 }
 
-echo "Test 1: dry-run deletes nothing"
-run --dry-run >"$T/dry.out"
+echo "Test 1: dry-run deletes nothing and reports incomplete measurement"
+dry_rc=0; run --dry-run >"$T/dry.out" 2>&1 || dry_rc=$?
+check "dry-run surfaces incomplete measurement" '[[ "$dry_rc" -ne 0 ]] && grep -q "measurement_status=incomplete" "$T/dry.out"'
 check "dry-run left old run" '[[ -d "$RUNS/old" ]]'
 check "dry-run left oldest release" '[[ -d "$REL/r2" ]]'
 check "dry-run reports would-remove" 'grep -qF "would remove run: $(cd -P "$RUNS" && pwd)/old" "$T/dry.out"'
 
-echo "Test 2: --clean applies retention"
-run --clean >"$T/clean.out"
+echo "Test 2: --clean applies independent retention and reports the unreadable keep"
+clean_rc=0; run --clean >"$T/clean.out" 2>&1 || clean_rc=$?
+check "clean surfaces incomplete measurement" '[[ "$clean_rc" -ne 0 ]] && grep -q "measurement_status=incomplete" "$T/clean.out"'
 check "live symlinked release r1 kept" '[[ -d "$REL/r1" ]]'
 check "newest 3 releases kept" '[[ -d "$REL/r4" && -d "$REL/r5" && -d "$REL/r6" ]]'
 check "stale unreferenced releases removed" '[[ ! -e "$REL/r2" && ! -e "$REL/r3" ]]'

@@ -175,7 +175,7 @@ echo "Test 0c: the LRU budget opt-in switches the Scratch pass to approved budge
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 \
   /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
 LRU_CALLS="$(cat "$INVOCATION_LOG")"
-assert_contains "opt-in passes --budget-pct to scratch-prune" "disk_magician scratch-prune --clean --budget-pct 50 " "$LRU_CALLS"
+assert_contains "opt-in passes --budget-pct to scratch-prune" "disk_magician scratch-prune --clean --budget-pct 50 --budget-preserve-content-keeps " "$LRU_CALLS"
 assert_contains "opt-in runs the approved non-automatic mode" "scratch_prune_mode automatic=0 approval=1" "$LRU_CALLS"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=0 \

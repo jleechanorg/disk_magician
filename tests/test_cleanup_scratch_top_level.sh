@@ -149,13 +149,14 @@ FAKE_LRU_DISKM
       FAKE_DISKUTIL_MOUNTPOINT="${FAKE_DISKUTIL_MOUNTPOINT:-}" \
       DISK_MAGICIAN_DISKM_BIN="$LRU_DISKM" FAKE_SCRATCH_ROOT="$SCRATCH_ROOT" \
       SCRATCH_TOP_LEVEL_APPROVED=1 \
-      FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" DISK_MAGICIAN_SCRATCH_MIN_KB=512 "$@" --budget-floor-minutes 120
+      FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" \
+      DISK_MAGICIAN_SCRATCH_MIN_KB=512 DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 "$@" --budget-floor-minutes 120
   }
   if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
   use_root
   make_tree lru-small 14 >/dev/null
   mkdir -p "$SCRATCH_ROOT/lru-large"
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/lru-large/payload.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/lru-large/payload.bin"
   old_stamp "$SCRATCH_ROOT/lru-large" 13
   make_tree lru-small-after 12 >/dev/null
   : >"$T/lru-status.calls"
@@ -172,7 +173,7 @@ FAKE_LRU_DISKM
   use_root
   mkdir -p "$SCRATCH_ROOT/aaa-small-slow" "$SCRATCH_ROOT/zzz-large-eligible"
   printf 'tiny\n' >"$SCRATCH_ROOT/aaa-small-slow/payload.bin"
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/zzz-large-eligible/payload.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/zzz-large-eligible/payload.bin"
   old_stamp "$SCRATCH_ROOT/aaa-small-slow" 13
   old_stamp "$SCRATCH_ROOT/zzz-large-eligible" 13
   SLOW_FIND_BIN="$T/lru-slow-find-bin"
@@ -196,7 +197,7 @@ FAKE_FIND
   for mode in quota-change usage-unknown; do
     use_root
     mkdir -p "$SCRATCH_ROOT/lru-identity"
-    head -c 1048576 /dev/zero >"$SCRATCH_ROOT/lru-identity/payload.bin"
+    head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/lru-identity/payload.bin"
     old_stamp "$SCRATCH_ROOT/lru-identity" 13
     : >"$T/lru-status.calls"
     out="$(FAKE_STATUS_MODE="$mode" lru_run bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?
@@ -636,7 +637,7 @@ kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
 check "open file keeps the candidate" "kept:open-file" "$out"
 [[ -d "$SCRATCH_ROOT/open-file" ]] && ok "open-file dir preserved" || bad "open-file dir preserved"
 
-echo "Test 7: both override classes need the approval flag and are logged"
+echo "Test 7: no-proof and secret-like content keeps need approval and are logged"
 use_root
 make_tree content-keep 72 '.env.example' >/dev/null
 make_tree secret-keep 73 '.env' >/dev/null
@@ -773,7 +774,7 @@ PYTHON
   C14_USER_TMP_ROOT="$SANDBOX/c14-user-tmp"
   mkdir -p "$C14_PRIVATE_TMP_ROOT" "$C14_TMP_ROOT" "$C14_USER_TMP_ROOT"
   make_tree budget-unproven 72 '.env.example' >/dev/null
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-unproven/payload.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/budget-unproven/payload.bin"
   old_stamp "$SCRATCH_ROOT/budget-unproven" 49
   C14_ROOT_ENV=(
     "DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE=$C14_PRIVATE_TMP_ROOT"
@@ -821,8 +822,8 @@ PYTHON
   git -C "$SCRATCH_ROOT/budget-ignored" commit -qm ignore-rule
   printf 'ignored bytes\n' >"$SCRATCH_ROOT/budget-ignored/ignored.bin"
   make_managed_tree budget-known-build 13 >/dev/null
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-secret/payload.bin"
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-dirty/padding.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/budget-secret/payload.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/budget-dirty/padding.bin"
   old_stamp "$SCRATCH_ROOT/budget-secret" 49
   old_stamp "$SCRATCH_ROOT/budget-dirty" 49
   old_stamp "$SCRATCH_ROOT/budget-not-pushed" 50
@@ -853,8 +854,8 @@ PYTHON
   STATE="$DISK_MAGICIAN_STATE_DIR"
   make_tree legacy-secret 72 '.env' >/dev/null
   make_tree legacy-unproven 72 '.env.example' >/dev/null
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/legacy-secret/payload.bin"
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/legacy-unproven/payload.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/legacy-secret/payload.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/legacy-unproven/payload.bin"
   old_stamp "$SCRATCH_ROOT/legacy-secret" 13
   old_stamp "$SCRATCH_ROOT/legacy-unproven" 13
   out="$(lru_run env DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?

@@ -1379,11 +1379,11 @@ if age_hours < 0:
 if age_hours > 36.0:
     result = {"stale": True, "captured_at": captured_at, "age_hours": round(age_hours, 1)}
 else:
-    le_5g_count = sum(
+    lt_100m_count = sum(
         1 for b in (d.get("granularity_buckets") or [])
         if isinstance(b, dict) and (
             b.get("measured_kb") if b.get("measured_kb") is not None else int(round((b.get("size_mb") or 0) * 1024))
-        ) <= 5 * 1024 * 1024
+        ) < 100 * 1024
     )
     result = {
         "mode": d.get("mode"),
@@ -1391,7 +1391,7 @@ else:
         "age_hours": round(age_hours, 1),
         "measured_total_kb": d.get("measured_total_kb"),
         "frontier_unfinished_count": len(d.get("frontier_unfinished") or []),
-        "mega_table_le_5g_count": le_5g_count,
+        "mega_table_lt_100m_count": lt_100m_count,
         "residual_kb": d.get("residual_kb"),
         "sibling_volumes_count": len(d.get("sibling_volumes") or {}),
         "local_snapshots_count": d.get("local_snapshots_count"),

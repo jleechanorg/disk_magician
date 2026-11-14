@@ -346,6 +346,7 @@ dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 CANDIDATE_REMOVED_COUNT=0
 CANDIDATE_DEFERRED_COUNT=0
 CANDIDATE_INTERRUPTED_COUNT=0
+CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=false
 cleanup_tmp_count_candidate_result() {
   case "$1" in
     removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;
@@ -382,7 +383,7 @@ cleanup_tmp_finish_receipt() {
   if [[ "$sig" != 0 || "$rc" == 124 || "$rc" == 137 ]]; then
     outcome=timeout
     reason="interrupted; signal=${sig}; exit=${rc}"
-    CANDIDATE_INTERRUPTED_COUNT=$(( CANDIDATE_INTERRUPTED_COUNT + 1 ))
+    [[ "$CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED" == true ]] || CANDIDATE_INTERRUPTED_COUNT=$(( CANDIDATE_INTERRUPTED_COUNT + 1 ))
   elif (( rc != 0 )); then
     outcome=error
     reason="cleanup_tmp exited ${rc}"
@@ -416,6 +417,12 @@ cleanup_tmp_finish_receipt() {
 cleanup_tmp_exit_trap() {
   local rc=$? sig="${1:-0}"
   trap - EXIT HUP INT TERM
+  # Candidate probes continue safely after an incomplete unit so later
+  # candidates can still be classified. Preserve that deadline in the final
+  # actuator status after the scan has had a chance to finish.
+  if (( rc == 0 )) && [[ "$CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED" == true && -z "${ACT_CURSOR:-}" ]]; then
+    rc=124
+  fi
   cleanup_tmp_finish_receipt "$rc" "$sig" || { [[ "$rc" != 0 ]] || rc=1; }
   if [[ "$sig" != 0 ]]; then
     [[ -n "${dylib_candidate_file:-}" ]] && rm -f "$dylib_candidate_file"
@@ -463,6 +470,7 @@ resolve_timeout_bin() {
 }
 
 path_size_kb() {
+  scratch_budget_report_measurement "$1" || return $?
   # Bead disk_magician-lsl: `du -sk` can emit zero, one, or (under a TOCTOU
   # race / BSD-du edge case on a live, churning TMPDIR) multiple lines.
   # Take the first numeric field of the LAST line; default to 0 when there
@@ -516,7 +524,7 @@ remove_path() {
   local kb result
   REMOVE_PATH_KB=0
   REMOVE_PATH_COMPLETED=false
-  kb=$(path_size_kb "$path")
+  kb=$(path_size_kb "$path") || exit $?
   if (( kb < 0 )); then
     log "Preserving (size unknown, not removing): $path"
     return 0
@@ -595,7 +603,7 @@ scan_protected_root_children() {
       log "Skipping recently active protected-root child (mtime/ctime within ${protected_child_active_hours}h): $child"
       continue
     fi
-    kb=$(path_size_kb "$child")
+    kb=$(path_size_kb "$child") || exit $?
     if [[ "$kb" -lt 0 ]]; then
       log "Skipping protected-root child (size unknown): $child"
       continue
@@ -1116,7 +1124,7 @@ PY
 
 purge_archive_entry() {
   local d="$1" mins="$2" retention_hours="${3:-$LARGE_TMP_ARCHIVE_RETENTION_HOURS}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" max_hours="${5:-$LARGE_TMP_ARCHIVE_MAX_HOURS}"
-  local kb entry_mtime age_hours result size_unknown=false now_epoch recovery_info recovery_hours archived_at recovery_age activity_hours aged_recovery=false
+  local kb entry_mtime age_hours result size_rc=0 size_unknown=false now_epoch recovery_info recovery_hours archived_at recovery_age activity_hours aged_recovery=false
   now_epoch="$(date +%s)"
   # Aged-mode archives carry a recovery window in the existing C14 origin
   # receipt. Honor it in every purge mode, even when source mtime predates the
@@ -1149,7 +1157,22 @@ PY
   fi
   # Size first because du can be slow. All safety probes follow it, with the
   # open-file check last immediately before the destructive operation.
-  kb=$(path_size_kb "$d")
+  kb=$(path_size_kb "$d") || size_rc=$?
+  if (( size_rc != 0 )); then
+    if (( size_rc == 124 || size_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
+      if ! act_unit_fits 0; then
+        result="$(scratch_budget_quarantine_remove "$d")"
+        cleanup_tmp_count_candidate_result "$result"
+        log "C14 $result: $d"
+        return 0
+      fi
+      log "measurement_status=incomplete rc=$size_rc path=$d; fail-closed and preserving this archive"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+      return 0
+    fi
+    exit "$size_rc"
+  fi
   size_unknown=false
   (( kb < 0 )) && { size_unknown=true; kb=0; }
   # Hard cap (bead jleechan-mtow): past max_hours the
@@ -1343,7 +1366,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       continue
     fi
     files_completed=0
-    local_kb=$(path_size_kb "$f")
+    local_kb=$(path_size_kb "$f") || exit $?
     if (( local_kb < 0 )); then
       log "Skipping (size unknown): $f"
       continue
@@ -1472,7 +1495,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     fi
 
     # Size filter
-    kb=$(path_size_kb "$subdir")
+    kb=$(path_size_kb "$subdir") || exit $?
     if (( kb < 0 )); then
       log "Skipping (size unknown): $subdir"
       continue
@@ -1623,13 +1646,27 @@ container_child_has_protected_repository() {
 # large_consider_entry <dir> <depth> — --large gates for one candidate: depth 0
 # is a top-level tmp entry, depth 1 a child of a descended container.
 large_consider_entry() {
-  local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0
+  local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0 report_rc=0
   local scratch_container=false
   base="$(basename "$d")"
 
   if is_different_filesystem "$d" "${PRIVATE_TMP_ROOT:-}"; then
     log "Skipping mountpoint or foreign filesystem: $d"
     cleanup_tmp_count_candidate_result "kept:mountpoint"
+    return 0
+  fi
+
+  scratch_budget_report_measurement "$d" || report_rc=$?
+  if (( report_rc != 0 )); then
+    log "measurement_status=incomplete rc=$report_rc path=$d; fail-closed and preserving this unit"
+    if (( report_rc == 124 || report_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
+      log "deferred:deadline-before-unit $d"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+    else
+      log "Activity/size measurement failed; fail-closed, treating as active: $d"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+    fi
     return 0
   fi
 
@@ -1710,12 +1747,57 @@ large_consider_entry() {
     done < <(/usr/bin/find "$d" -xdev -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
     return 0
   fi
+  # Split measured large parents before per-unit recency; retain repository
+  # lifecycle units and the existing typed paths for files and links.
+  local plan plan_rc=0 marker _bytes _files _newest kind leaf _apparent descended=false
+  plan="$(mktemp "${TMPDIR:-/tmp}/cleanup-tmp-leaves.XXXXXX")" || return 1
+  scratch_budget_measure_files "$d" 100 --nul >"$plan" || plan_rc=$?
+  if (( plan_rc != 0 )); then
+    rm -f -- "$plan"
+    if (( plan_rc == 124 || plan_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
+      log "measurement_status=incomplete rc=$plan_rc path=$d; fail-closed and deferring this unit"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+    else
+      log "measurement_status=incomplete rc=$plan_rc path=$d; fail-closed, treating as active"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+    fi
+    return 0
+  fi
+  IFS= read -r -d '' marker <"$plan" || marker=""
+  if [[ "$marker" != diskm-measure-leaves-v1 ]]; then
+    rm -f -- "$plan"
+    log "ERROR: invalid measurement frame; preserving $d"
+    return 1
+  fi
+  if ! _scratch_budget_contains_git "$d"; then
+    {
+      IFS= read -r -d '' marker
+      while IFS= read -r -d '' _bytes && IFS= read -r -d '' _files &&
+        IFS= read -r -d '' _newest && IFS= read -r -d '' kind &&
+        IFS= read -r -d '' leaf && IFS= read -r -d '' _apparent; do
+        [[ "$leaf" == "$d" ]] && continue
+        if [[ "$kind" == A && -d "$leaf" && ! -L "$leaf" ]] &&
+          python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$d" "$leaf"; then
+          descended=true
+          large_consider_entry "$leaf" "$((depth + 1))" "$min_kb" "$active_hours" "$aged_mode" || {
+            plan_rc=$?
+            break
+          }
+        fi
+      done
+    } <"$plan"
+  fi
+  rm -f -- "$plan"
+  (( plan_rc == 0 )) || return "$plan_rc"
+  [[ "$descended" == true ]] && return 0
+
   if has_recent_activity "$d" "$active_hours" "$aged_mode"; then
     log "Skipping recently active dir (mtime/ctime within ${active_hours}h): $d"
     return 0
   fi
 
-  kb=$(path_size_kb "$d")
+  kb=$(path_size_kb "$d") || exit $?
   if [[ "$kb" -lt 0 ]]; then
     log "Skipping large-dir candidate (size unknown): $d"
     return 0
@@ -1791,7 +1873,7 @@ if [[ "$INCLUDE_AGED" == true && -n "$PRIVATE_TMP_ROOT" ]]; then
       continue
     fi
     [[ -f "$f" && ! -L "$f" ]] || continue
-    aged_file_kb=$(path_size_kb "$f")
+    aged_file_kb=$(path_size_kb "$f") || exit $?
     if (( aged_file_kb < 0 )); then
       log "Skipping aged agent prompt (size unknown): $f"
       continue
