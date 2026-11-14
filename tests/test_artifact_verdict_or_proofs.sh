@@ -187,8 +187,12 @@ mkdir_file "$T/s/proj2/build"; git init -q "$T/s/proj2/build"; age "$T/s/proj2/b
 assert_eq "$(av "$T/s/proj2/build")" kept:dirty "a build-named repo with untracked content is kept"
 mkdir_file "$T/s/named"; age "$T/s/named" 2881
 target_list="$(printf '%s\n' "$T/s/other" "$T/s/named")"
-assert_eq "$(DISK_MAGICIAN_OPERATOR_TARGETS="$target_list" av "$T/s/named")" remove "operator-target proof still requires48h content inactivity"
+# Export explicitly: macOS Bash 3.2 does not reliably pass a temporary
+# assignment on a shell-function call into C14's nested command substitution.
+export DISK_MAGICIAN_OPERATOR_TARGETS="$target_list"
+assert_eq "$(av "$T/s/named")" remove "operator-target proof still requires48h content inactivity"
 assert_eq "$(proofs)" "age,operator-named" "age and operator target proofs are recorded after48h"
+unset DISK_MAGICIAN_OPERATOR_TARGETS
 
 echo "== vetoes keep even when every proof holds =="
 mkdir_file "$T/s/cwd"; age "$T/s/cwd" 2000
