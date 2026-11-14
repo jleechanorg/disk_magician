@@ -839,7 +839,7 @@ venvw "$HOME/wt-eligible" && age "$HOME/wt-eligible" 11520
 assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" remove \
     "ignored venv/ in a worktree quiet for 8 days"
 # Canonical unmeasurable recency fails closed (reports active), so the venv stays.
-worktree_is_recently_active() { return 0; }
+worktree_last_activity_epoch() { printf 'unmeasurable\n'; }
 assert_eq "$(av "$HOME/wt-eligible/venv" --kind rebuildable)" kept:recent-activity \
     "ignored venv/ when canonical worktree recency cannot be measured"
 # shellcheck source=scripts/lib/worktree_recency.sh
