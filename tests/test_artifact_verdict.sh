@@ -468,7 +468,7 @@ NOW="$(date +%s)"
 # an explicit emergency override case.
 DEFAULT_RECENCY_MINUTES=2880
 # age <path> <minutes>: every entry under <path> last modified <minutes> ago.
-age() { find "$1" -exec touch -h -t "$(date -r $((NOW - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
+age() { local fixture_now; fixture_now="$(date +%s)"; find "$1" -exec touch -h -t "$(date -r $((fixture_now - $2 * 60)) +%Y%m%d%H%M.%S)" {} +; }
 eph() { artifact_removal_verdict "$1" --kind ephemeral; }
 index_candidate="$PT/pr-index-inventory-check"
 git clone -q "$TMPROOT/remotes/ctl.git" "$index_candidate" && baseline "$index_candidate"
@@ -498,11 +498,11 @@ for f in "$PT/cli_validation_gemini_1/o" "$HOME/.aside/u/a/sessions/s1/state" "$
 while read -r row ret p; do
     floor="$ret"
     (( floor < DEFAULT_RECENCY_MINUTES )) && floor=$DEFAULT_RECENCY_MINUTES
-    age "$p" $((floor + 1)) && assert_eq "$(eph "$p")" remove "$row 1 min past ${floor} min: ${p#"$TMPROOT"/}" \
+    age "$p" $((floor + 60)) && assert_eq "$(eph "$p")" remove "$row 1 hour past ${floor} min: ${p#"$TMPROOT"/}" \
         || bad "$row age-old fixture setup (${p#"$TMPROOT"/})"
     exp=kept:no-proof
-    (( floor - 1 < DEFAULT_RECENCY_MINUTES )) && exp=kept:recent-activity
-    age "$p" $((floor - 1)) && assert_eq "$(eph "$p")" "$exp" "$row 1 min short of ${floor} min" \
+    (( floor - 60 < DEFAULT_RECENCY_MINUTES )) && exp=kept:recent-activity
+    age "$p" $((floor - 60)) && assert_eq "$(eph "$p")" "$exp" "$row 1 hour short of ${floor} min" \
         || bad "$row age-fresh fixture setup (${p#"$TMPROOT"/})"
 done <<EOF
 E2 240 $PT/agent_prompt_1.txt
@@ -525,10 +525,10 @@ assert_eq "$(c14_ephemeral_retention "$HOME/.gemini/antigravity/brain/b1")" 3024
 assert_eq "$(c14_ephemeral_retention "$HOME/.gemini/antigravity/implicit.backup")" 43200 "Antigravity backup retention stays durable"
 # An explicit emergency floor may lower the default for ephemeral candidates,
 # but it still enforces its 2 h minimum and the 48 h default remains the normal path.
-age "$PT/agent_prompt_1.txt" 121
+age "$PT/agent_prompt_1.txt" 180
 assert_eq "$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 eph "$PT/agent_prompt_1.txt")" remove \
     "explicit emergency age floor lowers the default to its 2 h minimum"
-age "$PT/agent_prompt_1.txt" 119
+age "$PT/agent_prompt_1.txt" 60
 assert_eq "$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 eph "$PT/agent_prompt_1.txt")" kept:recent-activity \
     "explicit emergency age floor still protects content younger than 2 h"
 # An exact-worktree-root receipt binds only that candidate's own admin rows.
@@ -873,7 +873,11 @@ for d in "$HOME/projects" "$HOME/Documents" "$HOME/wt-dirty" "$HOME/wt-tracked" 
 assert_eq "$(av "$HOME/projects/app/venv" --kind rebuildable)" kept:no-proof "tracked, unpushed and dirty venv/ in a base repo"
 assert_eq "$(av "$HOME/Documents/venv" --kind rebuildable)" kept:no-proof "venv/ outside any repository"
 assert_eq "$(av "$HOME/Documents/venv.bak.old" --kind rebuildable)" kept:no-proof "venv.bak.old outside any repository"
-assert_eq "$(av "$HOME/wt-dirty/venv" --kind rebuildable)" kept:no-proof "ignored venv/ in a dirty worktree"
+dirty_parent_head="$(git -C "$HOME/wt-dirty" rev-parse HEAD)"
+dirty_parent_status="$(git -C "$HOME/wt-dirty" status --porcelain)"
+assert_eq "$(av "$HOME/wt-dirty/venv" --kind rebuildable)" remove "old untracked venv/ can be stripped despite dirty parent"
+assert_eq "$(git -C "$HOME/wt-dirty" rev-parse HEAD)" "$dirty_parent_head" "dirty parent HEAD remains unchanged"
+assert_eq "$(git -C "$HOME/wt-dirty" status --porcelain)" "$dirty_parent_status" "dirty parent status remains unchanged"
 assert_eq "$(av "$HOME/wt-tracked/venv" --kind rebuildable)" kept:no-proof "tracked venv/ in a clean pushed worktree"
 assert_eq "$(av "$HOME/base/venv" --kind rebuildable)" kept:no-proof "ignored venv/ in a base repo, not a linked worktree"
 mkdir -p "$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1" && printf 'bin' >"$PT/X/com.google.Chrome.code_sign_clone/code_sign_clone.c1/app" && age "$PT/X" 43200
