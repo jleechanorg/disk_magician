@@ -26,6 +26,7 @@ Commands:
   report        Generate interactive HTML Treemap & canonical diskm cleanup report (--html, --output, --json).
   frontier      Run the full-disk frontier scanner and optionally persist its state.
   frontier-nightly Run the existing scheduled frontier wrapper.
+  scan-48h      Read-only single-pass every-file 48h scanner with per-dir latest_file rollup.
   install-root-frontier-runner Install the immutable root-owned frontier runner.
   install-cwd-scanner Install the passwordless root cwd scanner for Linux live-cwd gates (run via sudo).
   install-sweepers Install and validate the launchd sweeper set.
@@ -449,6 +450,9 @@ case "$CMD" in
     ;;
   frontier-nightly)
     exec bash "$SCRIPT_DIR/scripts/disk_frontier_scan.sh" "$@"
+    ;;
+  scan_48h|scan-48h)
+    exec python3 "$SCRIPT_DIR/scripts/scan_48h_every_file.py" "$@"
     ;;
   install-root-frontier-runner|install_root_frontier_runner)
     exec bash "$SCRIPT_DIR/scripts/install_root_frontier_runner.sh" "$@"
