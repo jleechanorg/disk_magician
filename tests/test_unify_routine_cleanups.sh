@@ -34,6 +34,7 @@ cp "$REPO_ROOT/disk_magician.sh" "$FIXTURE_DIR/disk_magician.sh"
 cp "$REPO_ROOT/config.json.template" "$FIXTURE_DIR/config.json.template"
 mkdir -p "$FIXTURE_DIR/scripts/lib"
 cp -r "$REPO_ROOT/scripts/lib/"* "$FIXTURE_DIR/scripts/lib/"
+cp "$REPO_ROOT/scripts/safety_lib.sh" "$FIXTURE_DIR/scripts/safety_lib.sh"
 chmod +x "$FIXTURE_DIR/scripts/disk_audit.sh" "$FIXTURE_DIR/disk_magician.sh"
 
 # Mock fleet check
@@ -184,7 +185,7 @@ set -e
 check "audit clean exits 0" test "$RC2" -eq 0
 check "worktrees skipped in clean without approval" grep -q "Worktrees: skipped (requires WORKTREE_APPROVED=1)" "$OUT2"
 check "worktree venvs skipped in clean without approval" grep -q "Worktree venvs: skipped (requires WORKTREE_APPROVED=1)" "$OUT2"
-check "claude state skipped in clean without approval" grep -q "Claude state (>=7d dormant): skipped (requires CLAUDE_STATE_APPROVED=1)" "$OUT2"
+check "claude state skipped in clean without approval" grep -q "Claude state (>=48h dormant): skipped (requires CLAUDE_STATE_APPROVED=1)" "$OUT2"
 check "agent artifacts skipped in clean without approval" grep -q "Agent artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)" "$OUT2"
 check "dark factory skipped in clean without approval" grep -q "Dark Factory artifacts: skipped (requires AGENT_ARTIFACTS_APPROVED=1)" "$OUT2"
 
