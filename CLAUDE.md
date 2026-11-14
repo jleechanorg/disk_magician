@@ -232,6 +232,8 @@ free-space alert, an investigation), do this **without being asked**, then act:
 
 ## 6-tier routine cleanup stack — unified safe maintenance
 
+**Execution order for an emergency reclaim lives in one place:** [`~/.claude/skills/disk-reclaim-playbook/SKILL.md`](/Users/jleechan/.claude/skills/disk-reclaim-playbook/SKILL.md) (projected at `~/.agents/skills/disk-reclaim-playbook`). Follow it before the tiers below: step 0 finds the producer, step 1 applies the per-worktree sparse exclusion, step 2 is the Linux delete-then-trim. Those three accounted for ~108 of ~250 GiB recovered on 2026-11-13 and are the only structural (regrowth-stopping) wins. The 6-tier stack below is the routine maintenance pass, not the emergency order.
+
 When cleaning or recommending disk cleanups on this workstation, execute the canonical 6-tier stack via `./disk_magician.sh clean` (or `--routine`), or fan out the tiers in parallel across `flash` subagents for large reclaims. Do not guess, write ad-hoc scripts, or require user steering to identify the primary high-yield cleanup targets:
 
 1. **Tier 1: Scratch Volume, Developer Caches & Temp (Safe, 10–150+ GiB)**:
