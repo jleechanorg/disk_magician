@@ -274,16 +274,16 @@ assert_exists "t9 idle sources in unknown active workspace kept" "$PT/build/sour
 assert_exists "t9 fresh logs in unknown active workspace kept" "$PT/build/logs"
 assert_contains "t9 unknown workspace skipped as one active unit" "Skipping recently active dir" "$OUT"
 
-echo "Test 10: clean pushed worktree 25h old remains protected by seven-day floor"
+echo "Test 10: clean pushed worktree 47h old remains protected by 48h floor"
 make_env t10
 mkdir -p "$PT/agent-scratch"
 make_clean_pushed_worktree "$TMP_ROOT/t10-main" "$PT/agent-scratch/old-wt" t10wt
-set_age_hours "$PT/agent-scratch/old-wt" 25
+set_age_hours "$PT/agent-scratch/old-wt" 47
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t10 --clean
-assert_exists "t10 25h-old clean pushed worktree kept" "$PT/agent-scratch/old-wt"
-assert_contains "t10 seven-day worktree floor reported" \
-  "recently active nested repository/worktree (<7d)" "$OUT"
+assert_exists "t10 47h-old clean pushed worktree kept" "$PT/agent-scratch/old-wt"
+assert_contains "t10 48h worktree floor reported" \
+  "recently active nested repository/worktree (<48h)" "$OUT"
 
 echo "Test 11: unmeasurable clean pushed worktree fails closed"
 make_env t11
@@ -300,9 +300,9 @@ chmod +x "$BIN/find"
 run_sweep t11 --clean FAIL_RECENCY_ROOT="$PT/agent-scratch/old-wt"
 assert_exists "t11 unmeasurable clean pushed worktree kept" "$PT/agent-scratch/old-wt"
 assert_contains "t11 fail-closed recency protection reported" \
-  "recently active nested repository/worktree (<7d)" "$OUT"
+  "recently active nested repository/worktree (<48h)" "$OUT"
 
-echo "Test 12: clean pushed linked worktree older than seven days reaches the archive gate but stays unproven"
+echo "Test 12: clean pushed linked worktree older than 48 hours reaches the archive gate but stays unproven"
 make_env t12
 mkdir -p "$PT/agent-scratch"
 make_clean_pushed_worktree "$TMP_ROOT/t12-main" "$PT/agent-scratch/old-wt" t12wt
@@ -371,16 +371,16 @@ assert_exists "t15 child containing unpushed nested repository kept" "$PT/agent-
 assert_contains "t15 nested unpushed-work protection reported" \
   "nested repository unsaved work" "$OUT"
 
-echo "Test 16: recently active clean nested worktree honors the seven-day floor"
+echo "Test 16: recently active clean nested worktree honors the 48h floor"
 make_env t16
 mkdir -p "$PT/agent-scratch/runtime/run-id"
 make_clean_pushed_worktree "$TMP_ROOT/t16-main" "$PT/agent-scratch/runtime/run-id/repo" t16wt
-set_age_hours "$PT/agent-scratch/runtime" 25
+set_age_hours "$PT/agent-scratch/runtime" 47
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t16 --clean
-assert_exists "t16 child containing 25h-old clean nested worktree kept" "$PT/agent-scratch/runtime"
+assert_exists "t16 child containing 47h-old clean nested worktree kept" "$PT/agent-scratch/runtime"
 assert_contains "t16 nested worktree recency protection reported" \
-  "recently active nested repository/worktree (<7d)" "$OUT"
+  "recently active nested repository/worktree (<48h)" "$OUT"
 
 echo "Test 17: old clean pushed nested worktree reaches the archive gate but stays unproven"
 make_env t17

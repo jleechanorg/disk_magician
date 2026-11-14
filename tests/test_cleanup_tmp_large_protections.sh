@@ -220,7 +220,7 @@ ago_stamp() {
 
 set_old_mtime() {
   # Backdate every entry under $1 (and $1 itself) well outside the default
-  # 24h active-use window.
+  # 48h active-use window.
   local dir="$1"
   /usr/bin/find "$dir" -exec touch -t 202001010000 {} +
 }
@@ -316,7 +316,7 @@ G1_BIN="$TMP_ROOT/g1-bin"
 mkdir -p "$G1_PRIVATE_TMP" "$G1_TMP"
 make_find_shim "$G1_BIN" "$G1_PRIVATE_TMP" "$G1_TMP"
 make_large_dir "$G1_PRIVATE_TMP/fresh_scratch_dir"
-# Deliberately do NOT backdate — mtime is "now", inside the 24h window.
+# Deliberately do NOT backdate — mtime is "now", inside the 48h window.
 
 G1_OUT="$TMP_ROOT/g1.out"
 if run_capture "$G1_OUT" env -i HOME="$TMP_ROOT/g1-home" \
@@ -335,7 +335,7 @@ fi
 G1_OUT_CONTENT=$(cat "$G1_OUT")
 assert_rc "GREEN 1: exits 0" 0 "$G1_RC"
 assert_contains "GREEN 1: logs recently-active skip" \
-  "Skipping recently active dir (mtime/ctime within 24h): $G1_PRIVATE_TMP/fresh_scratch_dir" "$G1_OUT_CONTENT"
+  "Skipping recently active dir (mtime/ctime within 48h): $G1_PRIVATE_TMP/fresh_scratch_dir" "$G1_OUT_CONTENT"
 assert_exists "GREEN 1: fresh dir untouched at original path" "$G1_PRIVATE_TMP/fresh_scratch_dir"
 
 echo "GREEN 2: dir with .in-use marker is skipped even though mtime is old"
@@ -483,7 +483,7 @@ set_old_mtime "$G3D_PRIVATE_TMP/env_active_window"
 G3D_OUT="$TMP_ROOT/g3d.out"
 if run_capture "$G3D_OUT" env -i HOME="$TMP_ROOT/g3d-home" \
   PATH="$G3D_BIN:/usr/bin:/bin" \
-  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ACTIVE_HOURS=876000 \
+  LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ACTIVE_HOURS=87600 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G3D_ARCHIVE" \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
@@ -497,7 +497,7 @@ fi
 G3D_OUT_CONTENT=$(cat "$G3D_OUT")
 assert_rc "GREEN 3d: exits 0" 0 "$G3D_RC"
 assert_contains "GREEN 3d: logs env-selected active window" \
-  "mtime/ctime within 876000h" "$G3D_OUT_CONTENT"
+  "mtime/ctime within 87600h" "$G3D_OUT_CONTENT"
 assert_exists "GREEN 3d: env-selected active window preserves candidate" \
   "$G3D_PRIVATE_TMP/env_active_window"
 
@@ -1184,7 +1184,7 @@ G10_OUT_CONTENT=$(cat "$G10_OUT")
 assert_rc "GREEN 10: exits 0" 0 "$G10_RC"
 assert_exists "GREEN 10: protected root itself preserved" "$G10_PRIVATE_TMP/worldarchitect.ai"
 assert_exists "GREEN 10: canonical evidence child preserved" "$G10_PRIVATE_TMP/worldarchitect.ai/evidence"
-assert_contains "GREEN 10: --large retains the 48h protected-child floor despite its 24h scan" \
+assert_contains "GREEN 10: --large retains the 48h protected-child floor despite the 24h scan request" \
   "Skipping recently active protected-root child (mtime/ctime within 48h): $G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child" "$G10_OUT_CONTENT"
 assert_exists "GREEN 10: 36h protected-root child remains untouched" "$G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child/payload.bin"
 assert_exists "GREEN 10: stale non-evidence child stays at its original path" "$G10_PRIVATE_TMP/worldarchitect.ai/stale_child"
@@ -1241,7 +1241,7 @@ fi
 G11_OUT_CONTENT=$(cat "$G11_OUT")
 assert_rc "GREEN 11: exits 0" 0 "$G11_RC"
 assert_not_contains "GREEN 11: dir-mtime-only tree is NOT reported active" \
-  "Skipping recently active dir (mtime/ctime within 24h): $G11_PRIVATE_TMP/pr_dir_mtime_only" "$G11_OUT_CONTENT"
+  "Skipping recently active dir (mtime/ctime within 48h): $G11_PRIVATE_TMP/pr_dir_mtime_only" "$G11_OUT_CONTENT"
 
 assert_contains "GREEN 11: dir-mtime-only tree is actually archived" \
   "Archiving: $G11_PRIVATE_TMP/pr_dir_mtime_only ->" "$G11_OUT_CONTENT"
@@ -1282,7 +1282,7 @@ fi
 G12_OUT_CONTENT=$(cat "$G12_OUT")
 assert_rc "GREEN 12: exits 0" 0 "$G12_RC"
 assert_contains "GREEN 12: recent content still logs the active skip" \
-  "Skipping recently active dir (mtime/ctime within 24h): $G12_PRIVATE_TMP/recent_content" "$G12_OUT_CONTENT"
+  "Skipping recently active dir (mtime/ctime within 48h): $G12_PRIVATE_TMP/recent_content" "$G12_OUT_CONTENT"
 assert_exists "GREEN 12: recent-content tree untouched" "$G12_PRIVATE_TMP/recent_content/payload.bin"
 
 # Structural activity leaves OLD mtimes but a FRESH ctime on the moved file:
@@ -1325,7 +1325,7 @@ run_ctime_case() {
   content=$(cat "$out")
   assert_rc "$id: exits 0" 0 "$rc"
   assert_contains "$id: old-mtime file ($how) into stale dir reads ACTIVE via ctime" \
-    "Skipping recently active dir (mtime/ctime within 24h): $pt/pr_moved_in" "$content"
+    "Skipping recently active dir (mtime/ctime within 48h): $pt/pr_moved_in" "$content"
   assert_exists "$id: moved-in tree untouched" "$pt/pr_moved_in/moved.txt"
 }
 
@@ -1361,11 +1361,11 @@ run_root_grace_case() {
   assert_rc "$id: exits 0" 0 "$rc"
   if [[ "$expect" == active ]]; then
     assert_contains "$id: root mtime ${ago}m old with stale content is ACTIVE" \
-      "Skipping recently active dir (mtime/ctime within 24h): $pt/pr_root_grace" "$content"
+      "Skipping recently active dir (mtime/ctime within 48h): $pt/pr_root_grace" "$content"
     assert_exists "$id: tree untouched" "$pt/pr_root_grace/payload.bin"
   else
     assert_not_contains "$id: root mtime ${ago}m old is NOT active" \
-      "Skipping recently active dir (mtime/ctime within 24h): $pt/pr_root_grace" "$content"
+      "Skipping recently active dir (mtime/ctime within 48h): $pt/pr_root_grace" "$content"
     assert_contains "$id: archived" "Archiving: $pt/pr_root_grace ->" "$content"
     assert_missing "$id: original path gone" "$pt/pr_root_grace"
   fi
