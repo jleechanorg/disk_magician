@@ -23,8 +23,11 @@ FAIL=0
 # Keep every sourced helper at the corresponding revision. In particular, never
 # replace worktree_recency.sh with a stub that drops worktree_is_recently_active.
 mkdir -p "$TMP_ROOT/baseline" "$TMP_ROOT/batch_baseline" "$TMP_ROOT/branch" "$TMP_ROOT/unstubbed"
-git -C "$REPO_ROOT" archive "$BASE_SHA" scripts | tar -x -C "$TMP_ROOT/baseline"
-git -C "$REPO_ROOT" archive 2f35dfcd063f1c24f418b013ec9668547bccafff scripts | tar -x -C "$TMP_ROOT/batch_baseline"
+# Keep producer status separate; tar may stop after the valid archive trailer.
+"$REAL_GIT" -C "$REPO_ROOT" archive --output="$TMP_ROOT/baseline-scripts.tar" "$BASE_SHA" scripts
+tar -xf "$TMP_ROOT/baseline-scripts.tar" -C "$TMP_ROOT/baseline"
+"$REAL_GIT" -C "$REPO_ROOT" archive --output="$TMP_ROOT/batch-baseline-scripts.tar" 2f35dfcd063f1c24f418b013ec9668547bccafff scripts
+tar -xf "$TMP_ROOT/batch-baseline-scripts.tar" -C "$TMP_ROOT/batch_baseline"
 cp -R "$REPO_ROOT/scripts" "$TMP_ROOT/branch/"
 cp -R "$REPO_ROOT/scripts" "$TMP_ROOT/unstubbed/"
 # resolve_config falls back to the template beside the scripts directory.
