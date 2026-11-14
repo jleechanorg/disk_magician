@@ -30,7 +30,8 @@ class SessionMetadataSafety(unittest.TestCase):
             link = session / 'link'
             link.symlink_to(target)
             self.assertEqual(get_dir_size(session), link.lstat().st_size)
-            self.assertEqual(get_dir_max_mtime(session), float('inf'))
+            self.assertEqual(get_dir_max_mtime(session), 0.0)
+            self.assertEqual(parse_session_age_days(session), (0.0, 'unknown'))
             self.assertEqual(get_dir_mtime(session), float('inf'))
 
     def test_nested_git_boundary_makes_session_size_unknown(self):
