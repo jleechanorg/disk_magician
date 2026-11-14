@@ -67,6 +67,7 @@ MIN_HOURS_FLOOR=$(($(safety_disposable_recency_floor_minutes) / 60))
 SCRATCH_AUTOMATIC="${DISK_MAGICIAN_SCRATCH_AUTOMATIC:-0}"
 AVAILABLE_FLOOR=false
 RECENCY_SPEC=""
+C14_RECENCY_OVERRIDE_MINUTES=""
 # Idle-floor override (operator decision 2026-10-31): DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=N
 # (N>=12) lowers the manual operator floor. Automatic mode always uses at least 48h
 # and does not activate the content/repository override tied to this floor.
@@ -75,6 +76,7 @@ if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^
   if { mkdir -p "$_guard_state_dir" && printf '%s scratch-prune: recency override active: hours:%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" >>"$_guard_state_dir/worktree_guard.log"; } 2>/dev/null; then
     MIN_HOURS_FLOOR="$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS"
+    C14_RECENCY_OVERRIDE_MINUTES=$((MIN_HOURS_FLOOR * 60))
     RECENCY_SPEC="hours:$MIN_HOURS_FLOOR"
   else
       echo "scratch-prune: cannot record recency override hours:$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS; using 48h floor" >&2
@@ -90,6 +92,7 @@ if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[1
     if { mkdir -p "$_guard_state_dir" && printf '%s scratch-prune: emergency age floor active: hours:%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_emergency_hours" >>"$_guard_state_dir/worktree_guard.log"; } 2>/dev/null; then
       MIN_HOURS_FLOOR="$_emergency_hours"
+      C14_RECENCY_OVERRIDE_MINUTES="$DISK_MAGICIAN_AGE_FLOOR_MINUTES"
       RECENCY_SPEC="hours:$MIN_HOURS_FLOOR"
     else
       echo "scratch-prune: cannot record emergency floor hours:$_emergency_hours; keeping ${MIN_HOURS_FLOOR}h" >&2
@@ -366,6 +369,16 @@ emit_discovery_deferred_summary() {
   fi
 }
 
+# c14_scratch_verdict <path> <args...>: propagate only a logged manual floor override.
+c14_scratch_verdict() {
+  local path="$1"; shift
+  if [[ "$SCRATCH_AUTOMATIC" != 1 && "$C14_RECENCY_OVERRIDE_MINUTES" =~ ^[0-9]+$ && "$C14_RECENCY_OVERRIDE_MINUTES" -ge 120 ]]; then
+    DISK_MAGICIAN_AGE_FLOOR_MINUTES="$C14_RECENCY_OVERRIDE_MINUTES" \
+      artifact_removal_verdict "$path" "$@" --min-idle-minutes "$C14_RECENCY_OVERRIDE_MINUTES"
+  else
+    artifact_removal_verdict "$path" "$@"
+  fi
+}
 # verdict_and_maybe_remove <entry> — C14 gate plus the operator-approved content
 # override. The caller captures this function's output, so its lease scope must
 # live in that command-substitution shell across verdict and quarantine rename.
@@ -395,13 +408,13 @@ _verdict_and_maybe_remove() {
   if [[ "$BUDGET_PRESERVE_CONTENT_KEEPS" == true ]]; then
     # Only C14-recognized ephemeral artifacts get the age-based remove verdict;
     # unknown and repository content keeps remain final keeps in this mode.
-    verdict="$(artifact_removal_verdict "$verdict_path" --kind ephemeral --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
+    verdict="$(c14_scratch_verdict "$verdict_path" --kind ephemeral --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
   elif [[ -n "$BUDGET_PCT" ]]; then
     # Manual budget mode has an explicit selected floor. Pass that same floor to
     # C14 so its default 48h veto does not erase the caller's documented control.
     verdict="$(artifact_removal_verdict "$verdict_path" --inventory-out "$inv" --min-idle-minutes "$BUDGET_FLOOR_MINUTES" 2>/dev/null)" || verdict=kept:check-failed
   else
-    verdict="$(artifact_removal_verdict "$verdict_path" --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
+    verdict="$(c14_scratch_verdict "$verdict_path" --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
   fi
   case "$verdict" in
     remove) ;;

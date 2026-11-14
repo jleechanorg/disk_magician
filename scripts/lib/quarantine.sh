@@ -38,6 +38,9 @@ quarantine_remove() {
       --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity)
         [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
         caller_verdict_args+=("$1" "$2"); shift 2 ;;
+      --min-idle-minutes)
+        [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }
+        caller_verdict_args+=("$1" "$2"); shift 2 ;;
       *) echo kept:check-failed; return 0 ;;
     esac
   done
