@@ -334,10 +334,11 @@ fi
 if grep -q 'Lane 1/3.*top-down' "$OUT" &&
    grep -q 'Lane 2/3.*snapshot' "$OUT" &&
    grep -q 'Lane 3/3.*quick' "$OUT" &&
-   grep -q '/fixture/big/a' "$OUT" &&
-   grep -q '/fixture/big/b' "$OUT" &&
-   grep -q '3.0 GiB' "$OUT" &&
-   grep -q 'Data directory/path buckets <= 5 GiB' "$OUT" &&
+   grep -q '/fixture/test/fine.bin' "$OUT" &&
+   grep -q '/fixture/test/large.bin' "$OUT" &&
+   grep -q '6.0 GiB' "$OUT" &&
+   grep -q 'Data directory/path buckets <= 0.0976562 GiB' "$OUT" &&
+   grep -q 'Indivisible files above 0.0976562 GiB' "$OUT" &&
    grep -q 'Displayed Data equation:' "$OUT" &&
    grep -q '0.0 GiB measured tail' "$OUT" &&
    grep -q 'Physical store disk0s2' "$OUT" &&
@@ -353,7 +354,7 @@ if grep -q 'Lane 1/3.*top-down' "$OUT" &&
    grep -q 'QUICK_WIN_MARKER' "$OUT" &&
    grep -q 'WORKTREE_PREVIEW_MARKER' "$OUT" &&
    grep -q 'pushes and GitHub lookups disabled' "$OUT"; then
-  ok "ordered report includes top-down accounting, limits, deltas, and quick wins"
+  ok "ordered report includes 100 MiB leaves, indivisible files, limits, deltas, and quick wins"
 else
   bad "three-lane report is incomplete: $(tr '\n' ';' < "$OUT")"
 fi
@@ -364,7 +365,7 @@ HOME="$WORK/home" FRONTIER_ARGS_CAPTURE="$FRONTIER_ARGS_CAPTURE" \
   "$TREE/scripts/disk_diagnostic.sh" >"$INVALID_OUT" 2>&1
 invalid_rc=$?
 if [[ "$invalid_rc" -ne 0 ]] && grep -q 'CONTRACT FAILURE: scanner emitted oversized normal buckets' "$INVALID_OUT"; then
-  ok "renderer fails closed when a scanner violates the <=5 GiB bucket ceiling"
+  ok "renderer fails closed when a scanner violates the effective 100 MiB bucket ceiling"
 else
   bad "renderer accepted an oversized normal bucket (rc=$invalid_rc): $(tr '\n' ';' < "$INVALID_OUT")"
 fi
