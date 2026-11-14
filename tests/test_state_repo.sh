@@ -128,11 +128,18 @@ run_sr "$H10" - push >/dev/null 2>&1
 HOME="$H10" git clone -q "$BARE10" "$TMP_ROOT/other10"
 ( cd "$TMP_ROOT/other10" && echo remote-side > MACHINE && HOME="$H10" git -c user.email=o@o -c user.name=o commit -qam remote-conflict && HOME="$H10" git push -q )
 REMOTE_HEAD=$(HOME="$H10" git -C "$BARE10" rev-parse HEAD)
-( cd "$SD10" && echo local-side > MACHINE && HOME="$H10" git -c user.email=a@a -c user.name=a commit -qam local-conflict )
+if ! ( cd "$SD10" && echo local-side > MACHINE && HOME="$H10" git -c user.email=a@a -c user.name=a commit -qam local-conflict ); then
+  bad "local conflict commit created" "git commit failed"
+  exit 1
+fi
+LOCAL_HEAD10=$(git -C "$SD10" rev-parse HEAD 2>/dev/null) || {
+  bad "local conflict HEAD recorded" "rev-parse failed"
+  exit 1
+}
 run_sr "$H10" - push >/dev/null 2>&1; RC10=$?
 [[ $RC10 -ne 0 ]] && ok "conflicted push exits nonzero" || bad "conflicted push rc" "rc=0"
 [[ "$(git -C "$BARE10" rev-parse HEAD)" == "$REMOTE_HEAD" ]] && ok "remote history untouched" || bad "remote intact" "remote moved"
-git -C "$SD10" log --format=%s | grep -q local-conflict && ok "local commit preserved" || bad "local preserved" "missing"
+[[ "$(git -C "$SD10" rev-parse HEAD 2>/dev/null)" == "$LOCAL_HEAD10" ]] && ok "local commit preserved" || bad "local preserved" "HEAD changed"
 [[ ! -d "$SD10/.git/rebase-merge" && ! -d "$SD10/.git/rebase-apply" ]] && ok "no mid-rebase state" || bad "mid-rebase" "rebase dirs left"
 [[ -n "$(git -C "$SD10" branch --show-current)" ]] && ok "still on a branch" || bad "on branch" "detached"
 
