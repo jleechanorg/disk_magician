@@ -1159,11 +1159,10 @@ _process_repo_local_worktrees() {
                     # candidate's own owner-null lease (never an
                     # ancestor/descendant), after all other C14 checks and the
                     # recency/policy/remote proof above.
-                    if [[ -n "$ACT_DEADLINE_AT" ]]; then
-                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
-                    else
-                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
-                    fi
+                    local -a cw_c14_args=(--t3-owner-null --inventory-out "$cw_c14_inv")
+                    [[ -n "$FLOOR_HOURS" ]] && cw_c14_args+=(--min-idle-minutes "$((FLOOR_HOURS * 60))")
+                    [[ -n "$ACT_DEADLINE_AT" ]] && cw_c14_args+=(--deadline-at "$ACT_DEADLINE_AT")
+                    cw_c14_verdict="$(artifact_removal_verdict "$abs_path" "${cw_c14_args[@]}")"
                     if [[ "$cw_c14_verdict" == remove ]]; then
                         WRH_REASON="$wrh_reason"
                         if [[ -n "$ACT_DEADLINE_AT" ]]; then

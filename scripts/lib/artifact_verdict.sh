@@ -257,7 +257,7 @@ c14_archive_origin() (
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t floor re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
+    local h w g t floor caller_min_idle="${3:-}" caller_min_idle_explicit="${4:-0}" re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
@@ -272,6 +272,9 @@ _av_rebuildable() (
         # venv cleaner; higher local floors still protect the worktree.
         floor="$(safety_worktree_floor_minutes 2>/dev/null)" || { printf 'kept:check-failed\n'; return 1; }
         [[ "$floor" =~ ^[1-9][0-9]*$ ]] || { printf 'kept:check-failed\n'; return 1; }
+        if [[ "$caller_min_idle_explicit" == 1 && "$caller_min_idle" =~ ^[0-9]+$ ]] && (( caller_min_idle >= 60 )); then
+            floor="$caller_min_idle"
+        fi
         worktree_is_recently_active_minutes "$w" "$floor" && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
@@ -703,7 +706,7 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
             if [[ "$ret" == ok ]]; then proofs+=" age"
             elif [[ "$ret" != none ]]; then echo "$ret"; return 0; fi
             floor_class="$(c14_ephemeral_retention "$p")" || floor_class='' ;;
-        rebuildable) ret="$(_av_rebuildable "$p" "$deadline")" && reb=1 || {
+        rebuildable) ret="$(_av_rebuildable "$p" "$deadline" "$min_idle" "$min_idle_explicit")" && reb=1 || {
             case "$ret" in
                 deferred:*|kept:*) echo "$ret"; return 0 ;;
                 recent-activity) echo kept:recent-activity; return 0 ;;  # caller-owned venv floor

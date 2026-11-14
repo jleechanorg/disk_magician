@@ -164,6 +164,24 @@ if [[ "${DISK_MAGICIAN_WORKTREE_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_M
     FLOOR_HOURS="$DISK_MAGICIAN_WORKTREE_FLOOR_HOURS"
   fi
 fi
+C14_WORKTREE_MIN_IDLE=""
+
+c14_venv_verdict() {
+  local path="$1"; shift
+  if [[ -n "$C14_WORKTREE_MIN_IDLE" ]]; then
+    artifact_removal_verdict "$path" "$@" --min-idle-minutes "$C14_WORKTREE_MIN_IDLE"
+  else
+    artifact_removal_verdict "$path" "$@"
+  fi
+}
+c14_venv_remove() {
+  local path="$1"; shift
+  if [[ -n "$C14_WORKTREE_MIN_IDLE" ]]; then
+    c14_remove "$path" "$@" --min-idle-minutes "$C14_WORKTREE_MIN_IDLE"
+  else
+    c14_remove "$path" "$@"
+  fi
+}
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -448,6 +466,9 @@ if [[ "$DRY_RUN" == false ]]; then
     echo "WARNING: --clean requires WORKTREE_APPROVED=1 in the environment for worktrees < ${AUTO_APPROVE_AGE_DAYS}d (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)." >&2
   fi
 fi
+if [[ -n "$FLOOR_HOURS" && "$UNAPPROVED_CLEAN" == false ]]; then
+  C14_WORKTREE_MIN_IDLE=$((FLOOR_HOURS * 60))
+fi
 
 # Load deferral check (bead rev-ez5pho):
 # Defer execution when 5-min load per core > 4.0 (configurable via DISK_MAGICIAN_MAX_LOAD5_PER_CORE).
@@ -662,7 +683,7 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       _c14_verdict=""
       if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
         echo "SAFETY-SKIP $venv_path ($_safety_reason)"
-      elif _c14_verdict="$(artifact_removal_verdict "$venv_path" --kind rebuildable --no-rescue-push 2>/dev/null)" && [[ "$_c14_verdict" == remove ]]; then
+      elif _c14_verdict="$(c14_venv_verdict "$venv_path" --kind rebuildable --no-rescue-push 2>/dev/null)" && [[ "$_c14_verdict" == remove ]]; then
         log "  [dry-run] would strip $venv_path (${venv_pretty}, parent ${age_days}d old)"
         TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
         STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
@@ -674,7 +695,7 @@ for wt in ${CANDIDATE_WTS[@]+"${CANDIDATE_WTS[@]}"}; do
       log "  stripping $venv_path (${venv_pretty}, parent ${age_days}d old)"
       if ! _safety_reason="$(safety_gate "$venv_path" 2>/dev/null)"; then
         echo "SAFETY-SKIP $venv_path ($_safety_reason)"
-      elif c14_remove "$venv_path" --kind rebuildable; then
+      elif c14_venv_remove "$venv_path" --kind rebuildable; then
         TOTAL_FREED_KB=$(( TOTAL_FREED_KB + venv_kb ))
         STRIPPED_COUNT=$(( STRIPPED_COUNT + 1 ))
       else
@@ -727,7 +748,13 @@ purge_bak_dirs() {
       # Hard gate: parent worktree must be past the recency floor. Fails
       # closed — an unmeasurable parent reads as age 0, i.e. "recently
       # active", i.e. protected.
-      if worktree_is_recently_active_minutes "$parent" "$MIN_AGE_MIN"; then
+      if [[ -n "$FLOOR_HOURS" && "$UNAPPROVED_CLEAN" == false ]]; then
+        if worktree_is_recently_active_minutes "$parent" "$((FLOOR_HOURS * 60))"; then
+          skipped_young_wt=$(( skipped_young_wt + 1 ))
+          log "  skip (parent worktree < ${FLOOR_HOURS}h, protected): $bak_path"
+          continue
+        fi
+      elif worktree_is_recently_active_minutes "$parent" "$MIN_AGE_MIN"; then
         skipped_young_wt=$(( skipped_young_wt + 1 ))
         log "  skip (parent worktree < $(worktree_floor_label "$MIN_AGE_MIN"), protected): $bak_path"
         continue
@@ -763,7 +790,7 @@ purge_bak_dirs() {
         _bak_verdict=""
         if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then
           echo "SAFETY-SKIP $bak_path ($_safety_reason)"
-        elif _bak_verdict="$(artifact_removal_verdict "$bak_path" --kind rebuildable --no-rescue-push 2>/dev/null)" && [[ "$_bak_verdict" == remove ]]; then
+        elif _bak_verdict="$(c14_venv_verdict "$bak_path" --kind rebuildable --no-rescue-push 2>/dev/null)" && [[ "$_bak_verdict" == remove ]]; then
           log "  [dry-run] would purge $bak_path (${bak_pretty}, ${bak_age_days}d old, parent worktree stale)"
           bak_freed_kb=$(( bak_freed_kb + bak_kb ))
           bak_count=$(( bak_count + 1 ))
@@ -775,7 +802,7 @@ purge_bak_dirs() {
         log "  purging $bak_path (${bak_pretty}, ${bak_age_days}d old)"
         if ! _safety_reason="$(safety_gate "$bak_path" 2>/dev/null)"; then
           echo "SAFETY-SKIP $bak_path ($_safety_reason)"
-        elif c14_remove "$bak_path" --kind rebuildable; then
+        elif c14_venv_remove "$bak_path" --kind rebuildable; then
           bak_freed_kb=$(( bak_freed_kb + bak_kb ))
           bak_count=$(( bak_count + 1 ))
           TOTAL_BAK_PURGED=$(( TOTAL_BAK_PURGED + 1 ))

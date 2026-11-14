@@ -553,4 +553,5 @@ assert_contains "T20: the keep is counted under C14, not as a failure" "Skipped 
 assert_contains "T20: the keep names its reason" "SKIP (C14 kept: kept:secret-like): $T20_DIR/pr273z-holds-secret" "$T20_OUT"
 
 echo
-echo "=== Test Results: $PASS pass, $FAIL fail ==="[[ "$FAIL" -eq 0 ]]
+echo "=== Test Results: $PASS pass, $FAIL fail ==="
+[[ "$FAIL" -eq 0 ]]

@@ -255,14 +255,14 @@ When cleaning or recommending disk cleanups on this workstation, execute the can
    - Targets: Colima VM Docker prune (unused images/containers) + in-VM `fstrim -av` to shrink the host sparse disk (`~/.colima/_lima`).
 4. **Tier 4: Browser Sessions, Code-Sign Clones & Cloud Caches (Safe / Gated, 10–60+ GiB)**:
    - Scripts: `prune_aside_sessions.sh`, `cleanup_code_sign_clones.sh` (requires `CODE_SIGN_CLONES_APPROVED=1`), `evict_fileprovider.sh` (requires `FILEPROVIDER_EVICT_APPROVED=1`)
-   - Targets: stale Aside browser sessions (`~/.aside/u/*/sessions/` >7d/14d) with static asset hardlink deduplication, dead macOS `code_sign_clone` bundles in `/private/var/folders/.../X`, and evictable local CloudStorage FileProvider caches (`~/Library/CloudStorage/*`).
+   - Targets: Aside sessions with at least 48 hours of measured content inactivity (session-name dates do not establish age), dead macOS `code_sign_clone` bundles past the 48-hour default age, and uploaded/closed local CloudStorage FileProvider files past the 48-hour default. Explicit per-run age overrides remain available; C14, open-file, provider-state, and approval gates still apply.
 5. **Tier 5: Agent State Compaction, SQLite Vacuum & Rotated Logs (Safe, 5–20 GiB)**:
    - Scripts: `cleanup_antigravity_brain.sh`, `cleanup_codex_db.sh`, `vacuum_hermes_state.sh`, `cleanup_codex_documents.sh`, `cleanup_supervisor_logs.sh`, `cleanup_uv_cache.sh`
-   - Targets: losslessly compacts completed Antigravity task logs and transcripts (>=7d), vacuums `~/.codex` and `~/.hermes/state.db` SQLite databases, prunes dormant Codex task documents (>=7d), prunes stale rotated supervisor logs, and prunes orphaned uv-tool build wheels.
+   - Targets: retains Antigravity brain artifacts for 21 days and migration backups for 30 days, while preserving `conversations/` history; nested Antigravity worktrees and dormant Codex task documents use the 48-hour default. SQLite vacuum and orphaned uv-tool wheel cleanup retain their content-aware behavior. Rotated supervisor logs use the shared 48-hour floor; active logs and state remain protected.
 6. **Tier 6: Worktree Slimming, Dependency Stripping, Dormant Worktrees & Venvs (Safety-Gated, 30–180+ GiB)**:
    - Scripts (run in order): `slim_worktree_checkouts.sh` (`slim-worktrees`), `cleanup_worktree_deps.sh` (`cleanup-worktree-deps`), `cleanup_worktrees.sh` (`cleanup-worktrees`), `cleanup_worktree_venvs.sh` (`cleanup-worktree-venvs`), `cleanup_claude_state.sh`
-   - Targets: converts dormant worktrees (>=7d) to sparse root-only checkouts (`slim-worktrees`), strips rebuildable `node_modules`/`target`/`.mypy_cache` (>=3d), removes merged/pushed/detached-on-origin dormant worktrees (>=3d), and strips `.venv`/`venv` (>=7d).
-   - **GATING**: Requires `WORKTREE_APPROVED=1` in environment to execute `--clean`. Strictly enforces recency, live-cwd, C14 lease, hidden-state, and AO ownership (`C` container vs `P` project `worktreeDir`) gates.
+   - Targets: evaluates worktree inactivity at the shared 48-hour default for sparse checkout, rebuildable `node_modules`/`target`/`.mypy_cache`, merged/pushed worktree removal, and `.venv`/`venv` stripping.
+   - **GATING**: `WORKTREE_APPROVED=1` remains required where the command requires it. Recency never overrides live-cwd, C14 lease, hidden-state, source-preservation or AO ownership (`C` container vs `P` project `worktreeDir`) gates; AO-owned worktrees use the 48-hour content floor while retaining their separate ownership veto.
 
 ## Cross-repo authority: dir switching is ALWAYS allowed from this repo
 

@@ -793,7 +793,7 @@ chmod +x "$PS_BIN/lsof"
 # with a declared retention (bead disk_magician-archive-same-volume-regrowth-03bn).
 mkdir -p "$PS_PRIVATE_TMP/pr_stale_large_dir"
 dd if=/dev/zero of="$PS_PRIVATE_TMP/pr_stale_large_dir/payload" bs=1024 count=200 status=none
-STALE_STAMP="$(date -v-10H +%Y%m%d%H%M 2>/dev/null || date -d '-10 hours' +%Y%m%d%H%M)"
+STALE_STAMP="$(date -v-49H +%Y%m%d%H%M 2>/dev/null || date -d '-49 hours' +%Y%m%d%H%M)"
 # Stamp the directory entry itself, not just the file inside it —
 # has_recent_activity() / the --large scan's mtime check looks at every
 # entry under the candidate dir including the dir node itself, and mkdir -p
