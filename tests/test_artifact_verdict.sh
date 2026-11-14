@@ -936,7 +936,7 @@ assert_eq "$(av "$later_row_entry" --kind ephemeral)" kept:archive-identity "E1 
 
 legacy_entry="$ARCHIVE_ROOT/20261010T020000Z/pre-receipt"
 mkdir -p "$legacy_entry" && printf 'legacy archive' >"$legacy_entry/payload" && age "$legacy_entry" 43200
-assert_eq "$(av "$legacy_entry" --kind ephemeral)" remove "pre-receipt archive falls through to ordinary provenance"
+assert_eq "$(av "$legacy_entry" --kind ephemeral)" kept:archive-identity "pre-receipt archive is preserved without origin proof"
 
 replaced_source="$PT/pr-replaced-123"
 replaced_entry="$ARCHIVE_ROOT/20261010T030000Z/pr-replaced-123"
