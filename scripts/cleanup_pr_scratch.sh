@@ -84,7 +84,7 @@ CLI_TMP_DIRS=()
 CLI_PATTERNS=()
 # Size-budget mode (bead disk_magician-d45): 0 disables.
 BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
-BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
+BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-$(safety_disposable_recency_floor_minutes)}"
 
 usage() {
   cat <<EOF
@@ -104,7 +104,7 @@ Options:
                       env DISK_MAGICIAN_SCRATCH_BUDGET_GB).
   --budget-floor-minutes <N>
                       Never evict anything younger than N minutes under
-                      budget mode (default 120, hard minimum 60; env
+                      budget mode (default 48h, hard minimum 60m for explicit overrides; env
                       DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES).
   -h, --help          Show this help message.
 EOF

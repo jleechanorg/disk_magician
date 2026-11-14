@@ -300,21 +300,21 @@ done
 # advertises huggingface cleanup, but this script had no such section, so
 # ~/.cache/huggingface and ~/.cache/hy3dgen were unreachable (measured 11 GiB and
 # 6.9 GiB on 2026-11-03). These are model downloads a running job may be using, so a
-# root with ANY file touched in the last 24 h is preserved wholesale, and an
-# unmeasurable scan also preserves (fail closed).
+# root with ANY file touched within the shared 48h default floor is preserved
+# wholesale; an unmeasurable scan also preserves (fail closed).
 clean_hf_cache_if_idle() {
   local label="$1" path="$2" young rc=0
   if [[ ! -d "$path" ]]; then
     log "$label: directory not found, skipping"
     return
   fi
-  young="$(find "$path" -type f -mmin -1440 -print -quit 2>/dev/null)" || rc=$?
+  young="$(find "$path" -type f -mmin "-$DISPOSABLE_CONTENT_RECENCY_MINUTES" -print -quit 2>/dev/null)" || rc=$?
   if (( rc != 0 )); then
     log "$label: mtime scan failed (rc=$rc) — preserving (fail closed)"
     return
   fi
   if [[ -n "$young" ]]; then
-    log "$label: recently written (${young#"$path"/}) — preserving, younger than 24h"
+    log "$label: recently written (${young#"$path"/}) — preserving, younger than $((DISPOSABLE_CONTENT_RECENCY_MINUTES / 60))h"
     return
   fi
   clean_dir_contents "$label" "$path" true rebuildable

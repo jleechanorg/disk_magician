@@ -3,8 +3,7 @@
 #
 # Usage: emergency_reclaim.sh [--target-gb N] [--max-age-hours H] [--dry-run] [--include-worktrees]
 #
-# Runs the tmp lane then the Scratch lane under ONE scratch-lock hold, stepping the
-# age floor down H -> 12 -> 6 -> 2 hours (never below 2 h) and stopping the moment
+# Runs the tmp lane then the Scratch lane at one content-age floor. The default is 48h; lower floors require an explicit --max-age-hours.
 # measured host free space reaches the target. Running the command without --dry-run
 # is the operator's approval: LARGE_TMP_APPROVED / SCRATCH_TOP_LEVEL_APPROVED (and
 # WORKTREE_APPROVED with --include-worktrees) are set for the cleaner children only.
@@ -20,7 +19,7 @@ source "$SCRIPT_DIR/lib/scratch_lock.sh"
 MIN_FLOOR_HOURS=2
 DEFAULT_TARGET_GB=40
 TARGET_GB="$DEFAULT_TARGET_GB"
-MAX_AGE_HOURS=24
+MAX_AGE_HOURS=48
 DRY_RUN=false
 INCLUDE_WORKTREES=false
 ORIG_ARGS=("$@")
@@ -30,11 +29,11 @@ usage() {
 Usage: $(basename "$0") [--target-gb N] [--max-age-hours H] [--dry-run] [--include-worktrees]
 
 Emergency reclaim of tmp + Scratch under one lock hold. The age floor starts at
---max-age-hours (default 24) and steps down 12, 6, 2 hours; it never goes below 2 h.
+--max-age-hours (default 48 h; explicit minimum 2 h).
 Stops as soon as host free space reaches --target-gb (default ${DEFAULT_TARGET_GB}).
-  --dry-run            Run the cleaners in dry-run mode; print projected bytes per floor step.
+  --dry-run            Run the cleaners in dry-run mode; print projected bytes.
   --include-worktrees  Last step: cleanup-worktrees with WORKTREE_APPROVED=1.
-Exit 3 (target_unmet) when the target is not met after the 2 h step.
+Exit 3 (target_unmet) when the target is not met at the selected floor.
 EOF
 }
 
@@ -73,7 +72,6 @@ fi
 
 # Floor steps: MAX_AGE_HOURS, then each of 12/6/2 strictly below it.
 steps=("$MAX_AGE_HOURS")
-for h in 12 6 2; do ((h < MAX_AGE_HOURS)) && steps+=("$h"); done
 
 DATA_ROOT="${DISKM_EMERGENCY_DATA_ROOT:-}"
 if [[ -z "$DATA_ROOT" ]]; then
@@ -105,7 +103,7 @@ scratch_free_start=""
 [[ -n "$SCRATCH_ROOT" && -d "$SCRATCH_ROOT" ]] && scratch_free_start="$(free_bytes "$SCRATCH_ROOT")"
 
 echo "=== EMERGENCY RECLAIM ($([[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo CLEAN)) ==="
-echo "target=${TARGET_GB}GiB free on $DATA_ROOT; free_now=$(gib "$host_free")GiB; floors(h)=${steps[*]}; min_floor=${MIN_FLOOR_HOURS}h"
+echo "target=${TARGET_GB}GiB free on $DATA_ROOT; free_now=$(gib "$host_free")GiB; floor(h)=${steps[*]}; min_floor=${MIN_FLOOR_HOURS}h"
 if frontier_pids="$(pgrep -f -- 'disk_frontier_scan\.(py|sh)' 2>/dev/null | grep -v -x "$$" | tr '\n' ' ')" && [[ -n "${frontier_pids// }" ]]; then
   echo "frontier: scan running (pid ${frontier_pids% }); left running — emergency reclaim does not start, stop or wait on scans"
 fi

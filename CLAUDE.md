@@ -69,7 +69,7 @@ optionally partition/provision a dedicated Scratch volume via
 This isolates disposable agent and CI artifacts so they cannot exhaust host free
 space. Scratch volumes are automatically trimmed from 70% down to 50% usage
 while strictly preserving a 64 MiB `.diskm-ballast` emergency reserve and
-24-hour recency, live-PID, and active-lease protections for automatic Scratch pruning.
+48-hour content recency, live-PID, and active-lease protections for automatic Scratch pruning.
 
 Use the returned artifact directory rather than inventing paths under
 `/Volumes/diskm-scratch` or `~/Scratch`. A registered but unavailable, full or
@@ -236,9 +236,9 @@ When cleaning or recommending disk cleanups on this workstation, execute the can
 
 1. **Tier 1: Scratch Volume, Developer Caches & Temp (Safe, 10–150+ GiB)**:
    - Scripts: `cleanup_scratch_top_level.sh` (`scratch-prune`), `cleanup_tmp.sh`, `cleanup_pr_scratch.sh`, `cleanup_llm_inspector.sh`, `cleanup_dev_caches.sh`
-- Targets: C14-recognized top-level and managed Scratch entries older than the 24h default floor (preserving `.diskm-ballast`, live PIDs, active leases, secrets, and dirty/unpushed repositories), `/private/tmp` ephemera, and compiler/npm/cargo/test caches (`cleanup_dev_caches.sh` runs last so its `~/Library/Caches` walk does not hold `.owner-mutation.reuse-lock` ahead of fast cleaners).
+- Targets: C14-recognized top-level and managed Scratch entries older than the 48h default floor (preserving `.diskm-ballast`, live PIDs, active leases, secrets, and dirty/unpushed repositories), `/private/tmp` ephemera, and compiler/npm/cargo/test caches (`cleanup_dev_caches.sh` runs last so its `~/Library/Caches` walk does not hold `.owner-mutation.reuse-lock` ahead of fast cleaners).
 - `diskm clean` uses the measured host-free `<40 GiB` and Scratch-used `>=70%` thresholds only as triggers. Budget eviction is enabled only when the process also carries an operator-configured `DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=1..99`; pressure measurements never choose the percentage or create approval. A healthy host skips budget eviction even if the setting exists. If the trigger fires without a valid setting, `diskm clean` uses conservative `--available-floor` cleanup.
-- The budget branch keeps the effective conservative recency floor: `max(1440, SCRATCH_PRUNE_MIN_HOURS * 60)` minutes, with 24 hours by default. It passes `--budget-preserve-content-keeps`, so only C14 `remove` verdicts are eligible; dirty, not-pushed, secret-like, ignored-data, unproven-content and unknown checks remain protected. Legacy direct callers of `scratch-prune --budget-pct` retain their existing explicit override behavior.
+- The automatic budget branch and `--budget-preserve-content-keeps` use the shared 48-hour default; only C14 `remove` verdicts are eligible there, so dirty, not-pushed, secret-like, ignored-data, unproven-content and unknown checks remain protected. Direct manual `scratch-prune --budget-pct` callers keep their explicit selected `--budget-floor-minutes` control, passed into C14 with the existing 60-minute minimum.
 - `diskm clean --dry-run` preserves the dry-run argument. Its budget projection uses candidate-size estimates and reports physical budget attainment as `unknown` when shared allocation cannot be ruled out. A completed clean measures Scratch usage after the pass; safe-candidate exhaustion above target reports `budget_unmet=1` with exit 75, while incomplete measurement reports `budget_unmet=unknown`. Data-volume free-space before/after is an observed interval delta, not bytes attributable to this cleanup alone.
 - Correct target arithmetic example: on a 200 GiB Scratch quota at 80% used (160 GiB allocated), a 20 GiB recovery target is 70% used; a 40 GiB recovery target is 60% used. Budget targets are percentages of quota usage.
 2. **Tier 2: Xcode & Simulator Caches (Safe, 10–50+ GiB)**:
@@ -290,24 +290,24 @@ isolated dedup test alone is insufficient because the destructive behavior can
 occur only when a second tool later writes through the alias.
 ## Strict ban on ad-hoc cleanup scripts (hard)
 
-Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scripts (e.g. inline bash in /tmp or python one-liners) to prune worktrees, caches, or user data. ALL worktree cleanup operations MUST use established canonical scripts (`scripts/cleanup_worktrees.sh` or `scripts/worktree_hygiene.sh`) that strictly enforce the 7-day recency protection gate (`mtime > 7 days`). Writing ad-hoc scripts bypasses safety gates and is strictly banned.
+Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scripts (e.g. inline bash in /tmp or python one-liners) to prune worktrees, caches, or user data. ALL worktree cleanup operations MUST use established canonical scripts (`scripts/cleanup_worktrees.sh` or `scripts/worktree_hygiene.sh`) that strictly enforce the current 48-hour recency protection gate. Writing ad-hoc scripts bypasses safety gates and is strictly banned.
 
-## Worktree 7-day rule (hard) — recency is measured, never proxied
+## Disposable content uses a 48-hour age floor
 
-**Amended 2026-11-12 (operator decision, Jeffrey: "Make this default 48hr") — current default:**
-the default recency floor for every worktree cleaner is **48 hours (2880 minutes)**:
-`cleanup_worktrees.sh`, `cleanup_worktree_deps.sh`, `cleanup_worktree_venvs.sh`,
-`slim_worktree_checkouts.sh`, `worktree_hygiene.sh`, `cleanup_claude_state.sh` and
-`worktree_remove_hook.sh`. It is applied through `worktree_is_recently_active_minutes`
-(never rounded to days). `safety_worktree_floor_minutes` in `scripts/safety_lib.sh` owns the
-number: config (`worktree_min_stale_hours`, `worktree_min_stale_days`, legacy `min_stale_days`
-above 7) and `--min-age`/`WORKTREE_MIN_AGE_DAYS` may only RAISE it, never lower it below 48 h.
-Unmeasurable recency is still treated as active (kept). The env overrides below
-(`DISK_MAGICIAN_WORKTREE_FLOOR_HOURS` >= 12, `DISK_MAGICIAN_REMOVE_HOOK_RECENCY`) keep working
-unchanged, and AO-owned worktrees keep their separate 7-day bar and ownership veto. Every other
-gate is unchanged. Read every "3 days"/"7 days" below as superseded by this paragraph, except the
-AO 7-day bar and the 3-to-7-day merged-clean exception, which only matters when config raises
-the floor to 7 days.
+**Current default, operator decision 2026-11-13: 48 hours (2880 minutes) of content inactivity across disposable cleanup.** This applies to Scratch, temporary trees, generated build/cache artifacts, nested worktrees, dependency folders, venvs, and AO worktrees. Worktree recency uses `worktree_is_recently_active_minutes`; `.git` metadata is not content activity. `safety_worktree_floor_minutes` and `safety_disposable_recency_floor_minutes` provide the shared baseline; machine config or caller-selected larger floors may raise it.
+
+`diskm emergency` makes one 48-hour pass by default. Lower ages require an explicit operator option or environment on that invocation; no automatic 24/12/6/2-hour descent. Existing explicit 12-hour worktree and 2-hour ephemeral emergency overrides remain recorded and scoped to the calling cleanup.
+
+Age is only one condition. Live cwd, open files, active/unknown leases, AO ownership, secret material, unmeasurable activity, and failed preservation checks still keep the affected content. Source files remain in the worktree when only an untracked rebuildable venv is stripped. Full worktree removal or stripping unrelated data still applies its current content/source-preservation checks.
+
+Do not shorten retention for durable backups, session stores, history, credentials, or other explicitly retained data to meet this disposable-content floor.
+
+### Historical worktree recency policy (superseded)
+
+The following records preserve earlier age-floor decisions. Their 3-day/7-day values and age shortcuts do not set current defaults; use the 48-hour rule above. Separate ownership and preservation vetoes remain active.
+
+<details>
+<summary>Previous worktree age floor amendments (historical)</summary>
 
 **Amended 2026-10-08 (user decision; floor superseded 2026-11-12 by 48 h above):** `scripts/cleanup_worktrees.sh` used a
 3-day floor for ALL worktrees (`safety_worktree_floor_days`; the
@@ -403,6 +403,9 @@ branch still holds unpushed commits, or while a shell/agent has it as cwd,
 is the same incident with extra steps — see the triage ladder in
 `scripts/worktree_hygiene.sh` (`classify_candidate`), which is the canonical
 SAFE/NEEDS-REVIEW judgment. `--execute` still requires `WORKTREE_APPROVED=1`.
+
+
+</details>
 
 ## Machine-specific state repo — where the ledger lives (read this first in any disk investigation)
 

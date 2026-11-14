@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # scratch_budget.sh — size-budget eviction engine for agent/PR scratch roots.
 #
-# Bead disk_magician-d45 (age-only sweepers never touch 0-24h scratch, which
-# is where ~15 GiB/day of growth lives) + dcz (reviewed lsof-recheck
+# Bead disk_magician-d45 (age-only sweepers use the shared 48h content floor)
+# + dcz (reviewed lsof-recheck
 # requirement). When a scratch root's matched candidates exceed a size
 # budget, evict the oldest ones (by real content mtime, never a directory-
 # mtime proxy — see scripts/lib/worktree_recency.sh's header for why that
@@ -445,12 +445,11 @@ scratch_budget_evict_root() {
     return 0
   fi
   if ! [[ "$floor_minutes" =~ ^[0-9]+$ ]]; then
-    floor_minutes=120
+    floor_minutes="$(safety_disposable_recency_floor_minutes)"
   fi
-  # Hard floor (bead disk_magician-d45 spec): 2h default, 1h minimum,
-  # never lower — mirrors the WORKTREE_MIN_AGE_DAYS clamp-up pattern in
-  # cleanup_tmp.sh (may only be raised by config, never lowered below the
-  # safety floor).
+  # Shared 48h default for disposable content; retain the existing 1h minimum
+  # for an explicit operator-selected budget floor. The caller passes the
+  # effective value through to C14 as well.
   (( floor_minutes < 60 )) && floor_minutes=60
 
   local snapshot_file candidates_file

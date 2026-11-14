@@ -152,16 +152,6 @@ fi
 MIN_AGE_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
 MIN_AGE_DAYS=$(( MIN_AGE_MIN / 1440 ))   # display/legacy day figure (floor of days)
 
-# Bead plf: merged + clean worktrees use this floor instead; clamped to [3,7].
-MERGED_MIN_DAYS="${DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS:-3}"
-if [[ "$MERGED_MIN_DAYS" =~ ^[0-9]+$ ]]; then
-  MERGED_MIN_DAYS=$((10#$MERGED_MIN_DAYS))
-else
-  MERGED_MIN_DAYS=7
-fi
-[[ "$MERGED_MIN_DAYS" -lt 3 ]] && MERGED_MIN_DAYS=3
-[[ "$MERGED_MIN_DAYS" -gt 7 ]] && MERGED_MIN_DAYS=7
-
 # Idle-floor override (operator decision 2026-10-22): DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=N
 # (N>=12) lowers the non-AO recency floor to N hours. Lower or malformed values keep the
 # day floor. Env-only; every other removal gate still applies at any age.
@@ -229,7 +219,7 @@ else
         fi
     fi
 fi
-echo "Merged clean worktree floor: ${MERGED_MIN_DAYS}d (others: $(worktree_floor_label "$MIN_AGE_MIN"))"
+echo "Worktree content floor: $(worktree_floor_label "$MIN_AGE_MIN")"
 if [[ "$MANUAL_DISCARD" == true ]]; then
     echo "MANUAL DISCARD MODE: exact targets only; local changes and ignored data may be lost; 12h newest-content cutoff; live/AO/locked/safety gates remain active."
     if [[ "$MANUAL_INCLUDE_LIVE" == true ]]; then
@@ -431,11 +421,7 @@ classify_repo_local_worktree() {
     fi
 
     local min_age=$MIN_AGE_MIN now recently_active=false
-    # AO-managed sessions keep the 7-day inactivity bar; the 48 h floor is for
-    # human-created worktrees.
-    if [[ "$wt_path" == *"ao/data/worktrees/"* && "$min_age" -lt 10080 ]]; then
-        min_age=10080
-    fi
+    # AO worktrees use the same 48h content floor; their ownership gates remain below.
     now="$(date +%s)"
     if [[ -n "$FLOOR_HOURS" && "$wt_path" != *"ao/data/worktrees/"* ]]; then
         if worktree_is_recently_active_minutes "$wt_path" $(( FLOOR_HOURS * 60 )) "$now"; then
@@ -456,16 +442,6 @@ classify_repo_local_worktree() {
     fi
 
     if [[ "$recently_active" == true ]]; then
-        # Bead plf: a merged, fully clean, non-AO worktree may go at
-        # MERGED_MIN_DAYS. Any failed or unknown condition stays "young".
-        if (( min_age == 10080 )) \
-            && ! worktree_is_recently_active "$wt_path" "$MERGED_MIN_DAYS" "$now" \
-            && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
-            && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
-            && ! has_hidden_state "$wt_path" \
-            && ! has_ignored_user_data "$wt_path"; then
-            return 0
-        fi
         echo "young"
         return 0
     fi

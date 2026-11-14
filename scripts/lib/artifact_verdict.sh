@@ -263,11 +263,11 @@ _av_rebuildable() (
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
             g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" &&
             [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] &&
-            t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] &&
-            c14_repo_content_ok "$w" >/dev/null || return 1
-        # The caller's deadline reaches the bounded shared remote/topology probes;
-        # their kept/deferred verdict is propagated verbatim (never kept:-prefixed).
-        pushed="$(c14_repo_pushed_ok "$w" "$w" "$deadline")" || { printf '%s\n' "${pushed:-kept:check-failed}"; return 1; }
+            t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] || return 1
+        # User instruction (2026-11-13): dirty/unpushed parent work is not a
+        # deletion reason when only its untracked rebuildable venv is removed.
+        # The caller and C14 still apply parent lease/AO/live-cwd and 48h age;
+        # the target venv still passes candidate-scoped secrets/open-file checks.
         # Use the same configured floor and minute-based fail-closed probe as the
         # venv cleaner; higher local floors still protect the worktree.
         floor="$(safety_worktree_floor_minutes 2>/dev/null)" || { printf 'kept:check-failed\n'; return 1; }
