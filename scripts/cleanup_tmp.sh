@@ -346,6 +346,7 @@ dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 CANDIDATE_REMOVED_COUNT=0
 CANDIDATE_DEFERRED_COUNT=0
 CANDIDATE_INTERRUPTED_COUNT=0
+CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=false
 cleanup_tmp_count_candidate_result() {
   case "$1" in
     removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;
@@ -382,7 +383,7 @@ cleanup_tmp_finish_receipt() {
   if [[ "$sig" != 0 || "$rc" == 124 || "$rc" == 137 ]]; then
     outcome=timeout
     reason="interrupted; signal=${sig}; exit=${rc}"
-    CANDIDATE_INTERRUPTED_COUNT=$(( CANDIDATE_INTERRUPTED_COUNT + 1 ))
+    [[ "$CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED" == true ]] || CANDIDATE_INTERRUPTED_COUNT=$(( CANDIDATE_INTERRUPTED_COUNT + 1 ))
   elif (( rc != 0 )); then
     outcome=error
     reason="cleanup_tmp exited ${rc}"
@@ -416,6 +417,12 @@ cleanup_tmp_finish_receipt() {
 cleanup_tmp_exit_trap() {
   local rc=$? sig="${1:-0}"
   trap - EXIT HUP INT TERM
+  # Candidate probes continue safely after an incomplete unit so later
+  # candidates can still be classified. Preserve that deadline in the final
+  # actuator status after the scan has had a chance to finish.
+  if (( rc == 0 )) && [[ "$CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED" == true ]]; then
+    rc=124
+  fi
   cleanup_tmp_finish_receipt "$rc" "$sig" || { [[ "$rc" != 0 ]] || rc=1; }
   if [[ "$sig" != 0 ]]; then
     [[ -n "${dylib_candidate_file:-}" ]] && rm -f "$dylib_candidate_file"
@@ -1638,6 +1645,7 @@ large_consider_entry() {
   if (( report_rc != 0 )); then
     log "measurement_status=incomplete rc=$report_rc path=$d; fail-closed and preserving this unit"
     if (( report_rc == 124 || report_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
       log "deferred:deadline-before-unit $d"
       cleanup_tmp_count_candidate_result deferred:deadline-before-unit
     else
@@ -1732,6 +1740,7 @@ large_consider_entry() {
   if (( plan_rc != 0 )); then
     rm -f -- "$plan"
     if (( plan_rc == 124 || plan_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
       log "measurement_status=incomplete rc=$plan_rc path=$d; fail-closed and deferring this unit"
       cleanup_tmp_count_candidate_result deferred:deadline-before-unit
     else
