@@ -302,6 +302,7 @@ done
 # 6.9 GiB on 2026-11-03). These are model downloads a running job may be using, so a
 # root with ANY file touched within the shared 48h default floor is preserved
 # wholesale; an unmeasurable scan also preserves (fail closed).
+DISPOSABLE_CONTENT_RECENCY_MINUTES="$(safety_disposable_recency_floor_minutes)"
 clean_hf_cache_if_idle() {
   local label="$1" path="$2" young rc=0
   if [[ ! -d "$path" ]]; then
