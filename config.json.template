@@ -808,6 +808,16 @@
       "key": "local_state",
       "path": "~/.local/state",
       "timeout": 60
+    },
+    {
+      "key": "home_scratch",
+      "path": "~/scratch",
+      "timeout": 120
+    },
+    {
+      "key": "agentsview",
+      "path": "~/.agentsview",
+      "timeout": 60
     }
   ],
   "monitored_file_globs": [
