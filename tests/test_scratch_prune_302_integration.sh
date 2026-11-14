@@ -25,14 +25,14 @@ run() {
 }
 ENTRY="$WORK/scratch/worldai_frontend/build/fixture"
 SCRIPT="$ROOT/scripts/cleanup_scratch_top_level.sh"
-run env DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=1 bash "$SCRIPT" --dry-run >"$WORK/floor.log" 2>&1
+run bash "$SCRIPT" --dry-run >"$WORK/floor.log" 2>&1
 cat "$WORK/floor.log"
 grep -Fq "kept:recent-activity $ENTRY" "$WORK/floor.log"
-grep -Fq '< 24h)' "$WORK/floor.log"
-run env DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 bash "$SCRIPT" --dry-run >"$WORK/manual.log" 2>&1
+grep -Fq '< 48h)' "$WORK/floor.log"
+run env DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 DISK_MAGICIAN_AGE_FLOOR_MINUTES=720 bash "$SCRIPT" --dry-run >"$WORK/manual.log" 2>&1
 cat "$WORK/manual.log"
 grep -Fq "kept:no-proof $ENTRY" "$WORK/manual.log"
-run env DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 bash "$SCRIPT" --dry-run >"$WORK/minsize.log" 2>&1
+run env DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 DISK_MAGICIAN_AGE_FLOOR_MINUTES=720 DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 bash "$SCRIPT" --dry-run >"$WORK/minsize.log" 2>&1
 cat "$WORK/minsize.log"
 if grep -Fq "kept:no-proof $ENTRY" "$WORK/minsize.log"; then
   echo 'FAIL: below-threshold entry reached C14 classification' >&2
@@ -43,4 +43,4 @@ rc=0
 run bash "$SCRIPT" --lock-held >"$WORK/lock.log" 2>&1 || rc=$?
 [[ "$rc" == 2 ]]
 [[ -f "$ENTRY/payload" ]]
-echo 'PASS: nested manual discovery, min-size filter, 24h default / 12h manual floor, normal lock policy'
+echo 'PASS: nested manual discovery, min-size filter, 48h default / explicit 12h emergency floor, normal lock policy'
