@@ -39,17 +39,40 @@ def format_size(bytes_val: int) -> str:
 
 
 def get_dir_size(dir_path: Path) -> int:
-    """Return total bytes of all files in dir_path."""
-    total = 0
+    """Return unique apparent bytes from the shared metadata walker.
+
+    A Git or unreadable boundary has unknown size; do not replace that unknown
+    with zero or follow links to report their targets.
+    """
+    lib = Path(__file__).resolve().parent / "lib" / "scratch_budget.sh"
+    command = ["bash", "-c", 'source "$1"; scratch_budget_measure_files "$2" 100 --nul',
+               "_", str(lib), str(dir_path)]
     try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    total += (Path(root) / f).stat().st_size
-                except OSError:
-                    continue
-    except OSError:
-        pass
+        result = subprocess.run(command, capture_output=True, timeout=300, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"size measurement unavailable for {dir_path}: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode(errors="replace")[:512]
+        raise OSError(f"size measurement incomplete for {dir_path}: {detail}")
+    fields = result.stdout.split(b"\0")
+    if not fields or fields[0] != b"diskm-measure-leaves-v1":
+        raise OSError(f"size measurement protocol missing for {dir_path}")
+    fields = fields[1:]
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 6:
+        raise OSError(f"size measurement record incomplete for {dir_path}")
+    total = 0
+    for offset in range(0, len(fields), 6):
+        size, _files, _newest, flag, path, _apparent = fields[offset:offset + 6]
+        if flag in (b"G", b"E"):
+            raise OSError(f"size measurement opaque/unmeasured at {os.fsdecode(path)}")
+        if flag not in (b"A", b"F", b"L"):
+            raise OSError(f"size measurement has unknown flag {flag!r}")
+        try:
+            total += int(size)
+        except ValueError as exc:
+            raise OSError(f"size measurement has invalid bytes at {os.fsdecode(path)}") from exc
     return total
 
 
@@ -266,6 +289,7 @@ class AsideSessionPruner:
             "sessions_scanned": 0,
             "sessions_retained_recent": 0,
             "sessions_retained_in_use": 0,
+            "sessions_retained_unmeasured": 0,
             "sessions_pruned": 0,
             "bytes_pruned": 0,
             "assets_scanned": 0,
@@ -457,7 +481,13 @@ class AsideSessionPruner:
                         print(f"Safety guard: path rejected for deletion: {entry}")
                     continue
 
-                size = get_dir_size(entry)
+                try:
+                    size = get_dir_size(entry)
+                except OSError as exc:
+                    self.stats["sessions_retained_unmeasured"] += 1
+                    if self.verbose:
+                        print(f"Retaining session with incomplete size measurement: {entry}: {exc}")
+                    continue
                 stale_candidates.append((entry, container, age_days, size))
 
         # Execute Session Pruning
@@ -577,6 +607,7 @@ def main() -> int:
         print(f"Sessions Scanned:          {stats['sessions_scanned']}")
         print(f"Recent Sessions Retained:  {stats['sessions_retained_recent']}")
         print(f"In-Use Sessions Retained:  {stats['sessions_retained_in_use']}")
+        print(f"Unmeasured Sessions Kept:  {stats['sessions_retained_unmeasured']}")
         print(f"Stale Sessions Pruned:     {stats['sessions_pruned']}")
         print(f"Space Freed (Pruned):      {format_size(stats['bytes_pruned'])}")
         if args.dedup_assets:

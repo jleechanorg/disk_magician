@@ -33,6 +33,16 @@ class SessionMetadataSafety(unittest.TestCase):
             self.assertEqual(get_dir_max_mtime(session), float('inf'))
             self.assertEqual(get_dir_mtime(session), float('inf'))
 
+    def test_nested_git_boundary_makes_session_size_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / 'repo'
+            (repo / '.git').mkdir(parents=True)
+            (repo / 'source.py').write_text('preserve')
+            with self.assertRaisesRegex(OSError, 'opaque/unmeasured'):
+                get_dir_size(root)
+            self.assertTrue((repo / 'source.py').exists())
+
     def test_hardlink_size_counted_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)

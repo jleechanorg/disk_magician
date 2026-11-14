@@ -602,9 +602,9 @@ scratch_budget_artifact_children_batch() {
 }
 
 # scratch_budget_measure_files <path> [threshold_mib]
-# Read-only metadata traversal, independent of cleanup eligibility. Git/source/
-# session trees have no measurement exemption. Symlinks are indivisible link
-# leaves and never followed. Hardlinks count once per invocation (device/inode).
+# Read-only metadata traversal, independent of cleanup eligibility. Git roots
+# are opaque G boundaries; non-Git trees descend to measured files. Symlinks
+# are indivisible link leaves and never followed. Hardlinks count once per run.
 # TSV: unique inode bytes, file paths, newest epoch, A/F/L/E, path. NUL adds apparent bytes.
 # A requires strictly less than the ceiling (maximum 100 MiB). E is incomplete.
 # Returns 0 complete, 1 metadata/identity failure, 124 deadline, 2 usage error.
@@ -666,11 +666,14 @@ try:
             node['files'] = sum(n['files'] for n in children)
             node['newest'] = max((n['newest'] for n in children), default=0)
             node['error'] |= any(n['error'] for n in children)
+            # Opaque Git roots remain visible through small non-Git ancestors;
+            # otherwise their unknown bytes disappear inside an aggregate row.
+            node['opaque'] = any(n['flag'] == 'G' or n['opaque'] for n in children)
             # Link leaves remain visible even below the aggregation ceiling.
             node['links'] = any(n['links'] for n in children)
             continue
         node = nodes[path] = dict(bytes=0, apparent_bytes=0, files=0, newest=0, flag='E',
-                                  children=[], error=False, links=False)
+                                  children=[], error=False, links=False, opaque=False)
         try:
             st = os.lstat(path)
             if stat.S_ISDIR(st.st_mode):
@@ -713,7 +716,7 @@ try:
         check_deadline()
         path = stack.pop()
         node = nodes[path]
-        if node['flag'] == 'A' and (node['apparent_bytes'] >= ceiling or node['error'] or node['links']):
+        if node['flag'] == 'A' and (node['apparent_bytes'] >= ceiling or node['error'] or node['links'] or node['opaque']):
             stack.extend(reversed(node['children']))
             if node['error'] and not node['children']:
                 emit_row((0, 0, 0, 'E', path, 0))

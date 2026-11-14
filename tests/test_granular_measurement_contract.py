@@ -156,7 +156,12 @@ class GranularMeasurementContract(unittest.TestCase):
             os.symlink(root/'a', root/'link')
             result = subprocess.run(['bash', '-c', command, '_', d], cwd=ROOT, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0)
-            self.assertNotIn('\tG\t', result.stdout)
+            rows = [line.split('\t', 4) for line in result.stdout.splitlines()]
+            git_rows = [row for row in rows if len(row) == 5 and row[3] == 'G']
+            self.assertEqual([(row[0], row[1], row[2], row[4]) for row in git_rows],
+                             [('0', '0', '0', str(root/'repo'))])
+            self.assertFalse(any(row[4].startswith(str(root/'repo') + '/') for row in rows
+                                 if len(row) == 5), rows)
             self.assertIn('\tL\t', result.stdout)
 
 if __name__ == '__main__': unittest.main()
