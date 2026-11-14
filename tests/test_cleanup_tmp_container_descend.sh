@@ -528,24 +528,19 @@ PT="$TMP_ROOT/t24-tmp"
 mkdir -p "$PT/project/nested-mount"
 truncate -s $((120 * 1024 * 1024)) "$PT/project/nested-mount/payload.bin"
 set_age_hours "$PT/project/nested-mount" 72
-cat > "$BIN/awk" <<'S'
-#!/usr/bin/env bash
-for arg in "$@"; do
-  if [[ "$arg" == "c1=$FAKE_MOUNT_PATH" ]]; then exit 0; fi
-done
-exec /usr/bin/awk "$@"
-S
-chmod +x "$BIN/awk"
+cat > "$TMP_ROOT/t24.mountinfo" <<MOUNTINFO
+1 0 0:1 / $PT/project/nested-mount rw - tmpfs tmpfs rw
+MOUNTINFO
 run_sweep t24 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=project \
-  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT" FAKE_MOUNT_PATH="$PT/project/nested-mount"
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TEST_MOUNTINFO="$TMP_ROOT/t24.mountinfo"
 printf '%s\n' "$OUT"
 assert_exists "t24 simulated mount content is preserved" "$PT/project/nested-mount/payload.bin"
-assert_contains "t24 simulated mount is rejected" \
-  "Skipping mountpoint or foreign filesystem: $PT/project/nested-mount" "$OUT"
-if grep -qF "measurement_method=file-summed-apparent threshold_mib=100 flags=A:directory,F:file,L:link,E:unfinished path=$PT/project/nested-mount" <<<"$OUT"; then
-  fail "t24 nested mount was measured before its mount guard"
+assert_contains "t24 containing candidate is rejected for nested mount" \
+  "Skipping mountpoint or foreign filesystem: $PT/project" "$OUT"
+if grep -qF "measurement_method=file-summed-apparent threshold_mib=100 flags=A:directory,F:file,L:link,E:unfinished path=$PT/project" <<<"$OUT"; then
+  fail "t24 containing candidate was measured before its mount guard"
 else
-  pass "t24 nested mount is not measured before the guard"
+  pass "t24 containing candidate is skipped before measurement"
 fi
 
 echo "Passed: $PASS  Failed: $FAIL"

@@ -420,7 +420,7 @@ cleanup_tmp_exit_trap() {
   # Candidate probes continue safely after an incomplete unit so later
   # candidates can still be classified. Preserve that deadline in the final
   # actuator status after the scan has had a chance to finish.
-  if (( rc == 0 )) && [[ "$CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED" == true ]]; then
+  if (( rc == 0 )) && [[ "$CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED" == true && -z "${ACT_CURSOR:-}" ]]; then
     rc=124
   fi
   cleanup_tmp_finish_receipt "$rc" "$sig" || { [[ "$rc" != 0 ]] || rc=1; }
@@ -470,7 +470,7 @@ resolve_timeout_bin() {
 }
 
 path_size_kb() {
-  scratch_budget_report_measurement "$1" || exit $?
+  scratch_budget_report_measurement "$1" || return $?
   # Bead disk_magician-lsl: `du -sk` can emit zero, one, or (under a TOCTOU
   # race / BSD-du edge case on a live, churning TMPDIR) multiple lines.
   # Take the first numeric field of the LAST line; default to 0 when there
@@ -1124,7 +1124,7 @@ PY
 
 purge_archive_entry() {
   local d="$1" mins="$2" retention_hours="${3:-$LARGE_TMP_ARCHIVE_RETENTION_HOURS}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" max_hours="${5:-$LARGE_TMP_ARCHIVE_MAX_HOURS}"
-  local kb entry_mtime age_hours result size_unknown=false now_epoch recovery_info recovery_hours archived_at recovery_age activity_hours aged_recovery=false
+  local kb entry_mtime age_hours result size_rc=0 size_unknown=false now_epoch recovery_info recovery_hours archived_at recovery_age activity_hours aged_recovery=false
   now_epoch="$(date +%s)"
   # Aged-mode archives carry a recovery window in the existing C14 origin
   # receipt. Honor it in every purge mode, even when source mtime predates the
@@ -1157,7 +1157,22 @@ PY
   fi
   # Size first because du can be slow. All safety probes follow it, with the
   # open-file check last immediately before the destructive operation.
-  kb=$(path_size_kb "$d") || exit $?
+  kb=$(path_size_kb "$d") || size_rc=$?
+  if (( size_rc != 0 )); then
+    if (( size_rc == 124 || size_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
+      if ! act_unit_fits 0; then
+        result="$(scratch_budget_quarantine_remove "$d")"
+        cleanup_tmp_count_candidate_result "$result"
+        log "C14 $result: $d"
+        return 0
+      fi
+      log "measurement_status=incomplete rc=$size_rc path=$d; fail-closed and preserving this archive"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+      return 0
+    fi
+    exit "$size_rc"
+  fi
   size_unknown=false
   (( kb < 0 )) && { size_unknown=true; kb=0; }
   # Hard cap (bead jleechan-mtow): past max_hours the
