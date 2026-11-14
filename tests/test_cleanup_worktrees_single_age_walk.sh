@@ -254,8 +254,8 @@ run_cleanup() {
 mixed_fixture() {
   init_fixture "$1"
   add_wt wt-young "$WT/wt-young" 2
-  add_wt wt-merged4 "$WT/wt-merged4" 4
-  expect_eligible "$WT/wt-merged4"
+  add_wt wt-merged8 "$WT/wt-merged8" 8
+  expect_eligible "$WT/wt-merged8"
   add_wt wt-old "$WT/wt spaced old" 10
   expect_eligible "$WT/wt spaced old"
   add_wt wt-dirty "$WT/wt-dirty" 10
@@ -419,7 +419,7 @@ for filename in sys.argv[1:]:
         for line in source:
             line = re.sub(r' [|] age=\S+ size=\S+', '', line)
             if '/antigravity/worktrees/project/old ' in line or '/ao/data/worktrees/wt-auto ' in line: continue
-            if line.startswith(('Antigravity:', 'Repo-local:', 'Reclaimable:')): continue
+            if line.startswith(('Antigravity:', 'Repo-local:', 'Reclaimable:', 'Merged clean worktree floor:', 'Worktree content floor:')): continue
             line = re.sub(r' [(](?:age=[^)]*|< [0-9]+ days)[)]', '', line)
             target.write(line)
 PY_NORMALIZE
@@ -459,8 +459,8 @@ case_t9() {
   init_fixture t9
   add_wt wt-old "$WT/wt-old" 10
   expect_eligible "$WT/wt-old"
-  add_wt wt-merged4 "$WT/wt-merged4" 4
-  expect_eligible "$WT/wt-merged4"
+  add_wt wt-merged8 "$WT/wt-merged8" 8
+  expect_eligible "$WT/wt-merged8"
   AUTO="$F/ao/data/worktrees/wt-auto"
   add_wt wt-auto "$AUTO" 10
   "$REAL_GIT" -C "$REPO" worktree lock "$AUTO"
@@ -499,7 +499,7 @@ case_t9() {
   "$REAL_GIT" -C "$AG/old" push -q origin 'HEAD:refs/heads/orphan-old'
   write_released_lease "$AG/old"
   mark_stale "$WT/wt-old"
-  mark_stale "$WT/wt-merged4"
+  mark_stale "$WT/wt-merged8"
   mark_stale "$AG/old"
   cut -f 1 "$F/ages.tsv" > "$F/before.paths"
   run_cleanup branch "$F/out" constant --clean
