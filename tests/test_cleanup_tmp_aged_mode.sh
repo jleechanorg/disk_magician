@@ -25,16 +25,16 @@ cutoff=time.time()-int(sys.argv[2])*60
 for root, dirs, files in os.walk(sys.argv[1]):
   for name in [".", *dirs, *files]: os.utime(os.path.join(root,name), (cutoff,cutoff), follow_symlinks=False)' "$path" "$age_minutes"
 }
-make_pr_dir "$PRIVATE/pr123-fresh" 4260
-make_pr_dir "$PRIVATE/pr456-aged" 4380
-make_pr_dir "$PRIVATE/pr789-nested-active" 4380
+make_pr_dir "$PRIVATE/pr123-fresh" 2820
+make_pr_dir "$PRIVATE/pr456-aged" 2940
+make_pr_dir "$PRIVATE/pr789-nested-active" 2940
 mkdir -p "$PRIVATE/worldarchitect.ai/old-protected-child"
 printf "protected fixture\n" > "$PRIVATE/worldarchitect.ai/old-protected-child/payload.txt"
 python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2])*3600; [(os.utime(os.path.join(root,name),(t,t),follow_symlinks=False)) for root,dirs,files in os.walk(sys.argv[1]) for name in ["."]+dirs+files]' "$PRIVATE/worldarchitect.ai/old-protected-child" 80
 printf "old prompt\n" > "$PRIVATE/agent_prompt_old.txt"
 printf "fresh prompt\n" > "$PRIVATE/agent_prompt_fresh.txt"
-python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2])*60; os.utime(sys.argv[1],(t,t))' "$PRIVATE/agent_prompt_old.txt" 4380
-python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2])*60; os.utime(sys.argv[1],(t,t))' "$PRIVATE/agent_prompt_fresh.txt" 4260
+python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2])*60; os.utime(sys.argv[1],(t,t))' "$PRIVATE/agent_prompt_old.txt" 2940
+python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2])*60; os.utime(sys.argv[1],(t,t))' "$PRIVATE/agent_prompt_fresh.txt" 2820
 touch "$PRIVATE/pr789-nested-active/recent.txt"
 mkdir -p "$TMP_ROOT/bin"
 cat > "$TMP_ROOT/bin/stat" <<'MOCK'
@@ -66,13 +66,13 @@ else
   rc=$?; cat "$OUT" >&2; echo "aged cleanup dry-run failed rc=$rc" >&2; exit "$rc"
 fi
 cat "$OUT"
-grep -Fq "Scanning $PRIVATE for C14-proven dirs of any size with no activity for 72h" "$OUT"
-grep -Fq "Skipping recently active dir (mtime/ctime within 72h): $PRIVATE/pr123-fresh" "$OUT"
-grep -Fq "Skipping recently active dir (mtime/ctime within 72h): $PRIVATE/pr789-nested-active" "$OUT"
+grep -Fq "Scanning $PRIVATE for C14-proven dirs of any size with no activity for 48h" "$OUT"
+grep -Fq "Skipping recently active dir (mtime/ctime within 48h): $PRIVATE/pr123-fresh" "$OUT"
+grep -Fq "Skipping recently active dir (mtime/ctime within 48h): $PRIVATE/pr789-nested-active" "$OUT"
 grep -Fq "DRY RUN: would archive: $PRIVATE/pr456-aged" "$OUT"
-grep -Fq "Scanning $PRIVATE for C14-proven dirs of any size with no activity for 72h" "$OUT"
+grep -Fq "Scanning $PRIVATE for C14-proven dirs of any size with no activity for 48h" "$OUT"
 grep -Fq "Skipping recently active protected-root child (mtime/ctime within 96h): $PRIVATE/worldarchitect.ai/old-protected-child" "$OUT"
-grep -Fq "DRY RUN: would remove C14 agent prompt (>72h): $PRIVATE/agent_prompt_old.txt" "$OUT"
+grep -Fq "DRY RUN: would remove C14 agent prompt (>48h): $PRIVATE/agent_prompt_old.txt" "$OUT"
 ! grep -Fq "agent_prompt_fresh.txt" "$OUT"
 if grep -Fq "Scanning $ORDINARY for stale" "$OUT"; then
   echo "aged-only mode unexpectedly ran the ordinary tmp scan" >&2; cat "$OUT" >&2; exit 1
@@ -105,7 +105,7 @@ python3 - "$archived_candidate.c14-origin.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     row = json.load(f)
-assert row.get("recovery_hours") == 72, row
+assert row.get("recovery_hours") == 48, row
 PY
 grep -Fq "agent_prompt_fresh.txt" "$CLEAN_OUT" && { echo "fresh prompt unexpectedly entered clean candidate output" >&2; exit 1; }
 
@@ -123,15 +123,15 @@ else
   rc=$?; cat "$ORDINARY_OUT" >&2; echo "ordinary purge dry-run failed rc=$rc" >&2; exit "$rc"
 fi
 cat "$ORDINARY_OUT"
-grep -Fq "Skipping archive inside its persisted 72h recovery window: $archived_candidate" "$ORDINARY_OUT"
+grep -Fq "Skipping archive inside its persisted 48h recovery window: $archived_candidate" "$ORDINARY_OUT"
 
-# Once the receipt's archive age clears 72h, the ordinary purge path can
+# Once the receipt's archive age clears 48h, the ordinary purge path can
 # continue to the normal C14 and activity gates.
 python3 - "$archived_candidate.c14-origin.json" <<'PY'
 import json, sys, time
 path=sys.argv[1]
 with open(path, encoding="utf-8") as f: row=json.load(f)
-row["archived_at"] = int(time.time()) - 73*3600
+row["archived_at"] = int(time.time()) - 49*3600
 with open(path, "w", encoding="utf-8") as f: json.dump(row, f)
 PY
 python3 - "$archived_candidate/payload.txt" <<'PY'
@@ -154,7 +154,7 @@ cat "$RECENT_OUT"
 grep -Fq "Skipping recently-active aged archive: $archived_candidate" "$RECENT_OUT"
 python3 - "$archived_candidate/payload.txt" <<'PY'
 import os, sys, time
-old = time.time() - 73*3600
+old = time.time() - 49*3600
 os.utime(sys.argv[1], (old, old))
 PY
 LATER_OUT="$TMP_ROOT/later-purge.out"
@@ -186,4 +186,4 @@ else
 fi
 cat "$PURGE_OUT"
 [[ ! -e "$archived_candidate" ]]
-echo "PASS 72h age gate, nested activity, C14 clean archive+receipt, persistent recovery floor across ordinary purge, post-window real purge, prompt removal, fresh prompt preservation, and aged-only scan"
+echo "PASS 48h age gate, nested activity, C14 clean archive+receipt, persistent recovery floor across ordinary purge, post-window real purge, prompt removal, fresh prompt preservation, and aged-only scan"
