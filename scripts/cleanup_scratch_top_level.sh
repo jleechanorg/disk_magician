@@ -21,7 +21,7 @@
 #      no live owner lease, no live cwd, no open file and no recent activity
 #      BEFORE it reaches its content checks, so a content keep has already
 #      cleared all four;
-#   6. the content verdicts kept:secret-like and kept:unproven-content are
+#   6. the content verdicts kept:secret-like, kept:unproven-content and kept:no-proof are
 #      overridden ONLY with SCRATCH_TOP_LEVEL_APPROVED=1, and the override is
 #      recorded in the deletion log. Every other keep blocks (live-owner,
 #      open-file, live-cwd, dirty, recent-activity, check-failed, ...).
@@ -436,7 +436,7 @@ _verdict_and_maybe_remove() {
   fi
   case "$verdict" in
     remove) ;;
-    kept:secret-like|kept:unproven-content)
+    kept:secret-like|kept:unproven-content|kept:no-proof)
       # Ordered-gate guarantee: C14 evaluates owner lease, live cwd, open files
       # and recent activity BEFORE these content checks, so both are already
       # proven for this candidate when this branch runs.
