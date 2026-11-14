@@ -258,7 +258,7 @@ LOG3_CONTENT=$(cat "$LOG3")
 INV3_CONTENT=$(cat "$INV3")
 assert "logs builder cache size" "builder cache: 3277MB" "$LOG3_CONTENT"
 assert "runs docker system prune" "docker system prune -f" "$INV3_CONTENT"
-assert "runs docker builder prune with 24h filter" "docker builder prune -f --filter until=24h" "$INV3_CONTENT"
+assert "runs docker builder prune with 48h filter" "docker builder prune -f --filter until=48h" "$INV3_CONTENT"
 rm -rf "$TMP3"
 
 # ---------------------------------------------------------------------------

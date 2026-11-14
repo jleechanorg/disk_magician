@@ -22,7 +22,7 @@ STATE_FILE="$SUPERVISOR_DIR/cmux-codex-launchd-state.json"
 # 7 days. The launchd plist rotates ~3x/day, so 7d = ~21 rotated files.
 # Active log (cmux-codex-launchd.log) and stderr are NEVER touched — only
 # timestamped rotations. State file (2 bytes) is never touched.
-AGE_THRESHOLD_DAYS=7
+AGE_THRESHOLD_DAYS=2
 
 DRY_RUN=true
 
