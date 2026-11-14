@@ -764,10 +764,25 @@ PYTHON
 
   echo "Test 13b: an unregistered generic directory remains an unproven C14 keep"
   use_root
+  # Keep C14's canonical /private/tmp, /tmp, and DARWIN_USER_TEMP_DIR roots
+  # outside this candidate. The candidate is under the test Scratch root, which
+  # the cleaner discovers, but C14 must not infer a declared tmp class from the
+  # macOS host path containing this fixture.
+  C14_PRIVATE_TMP_ROOT="$SANDBOX/c14-private-tmp"
+  C14_TMP_ROOT="$SANDBOX/c14-tmp"
+  C14_USER_TMP_ROOT="$SANDBOX/c14-user-tmp"
+  mkdir -p "$C14_PRIVATE_TMP_ROOT" "$C14_TMP_ROOT" "$C14_USER_TMP_ROOT"
   make_tree budget-unproven 72 '.env.example' >/dev/null
   head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-unproven/payload.bin"
   old_stamp "$SCRATCH_ROOT/budget-unproven" 49
-  out="$(lru_run env -u DISK_MAGICIAN_CONFIG DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --dry-run --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
+  C14_ROOT_ENV=(
+    "DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE=$C14_PRIVATE_TMP_ROOT"
+    "DISK_MAGICIAN_TMP_ROOT_OVERRIDE=$C14_TMP_ROOT"
+    "DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE=$C14_USER_TMP_ROOT"
+  )
+  C14_RETENTION="$(run env -u DISK_MAGICIAN_CONFIG "${C14_ROOT_ENV[@]}" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2" 2>/dev/null' _ "$ROOT" "$SCRATCH_ROOT/budget-unproven")"
+  assert_eq "$C14_RETENTION" "" "generic candidate is outside every declared C14 tmp root"
+  out="$(lru_run env -u DISK_MAGICIAN_CONFIG "${C14_ROOT_ENV[@]}" DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --dry-run --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
   [[ "$rc" == 0 ]] && ok "unconfigured user content dry-run completes without deletion" || bad "unconfigured user content dry-run completes without deletion" "rc=$rc"
   check "unclassified user content has no proof" "kept:no-proof $SCRATCH_ROOT/budget-unproven" "$out"
   [[ -d "$SCRATCH_ROOT/budget-unproven" ]] && ok "unclassified user content remains present" || bad "unclassified user content remains present"
