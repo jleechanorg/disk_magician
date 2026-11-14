@@ -108,7 +108,7 @@ BUDGET_PRESERVE_CONTENT_KEEPS=false
 BUDGET_FLOOR_MINUTES=$(safety_disposable_recency_floor_minutes)
 # Known content/provenance keeps budget mode may override; anything else keeps,
 # including remote-unverified (a failed ls-remote is an unknown, not a keep).
-BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
+BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:no-proof|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
 DRY_RUN=true
 
 usage() {
