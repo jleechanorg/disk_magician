@@ -216,7 +216,7 @@ c14_ephemeral_retention() {
         # (see _av_artifact_removal_verdict), so it bypasses nothing. Depth stays
         # one component, the OS-owned basenames the tmp-root loop excludes (:179)
         # stay excluded, and a symlink is never followed.
-        if [[ "$rel" =~ ^[^./][^/]*$ && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) && -d "$content" && ! -L "$p" ]]; then echo 1440; return 0; fi
+        if [[ "$rel" =~ ^[^./][^/]*$ && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) && -d "$content" && ! -L "$p" ]]; then safety_disposable_recency_floor_minutes; return 0; fi
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
@@ -572,7 +572,7 @@ _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
     # A caller-provided dry-run marker is an unconditional no-push boundary.
     [[ "${DRY_RUN:-}" != true ]] || C14_NO_RESCUE_PUSH=1
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 min_idle_explicit=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -588,7 +588,7 @@ _av_artifact_removal_verdict() (
                     --deadline-at) deadline=$2 ;;
                     --inventory-out) inventory_out=$2 ;;
                     --own-reuse-claim) own_claim=$2 ;;
-                    --min-idle-minutes) [[ "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }; min_idle=$2 ;;
+                    --min-idle-minutes) [[ "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }; min_idle=$2; min_idle_explicit=1 ;;
                 esac
                 shift 2 ;;
             *) echo kept:check-failed; return 0 ;;
@@ -596,6 +596,10 @@ _av_artifact_removal_verdict() (
     done
     # A named reuse claim must be an absolute, existing lease file; never a
     # bare name that could resolve against the caller's cwd.
+    # User authority: default disposable content is protected for 48h, even when
+    # another proof (on-origin/rebuildable/released) is present. A named caller floor
+    # remains explicit; the emergency env override applies only to ephemeral rows.
+    if (( min_idle == 0 )); then min_idle="$(safety_disposable_recency_floor_minutes)"; fi
     if [[ -n "$own_claim" ]]; then
         [[ "$own_claim" == /* && -f "$own_claim" && ! -L "$own_claim" ]] || { echo kept:check-failed; return 0; }
         own_claim="$(cd "$(dirname "$own_claim")" 2>/dev/null && pwd -P)/${own_claim##*/}"
@@ -714,6 +718,13 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
             fi ;;
         *) echo kept:unproven-content; return 0 ;;
     esac
+    if (( min_idle_explicit == 0 )) && [[ "$kind" == ephemeral && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]{1,7}$ ]]; then
+        local emergency_floor=$((10#$DISK_MAGICIAN_AGE_FLOOR_MINUTES))
+        (( emergency_floor < 120 )) && emergency_floor=120
+        if [[ ! "$floor_class" =~ ^[0-9]+$ ]] || (( floor_class <= $(safety_disposable_recency_floor_minutes) )); then
+            min_idle=$emergency_floor
+        fi
+    fi
     # A caller that names --min-idle-minutes owns that idle floor (worktree_remove_hook's
     # recency window): it vetoes whatever proofs hold, and unmeasurable fails closed.
     if (( min_idle > 0 )); then
@@ -728,9 +739,10 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     [[ "$newest" =~ ^[0-9]+$ ]] || { echo kept:mtime-unmeasurable; return 0; }
     (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
     # Proof 1: age. Per-child newest content mtime; unmeasurable is no proof.
-    local floor=${floor_class:-1440}
-    [[ -n "$floor_class" || ! -f "$p/.git" ]] || floor=2880
-    if [[ "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]+$ ]]; then floor=$DISK_MAGICIAN_AGE_FLOOR_MINUTES; fi
+    local floor
+    floor="$(safety_disposable_recency_minimum_minutes "${floor_class:-$(safety_disposable_recency_floor_minutes)}")"
+    [[ -n "$floor_class" || ! -f "$p/.git" ]] || floor="$(safety_disposable_recency_floor_minutes)"
+    if [[ "$kind" == ephemeral && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]{1,7}$ ]] && { [[ ! "$floor_class" =~ ^[0-9]+$ ]] || (( floor_class <= $(safety_disposable_recency_floor_minutes) )); }; then floor=$DISK_MAGICIAN_AGE_FLOOR_MINUTES; fi
     (( floor >= 120 )) || floor=120
     # Age proves only the declared-ephemeral classes (/tmp and Scratch). Other kinds keep
     # their own shape/provenance proof: age must not bypass a caller's scope table.

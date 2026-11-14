@@ -264,6 +264,22 @@ print(max(7, int(value)) if isinstance(value, (int, float)) else 7)
 PY
 }
 
+# safety_disposable_recency_floor_minutes: shared default for disposable content.
+# Explicit emergency callers may lower the floor for one run; durable history and
+# backup classes keep their declared retention periods.
+safety_disposable_recency_floor_minutes() {
+  printf '%s\n' 2880
+}
+
+# Keep cleaner/config thresholds consistent with the shared 48-hour default.
+safety_disposable_recency_minimum_minutes() {
+  local requested="${1:-}" floor=2880
+  [[ "$requested" =~ ^[0-9]{1,7}$ ]] || requested="$floor"
+  requested=$((10#$requested))
+  (( requested < floor )) && requested="$floor"
+  printf '%s\n' "$requested"
+}
+
 # safety_worktree_floor_minutes — worktree recency floor in minutes.
 # Default and hard minimum is 2880 (48 h; operator decision 2026-11-12, "Make this
 # default 48hr", superseding the 2026-10-08 3-day floor). Config may only RAISE it:
