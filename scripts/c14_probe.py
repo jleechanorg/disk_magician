@@ -1046,6 +1046,24 @@ def _google_discovery_doc(parts, n):
         return False
     return bool(_DEP_DIRS & {c.lower() for c in parts[:-3]})
 
+# A PRIVATE (underscore-prefixed) module directory inside a vendored dependency is
+# implementation layout, not credential material: grpc ships its public CA trust
+# store at venv/.../grpc/_cython/_credentials/roots.pem. Without this, the DIRECTORY
+# name matched '*credentials*' in _av_secret_like's find, and no filename allowlist
+# could clear it, so 52 GB of venvs read as secret-like (bead disk_magician-9ywq).
+# Narrow on purpose: a bare `credentials` dir, or any credential-named path outside
+# a dependency dir, stays secret-like — that is the masquerade guard asserted by
+# tests/test_artifact_verdict.sh ("secret-like root name in an E3 directory").
+_PRIVATE_DEP_DIR_RE = re.compile(r"^_[a-z][a-z0-9_]*$")
+
+def _private_dep_dir(parts, n):
+    """True only for an underscore-prefixed package dir inside a dependency dir."""
+    if not _PRIVATE_DEP_DIR_RE.fullmatch(n):
+        return False
+    if not _DEP_DIRS & {c.lower() for c in parts[:-1]}:
+        return False
+    return True
+
 def exempt_name(path):
     """Single owner of the secret-name exemption (relative path; used by every secret gate).
     Exempt only: a template suffix; .d.ts/.map/.json.schema whose stripped stem is not
@@ -1063,6 +1081,8 @@ def exempt_name(path):
     if not SECRET_RE.fullmatch(parts[-1]):
         return True
     if _google_discovery_doc(parts, n):
+        return True
+    if _private_dep_dir(parts, n):
         return True
     # Source code is not secret material — but only when the secret word is part of a
     # longer identifier. A stem that IS the secret word (credentials.py, secrets.rb,
@@ -1101,13 +1121,13 @@ def secrets(inv_file, kind=""):
     try:
         kind = os.environ.get("C14_SECRET_KIND") or kind
         entries = json.load(open(inv_file, encoding="utf-8"))
-        # Only regular files can carry secret bytes. The inventory also records
-        # `type: "dir"` rows, and a credential-named DIRECTORY cannot be exempted
-        # by a filename rule: grpc's `_credentials/` matched SECRET_RE and made
-        # every grpc-bearing venv read as secret-like even after roots.pem and
-        # the discovery documents were exempt (bead disk_magician-9ywq).
-        paths = (e.get("name", "") if e["path"] == "." else e["path"]
-                 for e in entries if e.get("type") != "dir")
+        # Directory rows are intentionally kept. A DIRECTORY named like a credential
+        # is a masquerade that must stay secret-like (tests/test_artifact_verdict.sh
+        # "secret-like root name in an E3 directory"), so skipping type=="dir" here
+        # turned a protected entry into `remove`. The grpc `_credentials/` false
+        # positive is cleared in exempt_name by _private_dep_dir instead, which can
+        # tell a private package dir from a credential-shaped name.
+        paths = (e.get("name", "") if e["path"] == "." else e["path"] for e in entries)
         if kind == "xcode-derived-data":
             # Generated names such as NativeRequestCredentials.o are not secrets; anything
             # else in the root (a .env, secrets.json, *.p12) still is.
