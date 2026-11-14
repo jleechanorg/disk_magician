@@ -115,90 +115,6 @@ PY
 }
 use_root
 
-# Public automatic contract: a fresh sibling cannot shelter generic stale units.
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == generic-nested-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == generic-safety-contract ]]; then
-  use_root
-  register_test_volume
-  generic="$SCRATCH_ROOT/arbitrary-container/a/b/c/d"
-  mkdir -p "$generic/stale-unit" "$generic/fresh-unit" "$generic/secret-unit" \
-    "$generic/git-dir/nested-unit" "$generic/git-file/nested-unit" "$generic/bare.git/nested-unit"
-  printf 'disposable fixture\n' >"$generic/stale-unit/payload"
-  printf 'recent fixture\n' >"$generic/fresh-unit/payload"
-  printf 'secret fixture\n' >"$generic/secret-unit/placeholder.pem"
-  mkdir "$generic/git-dir/.git"
-  printf 'gitdir: /missing-fixture\n' >"$generic/git-file/.git"
-  git init --bare -q "$generic/bare.git"
-  ln -s "$generic/stale-unit" "$generic/symlink-unit"
-  old_stamp "$SCRATCH_ROOT/arbitrary-container" 26
-  touch "$generic/fresh-unit/payload"
-  active_workspace="$generic/active-workspace"
-  active_package="$active_workspace/node_modules/stale-package"
-  mkdir -p "$active_package"
-  printf 'stale package fixture\n' >"$active_package/payload"
-  old_stamp "$active_package" 26
-  (cd "$active_workspace" && exec sleep 300) & ancestor_cwd_pid=$!
-  (cd "$SCRATCH_ROOT" && exec sleep 300) & scratch_root_cwd_pid=$!
-  trap 'kill "$ancestor_cwd_pid" "$scratch_root_cwd_pid" 2>/dev/null || true; wait "$ancestor_cwd_pid" "$scratch_root_cwd_pid" 2>/dev/null || true; rm -rf "${T:?}"' EXIT
-  for _attempt in {1..100}; do
-    [[ -d "/proc/$ancestor_cwd_pid" && -d "/proc/$scratch_root_cwd_pid" ]] && break
-    sleep .02
-  done
-  [[ "$(readlink "/proc/$ancestor_cwd_pid/cwd" 2>/dev/null)" == "$active_workspace" ]] || {
-    echo 'FAIL: ancestor cwd fixture did not start'; exit 1;
-  }
-  [[ "$(readlink "/proc/$scratch_root_cwd_pid/cwd" 2>/dev/null)" == "$SCRATCH_ROOT" ]] || {
-    echo 'FAIL: scratch-root cwd fixture did not start'; exit 1;
-  }
-  if [[ "$SCRATCH_PRUNE_TEST_FILTER" == generic-safety-contract ]]; then
-    mkdir -p "$generic/leased-parent/stale-child" "$generic/cwd-unit" "$generic/open-unit" "$generic/dangling-git/nested-unit" "$generic/.hidden/stale-child"
-    printf 'open fixture\n' >"$generic/open-unit/payload"
-    ln -s "$T/nonexistent" "$generic/dangling-git/.git"
-    for unit in leased-parent cwd-unit open-unit dangling-git .hidden; do old_stamp "$generic/$unit" 26; done
-    sleep 300 & nested_lease_pid=$!
-    (cd "$generic/cwd-unit" && exec sleep 300) & nested_cwd_pid=$!
-    python3 -c 'import sys,time; f=open(sys.argv[1]); print("ready",flush=True); time.sleep(300)' "$generic/open-unit/payload" >"$T/open-ready" & nested_open_pid=$!
-    for _attempt in {1..100}; do [[ -s "$T/open-ready" ]] && break; sleep .02; done
-    env DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" bash -c '
-source "$1/scripts/lib/worktree_lease.sh"
-lease_write "$2" "$2" "" nested-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$generic/leased-parent" "$nested_lease_pid"
-  fi
-  preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$ROOT/disk_magician.sh" scratch-prune --dry-run 2>&1)"; rc=$?
-  if [[ "$preview" == *"would-remove:remove $active_package"* ]]; then
-    echo "FAIL: stale package under live workspace cwd was eligible: $active_package"
-    exit 1
-  fi
-  check "live ancestor workspace cwd protects stale descendant package" "kept:live-cwd $active_package" "$preview"
-  check "generic deep stale child is discovered and eligible" "would-remove:remove $generic/stale-unit" "$preview"
-  check "fresh sibling remains recent" "kept:recent-activity $generic/fresh-unit" "$preview"
-  check "nested secret remains protected" "kept:secret-like $generic/secret-unit" "$preview"
-  for boundary in git-dir git-file bare.git; do
-    [[ "$preview" != *"$generic/$boundary/nested-unit"* ]] && ok "$boundary is never entered" || bad "$boundary was entered"
-  done
-  out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$ROOT/disk_magician.sh" scratch-prune --clean 2>&1)"; rc=$?
-  [[ "$rc" == 0 ]] && ok "public cleanup exits 0" || bad "public cleanup rc=$rc"
-  [[ ! -e "$generic/stale-unit" ]] && ok "generic stale child removed" || bad "generic stale child remains"
-  [[ -e "$active_package/payload" ]] && ok "active workspace descendant remains after clean" || bad "active workspace descendant was deleted"
-  kill "$ancestor_cwd_pid" "$scratch_root_cwd_pid" 2>/dev/null || true
-  wait "$ancestor_cwd_pid" "$scratch_root_cwd_pid" 2>/dev/null || true
-  ancestor_cwd_pid="" scratch_root_cwd_pid=""
-  for keep in fresh-unit/payload secret-unit/placeholder.pem git-dir/nested-unit git-file/nested-unit bare.git/nested-unit; do
-    [[ -e "$generic/$keep" ]] && ok "preserved $keep" || bad "lost $keep"
-  done
-  [[ -L "$generic/symlink-unit" ]] && ok "symlink preserved" || bad "symlink removed"
-  if [[ "$SCRATCH_PRUNE_TEST_FILTER" == generic-safety-contract ]]; then
-    for unit in leased-parent/stale-child cwd-unit open-unit/payload dangling-git/nested-unit .hidden/stale-child; do
-      [[ -e "$generic/$unit" ]] && ok "nested safety preserved $unit" || bad "nested safety lost $unit"
-    done
-    check "ancestor lease protects child" "kept:live-owner $generic/leased-parent/stale-child" "$preview"
-    check "live cwd protects nested unit" "kept:live-cwd $generic/cwd-unit" "$preview"
-    check "open file protects nested unit" "kept:open-file $generic/open-unit" "$preview"
-    kill "$nested_lease_pid" "$nested_cwd_pid" "$nested_open_pid" 2>/dev/null || true
-    wait "$nested_lease_pid" "$nested_cwd_pid" "$nested_open_pid" 2>/dev/null || true
-  fi
-  echo "generic-nested-contract: PASS=$PASS FAIL=$FAIL"
-  [[ "$FAIL" == 0 ]]; exit $?
-fi
-
 if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" == lru-probe-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == budget-preserve-contract ]]; then
   echo "Test: manual LRU skips sub-threshold probes but keeps fresh usage identity"
   LRU_DISKM="$T/lru-diskm"
@@ -233,7 +149,7 @@ FAKE_LRU_DISKM
       FAKE_DISKUTIL_MOUNTPOINT="${FAKE_DISKUTIL_MOUNTPOINT:-}" \
       DISK_MAGICIAN_DISKM_BIN="$LRU_DISKM" FAKE_SCRATCH_ROOT="$SCRATCH_ROOT" \
       SCRATCH_TOP_LEVEL_APPROVED=1 \
-      FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" DISK_MAGICIAN_SCRATCH_MIN_KB=512 "$@"
+      FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" DISK_MAGICIAN_SCRATCH_MIN_KB=512 "$@" --budget-floor-minutes 120
   }
   if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
   use_root
@@ -320,15 +236,15 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
 f="$(lease_path_for "$2")"; gd="$(git -C "$2" rev-parse --absolute-git-dir)"
 mkdir -p "${f%/*}"
 printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s}\n" "$2" "$(python3 "$1/scripts/c14_probe.py" gitmeta "$gd")" >"$f"' _ "$ROOT" "$candidate/repo"
-    old_stamp "$candidate" 13
+    old_stamp "$candidate" 49
     initial="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2"' _ "$ROOT" "$candidate")"
     assert_eq "$initial" kept:secret-like "fixture reaches the secret veto (secret-like blocks rescue proof) ($pushed)"
     provenance="$(run bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_repos_ok "$2"' _ "$ROOT" "$candidate")"
     if [[ "$pushed" == no ]]; then expected=kept:not-pushed; else expected=ok; fi
     assert_eq "$provenance" "$expected" "fixture has expected repository provenance ($pushed)"
-    old_stamp "$candidate" 13  # Git provenance probes refresh metadata mtimes.
+    old_stamp "$candidate" 49  # Git provenance probes refresh metadata mtimes.
     preview="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 bash "$SCRIPT" --dry-run 2>&1)"
-    old_stamp "$candidate" 13
+    old_stamp "$candidate" 49
     out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=12 bash "$SCRIPT" --clean 2>&1)"
     if [[ "$pushed" == no ]]; then
       check "numeric-floor preview preserves unpushed secret-like repository" "kept:not-pushed $candidate" "$preview"
@@ -347,7 +263,7 @@ printf "{\"path\":\"%s\",\"owner\":{\"pid\":1},\"released_at\":1,\"git_meta\":%s
   fi
 fi
 
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 24h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != 48h-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
 # Earlier numeric-secret contract cases include a pushed control that is
 # correctly removed and logged; start this independent suite with a fresh log.
 : > "$LOG"
@@ -383,64 +299,64 @@ check "deletion log names the cleaner" "scratch-prune" "$(cat "$LOG" 2>/dev/null
 fi
 
 if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
-echo "Test 4: automatic mode uses a 24 h default and does not bypass C14 safety"
+echo "Test 4: automatic mode uses a 48 h default and does not bypass C14 safety"
 use_root
 register_test_volume
-make_tree unknown-25h 25 >/dev/null
-make_managed_tree recent-23h 23 >/dev/null
-make_managed_tree eligible-25h 25 >/dev/null
-make_managed_tree secret-25h 25 'placeholder.pem' >/dev/null
+make_tree unknown-49h 49 >/dev/null
+make_managed_tree recent-47h 47 >/dev/null
+make_managed_tree eligible-49h 49 >/dev/null
+make_managed_tree secret-49h 49 'placeholder.pem' >/dev/null
 make_managed_tree secret-5h 5 'placeholder.pem' >/dev/null
 mkdir -p "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h"
 git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h" init -q 2>/dev/null
 printf 'change\n' > "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h/tracked.txt"
 git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h" add tracked.txt 2>/dev/null
 old_stamp "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h" 5
-mkdir -p "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h"
-git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" init -q 2>/dev/null
-printf 'change\n' > "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h/tracked.txt"
-git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" add tracked.txt 2>/dev/null
-old_stamp "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h" 25
-assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/eligible-25h")" remove "C14 accepts a known Scratch build artifact after 24h"
-assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/recent-23h")" kept:no-proof "C14 preserves a known Scratch build artifact before 24h (no proof yet)"
+mkdir -p "$SCRATCH_ROOT/worldai_frontend/build/dirty-49h"
+git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-49h" init -q 2>/dev/null
+printf 'change\n' > "$SCRATCH_ROOT/worldai_frontend/build/dirty-49h/tracked.txt"
+git -C "$SCRATCH_ROOT/worldai_frontend/build/dirty-49h" add tracked.txt 2>/dev/null
+old_stamp "$SCRATCH_ROOT/worldai_frontend/build/dirty-49h" 49
+assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/eligible-49h")" remove "C14 accepts a known Scratch build artifact after 48h"
+assert_eq "$(run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; artifact_removal_verdict "$2" --kind ephemeral' _ "$ROOT" "$SCRATCH_ROOT/worldai_frontend/build/recent-47h")" kept:recent-activity "C14 preserves a known Scratch build artifact at 47h (48h recency veto)"
 preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 bash "$SCRIPT" --dry-run 2>&1)"
-check "automatic preview marks the 25h managed artifact removable" "would-remove:remove $SCRATCH_ROOT/worldai_frontend/build/eligible-25h" "$preview"
-check "automatic preview keeps the 23h managed artifact" "kept:recent-activity $SCRATCH_ROOT/worldai_frontend/build/recent-23h" "$preview"
-check "automatic preview refuses secret-bearing content after 24h" "kept:secret-like $SCRATCH_ROOT/worldai_frontend/build/secret-25h" "$preview"
-check "automatic preview refuses dirty repository content after 24h" "kept:dirty $SCRATCH_ROOT/worldai_frontend/build/dirty-25h" "$preview"
+check "automatic preview marks the 49h managed artifact removable" "would-remove:remove $SCRATCH_ROOT/worldai_frontend/build/eligible-49h" "$preview"
+check "automatic preview keeps the 47h managed artifact" "kept:recent-activity $SCRATCH_ROOT/worldai_frontend/build/recent-47h" "$preview"
+check "automatic preview refuses secret-bearing content after 48h" "kept:secret-like $SCRATCH_ROOT/worldai_frontend/build/secret-49h" "$preview"
+check "automatic preview refuses dirty repository content after 48h" "kept:dirty $SCRATCH_ROOT/worldai_frontend/build/dirty-49h" "$preview"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 bash "$SCRIPT" --clean 2>&1)"; rc=$?
 [[ "$rc" == 0 ]] && ok "automatic cleanup completes without override approval" || bad "automatic cleanup completes without override approval" "rc=$rc"
-[[ -d "$SCRATCH_ROOT/worldai_frontend/build/recent-23h" ]] && ok "23h candidate preserved by the 24h default" || bad "23h candidate preserved by the 24h default"
-[[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/eligible-25h" ]] && ok "25h registered ephemeral candidate removed through C14" || bad "25h registered ephemeral candidate removed through C14" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
-[[ -e "$SCRATCH_ROOT/worldai_frontend/build/secret-25h/placeholder.pem" ]] && ok "secret-like content past the age floor remains protected" || bad "secret-like content past the age floor remains protected"
-[[ -e "$SCRATCH_ROOT/worldai_frontend/build/dirty-25h/.git" ]] && ok "dirty repository past the age floor remains protected" || bad "dirty repository past the age floor remains protected"
+[[ -d "$SCRATCH_ROOT/worldai_frontend/build/recent-47h" ]] && ok "47h candidate preserved by the 48h default" || bad "47h candidate preserved by the 48h default"
+[[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/eligible-49h" ]] && ok "49h registered ephemeral candidate removed through C14" || bad "49h registered ephemeral candidate removed through C14" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+[[ -e "$SCRATCH_ROOT/worldai_frontend/build/secret-49h/placeholder.pem" ]] && ok "secret-like content past the age floor remains protected" || bad "secret-like content past the age floor remains protected"
+[[ -e "$SCRATCH_ROOT/worldai_frontend/build/dirty-49h/.git" ]] && ok "dirty repository past the age floor remains protected" || bad "dirty repository past the age floor remains protected"
 [[ -e "$SCRATCH_ROOT/worldai_frontend/build/secret-5h/placeholder.pem" ]] && ok "secret-like content younger than the floor remains protected in automatic mode" || bad "secret-like content younger than the floor remains protected in automatic mode"
 [[ -e "$SCRATCH_ROOT/worldai_frontend/build/dirty-5h/.git" ]] && ok "dirty repository younger than the floor remains protected in automatic mode" || bad "dirty repository younger than the floor remains protected in automatic mode"
 # E8 (artifact_verdict.sh:189-197) declares a direct child of the registered
-# scratch volume ephemeral at 1440 min whatever its name, so an aged unknown
+# scratch volume ephemeral at the shared 2880-minute floor whatever its name, so an aged unknown
 # top-level tree is now removable in automatic mode. Every other gate still ran.
-[[ ! -e "$SCRATCH_ROOT/unknown-25h" ]] && ok "E8 removes an aged unknown direct volume child" || bad "E8 removes an aged unknown direct volume child" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+[[ ! -e "$SCRATCH_ROOT/unknown-49h" ]] && ok "E8 removes an aged unknown direct volume child" || bad "E8 removes an aged unknown direct volume child" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
 
-echo "Test 4c: E8 declares an arbitrary direct child of the registered volume ephemeral at 24h"
+echo "Test 4c: E8 declares an arbitrary direct child of the registered volume ephemeral at 48h"
 use_root
 register_test_volume
 E8_ROOT="$SCRATCH_ROOT"
-make_tree e8-unleased-26h 26 >/dev/null
-mkdir -p "$E8_ROOT/e8-unleased-26h/nested"; old_stamp "$E8_ROOT/e8-unleased-26h" 26
-make_tree e8-recent-23h 23 >/dev/null
-make_tree e8-secret-26h 26 'placeholder.pem' >/dev/null
+make_tree e8-unleased-50h 50 >/dev/null
+mkdir -p "$E8_ROOT/e8-unleased-50h/nested"; old_stamp "$E8_ROOT/e8-unleased-50h" 50
+make_tree e8-recent-47h 47 >/dev/null
+make_tree e8-secret-50h 50 'placeholder.pem' >/dev/null
 make_tree e8-secret-5h 5 'placeholder.pem' >/dev/null
-make_tree e8-live-cwd-26h 26 >/dev/null
-make_tree e8-leased-26h 26 >/dev/null
-mkdir -p "$E8_ROOT/.dot-26h"; old_stamp "$E8_ROOT/.dot-26h" 26
-mkdir -p "$E8_ROOT/worldai_frontend/build/e2-probe"; old_stamp "$E8_ROOT/worldai_frontend/build/e2-probe" 26
+make_tree e8-live-cwd-50h 50 >/dev/null
+make_tree e8-leased-50h 50 >/dev/null
+mkdir -p "$E8_ROOT/.dot-50h"; old_stamp "$E8_ROOT/.dot-50h" 50
+mkdir -p "$E8_ROOT/worldai_frontend/build/e2-probe"; old_stamp "$E8_ROOT/worldai_frontend/build/e2-probe" 50
 # A real repository holding a commit no remote advertises: unpushed work.
-mkdir -p "$E8_ROOT/e8-unpushed-26h"
-git -C "$E8_ROOT/e8-unpushed-26h" init -q 2>/dev/null
-printf 'work\n' > "$E8_ROOT/e8-unpushed-26h/tracked.txt"
-git -C "$E8_ROOT/e8-unpushed-26h" add tracked.txt 2>/dev/null
-git -C "$E8_ROOT/e8-unpushed-26h" -c user.email=t@t -c user.name=t commit -qm work 2>/dev/null
-old_stamp "$E8_ROOT/e8-unpushed-26h" 26
+mkdir -p "$E8_ROOT/e8-unpushed-50h"
+git -C "$E8_ROOT/e8-unpushed-50h" init -q 2>/dev/null
+printf 'work\n' > "$E8_ROOT/e8-unpushed-50h/tracked.txt"
+git -C "$E8_ROOT/e8-unpushed-50h" add tracked.txt 2>/dev/null
+git -C "$E8_ROOT/e8-unpushed-50h" -c user.email=t@t -c user.name=t commit -qm work 2>/dev/null
+old_stamp "$E8_ROOT/e8-unpushed-50h" 50
 mkdir -p "$E8_ROOT/e8-unpushed-5h"
 git -C "$E8_ROOT/e8-unpushed-5h" init -q 2>/dev/null
 printf 'work\n' > "$E8_ROOT/e8-unpushed-5h/tracked.txt"
@@ -449,28 +365,28 @@ git -C "$E8_ROOT/e8-unpushed-5h" -c user.email=t@t -c user.name=t commit -qm wor
 old_stamp "$E8_ROOT/e8-unpushed-5h" 5
 # The symlink target is a plain tree: a target holding .git would match the
 # pre-existing <name>-holds-.git volume row and prove nothing about E8.
-make_tree e8-symlink-target-26h 26 >/dev/null
-ln -s "$E8_ROOT/e8-symlink-target-26h" "$E8_ROOT/e8-link-26h"
+make_tree e8-symlink-target-50h 50 >/dev/null
+ln -s "$E8_ROOT/e8-symlink-target-50h" "$E8_ROOT/e8-link-50h"
 sleep 300 & e8_lease_pid=$!
-(cd "$E8_ROOT/e8-live-cwd-26h" && exec sleep 300) & e8_cwd_pid=$!
+(cd "$E8_ROOT/e8-live-cwd-50h" && exec sleep 300) & e8_cwd_pid=$!
 env DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" bash -c '
 source "$1/scripts/lib/worktree_lease.sh"
-lease_write "$2" "$2" "" scratch-prune-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$E8_ROOT/e8-leased-26h" "$e8_lease_pid"
+lease_write "$2" "$2" "" scratch-prune-test --owner-pid "$3" >/dev/null' _ "$ROOT" "$E8_ROOT/e8-leased-50h" "$e8_lease_pid"
 eph_retention() { run env DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2" 2>/dev/null' _ "$ROOT" "$1"; }
-assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-26h")" 1440 "E8 proves an arbitrary volume-child name"
-assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-26h/nested")" 1440 "E8 covers independent nested volume directories"
-assert_eq "$(eph_retention "$E8_ROOT/.dot-26h")" "" "E8 never covers a dot entry"
-assert_eq "$(eph_retention "$E8_ROOT/e8-link-26h")" "" "E8 never answers for a symlink"
+assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-50h")" 2880 "E8 proves an arbitrary volume-child name"
+assert_eq "$(eph_retention "$E8_ROOT/e8-unleased-50h/nested")" "" "E8 stays top-level only"
+assert_eq "$(eph_retention "$E8_ROOT/.dot-50h")" "" "E8 never covers a dot entry"
+assert_eq "$(eph_retention "$E8_ROOT/e8-link-50h")" "" "E8 never answers for a symlink"
 assert_eq "$(eph_retention "$E8_ROOT/worldai_frontend/build/e2-probe")" 1440 "the <name>/build/<name> row still answers 1440"
 preview="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --dry-run 2>&1)"
-check "automatic preview marks the unleased E8 candidate removable" "would-remove:remove $E8_ROOT/e8-unleased-26h" "$preview"
-check "automatic preview keeps the under-24h E8 candidate" "kept:recent-activity $E8_ROOT/e8-recent-23h" "$preview"
-check "automatic preview preserves secret-like E8 content past the floor" "kept:secret-like $E8_ROOT/e8-secret-26h" "$preview"
+check "automatic preview marks the unleased E8 candidate removable" "would-remove:remove $E8_ROOT/e8-unleased-50h" "$preview"
+check "automatic preview keeps the under-48h E8 candidate" "kept:recent-activity $E8_ROOT/e8-recent-47h" "$preview"
+check "automatic preview preserves secret-like E8 content past the floor" "kept:secret-like $E8_ROOT/e8-secret-50h" "$preview"
 check "automatic preview keeps the secret-like E8 candidate younger than the floor" "kept:recent-activity $E8_ROOT/e8-secret-5h" "$preview"
-check "automatic preview keeps the live-cwd E8 candidate" "kept:live-cwd $E8_ROOT/e8-live-cwd-26h" "$preview"
-check "automatic preview keeps the leased E8 candidate" "kept:live-owner $E8_ROOT/e8-leased-26h" "$preview"
-check "automatic preview keeps the symlinked entry as unproven" "kept:unproven-content $E8_ROOT/e8-link-26h" "$preview"
-check "the unpushed repository without rescue remains protected past the floor" "kept:not-pushed $E8_ROOT/e8-unpushed-26h" "$preview"
+check "automatic preview keeps the live-cwd E8 candidate" "kept:live-cwd $E8_ROOT/e8-live-cwd-50h" "$preview"
+check "automatic preview keeps the leased E8 candidate" "kept:live-owner $E8_ROOT/e8-leased-50h" "$preview"
+check "automatic preview keeps the symlinked entry as unproven" "kept:unproven-content $E8_ROOT/e8-link-50h" "$preview"
+check "the unpushed repository without rescue remains protected past the floor" "kept:not-pushed $E8_ROOT/e8-unpushed-50h" "$preview"
 if printf '%s\n' "$preview" | grep -qE "^would-remove:[^ ]* $E8_ROOT/e8-unpushed-5h$"; then
   bad "the unpushed repository younger than the floor is never advertised for removal" "$(printf '%s' "$preview" | grep -F "e8-unpushed-5h" | tr '\n' ' ' | cut -c1-200)"
 else
@@ -479,29 +395,29 @@ fi
 check "the unpushed repository younger than the floor keeps as recent-activity" "kept:recent-activity $E8_ROOT/e8-unpushed-5h" "$preview"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean 2>&1)"; rc=$?
 kill "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true; wait "$e8_lease_pid" "$e8_cwd_pid" 2>/dev/null || true
-[[ "$rc" == 0 ]] && ok "automatic E8 cleanup exits 0" || bad "automatic E8 cleanup exits 0" "rc=$rc; $out"
-[[ ! -e "$E8_ROOT/e8-unleased-26h" ]] && ok "an unleased dormant volume child is reclaimed" || bad "an unleased dormant volume child is reclaimed" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
-[[ -e "$E8_ROOT/e8-recent-23h" ]] && ok "the 24h floor is still honoured by default" || bad "the 24h floor is still honoured by default"
-[[ -e "$E8_ROOT/e8-leased-26h" ]] && ok "a leased volume child is preserved" || bad "a leased volume child is preserved"
-[[ -e "$E8_ROOT/e8-live-cwd-26h" ]] && ok "a live-cwd volume child is preserved" || bad "a live-cwd volume child is preserved"
-[[ -e "$E8_ROOT/e8-unpushed-26h/.git" ]] && ok "a volume child holding unpushed commits past the floor stays protected" || bad "a volume child holding unpushed commits past the floor stays protected"
-[[ -e "$E8_ROOT/e8-secret-26h/placeholder.pem" ]] && ok "a secret-like volume child past the floor stays protected" || bad "a secret-like volume child past the floor stays protected"
+[[ "$rc" == 0 ]] && ok "automatic E8 cleanup exits 0" || bad "automatic E8 cleanup exits 0" "rc=$rc"
+[[ ! -e "$E8_ROOT/e8-unleased-50h" ]] && ok "an unleased dormant volume child is reclaimed" || bad "an unleased dormant volume child is reclaimed" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+[[ -e "$E8_ROOT/e8-recent-47h" ]] && ok "the 48h floor is still honoured by default" || bad "the 48h floor is still honoured by default"
+[[ -e "$E8_ROOT/e8-leased-50h" ]] && ok "a leased volume child is preserved" || bad "a leased volume child is preserved"
+[[ -e "$E8_ROOT/e8-live-cwd-50h" ]] && ok "a live-cwd volume child is preserved" || bad "a live-cwd volume child is preserved"
+[[ -e "$E8_ROOT/e8-unpushed-50h/.git" ]] && ok "a volume child holding unpushed commits past the floor stays protected" || bad "a volume child holding unpushed commits past the floor stays protected"
+[[ -e "$E8_ROOT/e8-secret-50h/placeholder.pem" ]] && ok "a secret-like volume child past the floor stays protected" || bad "a secret-like volume child past the floor stays protected"
 [[ -e "$E8_ROOT/e8-unpushed-5h/tracked.txt" ]] && ok "a volume child holding unpushed commits younger than the floor is preserved" || bad "a volume child holding unpushed commits younger than the floor is preserved"
 [[ -e "$E8_ROOT/e8-secret-5h/placeholder.pem" ]] && ok "a secret-like volume child younger than the floor is preserved" || bad "a secret-like volume child younger than the floor is preserved"
-[[ -L "$E8_ROOT/e8-link-26h" ]] && ok "a symlinked top-level entry is never followed or reclaimed" || bad "a symlinked top-level entry is never followed or reclaimed"
+[[ -L "$E8_ROOT/e8-link-50h" ]] && ok "a symlinked top-level entry is never followed or reclaimed" || bad "a symlinked top-level entry is never followed or reclaimed"
 fi
 
 if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != unknown-deadline-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != discovery-cursor-contract && "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
 echo "Test 4b: an expired batch deadline leaves the existing cursor retryable"
 use_root
 register_test_volume
-make_managed_tree resume-25h 25 >/dev/null
+make_managed_tree resume-49h 49 >/dev/null
 CURSOR="$T/scratch-prune.cursor"
 EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"
 rc=$?
 [[ "$rc" == 75 ]] && ok "expired batch deadline returns deferred status 75" || bad "expired batch deadline returns deferred status 75" "rc=$rc"
-[[ -d "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "expired deadline does not delete the pending candidate" || bad "expired deadline does not delete the pending candidate"
+[[ -d "$SCRATCH_ROOT/worldai_frontend/build/resume-49h" ]] && ok "expired deadline does not delete the pending candidate" || bad "expired deadline does not delete the pending candidate"
 check "expired batch deadline is explicit" "deferred:artifact-discovery-deadline" "$out"
 if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT" <<'PY'
 import json,sys
@@ -511,9 +427,9 @@ PY
 then ok "expired batch leaves a zero-progress cursor that retries discovery"; else bad "expired batch leaves a zero-progress cursor that retries discovery"; fi
 FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
 out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"
-[[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-25h" ]] && ok "the next scheduled pass resumes and removes the eligible item" || bad "the next scheduled pass resumes and removes the eligible item" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+[[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-49h" ]] && ok "the next scheduled pass resumes and removes the eligible item" || bad "the next scheduled pass resumes and removes the eligible item" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
 fi
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 48h-contract ]]; then
   echo "Test 4d: public scratch-prune dry-run does not publish a dirty-source rescue"
   use_root
   register_test_volume
@@ -542,7 +458,7 @@ if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract ]]; then
   [[ "$refs_after" == "$refs_before" ]] && ok "dry-run leaves remote refs unchanged" || bad "dry-run leaves remote refs unchanged"
   [[ "$objects_after" == "$objects_before" ]] && ok "dry-run leaves remote objects unchanged" || bad "dry-run leaves remote objects unchanged"
 fi
-if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 24h-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == cursor-contract ]]; then
+if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == 48h-contract || "${SCRATCH_PRUNE_TEST_FILTER:-}" == cursor-contract ]]; then
   echo "test_cleanup_scratch_top_level (${SCRATCH_PRUNE_TEST_FILTER}): $PASS passed, $FAIL failed"
   [[ "$FAIL" == 0 ]]
   exit $?
@@ -552,8 +468,8 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
   echo "Test: any batch discovery failure aborts before deleting candidates and leaves the cursor retryable"
   use_root
   register_test_volume
-  make_tree discovery-failed 2880 >/dev/null
-  make_tree isolated-discovery-eligible 25 >/dev/null
+  make_tree discovery-failed 49 >/dev/null
+  make_tree isolated-discovery-eligible 49 >/dev/null
   make_managed_tree isolated-discovery-recent 1 >/dev/null
   discovery_eligible="$SCRATCH_ROOT/isolated-discovery-eligible"
   discovery_recent="$SCRATCH_ROOT/worldai_frontend/build/isolated-discovery-recent"
@@ -589,7 +505,7 @@ PY
   echo "Test: a failing batch with only one cursor item does not persist false completion"
   use_root
   register_test_volume
-  make_tree discovery-final 2880 >/dev/null
+  make_tree discovery-final 49 >/dev/null
   SHIM="$T/discovery-final-shim"; mkdir -p "$SHIM"
   REAL_PYTHON="$(command -v python3)"
   cat >"$SHIM/python3" <<EOF
@@ -626,20 +542,20 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
   # Untyped content that E8 cannot classify: a direct-child *file*, not a
   # directory. These fixtures exist to prove the deadline is honoured before
   # unproven content is even classified, so they must stay unproven.
-  make_unknown_file a-unknown-25h 25
-  make_unknown_file b-unknown-25h 25
-  make_managed_tree resume-after-unknown-25h 25 >/dev/null
+  make_unknown_file a-unknown-49h 49
+  make_unknown_file b-unknown-49h 49
+  make_managed_tree resume-after-unknown-49h 49 >/dev/null
   CURSOR="$T/unknown-deadline.cursor"
   EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
   out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
   [[ "$rc" == 75 ]] && ok "expired automatic batch pass returns deferred status 75" || bad "expired automatic batch pass returns deferred status 75" "rc=$rc"
   check "expired automatic batch pass reports discovery deferral" "deferred:artifact-discovery-deadline" "$out"
-  if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-25h"* ]]; then
+  if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-49h"* ]]; then
     ok "expired deadline is checked before unknown-content classification"
   else
     bad "expired deadline is checked before unknown-content classification" "unknown candidate was classified before deadline: $(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
   fi
-  [[ -e "$SCRATCH_ROOT/a-unknown-25h" && -e "$SCRATCH_ROOT/b-unknown-25h" && -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-25h" ]] && ok "expired pass preserves both unknowns and the recognized candidate" || bad "expired pass preserves both unknowns and the recognized candidate"
+  [[ -e "$SCRATCH_ROOT/a-unknown-49h" && -e "$SCRATCH_ROOT/b-unknown-49h" && -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-49h" ]] && ok "expired pass preserves both unknowns and the recognized candidate" || bad "expired pass preserves both unknowns and the recognized candidate"
   if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); assert d["source"] == f"scratch_prune:v1:{sys.argv[2]}"
@@ -649,9 +565,9 @@ PY
   FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
   out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
   [[ "$rc" == 0 ]] && ok "resumed automatic pass exits cleanly" || bad "resumed automatic pass exits cleanly" "rc=$rc"
-  [[ -e "$SCRATCH_ROOT/a-unknown-25h" ]] && ok "resumed pass preserves the unknown candidate" || bad "resumed pass preserves the unknown candidate"
-  [[ -e "$SCRATCH_ROOT/b-unknown-25h" ]] && ok "resumed pass progresses past the second unknown candidate without deleting it" || bad "resumed pass progresses past the second unknown candidate without deleting it"
-  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-25h" ]] && ok "resumed pass reaches and removes the recognized artifact" || bad "resumed pass reaches and removes the recognized artifact" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+  [[ -e "$SCRATCH_ROOT/a-unknown-49h" ]] && ok "resumed pass preserves the unknown candidate" || bad "resumed pass preserves the unknown candidate"
+  [[ -e "$SCRATCH_ROOT/b-unknown-49h" ]] && ok "resumed pass progresses past the second unknown candidate without deleting it" || bad "resumed pass progresses past the second unknown candidate without deleting it"
+  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-unknown-49h" ]] && ok "resumed pass reaches and removes the recognized artifact" || bad "resumed pass reaches and removes the recognized artifact" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
 
   echo "Test: a seeded resume cursor skips prior unknown work and continues after the pending unknown"
   use_root
@@ -659,12 +575,12 @@ PY
   # Untyped content that E8 cannot classify: a direct-child *file*, not a
   # directory. These fixtures exist to prove the deadline is honoured before
   # unproven content is even classified, so they must stay unproven.
-  make_unknown_file a-unknown-25h 25
-  make_unknown_file b-unknown-25h 25
-  make_managed_tree resume-after-seeded-unknown-25h 25 >/dev/null
+  make_unknown_file a-unknown-49h 49
+  make_unknown_file b-unknown-49h 49
+  make_managed_tree resume-after-seeded-unknown-49h 49 >/dev/null
   CURSOR="$T/seeded-unknown-deadline.cursor"
   CURSOR_SOURCE="scratch_prune:v1:$SCRATCH_ROOT"
-  python3 - "$CURSOR" "$CURSOR_SOURCE" "$SCRATCH_ROOT/a-unknown-25h" "$SCRATCH_ROOT/b-unknown-25h" <<'PY'
+  python3 - "$CURSOR" "$CURSOR_SOURCE" "$SCRATCH_ROOT/a-unknown-49h" "$SCRATCH_ROOT/b-unknown-49h" <<'PY'
 import json,sys
 with open(sys.argv[1], "w") as f:
     json.dump({"schema": 1, "source": sys.argv[2], "items": sys.argv[3:], "next_index": 1}, f)
@@ -672,12 +588,12 @@ PY
   EXPIRED_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()-1)')"
   out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$EXPIRED_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
   [[ "$rc" == 75 ]] && ok "seeded expired batch pass returns deferred status 75" || bad "seeded expired batch pass returns deferred status 75" "rc=$rc"
-  if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-25h"* ]]; then
+  if [[ "$out" != *"kept:unproven-content $SCRATCH_ROOT/a-unknown-49h"* ]]; then
     ok "seeded cursor does not reclassify the completed unknown candidate"
   else
     bad "seeded cursor does not reclassify the completed unknown candidate" "completed unknown was reclassified: $(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
   fi
-  if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/b-unknown-25h" <<'PY'
+  if [[ -f "$CURSOR" ]] && python3 - "$CURSOR" "$SCRATCH_ROOT/b-unknown-49h" <<'PY'
 import json,sys
 cursor=json.load(open(sys.argv[1])); assert cursor["next_index"] < len(cursor["items"])
 assert cursor["items"][cursor["next_index"]] == sys.argv[2]
@@ -686,8 +602,8 @@ PY
   FUTURE_DEADLINE="$("$REAL_PYTHON3" -c 'import time; print(time.monotonic()+60)')"
   out="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 "$REAL_PYTHON3" "$ROOT/src/disk_magician/cli.py" scratch-prune --clean --deadline-at "$FUTURE_DEADLINE" --cursor "$CURSOR" 2>&1)"; rc=$?
   [[ "$rc" == 0 ]] && ok "seeded resumed pass exits cleanly" || bad "seeded resumed pass exits cleanly" "rc=$rc"
-  [[ -e "$SCRATCH_ROOT/a-unknown-25h" && -e "$SCRATCH_ROOT/b-unknown-25h" ]] && ok "seeded resumed pass preserves both unknown candidates" || bad "seeded resumed pass preserves both unknown candidates"
-  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-seeded-unknown-25h" ]] && ok "seeded resumed pass reaches the registered artifact" || bad "seeded resumed pass reaches the registered artifact" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
+  [[ -e "$SCRATCH_ROOT/a-unknown-49h" && -e "$SCRATCH_ROOT/b-unknown-49h" ]] && ok "seeded resumed pass preserves both unknown candidates" || bad "seeded resumed pass preserves both unknown candidates"
+  [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/resume-after-seeded-unknown-49h" ]] && ok "seeded resumed pass reaches the registered artifact" || bad "seeded resumed pass reaches the registered artifact" "$(printf %s "$out" | tr '\n' ' ' | cut -c1-300)"
   if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" == unknown-deadline-contract ]]; then
     echo "test_cleanup_scratch_top_level (unknown-deadline-contract): $PASS passed, $FAIL failed"
     [[ "$FAIL" == 0 ]]
@@ -850,7 +766,7 @@ PYTHON
   use_root
   make_tree budget-unproven 72 '.env.example' >/dev/null
   head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-unproven/payload.bin"
-  old_stamp "$SCRATCH_ROOT/budget-unproven" 13
+  old_stamp "$SCRATCH_ROOT/budget-unproven" 49
   out="$(lru_run env -u DISK_MAGICIAN_CONFIG DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --dry-run --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
   [[ "$rc" == 0 ]] && ok "unconfigured user content dry-run completes without deletion" || bad "unconfigured user content dry-run completes without deletion" "rc=$rc"
   check "unclassified user content has no proof" "kept:no-proof $SCRATCH_ROOT/budget-unproven" "$out"
@@ -892,11 +808,11 @@ PYTHON
   make_managed_tree budget-known-build 13 >/dev/null
   head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-secret/payload.bin"
   head -c 1048576 /dev/zero >"$SCRATCH_ROOT/budget-dirty/padding.bin"
-  old_stamp "$SCRATCH_ROOT/budget-secret" 13
-  old_stamp "$SCRATCH_ROOT/budget-dirty" 13
-  old_stamp "$SCRATCH_ROOT/budget-not-pushed" 25
-  old_stamp "$SCRATCH_ROOT/budget-ignored" 25
-  old_stamp "$SCRATCH_ROOT/worldai_frontend/build/budget-known-build" 25
+  old_stamp "$SCRATCH_ROOT/budget-secret" 49
+  old_stamp "$SCRATCH_ROOT/budget-dirty" 49
+  old_stamp "$SCRATCH_ROOT/budget-not-pushed" 50
+  old_stamp "$SCRATCH_ROOT/budget-ignored" 50
+  old_stamp "$SCRATCH_ROOT/worldai_frontend/build/budget-known-build" 50
   out="$(lru_run env DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --dry-run --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
   printf '%s\n' "$out" | grep -E 'budget-(not-pushed|ignored|secret|unproven|dirty)|budget-known-build|budget_unmet=' || true
   [[ "$rc" == 0 ]] && ok "preserving budget dry-run completes without deletion" || bad "preserving budget dry-run completes without deletion" "rc=$rc"

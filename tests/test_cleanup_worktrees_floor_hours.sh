@@ -46,6 +46,12 @@ git -C "$REPO" worktree lock "$WT/wt-locked13"
 printf 'wip\n' >> "$WT/wt-d2dirty/README.md"
 age_hours_ago "$WT/wt-h13" 13
 age_hours_ago "$WT/wt-h11" 11
+add_wt h49 "$WT/wt-h49" "$AHEAD_SHA"
+add_wt h47 "$WT/wt-h47" "$AHEAD_SHA"
+git -C "$TMP_ROOT/origin.git" update-ref refs/heads/h49 "$AHEAD_SHA"
+git -C "$TMP_ROOT/origin.git" update-ref refs/heads/h47 "$AHEAD_SHA"
+age_hours_ago "$WT/wt-h49" 49
+age_hours_ago "$WT/wt-h47" 47
 age_hours_ago "$WT/wt-d2dirty" 48
 age_hours_ago "$WT/wt-d2unpushed" 48
 age_hours_ago "$WT/wt-unmeas" 13
@@ -60,10 +66,12 @@ SH
 printf '#!/bin/sh\nexit 1\n' > "$TMP_ROOT/bin/gh"
 printf '#!/bin/sh\nshift\nexec "$@"\n' > "$TMP_ROOT/bin/timeout"
 chmod +x "$TMP_ROOT/bin/lsof" "$TMP_ROOT/bin/gh" "$TMP_ROOT/bin/timeout"
-run() { env -i HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin:/usr/sbin" WORKTREE_MIN_AGE_DAYS=3 HERMES_SKIP_EXAMPLE_COM_GUARD=1 "$@" bash "$CLEANUP_SCRIPT" ${MODE:---dry-run} --repos "$REPO" 2>&1; }
+run() { env -i HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin:/usr/sbin" WORKTREE_MIN_AGE_DAYS=1 HERMES_SKIP_EXAMPLE_COM_GUARD=1 "$@" bash "$CLEANUP_SCRIPT" ${MODE:---dry-run} --repos "$REPO" 2>&1; }
 
 OUT="$(run)"
 check "no env: 13h-idle clean pushed worktree stays young" "wt-h13 | young" "$OUT"
+check "default 48h floor: 49h-idle clean pushed worktree is eligible" "ELIGIBLE  $WT/wt-h49 |" "$OUT"
+check "default 48h floor: 47h-idle clean pushed worktree stays young" "wt-h47 | young" "$OUT"
 [[ ! -e "$TMP_ROOT/home/.disk_magician_state/worktree_guard.log" ]] && { echo "  PASS  no env: nothing written to guard log"; PASS=$((PASS+1)); } || { echo "  FAIL  no env: guard log written"; FAIL=$((FAIL+1)); }
 
 # a worktree dir the scan cannot read: recency is unmeasurable, so it stays preserved

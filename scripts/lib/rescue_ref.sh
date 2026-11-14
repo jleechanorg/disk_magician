@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # rescue_ref.sh — snapshot a git work tree to a remote rescue ref before removal.
-#   rescue_check <dir>  rc 0 when rescuable (git tree, origin, no secret-like file, <= cap). No network/writes.
+#   rescue_check <dir>  rc 0 when complete source can be independently snapshotted. No writes.
 #   rescue_push  <dir>  push tracked+untracked (ignored excluded) snapshot to refs/diskm-rescue/...,
 #                       verify via ls-remote, print the ref, log `rescue`. rc != 0 on any failure.
 # The user's index and working tree are never touched: the snapshot uses a throwaway GIT_INDEX_FILE.
@@ -83,7 +83,7 @@ _rr_size_bytes() {
 }
 
 rescue_check() {
-    local dir="${1:?rescue_check <dir>}" cap_mb="${DISK_MAGICIAN_RESCUE_CAP_MB:-200}" size url urls
+    local dir="${1:?rescue_check <dir>}" cap_mb="${DISK_MAGICIAN_RESCUE_CAP_MB:-}" size url urls
     [[ -d "$dir" && ! -L "$dir" ]] || return 1
     [[ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" == true ]] || return 1
     # Only a work-tree root is rescuable: a subdirectory (e.g. venv/ inside a repo) would push
@@ -110,9 +110,11 @@ rescue_check() {
     _rr_secret_like "$dir" && return 1
     declare -F has_ignored_user_data >/dev/null 2>&1 || return 1
     has_ignored_user_data "$dir" && return 1
-    [[ "$cap_mb" =~ ^[0-9]+$ ]] || return 1
-    size="$(_rr_size_bytes "$dir")" || return 1
-    (( size <= cap_mb * 1024 * 1024 )) || return 1
+    if [[ -n "$cap_mb" ]]; then
+        [[ "$cap_mb" =~ ^[0-9]+$ ]] || return 1
+        size="$(_rr_size_bytes "$dir")" || return 1
+        (( size <= cap_mb * 1024 * 1024 )) || return 1
+    fi
     return 0
 }
 

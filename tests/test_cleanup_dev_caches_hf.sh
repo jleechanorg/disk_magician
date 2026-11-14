@@ -2,7 +2,7 @@
 # Hugging Face cache handling in cleanup_dev_caches.sh.
 #
 # ~/.cache/huggingface and ~/.cache/hy3dgen are model caches: large, rebuildable by
-# re-download, but a running job may be mid-download. So a root touched within 24h must
+# re-download, but a running job may be mid-download. So a root touched within 48h must
 # be preserved wholesale, an unmeasurable scan must preserve (fail closed), and a bare
 # invocation must delete nothing.
 set -uo pipefail

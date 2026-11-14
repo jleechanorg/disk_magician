@@ -67,10 +67,10 @@ mk_release worldai-ios-release-600-1 1   # finished, idle, DerivedData is a syml
 /bin/rm -rf "$P/worldai-ios-release-600-1/DerivedData"
 mkdir -p "$TMPROOT/real_dd/Build" "$TMPROOT/real_dd/Index.noindex"
 ln -s "$TMPROOT/real_dd" "$P/worldai-ios-release-600-1/DerivedData"
-for r in worldai-ios-release-100-1 worldai-ios-release-300-1 worldai-ios-release-400-1 not-ios-release-500-1 worldai-ios-release-600-1; do age "$P/$r" 1500; done
-age "$TMPROOT/real_dd" 1500
-age "$P" 1500
-age "$P/worldai-ios-release-200-1" 5
+for r in worldai-ios-release-100-1 worldai-ios-release-300-1 worldai-ios-release-400-1 not-ios-release-500-1 worldai-ios-release-600-1; do age "$P/$r" 2940; done
+age "$TMPROOT/real_dd" 2940
+age "$P" 2940
+age "$P/worldai-ios-release-200-1" 2820
 
 run() { bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$@" 2>&1; }
 

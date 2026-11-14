@@ -14,6 +14,8 @@ source "$_AV_DIR/worktree_ignored.sh"
 source "$_AV_DIR/../worktree_remove_hook.sh" # has_hidden_state
 # shellcheck source=scripts/lib/scratch_roots.sh
 source "$_AV_DIR/scratch_roots.sh"
+# shellcheck source=scripts/lib/rescue_ref.sh
+[[ -f "$_AV_DIR/rescue_ref.sh" ]] && source "$_AV_DIR/rescue_ref.sh"  # proof 3 (rescued)
 
 # c14_discover_repos <root>: print every repository under <root> (itself
 # included), NUL-terminated and absolute: a dir holding a `.git` dir or file,
@@ -141,6 +143,12 @@ c14_repo_pushed_ok() (
 # with the first recorded token means every keep was listed, so the decision does
 # not depend on discovery order.
 _c14_keep() {  # records into the caller's `soft`
+    # Secret/ignored data and unverified remotes cannot be overridden.
+    # Dirty or unpushed content is handled separately by verified rescue.
+    case "$1" in
+        kept:secret-like|kept:ignored-data|kept:remote-unverified|kept:unreachable-object)
+            echo "$1"; return 1 ;;
+    esac
     if [[ -n "${C14_OVERRIDABLE:-}" && "|$C14_OVERRIDABLE|" == *"|$1|"* ]]; then soft=${soft:-$1}; return 0; fi
     echo "${1:-kept:check-failed}"; return 1
 }
@@ -198,28 +206,28 @@ c14_ephemeral_retention() {
     while IFS= read -r r; do
         r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" ]] || continue
         [[ "$archive_origin" != --archive-origin ]] || return 1
-        python3 "$_AV_DIR/scratch_budget_artifact_children.py" scope "$r" "$p" || continue
         if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 1440; return 0; fi
         if [[ "$rel" =~ ^[^./][^/]*$ && ( -d "$content/.git" || -f "$content/.git" ) ]]; then echo 1440; return 0; fi
-        # E8: registered Scratch declares generic directory units ephemeral.
-        # An ancestor's fresh sibling must not shelter an independently stale
-        # unit. Validate every ancestor without following links or crossing Git
-        # boundaries; C14 still proves leases, live use, secrets and provenance.
-        if [[ -d "$content" && ! -L "$p" ]]; then
-            echo 1440; return 0
-        fi
+        # E8: a direct child of the registered scratch-VOLUME root is ephemeral
+        # at 1440 min whatever its name. Name shapes cannot enumerate agent
+        # scratch, and the volume's own class already declares its contents
+        # disposable. This row supplies only the missing retention: lease, live
+        # cwd, open file, secret, repository and recency gates all run before it
+        # (see _av_artifact_removal_verdict), so it bypasses nothing. Depth stays
+        # one component, the OS-owned basenames the tmp-root loop excludes (:179)
+        # stay excluded, and a symlink is never followed.
+        if [[ "$rel" =~ ^[^./][^/]*$ && ! "$rel" =~ ^(_disk_magician_archive|system-|com\.apple\.|PowerlogHelperd) && -d "$content" && ! -L "$p" ]]; then safety_disposable_recency_floor_minutes; return 0; fi
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
     elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
-    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then echo 10080
-    elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
+    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then safety_disposable_recency_floor_minutes
+    elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then safety_disposable_recency_floor_minutes
     else return 1; fi
 }
 # c14_archive_origin <candidate> <inventory>: E1 uses only a matching durable
-# origin receipt. `none` falls through to ordinary provenance; invalid identity
-# or a receipt whose E2/E3 retention has not elapsed stays kept.
+# origin receipt; missing or invalid identity stays kept.
 c14_archive_origin() (
     local p=$1 inv=$2 archive_root receipt info original archived_at retention expected_retention now minimum
     archive_root="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
@@ -227,7 +235,7 @@ c14_archive_origin() (
     archive_root="$(cd "$archive_root" 2>/dev/null && pwd -P)" || { echo kept:archive-identity; return 0; }
     [[ "$p" == "$archive_root/"* ]] || { echo none; return 0; }
     receipt="$p.c14-origin.json"
-    [[ -e "$receipt" || -L "$receipt" ]] || { echo none; return 0; }
+    [[ -e "$receipt" || -L "$receipt" ]] || { echo kept:archive-identity; return 0; }
     info="$(python3 "$_AV_DIR/../c14_probe.py" archive-info "$p" "$receipt" "$inv")"
     [[ "$info" != kept:* ]] || { echo kept:archive-identity; return 0; }
     IFS= read -r -d '' original < <(python3 -c 'import json,sys; sys.stdout.write(json.loads(sys.argv[1])["original_path"]); sys.stdout.write("\0")' "$info" 2>/dev/null) || { echo kept:archive-identity; return 0; }
@@ -244,25 +252,27 @@ c14_archive_origin() (
 )
 # _av_rebuildable <path> [<deadline>]: rc 0 under the cache-root table (§7.2 (b)) or,
 # as cleanup_worktree_venvs does, an untracked venv dir atop a linked worktree that
-# passes the content and push checks and is past the strict 7-day floor. Prints
+# passes the content and push checks and is past the configured worktree floor. Prints
 # `recent-activity` (and returns 1) when that floor protects the venv, or when
 # worktree recency cannot be measured; a kept/deferred verdict from the push check
 # is printed verbatim. The caller maps a bare reason back to kept.
 _av_rebuildable() (
-    local h w g t re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
+    local h w g t floor re='^((\.cache/(uv|pre-commit|worldai)|\.npm/_cacache|\.local/share/opencode/(repos|log|tool-output|snapshot)|Snapchat/Dev/\.cache/bazel|\.config/gcloud/logs|Library/Logs/com\.openai\.codex|Library/Application Support/Google/GoogleUpdater/crx_cache|Library/Caches/(ms-playwright|CocoaPods|@granolaelectron-updater|claude-cli-nodejs|go-build|org\.swift\.swiftpm)|Library/Developer/(Xcode/(DerivedData|iOS DeviceSupport)|CoreSimulator/(Caches|Temp)))/[^/])' deadline=${2:-} pushed
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
     if [[ "${1##*/}" =~ ^(venv|\.venv|venv\.bak(\..+)?)$ ]]; then
         w="$(git -C "${1%/*}" rev-parse --show-toplevel 2>/dev/null)" && [[ "$w" == "${1%/*}" ]] &&
             g="$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)" &&
             [[ "$g" != "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] &&
-            t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] &&
-            c14_repo_content_ok "$w" >/dev/null || return 1
-        # The caller's deadline reaches the bounded shared remote/topology probes;
-        # their kept/deferred verdict is propagated verbatim (never kept:-prefixed).
-        pushed="$(c14_repo_pushed_ok "$w" "$w" "$deadline")" || { printf '%s\n' "${pushed:-kept:check-failed}"; return 1; }
-        # Canonical strict floor: no venv is stripped from a worktree touched
-        # within 7 days, and unmeasurable recency fails closed as active.
-        worktree_is_recently_active "$w" 7 && { printf 'recent-activity\n'; return 1; }
+            t="$(git --literal-pathspecs -C "$w" ls-files -- "${1##*/}" 2>/dev/null)" && [[ -z "$t" ]] || return 1
+        # User instruction (2026-11-13): dirty/unpushed parent work is not a
+        # deletion reason when only its untracked rebuildable venv is removed.
+        # The caller and C14 still apply parent lease/AO/live-cwd and 48h age;
+        # the target venv still passes candidate-scoped secrets/open-file checks.
+        # Use the same configured floor and minute-based fail-closed probe as the
+        # venv cleaner; higher local floors still protect the worktree.
+        floor="$(safety_worktree_floor_minutes 2>/dev/null)" || { printf 'kept:check-failed\n'; return 1; }
+        [[ "$floor" =~ ^[1-9][0-9]*$ ]] || { printf 'kept:check-failed\n'; return 1; }
+        worktree_is_recently_active_minutes "$w" "$floor" && { printf 'recent-activity\n'; return 1; }
         return 0
     fi
     h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$h" ]] || return 1
@@ -421,7 +431,11 @@ except Exception:
 # Only find rc 0 + filter rc 1 + stdout "none" means clean; every other outcome is secret-like.
 _av_secret_like() {
     local res
-    res="$(find "$1" \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+    # -type f matters: without it, `find` also matched credential-named DIRECTORIES
+    # (e.g. grpc's _credentials/). A directory carries no secret bytes and cannot be
+    # exempted by a filename rule, so it forced every grpc-bearing venv to read as
+    # secret-like (52 GB blocked on jeff-ubuntu 2026-11-13, bead disk_magician-9ywq).
+    res="$(find "$1" -type f \( -iname '.env*' -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
         -o -iname '*.pem.map' -o -iname '*.key.map' -o -iname '*.p12.map' -o -iname '*.pfx.map' \
         -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' -o -iname 'id_dsa*' -o -iname .npmrc \
         -o -iname .netrc -o -iname '*credentials*' -o -iname 'secrets*' \) \
@@ -534,27 +548,40 @@ _av_os_clone_proof() {
 # Prints nothing when a linked worktree's own owner-null lease may be freed
 # without the T3 flag; otherwise kept:<token>. The idle floor is never below 60.
 _av_owner_null_relax_reason() {
-    local p=$1 inv=$2 min=${3:-0} ao status newest
-    (( min >= 60 )) || min=60
+    local p=$1 ao
+    # 2026-11-12 operator decision: dirty, unpushed and recent worktrees are no
+    # longer vetoes (they only lack proofs); AO ownership stays a veto and an
+    # unreadable AO config fails closed.
     declare -F wrh_ao_skip_reason >/dev/null 2>&1 || { echo kept:ao-config-unreadable; return; }
     ao="$(wrh_ao_skip_reason "$p")"
-    [[ -z "$ao" ]] || { echo "kept:$ao"; return; }
-    status="$(git -C "$p" status --porcelain --untracked-files=all 2>/dev/null)" || { echo kept:git-status-failed; return; }
-    [[ -z "$status" ]] || { echo kept:dirty; return; }
-    [[ -n "$(git -C "$p" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ]] || { echo kept:not-pushed; return; }
-    newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return; }
-    (( $(date +%s) - newest >= min * 60 )) || echo kept:recent-activity
+    [[ -z "$ao" ]] || echo "kept:$ao"
+}
+
+# _av_top_level_veto <path>: rc 0 for the ballast file anywhere, and for a dot-prefixed or
+# OS-owned name directly under a scratch/tmp root (2026-11-12 operator decision: a veto, not a proof gap).
+_av_top_level_veto() {
+    local p=$1 base=${1##*/} parent root
+    [[ "$base" == .diskm-ballast ]] && return 0
+    [[ "$base" =~ ^(\.|system-|com\.apple\.|PowerlogHelperd|_disk_magician_archive) ]] || return 1
+    parent=${p%/*}
+    while IFS= read -r root; do
+        root="$(cd "$root" 2>/dev/null && pwd -P)" && [[ "$root" == "$parent" ]] && return 0
+    done < <(scratch_roots_get_unique; scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
+    return 1
 }
 
 # artifact_removal_verdict <path> [...] | --self-test
 # Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
 _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' volume_root='' volume_match=0
+    # A caller-provided dry-run marker is an unconditional no-push boundary.
+    [[ "${DRY_RUN:-}" != true ]] || C14_NO_RESCUE_PUSH=1
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 min_idle_explicit=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --t3-owner-null) t3_owner_null=1; shift ;;
+            --no-rescue-push) C14_NO_RESCUE_PUSH=1; shift ;;  # preview: rescued proof counts, nothing is pushed
             --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity|--deadline-at|--inventory-out|--own-reuse-claim|--min-idle-minutes)
                 [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
                 case "$1" in
@@ -565,7 +592,7 @@ _av_artifact_removal_verdict() (
                     --deadline-at) deadline=$2 ;;
                     --inventory-out) inventory_out=$2 ;;
                     --own-reuse-claim) own_claim=$2 ;;
-                    --min-idle-minutes) [[ "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }; min_idle=$2 ;;
+                    --min-idle-minutes) [[ "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }; min_idle=$2; min_idle_explicit=1 ;;
                 esac
                 shift 2 ;;
             *) echo kept:check-failed; return 0 ;;
@@ -573,6 +600,10 @@ _av_artifact_removal_verdict() (
     done
     # A named reuse claim must be an absolute, existing lease file; never a
     # bare name that could resolve against the caller's cwd.
+    # User authority: default disposable content is protected for 48h, even when
+    # another proof (on-origin/rebuildable/released) is present. A named caller floor
+    # remains explicit; the emergency env override applies only to ephemeral rows.
+    if (( min_idle == 0 )); then min_idle="$(safety_disposable_recency_floor_minutes)"; fi
     if [[ -n "$own_claim" ]]; then
         [[ "$own_claim" == /* && -f "$own_claim" && ! -L "$own_claim" ]] || { echo kept:check-failed; return 0; }
         own_claim="$(cd "$(dirname "$own_claim")" 2>/dev/null && pwd -P)/${own_claim##*/}"
@@ -590,7 +621,9 @@ if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kep
     # component elsewhere (e.g. ~/.worktrees/worldarchitect.ai/foo or an
     # archive copy) must fall through to the ordinary C14 checks.
     scratch_roots_is_protected_path "$p" "$q" && { echo kept:protected; return 0; }
+    _av_top_level_veto "$p" && { echo kept:protected; return 0; }
     if [[ "$kind" == ephemeral ]]; then
+        local volume_root volume_match=0
         while IFS= read -r volume_root; do [[ "$p" == "$volume_root/"* ]] && { volume_match=1; break; }; done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-$q}" scratch)
         if [[ "$volume_match" == 1 ]] && ! python3 "$_AV_DIR/../volume.py" verify-mount "$volume_root" >/dev/null 2>&1; then echo kept:volume-identity; return 0; fi
     fi
@@ -629,7 +662,7 @@ except FileNotFoundError:print("none")' "$q" 2>/dev/null)" in none) continue ;; 
         # cwd, open files, newest-mtime floor, secrets, pushed, and AO-managed paths.
         # An ancestor/descendant null lease and live/unknown/malformed owners keep.
         case "$_av_owner_state" in
-            dead|released|own-live) ;;
+            dead|released|own-live) [[ "$_av_owner_state" == released && "$q" == "$candidate_lease" ]] && released=1 ;;
             none)
                 # birth-audit's ownerless scratch adoption record is ledger, not a claim.
                 [[ "$(python3 -c 'import json,sys
@@ -653,44 +686,129 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
         esac
     done < <(_av_lease_scope "$p" "$inv" && printf 'OK\0')
     [[ -n "$done" ]] || { echo kept:check-failed; return 0; }
-    if [[ "$volume_match" == 1 ]]; then
-        wrh_live_cwd_reason "$p" "$volume_root"
-    else
-        wrh_live_cwd_reason "$p"
-    fi
+    wrh_live_cwd_reason "$p"
     [[ -z "$WRH_LIVE_CWD_REASON" ]] || { echo "kept:$WRH_LIVE_CWD_REASON"; return 0; }
     st="$(_av_open_file "$p" "$deadline")"
     [[ "$st" == deferred:* ]] && { echo "$st"; return 0; }
     [[ "$st" == yes ]] && { echo kept:open-file; return 0; }
     [[ "$st" == no ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; }
-    newest="$(_av_newest_mtime "$inv")" || { echo kept:mtime-unmeasurable; return 0; }
-    (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
     st="$(python3 "$_AV_DIR/../c14_probe.py" secrets "$inv" "$kind")"
     if [[ "$st" != no ]]; then [[ "$st" == yes ]] && st=kept:secret-like; echo "${st:-kept:check-failed}"; return 0; fi
-    if [[ -d "$p" ]]; then st="$(c14_repos_ok "$p" "$inv" "$deadline")" || { echo "$st"; return 0; }; fi
+    # 2026-11-12 operator decision: eligible = no veto AND at least one proof.
+    # Secret-like content is vetoed below before any proof is considered.
+    # Dirty/unpushed repositories require rescue; age and release do not qualify them.
+    newest="$(_av_newest_mtime "$inv")" || newest=''
     case "$kind" in
         ephemeral) ret="$(c14_archive_origin "$p" "$inv")"
-            if [[ "$ret" == none ]]; then
-                ret="$(c14_ephemeral_retention "$p")" || { echo kept:unproven-content; return 0; }
-                (( $(date +%s) - newest > ret * 60 )) || { echo kept:recent-activity; return 0; }
-            else
-                [[ "$ret" == ok ]] || { echo "$ret"; return 0; }
-            fi ;;
-        rebuildable) ret="$(_av_rebuildable "$p" "$deadline")" || {
+            if [[ "$ret" == ok ]]; then proofs+=" age"
+            elif [[ "$ret" != none ]]; then echo "$ret"; return 0; fi
+            floor_class="$(c14_ephemeral_retention "$p")" || floor_class='' ;;
+        rebuildable) ret="$(_av_rebuildable "$p" "$deadline")" && reb=1 || {
             case "$ret" in
-                deferred:*|kept:*) echo "$ret" ;;
-                '') echo kept:unproven-content ;;
-                *) echo "kept:$ret" ;;
-            esac
-            return 0; } ;;
-        os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; } ;;
-        xcode-derived-data) _av_derived_data "$p" || { echo kept:unproven-content; return 0; } ;;
-        sparkle-update-staging) _av_sparkle_update_staging "$p" || { echo kept:unproven-content; return 0; } ;;
-        '') st="$({ C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" && printf 'OK\0'; } |
-                    python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")" "$deadline")"
-            [[ "$st" == ok ]] || { [[ "$st" == kept:* ]] && echo "$st" || echo kept:check-failed; return 0; } ;;
+                deferred:*|kept:*) echo "$ret"; return 0 ;;
+                recent-activity) echo kept:recent-activity; return 0 ;;  # caller-owned venv floor
+            esac; } ;;
+        os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; }
+            reb=1 ;;
+        xcode-derived-data) ! _av_derived_data "$p" || reb=1 ;;
+        sparkle-update-staging) ! _av_sparkle_update_staging "$p" || reb=1 ;;
+        '') # Verified publication proves content outside repositories. With a repository in the
+            # tree provenance is vacuous for that repo, so it gives no proof (on-origin/rescue do).
+            st="$(C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" | tr -d '\0')"
+            if [[ -z "$st" && ! -e "$p/.git" ]]; then
+                st="$({ printf 'OK\0'; } | python3 "$_AV_DIR/../c14_probe.py" provenance "$p" "$(lease_path_for "$p")" "$deadline")"
+                [[ "$st" == deferred:* ]] && { echo "$st"; return 0; }
+                [[ "$st" != ok ]] || proofs+=" published"
+            fi ;;
         *) echo kept:unproven-content; return 0 ;;
     esac
+    if (( min_idle_explicit == 0 )) && [[ "$kind" == ephemeral && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]{1,7}$ ]]; then
+        local emergency_floor=$((10#$DISK_MAGICIAN_AGE_FLOOR_MINUTES))
+        (( emergency_floor < 120 )) && emergency_floor=120
+        if [[ ! "$floor_class" =~ ^[0-9]+$ ]] || (( floor_class <= $(safety_disposable_recency_floor_minutes) )); then
+            min_idle=$emergency_floor
+        fi
+    fi
+    # A caller that names --min-idle-minutes owns that idle floor (worktree_remove_hook's
+    # recency window): it vetoes whatever proofs hold, and unmeasurable fails closed.
+    if (( min_idle > 0 )); then
+        (( min_idle >= 60 )) || min_idle=60
+        [[ "$newest" =~ ^[0-9]+$ ]] || { echo kept:mtime-unmeasurable; return 0; }
+        (( $(date +%s) - newest >= min_idle * 60 )) || { echo kept:recent-activity; return 0; }
+    fi
+    # Veto: content written within the last hour is treated as in use, whatever proves it.
+    # A producer can write through absolute paths with no cwd or open file inside
+    # (measured 2026-11-12: a 48.7 GiB Scratch tree written 12 min earlier, no live cwd).
+    # Unmeasurable newest mtime cannot prove idleness, so it fails closed.
+    [[ "$newest" =~ ^[0-9]+$ ]] || { echo kept:mtime-unmeasurable; return 0; }
+    (( $(date +%s) - newest >= 3600 )) || { echo kept:recent-activity; return 0; }
+    # Proof 1: age. Per-child newest content mtime; unmeasurable is no proof.
+    local floor
+    floor="$(safety_disposable_recency_minimum_minutes "${floor_class:-$(safety_disposable_recency_floor_minutes)}")"
+    [[ -n "$floor_class" || ! -f "$p/.git" ]] || floor="$(safety_disposable_recency_floor_minutes)"
+    if [[ "$kind" == ephemeral && "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[0-9]{1,7}$ ]] && { [[ ! "$floor_class" =~ ^[0-9]+$ ]] || (( floor_class <= $(safety_disposable_recency_floor_minutes) )); }; then floor=$DISK_MAGICIAN_AGE_FLOOR_MINUTES; fi
+    (( floor >= 120 )) || floor=120
+    # Age proves only the declared-ephemeral classes (/tmp and Scratch). Other kinds keep
+    # their own shape/provenance proof: age must not bypass a caller's scope table.
+    if [[ "$kind" == ephemeral && "$newest" =~ ^[0-9]+$ ]] && (( $(date +%s) - newest >= floor * 60 )); then proofs+=" age"; fi
+    # Proof 2: on-origin, over every repository in the tree (nested repos included).
+    # A lease-less clone has no git_meta baseline, so kept:git-unbaselined still counts when the
+    # content is clean and pushed. Vetoes no proof can make safe: an external registered worktree
+    # whose admin lives here, a git-metadata mismatch, a failed check, and a bare repository
+    # that is not on origin (rescue_ref cannot snapshot it). Dirty/unpushed only lose this proof.
+    if [[ -d "$p" ]]; then
+        st="$(C14_ROOT="$p" python3 "$_AV_DIR/../c14_probe.py" repos "$inv" | tr -d '\0')"
+        if [[ -n "$st" || -e "$p/.git" || "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then
+            st="$(c14_repos_ok "$p" "$inv" "$deadline")"
+            case "$st" in
+                deferred:*|kept:external-worktree|kept:check-failed|kept:git-metadata|kept:linked-worktree|kept:secret-like|kept:ignored-data|kept:remote-unverified|kept:unreachable-object)
+                    echo "$st"; return 0 ;;
+            esac
+            case "$st" in
+                kept:dirty|kept:not-pushed)
+                    # Age or producer release cannot substitute for preserving
+                    # local repository changes. Rescue is a proof only when the
+                    # complete visible payload can be pushed to an independent
+                    # remote; secret/ignored/nested content is rejected there.
+                    # Age or release says nothing about saving local changes.
+                    # A verified rescue destination must be the sole proof.
+                    if ! declare -F rescue_check >/dev/null 2>&1 || ! rescue_check "$p"; then echo "$st"; return 0; fi
+                    proofs=""
+                    if [[ "${C14_NO_RESCUE_PUSH:-}" == 1 ]]; then
+                        echo kept:rescue-required; return 0
+                    elif rescue_push "$p" >/dev/null 2>&1; then
+                        proofs+=" rescued"
+                    else
+                        echo "$st"; return 0
+                    fi ;;
+            esac
+            if [[ "$st" != ok && "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then echo "$st"; return 0; fi
+            # Only the repository root itself: files beside a nested clone belong to no repo.
+            if [[ -e "$p/.git" || "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then
+                case "$st" in ok|kept:git-unbaselined) proofs+=" on-origin" ;; esac
+            fi
+        fi
+    fi
+    # Proof 4: rebuildable artifact name — never a tree holding .git, never tracked paths.
+    if [[ -d "$p" && -z "$(find "$p" -name .git -print -quit 2>/dev/null)" && -z "$(git -C "$p" ls-files -- . 2>/dev/null | head -1)" ]]; then
+        case "${p##*/}" in
+            build|dist|out|target|coverage|gradle|.gradle|android-sdk|avd|.next|.cache|.turbo|.parcel-cache|__pycache__|DerivedData|Pods|node_modules|isolated-*|*-compilation-cache) reb=1 ;;
+        esac
+    fi
+    # Rebuildable proofs (kind-declared or name-scoped) keep the 1 h idle floor the
+    # old verdict applied to everything: a cache written minutes ago may be live.
+    if [[ "$reb" == 1 && "$newest" =~ ^[0-9]+$ ]] && (( $(date +%s) - newest >= 3600 )); then proofs+=" rebuildable"; fi
+    # Proof 5: producer released its lease.
+    [[ "$released" == 1 ]] && proofs+=" producer-released"
+    # Proof 6: named by the operator for this run.
+    if [[ -n "${DISK_MAGICIAN_OPERATOR_TARGETS:-}" ]] && grep -qxF -- "$p" <<<"$DISK_MAGICIAN_OPERATOR_TARGETS"; then proofs+=" operator-named"; fi
+    # Proof 3: rescued. Only when nothing else proves it; the push must succeed.
+    if [[ -z "$proofs" ]] && declare -F rescue_check >/dev/null 2>&1 && rescue_check "$p" >/dev/null 2>&1; then
+        if [[ "${C14_NO_RESCUE_PUSH:-}" == 1 ]]; then echo kept:rescue-required; return 0
+        elif declare -F rescue_push >/dev/null 2>&1 && rescue_push "$p" >/dev/null 2>&1; then proofs+=" rescued"; fi
+    fi
+    [[ -n "$proofs" ]] || { echo kept:no-proof; return 0; }
+
     if [[ -n "$inventory_out" ]]; then
         mkdir -p "$(dirname "$inventory_out")" || { echo kept:check-failed; return 0; }
         # Linked-worktree admin state belongs only to a candidate that is the
@@ -708,6 +826,8 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
         st="$(python3 "$_AV_DIR/../c14_probe.py" merge-inventory "$inv" "$admin_source" "$inventory_out.tmp.$$" "$admin_filter")"
         [[ "$st" == ok ]] && mv -f "$inventory_out.tmp.$$" "$inventory_out" || { rm -f "$inventory_out.tmp.$$"; echo kept:check-failed; return 0; }
     fi
+    # Proofs travel out of band so the verdict stays one word for every caller.
+    [[ -z "${C14_PROOF_FILE:-}" ]] || { local IFS=' '; set -- $proofs; IFS=,; printf '%s\n' "$*" >"$C14_PROOF_FILE"; }
     echo remove
 )
 
@@ -755,27 +875,23 @@ _av_self_test_run() {
     out="$(artifact_removal_verdict "$good" --kind ephemeral 2>/dev/null)"
     [[ "$out" == remove ]] || return 0
 
-    # kept fixture: a dirty tracked edit must never be removed.
+    # kept fixture: a young dirty tracked edit has no proof, so it is never removed.
     bad="$root/keep-candidate"
     git clone -q "$base" "$bad" 2>/dev/null || return 0
     printf 'dirty\n' >>"$bad/keep.txt" || return 0
-    gd="$(git -C "$bad" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
-    lm="$(python3 "$probe" gitmeta "$gd" 2>/dev/null)" || return 0
-    f="$(lease_path_for "$bad")" || return 0
-    mkdir -p "${f%/*}" 2>/dev/null || return 0
-    printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":%s}\n' "$bad" "$lm" >"$f" || return 0
-    find "$bad" -exec touch -h -t 202001010000 {} + 2>/dev/null
+    # No lease and left young: a released lease would itself be a proof.
+    # Left young on purpose: under the OR verdict an old dirty clone is removable by age.
     out="$(artifact_removal_verdict "$bad" --kind ephemeral 2>/dev/null)"
     [[ "$out" == kept:* ]] || return 0
 
-    # corrupted helper-evidence negative: the same removable shape with a
-    # damaged git_meta must fail closed (never remove).
+    # corrupted lease-evidence negative: a young clone whose lease is
+    # damaged must fail closed (never remove).
     corrupt="$root/corrupt-candidate"
     git clone -q "$base" "$corrupt" 2>/dev/null || return 0
     f="$(lease_path_for "$corrupt")" || return 0
     mkdir -p "${f%/*}" 2>/dev/null || return 0
-    printf '{"path":"%s","owner":{"pid":1},"released_at":1,"git_meta":{}}\n' "$corrupt" >"$f" || return 0
-    find "$corrupt" -exec touch -h -t 202001010000 {} + 2>/dev/null
+    printf '{"path":"%s","owner":' "$corrupt" >"$f" || return 0
+    # Young, with an unparseable lease: damaged evidence must fail closed.
     out="$(artifact_removal_verdict "$corrupt" --kind ephemeral 2>/dev/null)"
     [[ "$out" != remove ]] || return 0
 
@@ -800,19 +916,29 @@ _av_self_test() {
 
 artifact_removal_verdict() {
     [[ "${1:-}" == --self-test ]] && { _av_self_test; return 0; }
-    local tmpdir inv result reason admin_inv
+    local tmpdir inv result reason admin_inv proofs
     tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/c14-verdict.XXXXXX")" || { echo kept:check-failed; return 0; }
     inv="$tmpdir/inventory.json"
     # The admin row channel is per-call and owned by this verdict. A caller's
     # C14_INVENTORY_OUT is never inherited, and only --inventory-out names the
     # external receipt destination.
     admin_inv="$tmpdir/admin.jsonl"
-    result="$(GIT_OPTIONAL_LOCKS=0 C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" _av_artifact_removal_verdict "$@")"
+    result="$(GIT_OPTIONAL_LOCKS=0 C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" C14_PROOF_FILE="$tmpdir/proofs" _av_artifact_removal_verdict "$@")"
+    # The inner verdict writes its proof labels (comma-joined) to C14_PROOF_FILE; callers keep
+    # parsing one word on stdout. Proofs go to the ledger (bytes per reason) and, when set,
+    # to $DISK_MAGICIAN_C14_PROOF_OUT.
+    proofs=''
+    [[ "$result" != remove || ! -s "$tmpdir/proofs" ]] || proofs="$(<"$tmpdir/proofs")"
+    if [[ -n "$proofs" ]]; then
+        [[ -z "${DISK_MAGICIAN_C14_PROOF_OUT:-}" ]] || printf '%s\n' "$proofs" >"$DISK_MAGICIAN_C14_PROOF_OUT"
+        [[ ! -f "$inv" || -z "${DISK_MAGICIAN_C14_LEDGER:-}" ]] ||
+            python3 "$_AV_DIR/../c14_probe.py" account "$inv" "$DISK_MAGICIAN_C14_LEDGER" "proof:$proofs" >/dev/null 2>&1 || true
+    fi
     if [[ ( "$result" == kept:* || "$result" == deferred:* ) && -f "$inv" && -n "${DISK_MAGICIAN_C14_LEDGER:-}" ]]; then
         reason=${result#*:}
         python3 "$_AV_DIR/../c14_probe.py" account "$inv" "$DISK_MAGICIAN_C14_LEDGER" "$reason" >/dev/null 2>&1 || true
     fi
-    rm -f "$inv" "$admin_inv"
+    rm -f "$inv" "$admin_inv" "$tmpdir/proofs"
     rmdir "$tmpdir" 2>/dev/null || true
     echo "${result:-kept:check-failed}"
 }

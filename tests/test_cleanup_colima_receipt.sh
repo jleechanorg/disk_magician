@@ -18,13 +18,22 @@ case "$*" in
   "context inspect colima --format {{.Endpoints.docker.Host}}") echo "unix://$HOME/.colima/default/docker.sock" ;;
   "info") exit 0 ;;
   "system df") echo 'TYPE TOTAL ACTIVE SIZE RECLAIMABLE' ;;
-  "builder prune -af --reserved-space 5g") printf 'Deleted build cache objects:\ncache-id-1\nTotal reclaimed space: 1B\n' ;;
-  "image prune -af") printf 'Deleted Images:\nuntagged: example:old\ndeleted: sha256:image1\nTotal reclaimed space: 2B\n' ;;
-  "system prune -f") printf 'Deleted Containers:\ncontainer1\nDeleted Networks:\nnetwork1\nDeleted Images:\ndeleted: sha256:image2\nTotal reclaimed space: 3B\n' ;;
+  "builder prune -af --filter until=48h --reserved-space 5g") printf 'Deleted build cache objects:\ncache-id-1\nTotal reclaimed space: 1B\n' ;;
+  "image prune -af --filter until=48h") printf 'Deleted Images:\nuntagged: example:old\ndeleted: sha256:image1\nTotal reclaimed space: 2B\n' ;;
+  "system prune -f --filter until=48h") printf 'Deleted Containers:\ncontainer1\nDeleted Networks:\nnetwork1\nDeleted Images:\ndeleted: sha256:image2\nTotal reclaimed space: 3B\n' ;;
   *) echo "unexpected docker args: $*" >&2; exit 2 ;;
 esac
 SH
 # Hermetic backends: never let an ambient Colima/limactl/ssh touch the real VM.
+cat > "$BIN/stat" <<'SH'
+#!/usr/bin/env bash
+if [[ "$1" == -f && "$2" == %u ]]; then
+  /usr/bin/stat -c %u "$3" 2>/dev/null || /usr/bin/stat -f %u "$3"
+else
+  exec /usr/bin/stat "$@"
+fi
+SH
+chmod +x "$BIN/stat"
 cat > "$BIN/colima" <<'SH'
 #!/usr/bin/env bash
 exit 0

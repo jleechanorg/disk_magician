@@ -19,10 +19,12 @@ ACTIVE_LOG="$SUPERVISOR_DIR/cmux-codex-launchd.log"
 ACTIVE_ERR_LOG="$SUPERVISOR_DIR/cmux-codex-launchd.stderr.log"
 STATE_FILE="$SUPERVISOR_DIR/cmux-codex-launchd-state.json"
 
-# 7 days. The launchd plist rotates ~3x/day, so 7d = ~21 rotated files.
+# Use the shared 48h disposable-content floor; at ~3 rotations/day that keeps
+# roughly six recent logs available for debugging.
 # Active log (cmux-codex-launchd.log) and stderr are NEVER touched — only
 # timestamped rotations. State file (2 bytes) is never touched.
-AGE_THRESHOLD_DAYS=7
+AGE_THRESHOLD_MINUTES="$(safety_disposable_recency_floor_minutes)"
+AGE_THRESHOLD_HOURS=$((AGE_THRESHOLD_MINUTES / 60))
 
 DRY_RUN=true
 
@@ -31,7 +33,7 @@ usage() {
 Usage: $(basename "$0") [--clean] [-h|--help]
 
 Options:
-  --clean      Actually delete rotated launchd logs older than ${AGE_THRESHOLD_DAYS}d.
+  --clean      Actually delete rotated launchd logs older than ${AGE_THRESHOLD_HOURS}h.
   --dry-run    Preview cleanup without deleting.
   -h, --help   Show this help.
 EOF
@@ -55,7 +57,7 @@ if [[ ! -d "$SUPERVISOR_DIR" ]]; then
 fi
 
 log "Cleanup mode: $( [[ "$DRY_RUN" == true ]] && echo DRY-RUN || echo APPLY )"
-log "Threshold: rotated logs older than ${AGE_THRESHOLD_DAYS} days"
+log "Threshold: rotated logs older than ${AGE_THRESHOLD_HOURS} hours"
 log ""
 
 # Match only the timestamped rotation files, never the active log.
@@ -80,7 +82,7 @@ while IFS= read -r -d '' f; do
       freed_kb=$(( freed_kb + kb ))
     fi
   fi
-done < <(find "$SUPERVISOR_DIR" -maxdepth 1 -type f -name "$ROTATION_PATTERN" -mtime "+${AGE_THRESHOLD_DAYS}" -print0 2>/dev/null)
+done < <(find "$SUPERVISOR_DIR" -maxdepth 1 -type f -name "$ROTATION_PATTERN" -mmin "+${AGE_THRESHOLD_MINUTES}" -print0 2>/dev/null)
 
 log ""
 log "Done. Files removed: $deleted  Total freed: $(( freed_kb / 1024 )) MB"

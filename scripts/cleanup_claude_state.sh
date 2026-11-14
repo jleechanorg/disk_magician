@@ -69,7 +69,7 @@ Options:
   --clean       Actually remove eligible dirs (default: dry-run).
                 Requires CLAUDE_STATE_APPROVED=1 in the environment.
   --dry-run     Print actions without touching disk (default).
-  --min-age N   Minimum content age in days for eligibility (default: 7).
+  --min-age N   Minimum content age in days for eligibility (default: 2 days / 48h).
                 Hard floor: may only be raised, never lowered (CLAUDE.md).
   --root PATH   Root directory to scan (default: ~/.claude/state). Tests
                 only -- production callers should never override this, and

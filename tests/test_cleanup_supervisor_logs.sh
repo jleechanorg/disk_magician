@@ -6,7 +6,7 @@
 # not by invoking scripts/cleanup_supervisor_logs.sh directly. The dispatcher
 # must forward arguments and exit status, and the script itself must keep the
 # active log, stderr log, and state file while removing only timestamped
-# rotations older than its 7-day threshold (safety rules always win).
+# rotations older than the shared 48-hour threshold (safety rules always win).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -63,8 +63,8 @@ ERR="$SUP/cmux-codex-launchd.stderr.log"
 STATE="$SUP/cmux-codex-launchd-state.json"
 for f in "$STALE" "$RECENT" "$ACTIVE" "$ERR"; do printf 'log line\n' >"$f"; done
 printf '{}\n' >"$STATE"
-backdate "$STALE" 10
-backdate "$RECENT" 2
+backdate "$STALE" 3
+backdate "$RECENT" 1
 
 run() {
   HOME="$H" DISK_MAGICIAN_SAFETY_FILE="$H/.config/disk-magician/safety.local.json" \
@@ -90,7 +90,7 @@ H3="$WORK/home3"; SUP3="$H3/.claude/supervisor"
 mkdir -p "$SUP3" "$H3/.config/disk-magician"
 PROT="$SUP3/cmux-codex-launchd.20260101T000000.log"
 printf 'log line\n' >"$PROT"
-backdate "$PROT" 10
+backdate "$PROT" 3
 printf '{"never_delete": ["~/.claude/supervisor/cmux-codex-launchd.2026*.log"]}\n' \
   >"$H3/.config/disk-magician/safety.local.json"
 rc=0
@@ -105,7 +105,7 @@ H4="$WORK/home4"; SUP4="$H4/.claude/supervisor"
 mkdir -p "$SUP4" "$H4/.config/disk-magician"
 F4="$SUP4/cmux-codex-launchd.20260101T000000.log"
 printf 'log line\n' >"$F4"
-backdate "$F4" 10
+backdate "$F4" 3
 printf 'not json\n' >"$H4/.config/disk-magician/safety.local.json"
 HOME="$H4" DISK_MAGICIAN_SAFETY_FILE="$H4/.config/disk-magician/safety.local.json" \
   DISK_MAGICIAN_TEST_SANDBOX="$H4" DISK_MAGICIAN_TEST_CONTEXT=test_cleanup_supervisor_logs \

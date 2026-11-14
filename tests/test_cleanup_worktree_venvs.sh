@@ -647,6 +647,7 @@ done
 for p in "$WT_100D/README.md" "$WT_100D/.git" "$WT_100D/.venv"; do age_path_days_ago "$p" 100; done
 for p in "$WT_30D/README.md" "$WT_30D/.git" "$WT_30D/.venv"; do age_path_days_ago "$p" 30; done
 
+set +e
 OUT12=$(env -i HOME="$TMP_ROOT/home" PATH="$TEST_PATH" \
   DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
   DISK_MAGICIAN_LOAD5_OVERRIDE="0.1000" \
@@ -664,6 +665,36 @@ else
   record_fail "<90d worktree .venv preserved when WORKTREE_APPROVED=1 unset" "30d .venv was stripped without WORKTREE_APPROVED=1"
 fi
 
+
+# The parent floor applies to the venv candidate without rewriting the parent Git state.
+echo
+echo "=== Test 13: 48h floor preserves parent work and tracked venvs ==="
+R48="$TMP_ROOT/roots48"; mkdir -p "$R48"
+DIRTY48="$R48/dirty"; YOUNG48="$R48/young"; TRACKED48="$R48/tracked"
+git -C "$KXZ_BASE" worktree add -q -b dirty48 "$DIRTY48"
+printf "unpublished\n" >> "$DIRTY48/README.md"
+git -C "$DIRTY48" -c user.name=t -c user.email=t@t commit -qam unpublished
+printf "dirty edit\n" >> "$DIRTY48/README.md"
+printf "keep parent data\n" > "$DIRTY48/parent-note.txt"
+git -C "$KXZ_BASE" worktree add -q -b young48 "$YOUNG48"
+git -C "$KXZ_BASE" worktree add -q -b tracked48 "$TRACKED48"
+mkdir -p "$DIRTY48/.venv/lib" "$YOUNG48/.venv/lib" "$TRACKED48/.venv/lib"
+printf cache > "$DIRTY48/.venv/lib/site.py"; printf cache > "$YOUNG48/.venv/lib/site.py"; printf tracked > "$TRACKED48/.venv/lib/site.py"
+git -C "$TRACKED48" add -f .venv/lib/site.py
+git -C "$TRACKED48" -c user.name=t -c user.email=t@t commit -qm tracked-venv
+age_path_hours_ago() { local f="$1" h="$2" t; t=$(date -v-"${h}"H +%Y%m%d%H%M 2>/dev/null || date -d "${h} hours ago" +%Y%m%d%H%M); touch -t "$t" "$f"; }
+for f in "$DIRTY48/README.md" "$DIRTY48/parent-note.txt" "$DIRTY48/.venv/lib/site.py" "$TRACKED48/README.md" "$TRACKED48/.venv/lib/site.py"; do age_path_hours_ago "$f" 49; done
+age_path_hours_ago "$YOUNG48/README.md" 2; age_path_hours_ago "$YOUNG48/.venv/lib/site.py" 49
+HEAD48=$(git -C "$DIRTY48" rev-parse HEAD); STATUS48=$(git -C "$DIRTY48" status --porcelain -uno)
+SAFE48="$TMP_ROOT/bin48"; mkdir -p "$SAFE48"
+printf "#!/bin/sh\\nprintf 'p1\\nn/\\n'\\n" > "$SAFE48/lsof"; chmod +x "$SAFE48/lsof"
+OUT13=$(env -i HOME="$TMP_ROOT/home" PATH="$SAFE48:$TEST_PATH" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=48 DISK_MAGICIAN_LOAD5_OVERRIDE=0.1000 WORKTREE_APPROVED=1 bash "$TARGET_SCRIPT" --roots "$R48" --clean 2>&1)
+assert_contains "49h untracked venv is eligible" "stripping $DIRTY48/.venv" "$OUT13"
+[[ ! -d "$DIRTY48/.venv" ]] && record_pass "49h untracked venv removed" || record_fail "49h untracked venv removed" "still present"
+[[ "$(git -C "$DIRTY48" rev-parse HEAD)" == "$HEAD48" && "$(git -C "$DIRTY48" status --porcelain -uno)" == "$STATUS48" && -f "$DIRTY48/parent-note.txt" ]] && record_pass "unpublished parent HEAD/status and untracked file preserved" || record_fail "unpublished parent Git state preserved" "parent state changed"
+[[ -d "$YOUNG48/.venv" ]] && record_pass "2h parent venv preserved" || record_fail "2h parent venv preserved" "removed"
+[[ -f "$TRACKED48/.venv/lib/site.py" ]] && record_pass "tracked venv content preserved" || record_fail "tracked venv content preserved" "removed"
+assert_contains "tracked venv is identified explicitly" "skip (tracked by git): $TRACKED48/.venv" "$OUT13"
 echo
 echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

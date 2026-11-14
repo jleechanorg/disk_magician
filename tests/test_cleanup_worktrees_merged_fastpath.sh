@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # test_cleanup_worktrees_merged_fastpath.sh — bead disk_magician-plf: merged,
-# clean worktrees may be ELIGIBLE at >= 3 days; everything else keeps 7 days.
+# merged state does not relax the common48h content floor.
 #
 # Run: bash tests/test_cleanup_worktrees_merged_fastpath.sh
 set -euo pipefail
-# These cases pin the 7-day non-merged path; the production default is now 3.
-export WORKTREE_MIN_AGE_DAYS=7
+# These fixtures check content age and independent keep reasons with a common48h floor.
+export WORKTREE_MIN_AGE_DAYS=2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEANUP_SCRIPT="$SCRIPT_DIR/../scripts/cleanup_worktrees.sh"
@@ -114,7 +114,7 @@ add_wt m4credjson "$WT/wt-m4credjson" "$MERGED_SHA"
 mkdir -p "$WT/wt-m4credjson/__pycache__" "$WT/wt-m4credjson/config"
 printf 'x\n' > "$WT/wt-m4credjson/__pycache__/clock_skew_credentials.cpython-312.pyc"
 printf '{}\n' > "$WT/wt-m4credjson/config/credentials.json"
-# gh-verified squash-merged route (bead ueh) into the 3-day path.
+# gh-verified squash-merged route (bead ueh) into the common 48h path.
 git -C "$REPO" remote add origin https://github.com/fixture/repo.git
 add_wt sqmatch "$WT/wt-sqmatch" "$AHEAD_SHA"
 add_wt sqmatchignoreddata "$WT/wt-sqmatchignoreddata" "$AHEAD_SHA"
@@ -124,7 +124,7 @@ add_wt sqdiff "$WT/wt-sqdiff" "$AHEAD_SHA"
 for w in wt-m4 wt-m4dirty wt-m4ignoreddata wt-u4 wt-m4live wt-m4secret wt-m4ignored wt-m4untr wt-m4untrdir \
     wt-m4au wt-m4sw wt-m4envcase wt-m4npmrc wt-m4p12 wt-sqmatch wt-sqmatchignoreddata wt-sqdiff wt-m4lockr wt-m4ed wt-m4pyc wt-m4pyplain wt-m4pydep wt-m4credjson; do age_days_ago "$WT/$w" 4; done
 age_days_ago "$REPO/.ao/data/worktrees/wt-m4ao" 4
-age_days_ago "$WT/wt-m2" 2
+age_days_ago "$WT/wt-m2" 1
 age_days_ago "$TMP_ROOT/aodir/wt-m4cfg" 4
 age_days_ago "$WT/wt-m6" 6
 age_days_ago "$WT/wt-u8" 8
@@ -136,8 +136,10 @@ LIVE_REAL="$(cd "$WT/wt-m4live" && pwd -P)"
 cat > "$FAKE_BIN/lsof" <<SH
 #!/bin/sh
 echo "p1"
+echo "fcwd"
 echo "n/"
 echo "p2"
+echo "fcwd"
 echo "n$LIVE_REAL"
 SH
 # Fake gh: only the sq* branches resolve; everything else fails closed.
@@ -150,60 +152,38 @@ case "\$*" in
 esac
 SH
 printf '#!/bin/sh\nshift\nexec "$@"\n' > "$FAKE_BIN/timeout"
-chmod +x "$FAKE_BIN/lsof" "$FAKE_BIN/gh" "$FAKE_BIN/timeout"
+printf "#!/bin/sh\nexit 1\n" > "$FAKE_BIN/sudo"
+chmod +x "$FAKE_BIN/lsof" "$FAKE_BIN/gh" "$FAKE_BIN/timeout" "$FAKE_BIN/sudo"
 
 run() {
-  env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}" \
+  env -i HOME="$TMP_ROOT/home" PATH="$FAKE_BIN:/usr/bin:/bin" WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-2}" \
     HERMES_SKIP_EXAMPLE_COM_GUARD=1 "$@" \
     bash "$CLEANUP_SCRIPT" --dry-run --repos "$REPO" 2>&1
 }
 
-echo "Test: default (merged floor 3d)"
+echo "Test: standard 48h worktree floor applies to merged and unmerged trees"
 OUT="$(run)"
-check "header shows 3d merged floor" "Merged clean worktree floor: 3d" "$OUT"
+check "header reports 48h (2d) floor" "Worktree content floor: 48h" "$OUT"
 check "4d merged clean -> ELIGIBLE" "ELIGIBLE  $WT/wt-m4 |" "$OUT"
-check "4d merged dirty -> PRESERVE young" "wt-m4dirty | young" "$OUT"
-check "4d merged ignored data directory -> PRESERVE young" "wt-m4ignoreddata | young" "$OUT"
-check "4d GH-verified ignored data directory -> PRESERVE young" "wt-sqmatchignoreddata | young" "$OUT"
-check "4d unmerged clean -> PRESERVE young" "wt-u4 | young" "$OUT"
-check "2d merged clean -> PRESERVE young" "wt-m2 | young" "$OUT"
-check "4d merged clean live cwd -> PRESERVE live-cwd" "wt-m4live | live-cwd" "$OUT"
-check "4d merged with ignored .env -> PRESERVE young" "wt-m4secret | young" "$OUT"
-check "4d merged with ignored node_modules -> ELIGIBLE" "ELIGIBLE  $WT/wt-m4ignored |" "$OUT"
-check "4d merged under AO worktreeDir -> PRESERVE young" "wt-m4ao | young" "$OUT"
-check "4d merged under AO config worktreeDir -> PRESERVE young" "wt-m4cfg | young" "$OUT"
-check "8d unmerged keeps 7d path reason" "wt-u8 | ahead-of-main" "$OUT"
-check "4d untracked file (showUntrackedFiles=no) -> young" "wt-m4untr | young" "$OUT"
-check "4d untracked dir (showUntrackedFiles=no) -> young" "wt-m4untrdir | young" "$OUT"
-check "8d untracked file (showUntrackedFiles=no) -> untracked" "wt-m8untr | untracked" "$OUT"
-check "4d assume-unchanged edit -> young" "wt-m4au | young" "$OUT"
-check "4d skip-worktree edit -> young" "wt-m4sw | young" "$OUT"
-check "4d ignored .ENV (uppercase) -> young" "wt-m4envcase | young" "$OUT"
-check "4d ignored .npmrc -> young" "wt-m4npmrc | young" "$OUT"
-check "4d ignored *.P12 -> young" "wt-m4p12 | young" "$OUT"
-check "4d merged locked with reason -> PRESERVE locked" "wt-m4lockr | locked" "$OUT"
-check "4d ignored id_ed25519 -> young" "wt-m4ed | young" "$OUT"
-check "4d gh squash-merged matching head -> ELIGIBLE" "ELIGIBLE  $WT/wt-sqmatch |" "$OUT"
-check "4d gh squash-merged differing head -> young" "wt-sqdiff | young" "$OUT"
+check "4d merged dirty remains protected" "wt-m4dirty | dirty" "$OUT"
+check "4d merged ignored data remains protected" "wt-m4ignoreddata | ignored-data" "$OUT"
+check "4d squash-merged ignored data remains protected" "wt-sqmatchignoreddata | ignored-data" "$OUT"
+check "4d unmerged clean is classified" "wt-u4 | ahead-of-main" "$OUT"
+check "recent worktree remains protected" "wt-m2 | young" "$OUT"
+check "live cwd remains protected" "wt-m4live | live-cwd" "$OUT"
+check "secret-like path remains protected" "wt-m4secret | hidden-state" "$OUT"
+check "AO owned worktree keeps ownership gate" "wt-m4ao | ao-owned" "$OUT"
+check "AO project worktree keeps ownership gate" "wt-m4cfg | ao-owned" "$OUT"
+check "8d unmerged clean passes content floor" "wt-u8 | ahead-of-main" "$OUT"
+check "untracked file remains protected" "wt-m4untr | untracked" "$OUT"
+check "untracked directory remains protected" "wt-m4untrdir | untracked" "$OUT"
+check "hidden index edits remain protected" "wt-m4au | hidden-state" "$OUT"
+check "skip-worktree edits remain protected" "wt-m4sw | hidden-state" "$OUT"
+check "merged matching head can be eligible after48h" "ELIGIBLE  $WT/wt-sqmatch |" "$OUT"
 
-echo "Test: env 1 clamped to 3"
-OUT="$(run DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS=1)"
-check "env 1 -> header 3d" "Merged clean worktree floor: 3d" "$OUT"
-check "env 1 -> 2d merged still young" "wt-m2 | young" "$OUT"
-
-echo "Test: env 10 clamped to 7"
-OUT="$(run DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS=10)"
-check "env 10 -> header 7d" "Merged clean worktree floor: 7d" "$OUT"
-check "env 10 -> 6d merged clean young" "wt-m6 | young" "$OUT"
-
-echo "Test: env 5 raises floor"
-OUT="$(run DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS=5)"
-check "env 5 -> 4d merged clean young" "wt-m4 | young" "$OUT"
-check "env 5 -> 6d merged clean ELIGIBLE" "ELIGIBLE  $WT/wt-m6 |" "$OUT"
-
-echo "Test: production default floor is 3 days for all worktrees"
+echo "Test: caller-requested floor still raises the common48h default"
 OUT="$(run WORKTREE_MIN_AGE_DAYS=3)"
-check "default -> header others 3d" "(others: 3d)" "$OUT"
+check "explicit 3d age raises the 48h floor" "Worktree content floor: 3d" "$OUT"
 check "default -> 4d unmerged clean is not young" "wt-u4 | ahead-of-main" "$OUT"
 check "default -> 4d merged with ignored .env is preserved" "wt-m4secret | hidden-state" "$OUT"
 check "default -> 4d assume-unchanged edit is preserved" "wt-m4au | hidden-state" "$OUT"
@@ -211,8 +191,8 @@ check "default -> 4d merged with __pycache__ *credentials*.pyc is preserved (sec
 check "default -> 4d merged with only plain __pycache__ .pyc ELIGIBLE" "ELIGIBLE  $WT/wt-m4pyplain |" "$OUT"
 check "default -> 4d merged with node_modules credentials .pyc ELIGIBLE" "ELIGIBLE  $WT/wt-m4pydep |" "$OUT"
 check "default -> 4d merged with ignored credentials.json is preserved" "wt-m4credjson | hidden-state" "$OUT"
-check "default -> 4d merged under AO worktreeDir stays young (AO keeps 7d)" "wt-m4ao | young" "$OUT"
-check "default -> 4d merged clean still ELIGIBLE" "ELIGIBLE  $WT/wt-m4 |" "$OUT"
+check "AO-owned worktree preserves its AO owner gate under the raised3d floor" "wt-m4ao | ao-owned" "$OUT"
+check "4d merged clean is eligible above the requested3d floor" "ELIGIBLE  $WT/wt-m4 |" "$OUT"
 check "3d merged path catches ignored data" "wt-m4ignoreddata | ignored-data" "$OUT"
 check "3d GH-verified path catches ignored data" "wt-sqmatchignoreddata | ignored-data" "$OUT"
 

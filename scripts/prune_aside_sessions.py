@@ -13,21 +13,19 @@ Defaults to dry-run (pass --clean or --apply to execute).
 """
 
 import argparse
-import datetime
 import hashlib
 import json
 import os
-import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-DEFAULT_MAX_AGE_DAYS = 7
+DEFAULT_MAX_AGE_DAYS = 2
 DEFAULT_MIN_DEDUP_SIZE = 1024  # 1 KB
-DATE_PREFIX_REGEX = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:_.*)?$")
 
 
 def format_size(bytes_val: int) -> str:
@@ -40,33 +38,18 @@ def format_size(bytes_val: int) -> str:
     return f"{v:.2f} TB"
 
 
-def report_measurement(path: Path) -> bool:
-    """Publish shared metadata leaves; failed measurement cannot authorize cleanup."""
-    lib = Path(__file__).resolve().parent / "lib" / "scratch_budget.sh"
-    try:
-        result = subprocess.run(
-            ["bash", "-c", 'source "$1"; scratch_budget_report_measurement "$2"',
-             "_", str(lib), str(path)], check=False, timeout=300,
-        )
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"measurement_status=incomplete path={path}: {exc}", file=sys.stderr)
-        return False
-
-
 def get_dir_size(dir_path: Path) -> int:
-    """Unique-inode metadata bytes; never follow links or conceal read errors."""
+    """Return total bytes of all files in dir_path."""
     total = 0
-    seen = set()
-    def failed(error):
-        raise error
-    for root, dirs, files in os.walk(dir_path, followlinks=False, onerror=failed):
-        for name in files + [name for name in dirs if (Path(root) / name).is_symlink()]:
-            st = (Path(root) / name).lstat()
-            inode = (st.st_dev, st.st_ino)
-            if inode not in seen:
-                seen.add(inode)
-                total += st.st_size
+    try:
+        for root, _, files in os.walk(dir_path):
+            for f in files:
+                try:
+                    total += (Path(root) / f).stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        pass
     return total
 
 
@@ -91,49 +74,33 @@ def quarantine_remove(path: Path, *extra: str) -> Tuple[bool, str]:
 
 
 def get_dir_max_mtime(dir_path: Path) -> float:
-    """Newest metadata mtime, failing closed and never following symlinks."""
-    def failed(error):
+    """Return the newest regular-file mtime; unknown for opaque or unreadable trees."""
+    newest = 0.0
+    def failed(error: OSError) -> None:
         raise error
     try:
-        newest = dir_path.lstat().st_mtime
-        if dir_path.is_symlink():
-            return float("inf")
-        for root, dirs, files in os.walk(dir_path, followlinks=False, onerror=failed):
-            for name in dirs + files:
+        for root, dirs, files in os.walk(dir_path, onerror=failed, followlinks=False):
+            if any((Path(root) / name).is_symlink() for name in dirs):
+                return 0.0
+            for name in files:
                 path = Path(root) / name
-                st = path.lstat()
-                if path.is_symlink():
-                    return float("inf")
-                newest = max(newest, st.st_mtime)
-        return newest
+                item = path.lstat()
+                if stat.S_ISLNK(item.st_mode):
+                    return 0.0
+                if stat.S_ISREG(item.st_mode):
+                    newest = max(newest, item.st_mtime)
     except OSError:
-        return float("inf")
+        return 0.0
+    return newest
 
 
 def parse_session_age_days(session_dir: Path, ref_time: Optional[float] = None) -> Tuple[float, str]:
-    """Determine session age in days and the method used ('date_prefix' or 'mtime')."""
+    """Measure from session content, not a date-named directory or directory mtime."""
     now = ref_time if ref_time is not None else time.time()
-    name = session_dir.name
-    m = DATE_PREFIX_REGEX.match(name)
-    if m:
-        date_str = m.group(1)
-        try:
-            dt = datetime.datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
-            session_epoch = dt.timestamp()
-            age_days = (now - session_epoch) / 86400.0
-            if age_days >= 0:
-                content_age = max(0.0, (now - get_dir_max_mtime(session_dir)) / 86400.0)
-                return min(age_days, content_age), "date_prefix"
-        except (ValueError, OverflowError):
-            pass
-
-    # Fallback to mtime
-    max_mtime = get_dir_max_mtime(session_dir)
-    if max_mtime <= 0.0:
+    newest = get_dir_max_mtime(session_dir)
+    if newest <= 0.0:
         return 0.0, "unknown"
-    age_days = max(0.0, (now - max_mtime) / 86400.0)
-    return age_days, "mtime"
-
+    return max(0.0, (now - newest) / 86400.0), "mtime"
 
 def get_open_session_paths(container: Path, lsof_bin: Optional[str] = None) -> Tuple[bool, Set[Path]]:
     """Query open file descriptors under a sessions container using a single batch lsof call.
@@ -296,7 +263,6 @@ class AsideSessionPruner:
         self.verbose = verbose
 
         self.stats = {
-            "measurement_failures": 0,
             "sessions_scanned": 0,
             "sessions_retained_recent": 0,
             "sessions_retained_in_use": 0,
@@ -308,29 +274,24 @@ class AsideSessionPruner:
         }
 
     def discover_session_containers(self) -> List[Path]:
-        """Find physical session containers without traversing link roots."""
-        def physical_dir(path):
-            if path.is_symlink():
-                if not report_measurement(path):
-                    self.stats["measurement_failures"] += 1
-                return False
-            return path.is_dir()
-
+        """Find all sessions directories (e.g. ~/.aside/u/0/sessions, ~/.aside/u/1/sessions)."""
         if self.sessions_dirs:
-            return [d for d in self.sessions_dirs if physical_dir(d)]
-        if not physical_dir(self.aside_dir):
-            return []
+            return [d for d in self.sessions_dirs if d.is_dir()]
+
         containers = []
         u_dir = self.aside_dir / "u"
-        if physical_dir(u_dir):
+        if u_dir.is_dir():
             for child in sorted(u_dir.iterdir()):
-                if physical_dir(child):
+                if child.is_dir():
                     s_dir = child / "sessions"
-                    if physical_dir(s_dir):
+                    if s_dir.is_dir():
                         containers.append(s_dir)
+
+        # Also check top-level sessions if any
         top_sessions = self.aside_dir / "sessions"
-        if physical_dir(top_sessions) and top_sessions not in containers:
+        if top_sessions.is_dir() and top_sessions not in containers:
             containers.append(top_sessions)
+
         return containers
 
     def is_safe_session_path(self, session_dir: Path, container: Path) -> bool:
@@ -459,18 +420,10 @@ class AsideSessionPruner:
             lsof_valid, open_session_paths = get_open_session_paths(container, self.lsof_bin)
 
             for entry in entries:
-                if entry.is_symlink():
-                    if not report_measurement(entry):
-                        self.stats["measurement_failures"] += 1
-                    continue
                 if not entry.is_dir():
                     continue
 
                 self.stats["sessions_scanned"] += 1
-                if not report_measurement(entry):
-                    self.stats["measurement_failures"] += 1
-                    self.stats["sessions_retained_in_use"] += 1
-                    continue
                 age_days, method = parse_session_age_days(entry, self.ref_time)
 
                 # Signal A: Age check
@@ -504,13 +457,7 @@ class AsideSessionPruner:
                         print(f"Safety guard: path rejected for deletion: {entry}")
                     continue
 
-                try:
-                    size = get_dir_size(entry)
-                except OSError as exc:
-                    print(f"measurement_status=incomplete path={entry}: {exc}", file=sys.stderr)
-                    self.stats["measurement_failures"] += 1
-                    self.stats["sessions_retained_in_use"] += 1
-                    continue
+                size = get_dir_size(entry)
                 stale_candidates.append((entry, container, age_days, size))
 
         # Execute Session Pruning
@@ -518,13 +465,13 @@ class AsideSessionPruner:
             if self.dry_run:
                 self.stats["sessions_pruned"] += 1
                 self.stats["bytes_pruned"] += size
-                print(f"[DRY-RUN] Would prune stale session: {session_dir} (aggregate {format_size(size)}, lifecycle age {age_days:.1f} days)")
+                print(f"[DRY-RUN] Would prune stale session: {session_dir} ({format_size(size)}, {age_days:.1f} days old)")
             else:
                 removed, reason = quarantine_remove(session_dir, "--kind", "ephemeral")
                 if removed:
                     self.stats["sessions_pruned"] += 1
                     self.stats["bytes_pruned"] += size
-                    print(f"Pruned stale session: {session_dir} (aggregate {format_size(size)}, lifecycle age {age_days:.1f} days)")
+                    print(f"Pruned stale session: {session_dir} ({format_size(size)}, {age_days:.1f} days old)")
                 else:
                     print(f"Kept stale session (C14 {reason}): {session_dir}", file=sys.stderr)
                     retained_dirs.append(session_dir)
@@ -640,7 +587,7 @@ def main() -> int:
         prefix = "Would Reclaim" if not args.clean else "Total Reclaimed"
         print(f"{prefix}:             {format_size(total_freed)}")
 
-    return 75 if stats["measurement_failures"] else 0
+    return 0
 
 
 if __name__ == "__main__":

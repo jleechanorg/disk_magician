@@ -15,7 +15,7 @@
 #   2. registered Scratch candidates include generic nested directory units:
 #      never the root, symlinks, hidden components or repository internals;
 #   3. newest content mtime must be at least SCRATCH_PRUNE_MIN_HOURS old
-#      (24 h floor; a larger value is honoured, a smaller one is clamped up);
+#      (48 h default floor; a larger value is honoured, a smaller one is clamped up);
 #   4. safety_gate (never_delete / protected_live_paths / needs_decision);
 #   5. webhook-free C14 verdict under the shared lease-registry lock. C14 proves
 #      no live owner lease, no live cwd, no open file and no recent activity
@@ -35,7 +35,7 @@
 # (plus <repo>/{build,evidence}/<name> units) are evicted least-recently-used
 # first by canonical content mtime, re-measuring usage before each removal, until
 # usage is at or below N%. Only live use keeps: C14 lease/live-cwd/open-file/
-# 60-minute activity, the --budget-floor-minutes floor (default 120, minimum 60),
+# 60-minute activity, the --budget-floor-minutes floor (default 48h, minimum 60m for explicit overrides),
 # safety_gate, and unmeasurable recency or usage. Content and repository
 # provenance keeps (dirty, not-pushed, secret-like, ...) are overridden, and each
 # eviction logs its prior C14 verdict so unpushed losses stay auditable.
@@ -63,12 +63,12 @@ ORIG_ARGS=("$@")
 act_parse_deadline_args "$@" || exit 2
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 
-MIN_HOURS_FLOOR=24
+MIN_HOURS_FLOOR=$(($(safety_disposable_recency_floor_minutes) / 60))
 SCRATCH_AUTOMATIC="${DISK_MAGICIAN_SCRATCH_AUTOMATIC:-0}"
 AVAILABLE_FLOOR=false
 RECENCY_SPEC=""
 # Idle-floor override (operator decision 2026-10-31): DISK_MAGICIAN_SCRATCH_FLOOR_HOURS=N
-# (N>=12) lowers the manual operator floor. Automatic mode always uses at least 24h
+# (N>=12) lowers the manual operator floor. Automatic mode always uses at least 48h
 # and does not activate the content/repository override tied to this floor.
 if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{1,3}$ && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -ge 12 && "$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS" -lt "$MIN_HOURS_FLOOR" ]]; then
   _guard_state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
@@ -77,7 +77,7 @@ if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_FLOOR_HOURS:-}" =~ ^
     MIN_HOURS_FLOOR="$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS"
     RECENCY_SPEC="hours:$MIN_HOURS_FLOOR"
   else
-      echo "scratch-prune: cannot record recency override hours:$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS; using 24h floor" >&2
+      echo "scratch-prune: cannot record recency override hours:$DISK_MAGICIAN_SCRATCH_FLOOR_HOURS; using 48h floor" >&2
   fi
 fi
 MIN_HOURS="${SCRATCH_PRUNE_MIN_HOURS:-$MIN_HOURS_FLOOR}"
@@ -86,7 +86,7 @@ MAX_GIB_SET=false
 [[ -n "${SCRATCH_PRUNE_MAX_GIB:-}" ]] && MAX_GIB_SET=true
 BUDGET_PCT=""
 BUDGET_PRESERVE_CONTENT_KEEPS=false
-BUDGET_FLOOR_MINUTES=120
+BUDGET_FLOOR_MINUTES=$(safety_disposable_recency_floor_minutes)
 # Known content/provenance keeps budget mode may override; anything else keeps,
 # including remote-unverified (a failed ls-remote is an unknown, not a keep).
 BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
@@ -102,8 +102,8 @@ Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--d
                   SCRATCH_TOP_LEVEL_APPROVED=1, or the C14-only
                   DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 mode on the registered volume.
   --available-floor  Stop at 50 GiB available and recheck before each removal.
-  --min-hours N   Recency floor in hours (default 24; values below 24 are
-                  clamped up to 24).
+  --min-hours N   Recency floor in hours (default 48; values below 48 are
+                  clamped up to 48).
   --max-gib N     Per-run removal cap in GiB (default 25; 0 means no cap;
                   budget mode defaults to no cap).
   --budget-pct N  LRU budget mode: while Scratch is above N% used (1-99),
@@ -114,7 +114,7 @@ Usage: cleanup_scratch_top_level.sh [--dry-run|--clean] [--available-floor] [--d
                   floor, unknown or failed checks, and never an entry holding
                   a linked worktree.
                   --clean needs SCRATCH_TOP_LEVEL_APPROVED=1.
-  --budget-floor-minutes N  Budget-mode recency floor (default 120, min 60).
+  --budget-floor-minutes N  Budget-mode recency floor (default 2880, min 60).
   --budget-preserve-content-keeps  Keep every C14 content/provenance verdict; only final `remove` verdicts may be budget-evicted.
 
 Automatic mode removes only C14-recognized ephemeral Scratch artifacts. It never
@@ -140,7 +140,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# The recency floor may rise but never fall below the 24 h default: a caller
+# The recency floor may rise but never fall below the shared 48 h default: a caller
 # cannot make this cleaner more aggressive than its documented contract.
 [[ "$MIN_HOURS" =~ ^[0-9]+$ ]] || MIN_HOURS="$MIN_HOURS_FLOOR"
 MIN_HOURS=$((10#$MIN_HOURS))
@@ -285,8 +285,13 @@ data_volume_free_bytes() {
 # line while 23.7 GiB of its children were 39-41 h old. Reporting only -- the
 # C14 verdict, the recency floor, the cursor and the LRU order are untouched.
 DETAIL_MIB=100
+DETAIL_FILE=""
+if [[ ( -n "${DISK_MAGICIAN_TRIGGER:-}" || "$SCRATCH_AUTOMATIC" == 1 ) && "${DISK_MAGICIAN_SCRATCH_DETAIL:-}" != stdout ]]; then
+  _detail_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}/scratch_detail"
+  if mkdir -p "$_detail_dir" 2>/dev/null && : >"$_detail_dir/latest.txt" 2>/dev/null; then DETAIL_FILE="$_detail_dir/latest.txt"; fi
+fi
 report_candidate_detail() {
-  local entry="$1" rows_file protocol bytes files newest flag path apparent_bytes metadata rc=0
+  local entry="$1" rows_file protocol bytes files newest flag path apparent_bytes metadata rc=0 n=0
   rows_file="$(mktemp "${TMPDIR:-/tmp}/dm-measure-display.XXXXXX")" || return 2
   scratch_budget_measure_files "$entry" "$DETAIL_MIB" --nul >"$rows_file" 2>/dev/null || rc=$?
   exec 3<"$rows_file"
@@ -309,13 +314,20 @@ report_candidate_detail() {
     if [[ "$flag" == G || "$flag" == E ]]; then
       metadata="size_method=unmeasured size_known=false age_known=false threshold_mib=$DETAIL_MIB"
     fi
-    printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path"
+    if [[ -n "${DETAIL_FILE:-}" ]]; then
+      printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path" >>"$DETAIL_FILE" || { (( rc != 0 )) || rc=1; }
+      n=$((n + 1))
+    else
+      printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path"
+    fi
   done
   exec 3<&-
   python3 -c 'import os,sys; os.unlink(sys.argv[1])' "$rows_file" 2>/dev/null || { (( rc != 0 )) || rc=1; }
   if (( rc != 0 )); then
-    printf 'detail:unfinished rc=%s path=%s\n' "$rc" "$entry"
+    if [[ -n "${DETAIL_FILE:-}" ]]; then printf 'detail:unfinished rc=%s path=%s\n' "$rc" "$entry" >>"$DETAIL_FILE" || true
+    else printf 'detail:unfinished rc=%s path=%s\n' "$rc" "$entry"; fi
   fi
+  if [[ -n "${DETAIL_FILE:-}" ]] && (( n > 0 )); then printf 'detail-summary: rows=%s file=%s %s\n' "$n" "$DETAIL_FILE" "$entry"; fi
   return "$rc"
 }
 
@@ -380,6 +392,10 @@ _verdict_and_maybe_remove() {
     # Only C14-recognized ephemeral artifacts get the age-based remove verdict;
     # unknown and repository content keeps remain final keeps in this mode.
     verdict="$(artifact_removal_verdict "$verdict_path" --kind ephemeral --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
+  elif [[ -n "$BUDGET_PCT" ]]; then
+    # Manual budget mode has an explicit selected floor. Pass that same floor to
+    # C14 so its default 48h veto does not erase the caller's documented control.
+    verdict="$(artifact_removal_verdict "$verdict_path" --inventory-out "$inv" --min-idle-minutes "$BUDGET_FLOOR_MINUTES" 2>/dev/null)" || verdict=kept:check-failed
   else
     verdict="$(artifact_removal_verdict "$verdict_path" --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
   fi

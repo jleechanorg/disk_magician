@@ -99,7 +99,32 @@ HAVE_TASKPOLICY = shutil.which("taskpolicy") is not None
 HAVE_NICE = shutil.which("nice") is not None
 DUA_CMD = shutil.which("dua")
 _GDU_OVERRIDE = os.environ.get("DISK_MAGICIAN_GDU_CMD")
-GDU_CMD = shutil.which("gdu") if _GDU_OVERRIDE is None else (_GDU_OVERRIDE or None)
+
+
+def _discover_gnu_du_cmd():
+    if _GDU_OVERRIDE is not None:
+        return _GDU_OVERRIDE or None
+
+    gdu = shutil.which("gdu")
+    if gdu:
+        return gdu
+
+    du = shutil.which("du")
+    if not du:
+        return None
+    try:
+        version = subprocess.run(
+            [du, "--version"], capture_output=True, text=True, timeout=2,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if version.returncode != 0 or not version.stdout.startswith("du (GNU coreutils)"):
+        return None
+    return du
+
+
+GDU_CMD = _discover_gnu_du_cmd()
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 GDU_LOCALIZED_ERROR_RE = re.compile(
     r"^(?:.*/)?g?du: .*? '(.+)': (Permission denied|Operation not permitted|"

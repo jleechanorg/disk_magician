@@ -88,9 +88,9 @@ printf 'o' >"$HOME/proj_dd_nested/DerivedData/Build/b.o"
 printf 'keep' >"$HOME/proj_dd_nested/README.md"
 printf 'o' >"$HOME/real_dd/Build/c.o"
 ln -s "$HOME/real_dd" "$HOME/dd_link"
-age "$TMPROOT/ptmp" 120 && age "$TMPROOT/utmp" 120 && age "$HOME/dd_gen" 120 && age "$HOME/dd_envroot" 120 && age "$HOME/dd_secretjson" 120 && age "$HOME/dd_plist" 120 && age "$HOME/dd_buildonly" 120 && age "$HOME/dd_idle" 120 && age "$HOME/dd_notdd" 120 && age "$HOME/proj_dd_nested" 120 && age "$HOME/real_dd" 120
-age "$SDD" 120
-age "$HOME/dd_recent" 5
+age "$TMPROOT/ptmp" 2940 && age "$TMPROOT/utmp" 2940 && age "$HOME/dd_gen" 2940 && age "$HOME/dd_envroot" 2940 && age "$HOME/dd_secretjson" 2940 && age "$HOME/dd_plist" 2940 && age "$HOME/dd_buildonly" 2940 && age "$HOME/dd_idle" 2940 && age "$HOME/dd_notdd" 2940 && age "$HOME/proj_dd_nested" 2940 && age "$HOME/real_dd" 2940
+age "$SDD" 2940
+age "$HOME/dd_recent" 2820
 
 run() { bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$@" 2>&1; }
 run_with_env() { env "$1=$2" bash "$REPO_ROOT/scripts/cleanup_xcode.sh" --clean 2>&1; }
@@ -129,7 +129,7 @@ if [[ -f "$log" ]] && [[ "$(<"$log")" == *"$HOME/dd_idle"* ]]; then ok "removal 
 echo "-- unmeasurable recency --"
 if [[ "$(id -u)" != 0 ]]; then
     mkdir -p "$HOME/dd_unmeasured/Build" "$HOME/dd_unmeasured/Index.noindex/sub"
-    age "$HOME/dd_unmeasured" 120
+    age "$HOME/dd_unmeasured" 2940
     chmod 000 "$HOME/dd_unmeasured/Index.noindex/sub"
     run --clean >/dev/null
     chmod 755 "$HOME/dd_unmeasured/Index.noindex/sub"
@@ -143,10 +143,10 @@ printf 'o' >"$HOME/dd_zero/Build/a.o"
 printf 'o' >"$HOME/dd_malformed/Build/a.o"
 out="$(run_with_env CUSTOM_DD_IDLE_MINUTES 0)"
 [[ -d "$HOME/dd_zero" ]] && ok "zero custom-DerivedData override keeps fresh output" || bad "zero override removed fresh output: $out"
-[[ "$out" == *"within 60m"* ]] && ok "custom-DerivedData retention floor stays 60m" || bad "custom retention floor not reported: $out"
+[[ "$out" == *"within 2880m"* ]] && ok "custom-DerivedData retention floor stays 2880m" || bad "custom 48-hour retention floor not reported: $out"
 out="$(run_with_env CUSTOM_DD_IDLE_MINUTES malformed)"
 [[ -d "$HOME/dd_malformed" ]] && ok "malformed custom-DerivedData override keeps fresh output" || bad "malformed override removed fresh output: $out"
-[[ "$out" == *"within 60m"* ]] && ok "malformed custom-DerivedData override retains the 60m floor" || bad "custom retention floor not reported for malformed value: $out"
+[[ "$out" == *"within 2880m"* ]] && ok "malformed custom-DerivedData override retains the 2880m floor" || bad "custom 48-hour retention floor not reported for malformed value: $out"
 
 for spec in '124 1 0' '125 1 malformed'; do
     read -r run_id attempt override <<<"$spec"
@@ -159,8 +159,8 @@ for spec in '124 1 0' '125 1 malformed'; do
     [[ -d "$dir/DerivedData" && -d "$dir/verify-unpacked" ]] \
         && ok "iOS release override '$override' keeps fresh rebuildable output" \
         || bad "iOS release override '$override' removed fresh output: $out"
-    [[ "$out" == *"within 1440m"* ]] \
-        && ok "iOS release retention floor stays 1440m for '$override'" \
+    [[ "$out" == *"within 2880m"* ]] \
+        && ok "iOS release retention floor stays 2880m for '$override'" \
         || bad "iOS release retention floor not reported for '$override': $out"
 done
 
