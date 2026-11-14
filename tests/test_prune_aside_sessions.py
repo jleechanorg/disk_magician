@@ -487,9 +487,15 @@ exit 0
         )
         # Make C14's live-CWD/open-file probe deterministic for these synthetic
         # paths; host-wide lsof visibility can be incomplete in containers.
+        import shlex
         from unittest.mock import patch
         lsof_alias = mock_lsof.parent / "lsof"
-        lsof_alias.symlink_to(mock_lsof)
+        lsof_alias.write_text(
+            "#!/bin/sh\n"
+            + 'case " $* " in *" -d cwd "*) printf "p1\\nfcwd\\nn/\\n"; exit 0;; esac\n'
+            + "exec " + shlex.quote(str(mock_lsof)) + ' "$@"\n'
+        )
+        lsof_alias.chmod(0o755)
         cwd_scan = mock_lsof.parent / "cwd_scan.sh"
         cwd_scan.write_bytes(b"#!/bin/sh\nprintf '1\\t0\\t/\\0'\n")
         cwd_scan.chmod(0o755)
