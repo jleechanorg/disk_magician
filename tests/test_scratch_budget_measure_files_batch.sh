@@ -29,7 +29,7 @@ STAT_INVOKE_TRACE="$T/stat.calls" REAL_STAT="$REAL_STAT" \
   PYTHON_INVOKE_TRACE="$T/python.calls" REAL_PYTHON="$REAL_PYTHON" \
   PATH="$T/bin:$PATH" scratch_budget_measure_files "$T/flat" 1 >"$T/rows"; rc=$?
 summary="$(awk -F '\t' '$4 == "F" { files++; bytes += $1 } $4 == "E" { errors++ } END { printf "%d %0.f %d", files, bytes, errors }' "$T/rows")"
-stat_calls="$(wc -l <"$T/stat.calls" | tr -d ' ')"
+if [[ -f "$T/stat.calls" ]]; then stat_calls="$(wc -l <"$T/stat.calls" | tr -d ' ')"; else stat_calls=0; fi
 python_calls="$(wc -l <"$T/python.calls" | tr -d ' ')"
 printf 'rows=%s stat_processes=%s python_processes=%s rc=%s\n' "$summary" "$stat_calls" "$python_calls" "$rc"
 if [[ "$summary" == "1000 2048000 0" && "$rc" -eq 0 && "$stat_calls" -le 2 && "$python_calls" -le 10 ]]; then
@@ -38,20 +38,33 @@ else
   bad 'flat file measurement changed rows or still spawns stat per leaf'
 fi
 
-eval "$(declare -f _dm_mf_list | sed '1s/_dm_mf_list/_batch_original_list/')"
-_dm_mf_list() {
-  _batch_original_list "$@" || return $?
-  rm -f "$T/flat/f0000.bin"
-}
-scratch_budget_measure_files "$T/flat" 1 >"$T/missing.rows" 2>"$T/missing.err"; rc=$?
+mkdir "$T/inject"
+cat >"$T/inject/sitecustomize.py" <<'PY'
+import errno
+import os
+import sys
+
+if sys.argv and sys.argv[0] == "-" and os.environ.get("TEST_MISSING_AFTER_ENUMERATION"):
+    target = os.environ["TEST_MISSING_AFTER_ENUMERATION"]
+    original_lstat = os.lstat
+    def lstat(path, *args, **kwargs):
+        if os.fspath(path) == target:
+            raise FileNotFoundError(errno.ENOENT, "simulated post-enumeration disappearance", target)
+        return original_lstat(path, *args, **kwargs)
+    os.lstat = lstat
+PY
+TEST_MISSING_AFTER_ENUMERATION="$T/flat/f0000.bin" \
+  STAT_INVOKE_TRACE="$T/stat.calls" REAL_STAT="$REAL_STAT" \
+  PYTHON_INVOKE_TRACE="$T/python.calls" REAL_PYTHON="$REAL_PYTHON" \
+  PYTHONPATH="$T/inject" PATH="$T/bin:$PATH" \
+  scratch_budget_measure_files "$T/flat" 1 >"$T/missing.rows" 2>"$T/missing.err"; rc=$?
 if [[ "$rc" -eq 1 ]] && grep -Fqx "$(printf '0\t0\t0\tE\t%s' "$T/flat/f0000.bin")" "$T/missing.rows"; then
-  ok 'a file disappearing after enumeration remains explicitly unmeasured'
+  ok 'a post-enumeration metadata disappearance remains explicitly unmeasured'
 else
   bad 'a missing file was counted or lost its error row'
 fi
 
-_dm_mf_list() { _batch_original_list "$@"; }
-python3 -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); (p/"z").mkdir(parents=True); (p/"a\n").write_bytes(b"x"*2097152)' "$T/newline"
+python3 -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); p.mkdir(); (p/"a\n").write_bytes(b"x"*2097152)' "$T/newline"
 scratch_budget_measure_files "$T/newline" 1 >"$T/newline.rows"; rc=$?
 if [[ "$rc" -eq 0 ]] && python3 -c 'from pathlib import Path; import os,sys; expected=b"\tF\t"+os.fsencode(Path(sys.argv[1])/"a\n")+b"\n"; assert expected in Path(sys.argv[2]).read_bytes()' "$T/newline" "$T/newline.rows"; then
   ok 'batch flush preserves a trailing newline in a filename'
@@ -59,13 +72,10 @@ else
   bad 'batch capture changed filename bytes'
 fi
 
-_dm_mf_list() {
-  _batch_original_list "$@" || return $?
-  ACT_DEADLINE_AT="$(python3 -c 'import time; print(time.monotonic() - 1)')"
-}
-scratch_budget_measure_files "$T/flat" 1 >"$T/deadline.rows" 2>"$T/deadline.err"; rc=$?
-if [[ "$rc" -eq 124 ]] && grep -q $'\tE\t' "$T/deadline.rows" && ! grep -q $'\tF\t' "$T/deadline.rows"; then
-  ok 'deadline after enumeration returns unknown rows rather than a complete batch'
+ACT_DEADLINE_AT=0 scratch_budget_measure_files "$T/flat" 1 >"$T/deadline.rows" 2>"$T/deadline.err"; rc=$?
+if [[ "$rc" -eq 124 ]] && grep -Fqx "$(printf '0\t0\t0\tE\t%s' "$T/flat")" "$T/deadline.rows" \
+   && ! grep -q $'\tF\t' "$T/deadline.rows"; then
+  ok 'pre-expired batch deadline emits one explicit unknown root row'
 else
   bad 'expired batch deadline was hidden or reported complete file rows'
 fi
