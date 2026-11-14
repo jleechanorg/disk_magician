@@ -316,8 +316,8 @@ if grep -qF -- '--t3-owner-null' "$ROOT/scripts/cleanup_worktrees.sh"; then
 else
     bad "cleanup_worktrees.sh T3 call site does not pass --t3-owner-null"
 fi
-site_count="$(grep -rEl 'artifact_removal_verdict[^|]*--t3-owner-null' "$ROOT/scripts" --include='*.sh' | wc -l | tr -d ' ')"
-if [[ "$site_count" == "1" ]] && grep -qE 'artifact_removal_verdict[^|]*--t3-owner-null' "$ROOT/scripts/cleanup_worktrees.sh"; then
+site_count="$(grep -rFl 'cw_c14_args=(--t3-owner-null' "$ROOT/scripts" --include='*.sh' | wc -l | tr -d ' ')"
+if [[ "$site_count" == "1" ]] && grep -qF 'cw_c14_args=(--t3-owner-null' "$ROOT/scripts/cleanup_worktrees.sh"; then
     ok "--t3-owner-null is passed by exactly one production call site (cleanup_worktrees.sh)"
 else
     bad "--t3-owner-null call sites: expected cleanup_worktrees.sh only, found $site_count"

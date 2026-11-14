@@ -12,6 +12,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'exec /bin/rm "$@"' >"$WORK/home/.local/bin/
 chmod +x "$WORK/home/.local/bin/guards/rm"
 cp "$REPO_ROOT/scripts/disk_audit.sh" "$FIXTURE/scripts/disk_audit.sh"
 cp "$REPO_ROOT/scripts/lib/degraded_gate.sh" "$FIXTURE/scripts/lib/degraded_gate.sh"
+cp "$REPO_ROOT/scripts/safety_lib.sh" "$FIXTURE/scripts/safety_lib.sh"
 cat >"$FIXTURE/disk_magician.sh" <<'INNER'
 #!/usr/bin/env bash
 printf '%s\n' "${TEST_VOLUME_STATUS_JSON:?}"
@@ -60,7 +61,7 @@ echo "Case 1: explicit one-shot policy plus low host space selects approved budg
 : >"$WORK/invocations"
 out="$(run_clean "$(volume_json 39 50)" "DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50" "SCRATCH_TOP_LEVEL_APPROVED=0 DISK_MAGICIAN_SCRATCH_AUTOMATIC=1")"
 assert_output "$out" "scratch-budget: reason=operator-policy mode=budget"
-assert_log "automatic=0 approval=1 args=<--dry-run><--budget-pct><50><--budget-floor-minutes><1440><--budget-preserve-content-keeps>"
+assert_log "automatic=0 approval=1 args=<--dry-run><--budget-pct><50><--budget-floor-minutes><2880><--budget-preserve-content-keeps>"
 echo "  PASS"
 
 echo "Case 2: valid policy from launchd EnvironmentVariables is honored when pressure trigger is crossed"
@@ -80,7 +81,7 @@ PY
 : >"$WORK/invocations"
 out="$(run_clean "$(volume_json 80 80)" "DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=$launchd_pct")"
 assert_output "$out" "reason=operator-policy mode=budget"
-assert_log "automatic=0 approval=1 args=<--dry-run><--budget-pct><50><--budget-floor-minutes><1440><--budget-preserve-content-keeps>"
+assert_log "automatic=0 approval=1 args=<--dry-run><--budget-pct><50><--budget-floor-minutes><2880><--budget-preserve-content-keeps>"
 echo "  PASS"
 
 echo "Case 3: valid policy from Linux systemd drop-in is honored when Scratch crosses 70%"
@@ -93,7 +94,7 @@ dropin_pct="$(sed -n 's/^Environment=DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=//p' "
 : >"$WORK/invocations"
 out="$(run_clean "$(volume_json 80 70)" "DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=$dropin_pct")"
 assert_output "$out" "reason=operator-policy mode=budget"
-assert_log "automatic=0 approval=1 args=<--dry-run><--budget-pct><72><--budget-floor-minutes><1440><--budget-preserve-content-keeps>"
+assert_log "automatic=0 approval=1 args=<--dry-run><--budget-pct><72><--budget-floor-minutes><2880><--budget-preserve-content-keeps>"
 echo "  PASS"
 REAL_DROPIN="${HOME:-}/.config/systemd/user/diskm-scratch-reclaim.service.d/20-lru-budget.conf"
 if [[ -r "$REAL_DROPIN" ]]; then
@@ -101,7 +102,7 @@ if [[ -r "$REAL_DROPIN" ]]; then
   if [[ "$actual_pct" =~ ^[1-9][0-9]?$ ]]; then
     : >"$WORK/invocations"
     out="$(run_clean "$(volume_json 80 70)" "DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=$actual_pct")"
-    assert_log "automatic=0 approval=1 args=<--dry-run><--budget-pct><$actual_pct><--budget-floor-minutes><1440><--budget-preserve-content-keeps>"
+    assert_log "automatic=0 approval=1 args=<--dry-run><--budget-pct><$actual_pct><--budget-floor-minutes><2880><--budget-preserve-content-keeps>"
     echo "  PASS: current Linux systemd drop-in value $actual_pct passed through"
   else
     echo "FAIL: current Linux systemd drop-in has invalid budget policy '$actual_pct'"

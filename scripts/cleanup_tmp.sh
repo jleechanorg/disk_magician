@@ -90,6 +90,8 @@ else
   WORKTREE_MIN_AGE_DAYS=2
 fi
 [[ "$WORKTREE_MIN_AGE_DAYS" -lt 2 ]] && WORKTREE_MIN_AGE_DAYS=2
+WORKTREE_MIN_AGE_MINUTES=$((WORKTREE_MIN_AGE_DAYS * 1440))
+WORKTREE_MIN_AGE_LABEL="$(worktree_floor_label "$WORKTREE_MIN_AGE_MINUTES")"
 
 
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -1459,8 +1461,8 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
 
     # Worktree safety rule floor (same WORKTREE_MIN_AGE_DAYS as the other
     # worktree-cleanup scripts)
-    if worktree_is_recently_active_minutes "$subdir" "$((WORKTREE_MIN_AGE_DAYS * 1440))"; then
-      log "Skipping recently active worktree pointer (<${WORKTREE_MIN_AGE_DAYS}d): $subdir"
+    if worktree_is_recently_active_minutes "$subdir" "$WORKTREE_MIN_AGE_MINUTES"; then
+      log "Skipping recently active worktree pointer (<${WORKTREE_MIN_AGE_LABEL}): $subdir"
       continue
     fi
 
@@ -1603,9 +1605,9 @@ container_child_has_protected_repository() {
 
   while IFS= read -r -d '' marker; do
     repo="${marker%/.git}"
-    if worktree_is_recently_active_minutes "$repo" "$((WORKTREE_MIN_AGE_DAYS * 1440))"; then
+    if worktree_is_recently_active_minutes "$repo" "$WORKTREE_MIN_AGE_MINUTES"; then
       rm -f "$marker_file"
-      log "Skipping container child with recently active nested repository/worktree (<${WORKTREE_MIN_AGE_DAYS}d): $repo (child: $child)"
+      log "Skipping container child with recently active nested repository/worktree (<${WORKTREE_MIN_AGE_LABEL}): $repo (child: $child)"
       return 0
     fi
     if worktree_has_unsaved_work "$repo"; then

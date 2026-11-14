@@ -264,7 +264,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     jobs = max(1, min(args.jobs, len(specs)))
-    shard_root = Path(tempfile.mkdtemp(prefix="dm-ci-shard-"))
+    shard_root = Path(tempfile.mkdtemp(prefix="dm-ci-shard-")).resolve()
     lock = threading.Lock()
     print_lock = threading.Lock()
     concurrency_state = {

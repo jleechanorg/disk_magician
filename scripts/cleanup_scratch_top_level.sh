@@ -418,9 +418,15 @@ _verdict_and_maybe_remove() {
     if (( tries < 0 )); then rm -f "$inv" "$binding"; echo kept:lease-busy; return 0; fi
   fi
   if [[ "$BUDGET_PRESERVE_CONTENT_KEEPS" == true ]]; then
-    # Only C14-recognized ephemeral artifacts get the age-based remove verdict;
-    # unknown and repository content keeps remain final keeps in this mode.
-    verdict="$(c14_scratch_verdict "$verdict_path" --kind ephemeral --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
+    # Only use the ephemeral age proof for a row already declared by C14.
+    # Unknown scopes must pass the ordinary proof scan; age alone cannot make
+    # unclassified content eligible.
+    declared_floor="$(c14_ephemeral_retention "$verdict_path" 2>/dev/null)" || declared_floor=""
+    if [[ "$declared_floor" =~ ^[0-9]+$ ]]; then
+      verdict="$(c14_scratch_verdict "$verdict_path" --kind ephemeral --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
+    else
+      verdict="$(c14_scratch_verdict "$verdict_path" --inventory-out "$inv" 2>/dev/null)" || verdict=kept:check-failed
+    fi
   elif [[ -n "$BUDGET_PCT" ]]; then
     # Manual budget mode has an explicit selected floor. Pass that same floor to
     # C14 so its default 48h veto does not erase the caller's documented control.
