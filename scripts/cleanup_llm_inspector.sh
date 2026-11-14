@@ -4,13 +4,16 @@
 # Defaults to dry-run (use --clean to actually delete).
 set -euo pipefail
 
+# shellcheck source=scripts/safety_lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
 CAPTURES_DIR="$HOME/.llm-inspector/captures"
 INSPECTOR_DIR="$HOME/.llm-inspector"
 
-AGE_THRESHOLD_DAYS=2
+AGE_THRESHOLD_MINUTES="$(safety_disposable_recency_floor_minutes)"
+AGE_THRESHOLD_HOURS=$((AGE_THRESHOLD_MINUTES / 60))
 SIZE_CAP_KB=$(( 2 * 1024 * 1024 ))  # 2 GB cap
 
 LAUNCHD_LOG="$INSPECTOR_DIR/launchd.log"
@@ -77,13 +80,13 @@ FILES_KEPT=0
 TOTAL_KB=0
 
 if [[ -d "$CAPTURES_DIR" ]]; then
-  log "Phase 1: removing files older than ${AGE_THRESHOLD_DAYS} days in ${CAPTURES_DIR} ..."
+  log "Phase 1: removing files older than ${AGE_THRESHOLD_HOURS} hours in ${CAPTURES_DIR} ..."
 
   while IFS= read -r -d '' f; do
     kb=$(remove_file "$f") || { FILES_KEPT=$(( FILES_KEPT + 1 )); continue; }
     TOTAL_KB=$(( TOTAL_KB + kb ))
     FILES_DELETED=$(( FILES_DELETED + 1 ))
-  done < <(find "$CAPTURES_DIR" -maxdepth 1 -type f               \( -name "capture-*.json" -o -name "*.summary.json" \)               -mtime "+${AGE_THRESHOLD_DAYS}" -print0 2>/dev/null || true)
+  done < <(find "$CAPTURES_DIR" -maxdepth 1 -type f               \( -name "capture-*.json" -o -name "*.summary.json" \)               -mmin "+${AGE_THRESHOLD_MINUTES}" -print0 2>/dev/null || true)
 
   log "Phase 1 complete. Files removed: ${FILES_DELETED}  KB freed: ${TOTAL_KB}"
 else
