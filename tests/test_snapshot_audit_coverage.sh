@@ -704,7 +704,9 @@ assert isinstance(coverage, dict), f"missing library_coverage: {d.get('snapshot_
 ledger = {os.path.basename(item["path"]): item for item in coverage.get("top_level_ledger", [])}
 assert coverage.get("root") == os.path.realpath(root), f"root mismatch: {coverage.get('root')} != {os.path.realpath(root)}"
 assert set(ledger) == {"Alpha", "Beta"}, f"unexpected ledger keys: {sorted(ledger)}"
-assert all(item.get("status") == "measured" for item in ledger.values()), f"non-measured ledger items: {ledger}"
+assert all(item.get("status") in ("measured", "measured_by_descendants")
+           and isinstance(item.get("measured_kb"), int) and item["measured_kb"] >= 0
+           for item in ledger.values()), f"non-measured ledger items: {ledger}"
 assert coverage.get("top_level_children_total") == 2, f"total={coverage.get('top_level_children_total')}"
 assert coverage.get("top_level_children_accounted") == 2, f"accounted={coverage.get('top_level_children_accounted')}"
 assert coverage.get("wall_clock_cap_seconds") == 5, f"wall_clock_cap_seconds={coverage.get('wall_clock_cap_seconds')}"

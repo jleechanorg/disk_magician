@@ -79,7 +79,7 @@ run() {
 }
 
 # These legacy manual-budget scenarios select their prior 120-minute floor explicitly.
-legacy_budget() { run "$@" --budget-floor-minutes 120; }
+legacy_budget() { run env DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 "$@" --budget-floor-minutes 120; }
 
 echo "Test 1: dry-run previews oldest-first eviction to the target and deletes nothing"
 use_root
@@ -135,12 +135,12 @@ check "the 48h default keeps a 10h-old entry" "kept:recent-activity $SCRATCH_ROO
 
 use_root
 make_tree old 600; make_tree young 90; make_tree fresh 45
-out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 --budget-floor-minutes 120 2>&1)"
+out="$(run env DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 --budget-floor-minutes 120 2>&1)"
 gone old; kept young; kept fresh
 check "explicit 120m floor keeps a 90m-old entry" "kept:recent-activity $SCRATCH_ROOT/young" "$out"
 out="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean --budget-pct 1 --budget-floor-minutes 10 2>&1)"
 gone young; kept fresh
-check "a floor below 60 minutes is clamped up" "kept:recent-activity $SCRATCH_ROOT/fresh" "$out"
+check "manual budget floor below 60m clamps to 60m" "kept:recent-activity $SCRATCH_ROOT/fresh" "$out"
 
 echo "Test 6: live lease, live cwd and open files are never evicted"
 use_root

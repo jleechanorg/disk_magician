@@ -6,6 +6,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
+# shellcheck source=scripts/lib/scratch_budget.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
@@ -296,29 +298,56 @@ PY_TRASH
     log "user Trash: SAFETY-SKIP ($_safety_reason)"
   fi
 done
-# 3b-hf. Hugging Face model caches. src/disk_magician/scripts/disk_report_html.py:215
-# advertises huggingface cleanup, but this script had no such section, so
-# ~/.cache/huggingface and ~/.cache/hy3dgen were unreachable (measured 11 GiB and
-# 6.9 GiB on 2026-11-03). These are model downloads a running job may be using, so a
-# root with ANY file touched within the shared 48h default floor is preserved
-# wholesale; an unmeasurable scan also preserves (fail closed).
+# 3b-hf. Model caches are independent lifecycle units. A fresh model must not
+# shelter a stale sibling, while tokens and other non-model HF data stay outside
+# this rebuildable class.
 DISPOSABLE_CONTENT_RECENCY_MINUTES="$(safety_disposable_recency_floor_minutes)"
 clean_hf_cache_if_idle() {
-  local label="$1" path="$2" young rc=0
+  local label="$1" path="$2" unit_root unit rc=0 mtime now
+  local roots=()
   if [[ ! -d "$path" ]]; then
     log "$label: directory not found, skipping"
-    return
+    return 0
   fi
-  young="$(find "$path" -type f -mmin "-$DISPOSABLE_CONTENT_RECENCY_MINUTES" -print -quit 2>/dev/null)" || rc=$?
-  if (( rc != 0 )); then
-    log "$label: mtime scan failed (rc=$rc) — preserving (fail closed)"
-    return
+  if [[ "$label" == "huggingface cache" ]]; then
+    roots=("$path/hub" "$path/modules" "$path/xet")
+  elif [[ -d "$path/tencent" ]]; then
+    roots=("$path/tencent")
+    while IFS= read -r -d '' unit; do
+      [[ "${unit##*/}" == tencent ]] || roots+=("$unit")
+    done < <(find "$path" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+  else
+    roots=("$path")
   fi
-  if [[ -n "$young" ]]; then
-    log "$label: recently written (${young#"$path"/}) — preserving, younger than $((DISPOSABLE_CONTENT_RECENCY_MINUTES / 60))h"
-    return
-  fi
-  clean_dir_contents "$label" "$path" true rebuildable
+  for unit_root in "${roots[@]}"; do
+    [[ -d "$unit_root" && ! -L "$unit_root" ]] || continue
+    while IFS= read -r -d '' unit; do
+      [[ -d "$unit" && ! -L "$unit" ]] || continue
+      if scratch_budget_report_measurement "$unit"; then :
+      else
+        rc=$?
+        log "$label: incomplete measurement (rc=$rc) — preserving unit: $unit"
+        continue
+      fi
+      mtime="$(scratch_budget_content_mtime "$unit" --strict 2>/dev/null)" || {
+        rc=$?
+        log "$label: mtime scan failed (rc=$rc) — preserving unit: $unit"
+        continue
+      }
+      if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
+        rc=1
+        log "$label: mtime scan unmeasurable — preserving unit: $unit"
+        continue
+      fi
+      now="$(date +%s)"
+      if (( now - mtime < DISPOSABLE_CONTENT_RECENCY_MINUTES * 60 )); then
+        log "$label: recently written (${unit#"$path"/}) — preserving active unit, younger than $((DISPOSABLE_CONTENT_RECENCY_MINUTES / 60))h"
+        continue
+      fi
+      clean_whole_dir "$label idle unit" "$unit" false rebuildable
+    done < <(find "$unit_root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+  done
+  return "$rc"
 }
 log "=== Section 3b-hf: Hugging Face caches ==="
 clean_hf_cache_if_idle "huggingface cache" "$HOME/.cache/huggingface"

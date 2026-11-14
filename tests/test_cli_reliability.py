@@ -168,7 +168,7 @@ class ReliabilityDispatchTests(unittest.TestCase):
     def test_scoped_templates_use_packaged_dispatch_without_argument_changes(self):
         templates = {
             "com.jleechanorg.disk-magician-frontier-nightly":
-                ["frontier-nightly", "--granularity-gib", "5", "--wall-clock-cap", "43200", "--output-default"],
+                ["frontier-nightly", "--granularity-gib", "0.09765625", "--wall-clock-cap", "43200", "--output-default"],
             "com.jleechanorg.disk-magician-pressure-sweep": ["pressure-sweep"],
             "com.jleechanorg.disk-magician-drilldown": ["residual-drilldown"],
             "com.jleechanorg.disk-magician-tmp-scratch": ["tmp-scratch-sweep", "--clean"],

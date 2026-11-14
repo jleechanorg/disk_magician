@@ -122,9 +122,13 @@ echo "T5: retention-hours env override expires younger spools"
 R5="$TMP_ROOT/r5"; mkdir -p "$R5"
 spool "$R5" "DK2D-EVIDENCE-A" fresh
 spool "$R5" "DK2D-EVIDENCE-B" fresh
-# Backdate B by ~2 hours only.
-/usr/bin/find "$R5/DK2D-EVIDENCE-B" -exec touch -A -020000 {} + 2>/dev/null || \
-  /usr/bin/find "$R5/DK2D-EVIDENCE-B" -exec touch -t "$(date -v-3H '+%Y%m%d%H%M' 2>/dev/null || date '+%Y%m%d%H%M')" {} +
+# Backdate actual content portably; directory timestamps are not proof of age.
+python3 - "$R5/DK2D-EVIDENCE-B" <<'PYAGE'
+import os, pathlib, sys, time
+root = pathlib.Path(sys.argv[1]); old = time.time() - 3 * 3600
+for path in [root, *root.rglob("*")]:
+    os.utime(path, (old, old))
+PYAGE
 O5="$TMP_ROOT/o5"
 run_sweeper "$R5" "$O5" DISK_MAGICIAN_EVIDENCE_KEEP_COUNT=1 DISK_MAGICIAN_EVIDENCE_RETENTION_HOURS=1 -- --clean; RC5=$?
 assert_rc "T5: exits 0" 0 "$RC5"

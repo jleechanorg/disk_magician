@@ -282,6 +282,7 @@ find_cmd() {
 }
 
 path_size_kb() {
+  scratch_budget_report_measurement "$1" || exit $?
   # Bead disk_magician-lsl: same fragility as cleanup_tmp.sh's twin --
   # `du -sk` can emit zero, one, or multiple lines under a TOCTOU race /
   # BSD-du edge case. Take the first numeric field of the LAST line;
@@ -519,6 +520,8 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         continue
       fi
 
+      scratch_budget_report_measurement "$item" || exit $?
+
       if is_protected_root "$base" || is_protected_tmp_path "$item"; then
         log "Skipping protected root (in PROTECTED_TMP_ROOTS): $item"
         continue
@@ -550,7 +553,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         fi
       fi
 
-      kb=$(path_size_kb "$item")
+      kb=$(path_size_kb "$item") || exit $?
       if [[ "$DRY_RUN" == true ]]; then
         log "DRY RUN: would remove: $item  (${kb} KB)"
         if [[ -d "$item" ]]; then

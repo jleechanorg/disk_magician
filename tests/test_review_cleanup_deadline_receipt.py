@@ -23,7 +23,7 @@ class CleanupReviewTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         for name in ("home", "private-tmp", "tmp", "user-tmp", "state", "bin"):
-            (self.root / name).mkdir()
+            (self.root / name).mkdir(mode=0o700)
         self.bin = self.root / "bin"
         self.write_shim("lsof", "printf 'p1234\\nfcwd\\nn/\\n'\n")
         # Keep receipt accounting deterministic even on hosts where awk prints
@@ -103,30 +103,27 @@ class CleanupReviewTests(unittest.TestCase):
         before = candidate.stat()
         payload = (candidate / "payload.bin").read_bytes()
         result = self.run_cleanup("cleanup_tmp.sh", "--clean", "--large", "--deadline-at", "1")
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 124)
         self.assertTrue(candidate.exists(), "expired deadline moved the source directory")
         self.assertEqual((candidate.stat().st_dev, candidate.stat().st_ino), (before.st_dev, before.st_ino))
         self.assertEqual((candidate / "payload.bin").read_bytes(), payload)
         self.assertFalse((self.root / "archive").exists(), "expired unit created archive state")
-        self.assertIn("Dirs archived: 0", result.stderr)
+        self.assertIn("measurement_status=incomplete rc=124", result.stderr)
         terminal = self.receipt("cleanup_tmp")["last_terminal"]
-        self.assertEqual(terminal["outcome"], "partial")
+        self.assertEqual(terminal["outcome"], "timeout")
         self.assertEqual(terminal["candidates"]["interrupted_count"], 1)
         self.assertEqual(terminal["candidates"]["removed_count"], 0)
 
     def test_expired_deadline_preserves_container_child(self):
         candidate = self.make_large_candidate("agent-scratch/review-large-artifact")
         result = self.run_cleanup("cleanup_tmp.sh", "--clean", "--large", "--deadline-at", "1")
-        self.assertEqual(result.returncode, 0)
-        # Message reflects the 7871 contract: a declared scratch container is
-        # always descended (children judged individually), not only when the
-        # container itself looked recently active.
-        self.assertIn("Descending into scratch container", result.stderr)
+        self.assertEqual(result.returncode, 124)
+        # The expired measurement stops before any candidate plan or move.
         self.assertTrue((candidate / "payload.bin").is_file())
         self.assertFalse((self.root / "archive").exists())
-        self.assertIn("Dirs archived: 0", result.stderr)
+        self.assertIn("measurement_status=incomplete rc=124", result.stderr)
         terminal = self.receipt("cleanup_tmp")["last_terminal"]
-        self.assertEqual(terminal["outcome"], "partial")
+        self.assertEqual(terminal["outcome"], "timeout")
         self.assertEqual(terminal["candidates"]["interrupted_count"], 1)
 
     def test_deadline_expiring_during_receipt_prep_prevents_move(self):
@@ -182,13 +179,17 @@ exec "$REVIEW_PYTHON" "$@"
     def test_no_deadline_allows_archive(self):
         self.assert_archive_allowed()
 
-    def test_expired_deadline_keeps_dry_run_preview(self):
+    def test_expired_deadline_reports_incomplete_dry_run(self):
         candidate = self.make_large_candidate()
         result = self.run_cleanup("cleanup_tmp.sh", "--dry-run", "--large", "--deadline-at", "1")
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 124)
         self.assertTrue(candidate.exists())
         self.assertFalse((self.root / "archive").exists())
-        self.assertIn("DRY RUN: would archive:", result.stderr)
+        self.assertIn("measurement_status=incomplete rc=124", result.stderr)
+        self.assertNotIn("DRY RUN: would archive:", result.stderr)
+        terminal = self.receipt("cleanup_tmp")["last_terminal"]
+        self.assertEqual(terminal["outcome"], "timeout")
+        self.assertEqual(terminal["candidates"]["removed_count"], 0)
 
     def make_codex_root(self):
         (self.root / "home" / "Documents" / "Codex").mkdir(parents=True)

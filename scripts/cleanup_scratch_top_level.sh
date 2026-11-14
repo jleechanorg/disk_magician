@@ -12,8 +12,8 @@
 # Gates, all fail-closed, in this order:
 #   1. the root must be the registered Scratch mount (verify-mount) and a real
 #      directory; a test root requires the explicit test sandbox;
-#   2. candidates are direct children only: never the root, never a symlink, and
-#      never a dot entry;
+#   2. registered Scratch candidates include generic nested directory units:
+#      never the root, symlinks, hidden components or repository internals;
 #   3. newest content mtime must be at least SCRATCH_PRUNE_MIN_HOURS old
 #      (48 h default floor; a larger value is honoured, a smaller one is clamped up);
 #   4. safety_gate (never_delete / protected_live_paths / needs_decision);
@@ -21,7 +21,7 @@
 #      no live owner lease, no live cwd, no open file and no recent activity
 #      BEFORE it reaches its content checks, so a content keep has already
 #      cleared all four;
-#   6. the content verdicts kept:secret-like and kept:unproven-content are
+#   6. the content verdicts kept:secret-like, kept:unproven-content and kept:no-proof are
 #      overridden ONLY with SCRATCH_TOP_LEVEL_APPROVED=1, and the override is
 #      recorded in the deletion log. Every other keep blocks (live-owner,
 #      open-file, live-cwd, dirty, recent-activity, check-failed, ...).
@@ -304,39 +304,50 @@ data_volume_free_bytes() {
 # line while 23.7 GiB of its children were 39-41 h old. Reporting only -- the
 # C14 verdict, the recency floor, the cursor and the LRU order are untouched.
 DETAIL_MIB=100
-# Scheduled runs write the itemisation to a per-run file instead of stdout:
-# measured 2026-11-12 on Jeff-Ubuntu, diskm-scratch-reclaim.service printed
-# ~30k detail lines/hour into the journal and a 1.4 GB weekly syslog. The rows
-# are unchanged; stdout gets one summary line per candidate naming the file.
 DETAIL_FILE=""
 if [[ ( -n "${DISK_MAGICIAN_TRIGGER:-}" || "$SCRATCH_AUTOMATIC" == 1 ) && "${DISK_MAGICIAN_SCRATCH_DETAIL:-}" != stdout ]]; then
   _detail_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}/scratch_detail"
-  if mkdir -p "$_detail_dir" 2>/dev/null && : >"$_detail_dir/latest.txt" 2>/dev/null; then
-    DETAIL_FILE="$_detail_dir/latest.txt"
-  fi
+  if mkdir -p "$_detail_dir" 2>/dev/null && : >"$_detail_dir/latest.txt" 2>/dev/null; then DETAIL_FILE="$_detail_dir/latest.txt"; fi
 fi
 report_candidate_detail() {
-  local entry="$1" rows bytes files newest flag path metadata n=0
-  # The caller supplies allocated du KiB; only the measurement can decide
-  # the apparent-size threshold (sparse files may have almost no allocation).
-  rows="$(scratch_budget_measure_files "$entry" "$DETAIL_MIB" 2>/dev/null)" || :
-  while IFS=$'\t' read -r bytes files newest flag path; do
-    [[ -n "${flag:-}" ]] || continue
-    [[ "$flag" == A && "$path" == "$entry" ]] && continue
-    metadata="size_method=file-summed-apparent threshold_mib=$DETAIL_MIB"
+  local entry="$1" rows_file protocol bytes files newest flag path apparent_bytes metadata rc=0 n=0
+  rows_file="$(mktemp "${TMPDIR:-/tmp}/dm-measure-display.XXXXXX")" || return 2
+  scratch_budget_measure_files "$entry" "$DETAIL_MIB" --nul >"$rows_file" 2>/dev/null || rc=$?
+  exec 3<"$rows_file"
+  IFS= read -r -d '' protocol <&3 || { (( rc != 0 )) || rc=1; }
+  [[ "$protocol" == diskm-measure-leaves-v1 ]] || { (( rc != 0 )) || rc=1; }
+  while :; do
+    bytes=""
+    IFS= read -r -d '' bytes <&3
+    read_rc=$?
+    if (( read_rc != 0 )); then
+      [[ -z "$bytes" ]] || { (( rc != 0 )) || rc=1; }
+      break
+    fi
+    IFS= read -r -d '' files <&3 || { (( rc != 0 )) || rc=1; break; }
+    IFS= read -r -d '' newest <&3 || { (( rc != 0 )) || rc=1; break; }
+    IFS= read -r -d '' flag <&3 || { (( rc != 0 )) || rc=1; break; }
+    IFS= read -r -d '' path <&3 || { (( rc != 0 )) || rc=1; break; }
+    IFS= read -r -d '' apparent_bytes <&3 || { (( rc != 0 )) || rc=1; break; }
+    metadata="size_method=inode-deduplicated-file-summed-apparent threshold_mib=$DETAIL_MIB apparent_bytes=$apparent_bytes unique_bytes=$bytes"
     if [[ "$flag" == G || "$flag" == E ]]; then
       metadata="size_method=unmeasured size_known=false age_known=false threshold_mib=$DETAIL_MIB"
     fi
     if [[ -n "${DETAIL_FILE:-}" ]]; then
-      printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path" >>"$DETAIL_FILE"
+      printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path" >>"$DETAIL_FILE" || { (( rc != 0 )) || rc=1; }
       n=$((n + 1))
     else
       printf 'detail:%s bytes=%s files=%s newest=%s %s %s\n' "$flag" "$bytes" "$files" "$newest" "$metadata" "$path"
     fi
-  done <<<"$rows"
-  if [[ -n "${DETAIL_FILE:-}" ]] && (( n > 0 )); then
-    printf 'detail-summary: rows=%s file=%s %s\n' "$n" "$DETAIL_FILE" "$entry"
+  done
+  exec 3<&-
+  python3 -c 'import os,sys; os.unlink(sys.argv[1])' "$rows_file" 2>/dev/null || { (( rc != 0 )) || rc=1; }
+  if (( rc != 0 )); then
+    if [[ -n "${DETAIL_FILE:-}" ]]; then printf 'detail:unfinished rc=%s path=%s\n' "$rc" "$entry" >>"$DETAIL_FILE" || true
+    else printf 'detail:unfinished rc=%s path=%s\n' "$rc" "$entry"; fi
   fi
+  if [[ -n "${DETAIL_FILE:-}" ]] && (( n > 0 )); then printf 'detail-summary: rows=%s file=%s %s\n' "$n" "$DETAIL_FILE" "$entry"; fi
+  return "$rc"
 }
 
 if [[ "$AVAILABLE_FLOOR" == true ]]; then
@@ -351,6 +362,7 @@ now="$(date +%s)"
 floor_epoch=$(( now - MIN_HOURS * 3600 ))
 scanned=0 kept=0 removable=0 removed=0 planned_kb=0 removed_kb=0 capped=0 busy_streak=0
 DEFERRED_CANDIDATES=0
+MEASUREMENT_INCOMPLETE=0
 data_free_before_bytes="$(data_volume_free_bytes 2>/dev/null || echo unknown)"
 budget_target_bytes=0 budget_gap_before_bytes=unknown
 
@@ -524,7 +536,7 @@ for _top in "$root"/*; do
     evidence|worldai_frontend|worldarchitect.ai|worldai_claw|disk_magician|mirrors|relocated-tmp|advice-11070)
       # Keep automatic cursor ordering/source identity on the existing queue.
       # Nested manual discovery must not replace its pending root item.
-      if [[ "$SCRATCH_AUTOMATIC" != 1 && -d "$_top" && ! -L "$_top" ]]; then
+      if [[ "$root_registered" != true && "$SCRATCH_AUTOMATIC" != 1 && -d "$_top" && ! -L "$_top" ]]; then
         for _sub in "$_top"/*; do
           [[ -e "$_sub" || -L "$_sub" ]] || continue
           case "${_sub##*/}" in
@@ -577,12 +589,23 @@ if (( ${#candidates[@]} )); then
     # and /Volumes/diskm-scratch/.Spotlight-V100 did the same on macOS.
     # Skip candidates this process cannot read and keep the batch contract.
     [[ -r "$_candidate" && -x "$_candidate" ]] || continue
+    if [[ "$root_registered" == true ]]; then
+      python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$_candidate"
+      _scope_rc=$?
+      case "$_scope_rc" in
+        0) ;;
+        3) continue ;;
+        *) emit_discovery_deferred_summary unmeasurable-scope; exit 75 ;;
+      esac
+    fi
     candidate_dirs+=("$_candidate")
   done
   _artifact_extra=()
   if (( ${#candidate_dirs[@]} )); then
     artifact_batch_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-artifacts.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable; exit 75; }
-    printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 >"$artifact_batch_output_file"
+    _artifact_mode=batch
+    [[ "$root_registered" == true ]] && _artifact_mode=batch-generic
+    printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" >"$artifact_batch_output_file"
     _artifact_rc=$?
     if (( _artifact_rc != 0 )); then
       rm -f "$artifact_batch_output_file"
@@ -747,6 +770,12 @@ while IFS= read -r -d '' entry; do
   [[ -e "$entry" || -L "$entry" ]] || continue
   base="${entry##*/}"
   case "$base" in .*) continue ;; esac
+  if [[ "$root_registered" == true && -d "$entry" && ! -L "$entry" ]] &&
+      ! python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$entry"; then
+    echo "kept:discovery-boundary $entry"
+    kept=$(( kept + 1 ))
+    continue
+  fi
   _artifact_blocked=false
   for _blocked in ${_artifact_discovery_blocked[@]+"${_artifact_discovery_blocked[@]}"}; do
     if [[ "$entry" == "$_blocked" ]]; then _artifact_blocked=true; break; fi
@@ -786,6 +815,18 @@ while IFS= read -r -d '' entry; do
       echo "deferred:deadline (stopped before $(basename "${entry%%/}"))"
     fi
     break
+  fi
+  # Read-only metadata coverage is independent of removal age/provenance.
+  # Fresh and protected repository units still need granular size reporting.
+  if [[ -d "$entry" && ! -L "$entry" ]]; then
+    if report_candidate_detail "$entry"; then
+      :
+    else
+      DEFERRED_CANDIDATES=$(( DEFERRED_CANDIDATES + 1 ))
+      MEASUREMENT_INCOMPLETE=1
+      echo "kept:measurement-unfinished $entry"
+      continue
+    fi
   fi
   if [[ "$SCRATCH_AUTOMATIC" == 1 ]] && ! c14_ephemeral_retention "$entry" >/dev/null 2>&1; then
     if [[ "$DRY_RUN" != true ]]; then
@@ -847,10 +888,6 @@ while IFS= read -r -d '' entry; do
     capped=1
     continue
   fi
-  # Itemisation is reporting only, so only a preview pays for it: measured 2026-11-13 on
-  # Jeff-Ubuntu, one 196k-file entry took ~80 min (a stat subprocess per file) and the
-  # 15-min timer evicted nothing for days. A --clean run's removals go to the deletion log.
-  [[ "$DRY_RUN" == true ]] && report_candidate_detail "$entry" "$kb"
   automatic_logged=false
   if [[ "$SCRATCH_AUTOMATIC" == 1 ]]; then
     if [[ "$DRY_RUN" != true ]]; then
@@ -864,7 +901,7 @@ while IFS= read -r -d '' entry; do
       outcome="$(scratch_budget_quarantine_remove "$entry")"
       automatic_logged=true
     else
-      preview_args=(--kind ephemeral --no-rescue-push)
+      preview_args=(--kind ephemeral)
       [[ -n "$ACT_DEADLINE_AT" ]] && preview_args+=(--deadline-at "$ACT_DEADLINE_AT")
       auto_verdict="$(artifact_removal_verdict "$entry" "${preview_args[@]}")"
       case "$auto_verdict" in
@@ -912,9 +949,6 @@ done < <(
     sort -z -t $'\t' -k1,1n "$LRU_LIST" | while IFS= read -r -d '' _row; do printf '%s\0' "${_row#*$'\t'}"; done
   else
   for candidate in ${candidates[@]+"${candidates[@]}"}; do printf '%s\0' "$candidate"; done
-  if [[ "$root_registered" == true ]]; then
-    find "$root" -mindepth 3 -maxdepth 3 -type d ! -path '*/.*' -print0 2>/dev/null
-  fi
   fi
 )
 fi
@@ -978,5 +1012,9 @@ if [[ -n "$BUDGET_PCT" ]]; then
       exit 75
     fi
   fi
+fi
+if (( MEASUREMENT_INCOMPLETE )); then
+  echo "deferred:measurement-unfinished"
+  exit 75
 fi
 exit 0

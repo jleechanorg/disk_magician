@@ -280,9 +280,10 @@ echo "Test 7: cleanup_downloads_evidence.sh tolerates multi-line du output"
 T7_ROOT="$TMP_ROOT/t7-downloads"
 T7_BIN="$TMP_ROOT/t7-bin"
 mkdir -p "$T7_ROOT/ev-new-1" "$T7_ROOT/ev-new-2" "$T7_ROOT/ev-old-3" "$T7_BIN"
-touch -t 202601030000 "$T7_ROOT/ev-new-1"
-touch -t 202601020000 "$T7_ROOT/ev-new-2"
-touch -t 202001010000 "$T7_ROOT/ev-old-3"
+for d in "$T7_ROOT/ev-new-1" "$T7_ROOT/ev-new-2" "$T7_ROOT/ev-old-3"; do printf 'payload\n' >"$d/payload.bin"; done
+touch -t 202601030000 "$T7_ROOT/ev-new-1/payload.bin"
+touch -t 202601020000 "$T7_ROOT/ev-new-2/payload.bin"
+touch -t 202001010000 "$T7_ROOT/ev-old-3/payload.bin"
 make_multiline_du_stub "$T7_BIN" "ev-old-3" 3072
 T7_OUT="$TMP_ROOT/t7.out"
 set +e

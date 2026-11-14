@@ -342,6 +342,10 @@ def validate_ledger(ledger: dict, *, label: str) -> None:
         kind = item.get("kind", "dir")
         if not path or type(size) is not int or size < 0:
             raise LedgerError(f"{label}: bucket missing path/measured_kb: {item!r}")
+        if "apparent_bytes" in item and (
+            type(item["apparent_bytes"]) is not int or item["apparent_bytes"] < 0
+        ):
+            raise LedgerError(f"{label}: invalid apparent_bytes: {item!r}")
         if kind not in ("dir", "file", "direct_allocation_segment"):
             raise LedgerError(f"{label}: bucket {path!r} has unknown kind {kind!r}")
         if kind in ("dir", "direct_allocation_segment") and size > 5 * GIB_KB:
@@ -408,9 +412,24 @@ def validate_full_attribution_ledger(ledger: dict, *, label: str) -> None:
 
     ``--validate`` intentionally remains a structural/partial validation
     utility, but a history comparison must never present incomplete rows as a
-    full-disk attribution delta. A scanner-attested system-boundary partial
-    aggregate is complete for this purpose.
+    full-disk attribution delta. Attestations do not make inaccessible
+    metadata complete.
     """
+    # Historical reports remain structurally readable, but cannot establish a
+    # full-attribution floor when the present metadata contract is unproven.
+    if ledger.get("canonical") is False or ledger.get("publication_kind") == "partial":
+        raise LedgerError(f"{label}: full-attribution ledger required (noncanonical partial artifact)")
+    for gate in ledger.get("opaque_intrinsic_gates", []):
+        if gate.get("reason") in {
+            "permission_denied_intrinsic", "vanished_during_scan", "cross_device_boundary"
+        }:
+            raise LedgerError(f"{label}: full-attribution ledger required (unfinished metadata boundary)")
+    for bucket in ledger.get("granularity_buckets", ledger.get("buckets", [])):
+        if bucket.get("kind", "dir") == "direct_allocation_segment" or (
+            bucket.get("kind", "dir") != "file"
+            and bucket.get("apparent_bytes", bucket.get("measured_kb", 0) * 1024) >= 100 * 1024 ** 2
+        ):
+            raise LedgerError(f"{label}: full-attribution ledger required (directory leaf must be below100 MiB)")
     envelope = ledger.get("coverage_envelope")
     accounting = ledger.get("accounting_equation")
     reachable = envelope.get("reachable_top_level_roots") if isinstance(envelope, dict) else None

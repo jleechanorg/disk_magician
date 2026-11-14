@@ -31,7 +31,7 @@ out="$(scratch_budget_measure_files "$BIG" 100)"; rc=$?
 [[ "$rc" -eq 0 ]] && ok "200 MiB tree measured without error" || bad "200 MiB tree returned rc=$rc"
 [[ "$(flags_of "$BIG" "$out")" == "" ]] \
   && ok "200 MiB directory is not aggregated" || bad "200 MiB directory aggregated into one row"
-grep -q 'F	'"$BIG"'/f1$' <<<"$out" && grep -q 'F	'"$BIG"'/f2$' <<<"$out" \
+[[ "$(flags_of "$BIG/f1" "$out")" == "F" && "$(flags_of "$BIG/f2" "$out")" == "F" ]] \
   && ok "both 200 MiB children reported as their own file rows" \
   || bad "200 MiB children missing itemised rows"
 [[ "$(awk -F'\t' -v d="$BIG" 'index($5, d "/") == 1 {s += $1} END {print s+0}' <<<"$out")" == "209715200" ]] \
@@ -53,17 +53,17 @@ out="$(scratch_budget_measure_files "$SMALL" 100)"; rc=$?
   && ok "aggregate row counts both files" || bad "aggregate row file count wrong"
 
 # 3. The threshold is honoured AT the boundary: exactly 100 MiB is never
-#    aggregated at 100, and is aggregated at 101.
+#    aggregated at 100, including an attempted ceiling above 100.
 EXACT="$T/exact"
 mkdir -p "$EXACT"
 truncate -s 100M "$EXACT/f"
 out="$(scratch_budget_measure_files "$EXACT" 100)"
-grep -q 'A	'"$EXACT"'$' <<<"$out" \
+[[ "$(flags_of "$EXACT" "$out")" == "A" ]] \
   && bad "100 MiB aggregated at a 100 MiB threshold" \
   || ok "100 MiB directory itemised at a 100 MiB threshold"
 out="$(scratch_budget_measure_files "$EXACT" 101)"
-[[ "$(flags_of "$EXACT" "$out")" == "A" ]] && ok "100 MiB directory aggregated at a 101 MiB threshold" \
-  || bad "100 MiB directory not aggregated at a 101 MiB threshold"
+[[ "$(flags_of "$EXACT" "$out")" != "A" ]] && ok "101 MiB configuration capped to100 MiB" \
+  || bad "configured ceiling above100 MiB hid the directory"
 
 # 4. Symlinks are never followed: a link to a 200 MiB tree contributes the link
 #    itself (a few dozen bytes), never the target's bytes.
@@ -91,7 +91,7 @@ chmod 755 "$UNR/blocked"
 if [[ "$(id -u)" == 0 ]]; then
   echo "  SKIP: unreadable-subdir case needs a non-root user (root reads mode 000)"
 else
-  grep -q 'E	'"$UNR"'/blocked$' <<<"$out" \
+  [[ "$(flags_of "$UNR/blocked" "$out")" == "E" ]] \
     && ok "unreadable subdirectory reported as its own E row" \
     || bad "unreadable subdirectory swallowed (no E row)"
   [[ "$rc" -eq 1 ]] && ok "unreadable subtree fails closed (rc=1)" || bad "unreadable subtree returned rc=$rc"

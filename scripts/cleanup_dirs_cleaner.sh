@@ -6,6 +6,9 @@
 # Uses find -delete (fd-relative) to avoid Apple's removefile ENAMETOOLONG bug.
 set -euo pipefail
 
+# Read-only detail is independent of lifecycle/removal eligibility.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 CLEAN=false
 DRY_RUN=true
 
@@ -24,6 +27,12 @@ done
 
 TARGET_DIR="${DISK_MAGICIAN_DIRS_CLEANER_TARGET:-/private/var/dirs_cleaner}"
 
+if [[ -L "$TARGET_DIR" ]]; then
+  scratch_budget_report_measurement "$TARGET_DIR" || exit $?
+  echo "SKIP root: symlink boundary $TARGET_DIR"
+  exit 0
+fi
+
 if [[ ! -d "$TARGET_DIR" ]]; then
   echo "Target directory $TARGET_DIR does not exist. No-op."
   exit 0
@@ -37,6 +46,7 @@ if [[ "${DISK_MAGICIAN_SKIP_PS_CHECK:-0}" != "1" ]]; then
   fi
 fi
 
+scratch_budget_report_measurement "$TARGET_DIR" || exit $?
 SIZE_MB="$(sudo -n du -sm "$TARGET_DIR" 2>/dev/null | awk '{print $1}' || du -sm "$TARGET_DIR" 2>/dev/null | awk '{print $1}' || echo "0")"
 echo "Found $TARGET_DIR size: ${SIZE_MB} MB"
 
@@ -49,5 +59,6 @@ echo "Cleaning contents of $TARGET_DIR..."
 # Delete contents batch by batch (mindepth 1)
 sudo -n find "$TARGET_DIR" -mindepth 1 -delete 2>&1 || find "$TARGET_DIR" -mindepth 1 -delete 2>&1 || true
 
+scratch_budget_report_measurement "$TARGET_DIR" || exit $?
 AFTER_SIZE_MB="$(sudo -n du -sm "$TARGET_DIR" 2>/dev/null | awk '{print $1}' || du -sm "$TARGET_DIR" 2>/dev/null | awk '{print $1}' || echo "0")"
 echo "Done. $TARGET_DIR new size: ${AFTER_SIZE_MB} MB"
