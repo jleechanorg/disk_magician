@@ -149,13 +149,14 @@ FAKE_LRU_DISKM
       FAKE_DISKUTIL_MOUNTPOINT="${FAKE_DISKUTIL_MOUNTPOINT:-}" \
       DISK_MAGICIAN_DISKM_BIN="$LRU_DISKM" FAKE_SCRATCH_ROOT="$SCRATCH_ROOT" \
       SCRATCH_TOP_LEVEL_APPROVED=1 \
-      FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" DISK_MAGICIAN_SCRATCH_MIN_KB=512 "$@" --budget-floor-minutes 120
+      FAKE_STATUS_CALLS="$T/lru-status.calls" FAKE_STATUS_MODE="${FAKE_STATUS_MODE:-}" \
+      DISK_MAGICIAN_SCRATCH_MIN_KB=512 DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 "$@" --budget-floor-minutes 120
   }
   if [[ "${SCRATCH_PRUNE_TEST_FILTER:-}" != budget-preserve-contract ]]; then
   use_root
   make_tree lru-small 14 >/dev/null
   mkdir -p "$SCRATCH_ROOT/lru-large"
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/lru-large/payload.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/lru-large/payload.bin"
   old_stamp "$SCRATCH_ROOT/lru-large" 13
   make_tree lru-small-after 12 >/dev/null
   : >"$T/lru-status.calls"
@@ -172,7 +173,7 @@ FAKE_LRU_DISKM
   use_root
   mkdir -p "$SCRATCH_ROOT/aaa-small-slow" "$SCRATCH_ROOT/zzz-large-eligible"
   printf 'tiny\n' >"$SCRATCH_ROOT/aaa-small-slow/payload.bin"
-  head -c 1048576 /dev/zero >"$SCRATCH_ROOT/zzz-large-eligible/payload.bin"
+  head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/zzz-large-eligible/payload.bin"
   old_stamp "$SCRATCH_ROOT/aaa-small-slow" 13
   old_stamp "$SCRATCH_ROOT/zzz-large-eligible" 13
   SLOW_FIND_BIN="$T/lru-slow-find-bin"
@@ -196,7 +197,7 @@ FAKE_FIND
   for mode in quota-change usage-unknown; do
     use_root
     mkdir -p "$SCRATCH_ROOT/lru-identity"
-    head -c 1048576 /dev/zero >"$SCRATCH_ROOT/lru-identity/payload.bin"
+    head -c 1048576 /dev/urandom >"$SCRATCH_ROOT/lru-identity/payload.bin"
     old_stamp "$SCRATCH_ROOT/lru-identity" 13
     : >"$T/lru-status.calls"
     out="$(FAKE_STATUS_MODE="$mode" lru_run bash "$SCRIPT" --clean --budget-pct 5 2>&1)"; rc=$?

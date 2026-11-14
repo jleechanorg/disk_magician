@@ -493,8 +493,8 @@ echo "Test 22: a fresh sibling does not shelter a stale typed build unit beneath
 make_env t22
 PT="$TMP_ROOT/t22-tmp"
 mkdir -p "$PT/project/build/pr_stale-unit" "$PT/project/build/pr_fresh-unit"
-truncate -s $((60 * 1024 * 1024)) "$PT/project/build/pr_stale-unit/payload.bin"
-truncate -s $((60 * 1024 * 1024)) "$PT/project/build/pr_fresh-unit/payload.bin"
+head -c $((60 * 1024 * 1024)) /dev/urandom >"$PT/project/build/pr_stale-unit/payload.bin"
+head -c $((60 * 1024 * 1024)) /dev/urandom >"$PT/project/build/pr_fresh-unit/payload.bin"
 set_age_hours "$PT/project/build/pr_stale-unit" 72
 run_sweep t22 --dry-run DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=project DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT/project/build"
 printf '%s\n' "$OUT"
@@ -514,7 +514,7 @@ echo "Test 23: a stale C14-eligible file-only parent is still archived as a whol
 make_env t23
 PT="$TMP_ROOT/t23-tmp"
 mkdir -p "$PT/pr_file-only"
-truncate -s $((120 * 1024 * 1024)) "$PT/pr_file-only/payload.bin"
+head -c $((120 * 1024 * 1024)) /dev/urandom >"$PT/pr_file-only/payload.bin"
 set_age_hours "$PT/pr_file-only" 72
 run_sweep t23 --clean DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
 printf '%s\n' "$OUT"

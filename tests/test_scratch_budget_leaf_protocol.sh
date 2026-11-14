@@ -7,7 +7,7 @@ test -n "$TMPDIR" && test -d "$TMPDIR" || exit 2
 T="$(mktemp -d "$TMPDIR/dm-leaf-protocol.XXXXXX")" || exit 2
 trap 'rm -rf -- "$T"' EXIT
 TREE="$T/tree"
-mkdir -p "$TREE/a" "$TREE/b" "$TREE/.git/objects"
+mkdir -p "$TREE/a" "$TREE/b" "$TREE/repo/.git/objects"
 python3 - "$TREE" <<'PY'
 import os,pathlib,sys
 root=pathlib.Path(sys.argv[1])
@@ -15,7 +15,7 @@ name='large'+chr(9)+'file'+chr(10)+'payload.bin'
 large=root/'a'/name
 with large.open('wb') as f: f.truncate(100*1024*1024)
 os.link(large, root/'b'/'hardlink-alias')
-with (root/'.git/objects/large-pack.bin').open('wb') as f: f.truncate(200*1024*1024)
+with (root/'repo/.git/objects/large-pack.bin').open('wb') as f: f.truncate(200*1024*1024)
 (root/'a'/'small-target').write_bytes(b'link target')
 os.symlink(root/'a'/'small-target', root/'a'/'symlink')
 PY
@@ -34,14 +34,18 @@ items={row[4]:row for row in rows}
 name='large'+chr(9)+'file'+chr(10)+'payload.bin'
 alias=str(root/'b'/'hardlink-alias').encode()
 original=str(root/'a'/name).encode()
-pack=str(root/'.git/objects/large-pack.bin').encode()
+repo=str(root/'repo').encode()
+pack=str(root/'repo/.git/objects/large-pack.bin').encode()
 sym=str(root/'a'/'symlink').encode()
-for path,size in ((alias,104857600),(original,104857600),(pack,209715200)):
+for path,size in ((alias,104857600),(original,104857600)):
     assert path in items and items[path][3]==b'F' and int(items[path][5])==size,(path,items.get(path))
 assert int(items[alias][0])==0 and int(items[original][0])==104857600
 assert int(items[alias][2])>0 and int(items[original][2])==int(items[alias][2])
+assert repo in items and items[repo][3]==b'G' and items[repo][0:3]==[b'0',b'0',b'0'],items.get(repo)
+assert not any(path.startswith(repo+b'/') for path in items),items
+assert pack not in items
 assert sym in items and items[sym][3]==b'L' and int(items[sym][5])<4096
-print('NUL protocol: sparse apparent sizes, Git metadata, hardlink age/dedup, tab/newline paths, symlink leaf PASS')
+print('NUL protocol: sparse apparent sizes, opaque Git boundary, hardlink age/dedup, tab/newline paths, symlink leaf PASS')
 PY
 python3 - "$ROOT/scripts/lib/scratch_budget_artifact_children.py" "$T/stream-tree" <<'PY'
 import os, pathlib, subprocess, sys

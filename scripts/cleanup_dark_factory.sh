@@ -180,6 +180,18 @@ total_kb=0
 count=0
 # remove <physical path> <kind> [logical alias]: safety rules are written
 # against logical (~) paths, so a symlinked HOME is gated on both forms.
+MEASUREMENT_INCOMPLETE=0
+report_candidate_measurement() {
+  local path="$1" rc=0
+  scratch_budget_report_measurement "$path" || rc=$?
+  if (( rc != 0 )); then
+    MEASUREMENT_INCOMPLETE=1
+    log "WARN: measurement incomplete (rc=$rc); preserving candidate: $path"
+    return 1
+  fi
+  return 0
+}
+
 remove() {
   local path="$1" kind="$2" alias="${3:-}" reason kb
   if ! reason="$(safety_gate "$path")"; then
@@ -190,7 +202,6 @@ remove() {
     log "PROTECTED ($reason): $alias"
     return 0
   fi
-  scratch_budget_report_measurement "$path" || exit $?
   kb="$(du -sk "$path" 2>/dev/null | awk '{print $1}')"
   kb="${kb:-0}"
   if [[ "$DRY_RUN" == true ]]; then
@@ -279,7 +290,7 @@ for l in sys.stdin.buffer:
   for rel in "$RELEASES_DIR"/*/; do
     rel="${rel%/}"
     [[ -d "$rel" && ! -L "$rel" ]] || continue
-    scratch_budget_report_measurement "$rel" || exit $?
+    report_candidate_measurement "$rel" || continue
     grep -qxF "$rel" "$keep" && continue
     # Substring match over all reference text, so any terminator (: ; ) etc.)
     # still protects; over-protection (r1 vs r10) is the safe direction.
@@ -297,7 +308,7 @@ if root_ok "$RUNS_DIR"; then
   RUNS_DIR="$(phys "$RUNS_DIR")"
   while IFS= read -r -d '' run; do
     [[ -L "$run" ]] && continue
-    scratch_budget_report_measurement "$run" || exit $?
+    report_candidate_measurement "$run" || continue
     is_live "$run" "$runs_logical/${run##*/}" && continue
     is_stale "$run" || continue
     remove "$run" run "$runs_logical/${run##*/}"
@@ -315,7 +326,7 @@ if root_ok "$LOGS_DIR"; then
   LOGS_DIR="$(phys "$LOGS_DIR")"
   while IFS= read -r -d '' run_log; do
     [[ -L "$run_log" ]] && continue
-    scratch_budget_report_measurement "$run_log" || exit $?
+    report_candidate_measurement "$run_log" || continue
     is_live "$run_log" "$logs_logical/${run_log##*/}" && { log "SKIP run log dir (live process): $run_log"; continue; }
     is_stale "$run_log" || continue
     remove "$run_log" run_log "$logs_logical/${run_log##*/}"
@@ -329,7 +340,7 @@ if root_ok "$SESSIONS_DIR"; then
   for sess in "$SESSIONS_DIR"/df-*/; do
     sess="${sess%/}"
     [[ -d "$sess" && ! -L "$sess" ]] || continue
-    scratch_budget_report_measurement "$sess" || exit $?
+    report_candidate_measurement "$sess" || continue
     is_live "$sess" "$sessions_logical/${sess##*/}" && { log "SKIP session (live process): $sess"; continue; }
     is_stale "$sess" || continue
     remove "$sess" session "$sessions_logical/${sess##*/}"
@@ -339,3 +350,4 @@ fi
 mode="Would reclaim"
 [[ "$DRY_RUN" == false ]] && mode="Reclaimed"
 log "$mode: ${count} item(s), $(( total_kb / 1024 / 1024 )) GiB (${total_kb} KB), threshold ${DAYS}d"
+if (( MEASUREMENT_INCOMPLETE )); then exit 1; fi

@@ -98,12 +98,21 @@ data = {
   "disk_free_kb": 10*gib, "measured_total_kb": 6*gib,
   "purgeable_kb": 0, "residual_kb": 4*gib,
   "granularity_buckets": [
-    {"path": "/fixture/test", "measured_kb": 3*gib}
+    {"path": "/fixture/test/fine.bin", "measured_kb": 1,
+     "apparent_bytes": 1024, "kind": "file"}
   ],
-  "granularity_bucket_total_kb": 3*gib, "granularity_tail_kb": 0,
+  "granularity_bucket_total_kb": 1, "granularity_tail_kb": 0,
+  "oversize_indivisible_files": [{"path": "/fixture/test/large.bin",
+     "measured_kb": 6*gib-1, "apparent_bytes": (6*gib-1)*1024,
+     "reason": "indivisible_file"}],
+  "oversize_indivisible_files_total_kb": 6*gib-1,
   "sibling_volumes": {}, "frontier_unfinished": [],
-  "accounting_equation": {"balanced": True, "displayed_balanced": True, "displayed_buckets_kb": 3*gib, "sub_granularity_tail_kb": 0},
-  "config": {"max_nodes": 100, "scan_backend": "gdu_one_pass"},
+  "accounting_equation": {"balanced": True, "displayed_balanced": True,
+    "displayed_buckets_kb": 1, "oversize_indivisible_files_kb": 6*gib-1,
+    "sub_granularity_tail_kb": 0},
+  "config": {"max_nodes": 100, "scan_backend": "gdu_one_pass",
+    "granularity_gib": 5, "effective_granularity_gib": 100/1024,
+    "max_bucket_gib": 100/1024},
   "apfs_accounting": {
     "physical_stores": [{"device": "disk0s2", "size_kb": 20*gib}],
     "container_capacity_kb": 20*gib, "container_free_kb": 10*gib,

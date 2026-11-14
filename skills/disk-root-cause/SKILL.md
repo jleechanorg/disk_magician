@@ -30,6 +30,8 @@ Audit itself prints fleet health and the existing reclaim report synchronously
 before starting any deeper lane. It never automatically regenerates the report;
 `diskm reclaim-ledger --stdout` is a regeneration preview, not a read-existing alias.
 
+The public `--granularity-gib` request remains accepted through 5 GiB for compatibility;
+the scanner reports the requested value and its effective 100 MiB ceiling separately.
 Every complete size inventory follows the 100 MiB leaf rule in CLAUDE.md:
 recursively descend every real directory at or above 100 MiB, including Git
 directories for read-only measurement, until leaves are files or directories

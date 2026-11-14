@@ -1624,7 +1624,7 @@ container_child_has_protected_repository() {
 # large_consider_entry <dir> <depth> — --large gates for one candidate: depth 0
 # is a top-level tmp entry, depth 1 a child of a descended container.
 large_consider_entry() {
-  local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0
+  local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0 report_rc=0
   local scratch_container=false
   base="$(basename "$d")"
 
@@ -1634,7 +1634,18 @@ large_consider_entry() {
     return 0
   fi
 
-  scratch_budget_report_measurement "$d" || exit $?
+  scratch_budget_report_measurement "$d" || report_rc=$?
+  if (( report_rc != 0 )); then
+    log "measurement_status=incomplete rc=$report_rc path=$d; fail-closed and preserving this unit"
+    if (( report_rc == 124 || report_rc == 137 )); then
+      log "deferred:deadline-before-unit $d"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+    else
+      log "Activity/size measurement failed; fail-closed, treating as active: $d"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+    fi
+    return 0
+  fi
 
   case "$base" in
     com.apple.*|system-*|PowerlogHelperd*|systemd-private-*|snap-private-tmp|.X11-unix|.XIM-unix|.ICE-unix|.Test-unix|.font-unix) return 0 ;;
@@ -1720,7 +1731,14 @@ large_consider_entry() {
   scratch_budget_measure_files "$d" 100 --nul >"$plan" || plan_rc=$?
   if (( plan_rc != 0 )); then
     rm -f -- "$plan"
-    return "$plan_rc"
+    if (( plan_rc == 124 || plan_rc == 137 )); then
+      log "measurement_status=incomplete rc=$plan_rc path=$d; fail-closed and deferring this unit"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+    else
+      log "measurement_status=incomplete rc=$plan_rc path=$d; fail-closed, treating as active"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+    fi
+    return 0
   fi
   IFS= read -r -d '' marker <"$plan" || marker=""
   if [[ "$marker" != diskm-measure-leaves-v1 ]]; then

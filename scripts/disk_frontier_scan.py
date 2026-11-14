@@ -2141,7 +2141,8 @@ def build_report(
 
     status_counts = collections.Counter(item["status"] for item in top_level_ledger)
 
-    granularity_kb = int(args.granularity_gib * 1024 * 1024)
+    granularity_kb = min(100 * 1024, int(args.granularity_gib * 1024 * 1024))
+    effective_granularity_gib = granularity_kb / (1024 * 1024)
     inventory_buckets = getattr(scanner, "inventory_buckets", None)
     granularity_buckets = (
         inventory_buckets
@@ -2325,10 +2326,11 @@ def build_report(
             "wall_clock_cap_s": args.wall_clock_cap,
             "timeout_tiers_s": args.timeout_tiers,
             "granularity_gib": args.granularity_gib,
+            "effective_granularity_gib": effective_granularity_gib,
             "measurement_method": "allocated-blocks",
             "directory_ceiling_mib": 100,
             "directory_subdivision_method": "file-summed apparent bytes",
-            "max_bucket_gib": args.granularity_gib,
+            "max_bucket_gib": effective_granularity_gib,
             "shallow_enumeration_depth": getattr(scanner, "shallow_enumeration_depth", 0),
             "scan_backend": getattr(scanner, "inventory_backend", None) or "frontier_per_node",
         },
@@ -2462,9 +2464,9 @@ def parse_args(argv):
     )
     p.add_argument(
         "--granularity-gib", type=float, default=100 / 1024,
-        help="maximum size of each non-overlapping displayed path bucket; "
-             "larger directories are subdivided and larger indivisible files "
-             "are reported separately (must be >0 and <=100 MiB)",
+        help="requested maximum size of each non-overlapping displayed path bucket; "
+             "legacy requests up to 5 GiB are accepted, while the effective "
+             "directory ceiling is capped at 100 MiB; indivisible files are separate",
     )
     p.add_argument("--wall-clock-cap", type=float, default=DEFAULT_WALL_CLOCK_CAP)
     p.add_argument(
@@ -2487,8 +2489,8 @@ def parse_args(argv):
                     help="test-only: force disk_used_kb to exercise residual clamping")
     raw_args = list(argv if argv is not None else sys.argv[1:])
     args = p.parse_args(raw_args)
-    if not 0 < args.granularity_gib <= 100 / 1024:
-        p.error("--granularity-gib must be >0 and <=0.09765625 (100 MiB)")
+    if not 0 < args.granularity_gib <= 5:
+        p.error("--granularity-gib must be >0 and <=5 GiB")
     if args.inventory and sys.platform != "darwin" and "--root" not in raw_args:
         args.root = "/"
     if args.root_inventory:

@@ -79,6 +79,15 @@ scanner = SimpleNamespace(
     tracker=SimpleNamespace(peak=lambda: 2),
     level1_paths=[f"{root}/large", f"{root}/small-group"],
     fda_preflight={"status": "not_inferred"},
+    inventory_buckets=None,
+    directory_metadata={},
+    apparent_bytes={path: size * 1024 for path, size in measured.items()},
+    oversize_files=[{"path": path, "measured_kb": size, "apparent_bytes": size * 1024,
+                     "allocated_kb": size, "inode_deduplicated": False}
+                    for path, size in measured.items()],
+    file_leaves={path: {"path": path, "apparent_bytes": size * 1024,
+                        "allocated_kb": size, "inode_deduplicated": False}
+                 for path, size in measured.items()},
 )
 args = SimpleNamespace(workers=2, max_depth=6, max_nodes=50,
                        wall_clock_cap=10, timeout_tiers=[1], granularity_gib=5.0)
@@ -105,23 +114,24 @@ report = mod.build_report(
     disk_stats_before={"total_kb": 30 * gib, "used_kb": 21 * gib, "free_kb": 9 * gib},
 )
 buckets = report["granularity_buckets"]
-assert buckets == [
-    {"path": f"{root}/large/a", "measured_kb": 4 * gib},
-    {"path": f"{root}/large/b", "measured_kb": 4 * gib},
-    {"path": f"{root}/large/c", "measured_kb": 4 * gib},
-    {"path": f"{root}/small-group", "measured_kb": 4 * gib},
-]
-assert all(item["measured_kb"] <= 5 * gib for item in buckets)
-assert report["granularity_bucket_total_kb"] == 16 * gib
+assert buckets == []
+assert all(item["measured_kb"] < 100 * 1024 for item in buckets)
+assert report["granularity_bucket_total_kb"] == 0
+assert report["oversize_indivisible_files_total_kb"] == 16 * gib
 assert report["granularity_tail_kb"] == 0
+assert len(report["oversize_indivisible_files"]) == 5
+assert {row["path"] for row in report["oversize_indivisible_files"]} == {row["path"] for row in report["file_leaves"]}
 assert report["accounting_equation"]["balanced"] is True
 assert report["accounting_equation"]["displayed_balanced"] is True
-assert report["accounting_equation"]["displayed_buckets_kb"] == 16 * gib
+assert report["accounting_equation"]["displayed_buckets_kb"] == 0
+assert report["accounting_equation"]["oversize_indivisible_files_kb"] == 16 * gib
 assert report["accounting_equation"]["sub_granularity_tail_kb"] == 0
 assert report["accounting_equation"]["measurement_non_atomic"] is True
 assert report["measurement_window"]["disk_used_delta_kb"] == -1 * gib
 assert report["measurement_window"]["residual_interval_kb"] == {"min": 4 * gib, "max": 5 * gib}
 assert report["config"]["granularity_gib"] == 5.0
+assert report["config"]["effective_granularity_gib"] == 100 / 1024
+assert report["config"]["max_bucket_gib"] == 100 / 1024
 assert report["apfs_accounting"]["equation_balanced"] is True
 assert report["apfs_accounting"]["volumes"][0]["roles"] == ["Data"]
 assert report["limits"]["sudo_used"] is False

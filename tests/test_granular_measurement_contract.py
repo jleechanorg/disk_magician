@@ -16,7 +16,8 @@ import render_topdown_ledger as r
 class GranularMeasurementContract(unittest.TestCase):
     def test_default_and_invalid_ceiling(self):
         self.assertEqual(f.parse_args([]).granularity_gib, 100 / 1024)
-        for ceiling in ('0', '5', '-1', 'nan', 'inf'):
+        self.assertEqual(f.parse_args(['--granularity-gib', '5']).granularity_gib, 5.0)
+        for ceiling in ('0', '-1', 'nan', 'inf', '5.0001'):
             with self.subTest(ceiling=ceiling), self.assertRaises(SystemExit):
                 f.parse_args(['--granularity-gib', ceiling])
 

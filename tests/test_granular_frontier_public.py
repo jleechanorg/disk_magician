@@ -94,6 +94,41 @@ class PublicFrontier(unittest.TestCase):
                                          if not row["inode_deduplicated"]), 200 * 1024 ** 2)
                     self.assertTrue(any(row["inode_deduplicated"] for row in report["file_leaves"]))
 
+    def test_five_gib_cli_request_uses_effective_100_mib_file_ceiling(self):
+        with scratch_tempdir() as tmp:
+            work = pathlib.Path(tmp)
+            root = work / "root"
+            root.mkdir()
+            small = root / "fine.bin"
+            small.write_bytes(b"fine")
+            large = root / "indivisible-sparse.bin"
+            with large.open("wb") as stream:
+                stream.truncate(200 * 1024 * 1024)
+            report_path = work / "frontier.json"
+            proc = subprocess.run([
+                "bash", str(REPO / "disk_magician.sh"), "frontier",
+                "--root", str(root), "--granularity-gib", "5",
+                "--output", str(report_path), "--no-sibling-volumes",
+                "--no-purgeable", "--workers", "1", "--max-nodes", "1000",
+                "--max-depth", "20", "--wall-clock-cap", "20",
+            ], env=dict(os.environ, DISK_MAGICIAN_GDU_CMD=""),
+               text=True, capture_output=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            report = json.loads(proc.stdout)
+            self.assertEqual(report["config"]["granularity_gib"], 5.0)
+            self.assertEqual(report["config"]["effective_granularity_gib"], 100 / 1024)
+            self.assertEqual(report["config"]["max_bucket_gib"], 100 / 1024)
+            leaves = {row["path"]: row for row in report["file_leaves"]}
+            self.assertIn(str(small), leaves)
+            self.assertIn(str(large), leaves)
+            self.assertTrue(any(row["path"] == str(large)
+                                and row["apparent_bytes"] == 200 * 1024 * 1024
+                                for row in report["oversize_indivisible_files"]))
+            self.assertFalse(any(row.get("kind") == "direct_allocation_segment"
+                                 for row in report["granularity_buckets"]))
+            self.assertTrue(all(row["apparent_bytes"] < 100 * 1024 * 1024
+                                for row in report["granularity_buckets"]))
+
     def test_scale_publishes_only_terminal_file_evidence(self):
         du = shutil.which("gdu") or shutil.which("du")
         version = subprocess.run([du, "--version"], capture_output=True, text=True)

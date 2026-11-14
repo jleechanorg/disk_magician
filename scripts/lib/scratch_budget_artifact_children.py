@@ -166,6 +166,14 @@ def main():
         except TimeoutError:
             return 124
         except BrokenPipeError:
+            # Avoid Python's shutdown flush converting the documented broken-
+            # pipe status to exit 120; the consumer is already gone.
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+                os.close(devnull)
+            except OSError:
+                pass
             return 73
         except OSError:
             return 1
