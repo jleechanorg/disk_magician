@@ -18,7 +18,7 @@
 #            - Tier 3: Container VM Reclaim (cleanup_colima.sh --clean + post_job_docker_prune.sh)
 #            - Tier 4: Browser Sessions & Dedup (prune_aside_sessions.sh --clean)
 #            - Tier 5: Agent State Compaction & Rotated Logs (cleanup_antigravity_brain.sh --clean, cleanup_codex_db.sh --clean, cleanup_supervisor_logs.sh --clean, cleanup_uv_cache.sh --clean)
-#            - Tier 6: Dormant Worktree Venvs >=7d (cleanup_worktree_venvs.sh --clean) & Claude State >=7d (cleanup_claude_state.sh --clean)
+#            - Tier 6: Worktree venvs, deps, Claude state, and worktrees use the shared 48h default.
 #   Phase 5: Health & Ledger Freshness Verification (sweeper_health_check.sh).
 #
 # Defaults to live clean. Pass --dry-run for non-destructive preview.
@@ -411,7 +411,7 @@ main() {
       CODE_SIGN_CLONES_APPROVED=1 run_job_step "Tier 5: cleanup_code_sign_clones" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
     fi
 
-    # Tier 6: Dormant Worktree Venvs (>=7d), Worktree Deps (>=3d), Claude State (>=7d), & Worktrees (>=3d)
+    # Tier 6: Worktree venvs, deps, Claude state, and worktrees use the shared 48h default
     # Candidates >= 90d (>3 months) are auto-approved without env vars; candidates < 90d require WORKTREE_APPROVED=1 / CLAUDE_STATE_APPROVED=1.
     if [[ -f "$REPO_ROOT/scripts/cleanup_worktree_deps.sh" ]]; then
       run_job_step "Tier 6: cleanup_worktree_deps" bash "$REPO_ROOT/scripts/cleanup_worktree_deps.sh" "$CLEAN_ARG" || true

@@ -61,10 +61,10 @@ Commands:
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk
                          (use --native-docker for the verified Linux daemon).
   cleanup-xcode          Clean rebuildable Xcode and Simulator caches.
-  cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
-  cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
+  cleanup-worktrees      Safely prune stale linked worktrees >=48h idle (alias: prune-worktrees).
+  cleanup-worktree-venvs Strip Python venvs from worktrees idle >=48h.
   cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
-  cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from dormant worktrees >=3d.
+  cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from worktrees idle >=48h.
   slim-worktrees Suggest (dry-run) or apply sparse-checkout exclusions (default docs/)
                 on dormant worktrees to shrink each checkout without touching history.
   worktree-restore-verify Fetch pinned backups, verify full restore, and write a receipt.
@@ -73,15 +73,15 @@ Commands:
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
   scratch-prune          Reclaim C14-recognized Scratch artifacts behind lease/live-cwd/open-file
                          gates (--clean needs operator approval or internal safe automatic mode).
-  emergency              One-off emergency reclaim of tmp + Scratch under one lock hold; age floor
-                         steps 24h -> 12h -> 6h -> 2h (never lower) until --target-gb is free.
+  emergency              One-off emergency reclaim of tmp + Scratch under one lock hold; one 48h pass by default.
+                         Lower ages require an explicit --max-age-hours override (minimum 2h).
                          Flags: --target-gb N --max-age-hours H --dry-run --include-worktrees.
   cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.
   cleanup-antigravity-brain Prune old Antigravity brain dirs, idle worktrees, .backup leftovers.
   cleanup-claude-state   Run the guarded Claude state maintenance helper.
   cleanup-codex-db       Maintain Codex SQLite databases (aliases: vacuum-codex-db, codex-vacuum).
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
-  cleanup-supervisor-logs Prune rotated cmux-codex-launchd logs older than 7d (dry-run; --clean to act).
+  cleanup-supervisor-logs Prune rotated cmux-codex-launchd logs older than 48h (dry-run; --clean to act).
   cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
   cleanup-ao             Retire AO owners and workspaces (explicit approval required).
   cleanup-code-sign-clones Clean stale macOS app code_sign_clone bundles.
