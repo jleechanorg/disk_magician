@@ -1130,16 +1130,16 @@ deadline_inventory="$TMPROOT/deferred-inventory.json"
 verdict="$(PATH="$TMPROOT/slow-git:$PATH" DISK_MAGICIAN_LSOF_BIN="$TMPROOT/slow-git/lsof" av "$deadline_root" --deadline-at "$deadline_at" --inventory-out "$deadline_inventory")"
 [[ "$verdict" == deferred:* ]] && ok "deadline defers the nested-repo / 2 GiB provenance case ($verdict)" || bad "deadline verdict: $verdict"
 [[ -f "$deadline_root/manifested.bin" && -d "$deadline_repo" && ! -e "$deadline_inventory" ]] && ok "deferred verdict leaves candidate and output inventory untouched" || bad "deferred path changed candidate or emitted output"
-# Rebuildable deadline: the caller's --deadline-at must reach the enclosing
-# worktree's shared push (ls-remote) probe; a slow remote defers, never removes.
+# Rebuildable venvs are independently disposable after the parent worktree
+# is idle; parent branch publication is not required to strip an untracked venv.
 venvw "$HOME/wt-rbdl" && age "$HOME/wt-rbdl" 11520
-rb_short="$(python3 -c 'import time; print(time.monotonic()+5)')"
-assert_eq "$(PATH="$TMPROOT/slow-git:$PATH" av "$HOME/wt-rbdl/venv" --kind rebuildable --deadline-at "$rb_short")" deferred:lsremote \
-    "rebuildable venv honors the caller deadline on a slow remote"
-# Far-deadline positive: the same eligible venv still removes when time allows.
-rb_far="$(python3 -c 'import time; print(time.monotonic()+120)')"
-assert_eq "$(av "$HOME/wt-rbdl/venv" --kind rebuildable --deadline-at "$rb_far")" remove \
-    "far-deadline rebuildable venv still removes"
+rb_deadline="$(python3 -c 'import time; print(time.monotonic()+5)')"
+rb_head="$(git -C "$HOME/wt-rbdl" rev-parse HEAD)"
+rb_status="$(git -C "$HOME/wt-rbdl" status --porcelain)"
+assert_eq "$(PATH="$TMPROOT/slow-git:$PATH" av "$HOME/wt-rbdl/venv" --kind rebuildable --deadline-at "$rb_deadline")" remove \
+    "old untracked venv removes without a parent remote proof"
+assert_eq "$(git -C "$HOME/wt-rbdl" rev-parse HEAD)" "$rb_head" "venv cleanup leaves parent HEAD unchanged"
+assert_eq "$(git -C "$HOME/wt-rbdl" status --porcelain)" "$rb_status" "venv cleanup leaves parent status unchanged"
 
 mkdir -p "$PT/pr-race" && printf 'old bytes' >"$PT/pr-race/old.txt" && age "$PT/pr-race" 43200
 race_file="$PT/pr-race/untracked-after-nomination.txt"
