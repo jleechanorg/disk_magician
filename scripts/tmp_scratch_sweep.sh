@@ -250,7 +250,7 @@ if [[ "$SWEEP_MODE" == scratch-only ]]; then
   # approved LRU eviction down to N% used. The variable is the operator approval.
   SCRATCH_LRU_PCT="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
   if [[ "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
-    scratch_args+=(--budget-pct "$SCRATCH_LRU_PCT")
+    scratch_args+=(--budget-pct "$SCRATCH_LRU_PCT" --budget-preserve-content-keeps)
     scratch_mode_env=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=0 SCRATCH_TOP_LEVEL_APPROVED=1)
   else
     scratch_args+=(--available-floor)
