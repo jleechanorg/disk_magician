@@ -510,14 +510,19 @@ E2 60 $PT/cli_validation_gemini_1
 E2 240 $PT/clones/repo
 E2 60 $PT/wtp
 E3 2880 $PT/pr-123
-E4 10080 $HOME/.aside/u/a/sessions/s1
+E4 2880 $HOME/.aside/u/a/sessions/s1
 E5 30240 $HOME/.gemini/antigravity/brain/b1
 E5 30240 $HOME/.gemini/antigravity-cli/brain/b2
 E5 43200 $HOME/.gemini/antigravity/implicit.backup
-E6 4320 $HOME/.llm-inspector/captures/capture-1.json
-E6 4320 $HOME/.llm-inspector/captures/x.summary.json
-E7 10080 $HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log
+E6 2880 $HOME/.llm-inspector/captures/capture-1.json
+E6 2880 $HOME/.llm-inspector/captures/x.summary.json
+E7 2880 $HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log
 EOF
+assert_eq "$(c14_ephemeral_retention "$HOME/.aside/u/a/sessions/s1")" 2880 "Aside session class shares the 48h disposable floor"
+assert_eq "$(c14_ephemeral_retention "$HOME/.llm-inspector/captures/capture-1.json")" 2880 "LLM inspector capture class shares the 48h disposable floor"
+assert_eq "$(c14_ephemeral_retention "$HOME/.claude/supervisor/cmux-codex-launchd.20260101T000000.log")" 2880 "supervisor rotation class shares the 48h disposable floor"
+assert_eq "$(c14_ephemeral_retention "$HOME/.gemini/antigravity/brain/b1")" 30240 "Antigravity brain history retention stays intact"
+assert_eq "$(c14_ephemeral_retention "$HOME/.gemini/antigravity/implicit.backup")" 43200 "Antigravity backup retention stays durable"
 # An explicit emergency floor may lower the default for ephemeral candidates,
 # but it still enforces its 2 h minimum and the 48 h default remains the normal path.
 age "$PT/agent_prompt_1.txt" 121

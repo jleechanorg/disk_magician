@@ -222,8 +222,8 @@ c14_ephemeral_retention() {
     rel=${p#"$HOME"/}
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
     elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
-    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then echo 10080
-    elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then echo 4320
+    elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then safety_disposable_recency_floor_minutes
+    elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then safety_disposable_recency_floor_minutes
     else return 1; fi
 }
 # c14_archive_origin <candidate> <inventory>: E1 uses only a matching durable

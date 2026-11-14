@@ -485,7 +485,21 @@ exit 0
             lsof_bin=str(mock_lsof),
             ref_time=now,
         )
-        stats = pruner.run()
+        # Make C14's live-CWD/open-file probe deterministic for these synthetic
+        # paths; host-wide lsof visibility can be incomplete in containers.
+        from unittest.mock import patch
+        lsof_alias = mock_lsof.parent / "lsof"
+        lsof_alias.symlink_to(mock_lsof)
+        cwd_scan = mock_lsof.parent / "cwd_scan.sh"
+        cwd_scan.write_bytes(b"#!/bin/sh\nprintf '1\\t0\\t/\\0'\n")
+        cwd_scan.chmod(0o755)
+        with patch.dict(os.environ, {
+            "DISK_MAGICIAN_LSOF_BIN": str(mock_lsof),
+            "DISK_MAGICIAN_TEST_SANDBOX": str(self.temp_dir),
+            "DISK_MAGICIAN_CWD_SCAN_CMD": str(cwd_scan),
+            "PATH": f"{mock_lsof.parent}:{os.environ.get('PATH', '')}",
+        }):
+            stats = pruner.run()
 
         self.assertEqual(stats["sessions_scanned"], 2)
         self.assertEqual(stats["sessions_pruned"], 1)
