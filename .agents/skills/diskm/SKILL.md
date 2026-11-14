@@ -76,6 +76,11 @@ WORKTREE_APPROVED=1 bash scripts/slim_worktree_checkouts.sh --clean \
   --exclude 'docs,dashboards/prw/telemetry'
 ```
 
+Those two commands do **not** pass `--roots`, so they cover the helper's **default
+scope**, not a reviewed list. If you need a narrower or explicitly reviewed set,
+pass `--roots` to *both* invocations identically. Never describe a default-scope run
+as explicit.
+
 `--exclude` is **comma-separated** and refuses automatically when uncommitted work
 sits under an excluded path. Measured: 10,079 MB → 2,741 MB per worktree,
 **~7.3 GB each / 55 GB total**; branches and clean status survive; all 289 files
@@ -221,7 +226,23 @@ and any loop over a computed target), and record the four independent proofs for
 that exact path in the report so the decision is auditable:
 
 ```bash
-lsof -D "$D" | wc -l      # note: 0 can mean lsof failed — check its exit status
+# The recursive flag is +D (capital D). `lsof -D` is NOT a supported option and
+# errors out; piping that to wc -l manufactures a comfortable "0".
+# lsof's EXIT STATUS is useless here: `lsof +D` returns 1 for "nothing open", for
+# "found something", and for "bad path" alike (measured, lsof 4.91). Discriminate
+# on OUTPUT instead: empty = genuinely nothing open; any line beginning `lsof:`
+# (or the usage banner) = error/permission failure and must fail closed.
+lf="$(lsof +D "$D" 2>&1)"
+if [ -z "$lf" ]; then
+  echo "open_fds=0 (lsof succeeded, nothing open)"
+elif printf '%s\n' "$lf" | grep -qiE '^lsof:|^lsof [0-9]|unsupported option|can.t stat'; then
+  echo "FAIL-CLOSED: lsof errored or was denied — do NOT read this as zero:" >&2
+  printf '%s\n' "$lf" >&2
+  exit 1
+else
+  echo "open_fds=$(printf '%s\n' "$lf" | grep -c .)"
+fi
+
 lsof -a -d cwd -n -P | awk '$NF ~ /<name>/'
 find "$D" -type f -exec stat -f '%m' {} + | sort -rn | head -1
 bash scripts/safety_check.sh "$D"
