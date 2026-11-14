@@ -459,6 +459,19 @@ class DiskInventoryTest(unittest.TestCase):
             stale_version.mkdir()
             for version in newest_versions:
                 version.mkdir()
+            user_tmp = home / "private-temp"
+            user_tmp.mkdir()
+            safety_file = home / "safety.local.json"
+            safety_file.write_text(
+                json.dumps({
+                    "never_delete": [
+                        "/private/tmp/worldai-ios-compilation-cache",
+                        "/private/tmp/jest_dx",
+                        str(user_tmp / "jest_dx"),
+                    ]
+                }),
+                encoding="utf-8",
+            )
 
             # Installed tool versions are outside the approved C14 cache-root
             # table. Even a stale version must retain unproven content.
@@ -471,6 +484,18 @@ class DiskInventoryTest(unittest.TestCase):
 
             fake_bin = home / "fake-bin"
             fake_bin.mkdir()
+            fake_getconf = fake_bin / "getconf"
+            fake_getconf.write_text(
+                '''#!/bin/sh
+if [ "$1" = DARWIN_USER_TEMP_DIR ]; then
+  printf '%s\\n' "$DISK_MAGICIAN_TEST_USER_TMP"
+else
+  exec /usr/bin/getconf "$@"
+fi
+''',
+                encoding="utf-8",
+            )
+            fake_getconf.chmod(0o755)
             fake_realpath = fake_bin / "realpath"
             fake_realpath.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
             fake_realpath.chmod(0o755)
@@ -479,6 +504,8 @@ class DiskInventoryTest(unittest.TestCase):
                 ["/bin/bash", str(cleanup), "--clean"],
                 env={
                     "HOME": str(home),
+                    "DISK_MAGICIAN_SAFETY_FILE": str(safety_file),
+                    "DISK_MAGICIAN_TEST_USER_TMP": str(user_tmp),
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 },
                 capture_output=True, text=True, check=False,
@@ -488,7 +515,7 @@ class DiskInventoryTest(unittest.TestCase):
             self.assertTrue(active_binary.exists(), completed.stdout)
             self.assertTrue(agent_link.samefile(active_binary))
             self.assertTrue(stale_version.exists(), completed.stdout)
-            self.assertIn("kept:unproven-content", completed.stdout)
+            self.assertIn("kept:no-proof", completed.stdout)
             for version in newest_versions:
                 self.assertTrue(version.exists(), completed.stdout)
 

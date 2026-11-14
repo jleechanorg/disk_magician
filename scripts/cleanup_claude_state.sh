@@ -23,8 +23,8 @@
 #     not inside ~/.claude/projects (defense in depth; --root can never
 #     point there either -- see the hard refusal check below)
 #   - content age (scripts/lib/worktree_recency.sh: newest regular-file
-#     mtime in the tree, NOT directory mtime) >= --min-age days (default 7,
-#     the CLAUDE.md worktree floor -- may only be raised); unmeasurable
+#     mtime in the tree, NOT directory mtime) >= --min-age days (default floor
+#     48 h, the CLAUDE.md worktree floor -- may only be raised); unmeasurable
 #     content fails closed to age 0, i.e. preserved
 #   - every git repo/worktree found inside (auditing nested repos at any
 #     depth, with node_modules, venvs, and .git trees pruned) is clean
@@ -53,7 +53,7 @@ source "$SCRIPT_DIR/lib/worktree_recency.sh"
 source "$SCRIPT_DIR/safety_lib.sh"
 
 DRY_RUN=true
-MIN_AGE_DAYS="${CLAUDE_STATE_MIN_AGE_DAYS:-7}"
+MIN_AGE_DAYS="${CLAUDE_STATE_MIN_AGE_DAYS:-}"
 STATE_ROOT="${CLAUDE_STATE_ROOT:-$HOME/.claude/state}"
 LSOF_TIMEOUT_SEC="${CLAUDE_STATE_LSOF_TIMEOUT_SEC:-60}"
 
@@ -112,26 +112,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# Staleness floor: read from safety.local.json (safety_min_stale_days), with a
-# hardcoded baseline floor of 7 days. CLAUDE.md invariant: the configured floor
-# may only RAISE the floor, never lower it below 7.
-staleness_floor=$(safety_min_stale_days 2>/dev/null || echo 7)
-if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
-  staleness_floor=$((10#$staleness_floor))
-else
-  staleness_floor=7
-fi
-[[ "$staleness_floor" -lt 7 ]] && staleness_floor=7
-
-# Hard floor: staleness_floor days, may only be raised, never lowered (CLAUDE.md
-# invariant). Normalize via 10# BEFORE clamping -- bash arithmetic parses a
-# leading-zero numeral like "08" as invalid octal otherwise.
-if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
-  MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
-else
-  MIN_AGE_DAYS="$staleness_floor"
-fi
-[[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
+# Staleness floor in minutes: safety_worktree_floor_minutes (default and minimum 2880 =
+# 48 h, operator decision 2026-11-12); config, --min-age and the env default may only
+# RAISE it, never lower it.
+MIN_AGE_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
+MIN_AGE_DAYS=$(( MIN_AGE_MIN / 1440 ))   # display figure
 
 # realpath_or_empty <path> -- portable realpath (python3 is always present
 # on this machine; avoids depending on GNU coreutils' realpath -f).
@@ -356,9 +341,9 @@ fi
 [[ "$AUTO_APPROVE_AGE_DAYS" -lt 90 ]] && AUTO_APPROVE_AGE_DAYS=90
 
 if [[ "$DRY_RUN" == true ]]; then
-  echo "=== CLAUDE STATE CLEANUP (DRY-RUN) === root=$STATE_ROOT_REAL min-age=${MIN_AGE_DAYS}d"
+  echo "=== CLAUDE STATE CLEANUP (DRY-RUN) === root=$STATE_ROOT_REAL min-age=$(worktree_floor_label "$MIN_AGE_MIN")"
 else
-  echo "=== CLAUDE STATE CLEANUP === root=$STATE_ROOT_REAL min-age=${MIN_AGE_DAYS}d"
+  echo "=== CLAUDE STATE CLEANUP === root=$STATE_ROOT_REAL min-age=$(worktree_floor_label "$MIN_AGE_MIN")"
   if [[ "${CLAUDE_STATE_APPROVED:-0}" != "1" ]]; then
     echo "Refusing to delete: set CLAUDE_STATE_APPROVED=1 after explicit approval (auto-approving >= ${AUTO_APPROVE_AGE_DAYS}d only)."
   fi
@@ -406,8 +391,8 @@ for candidate in "$STATE_ROOT_REAL"/*/; do
   fi
 
   age_days="$(worktree_age_days "$candidate")"
-  if (( age_days < MIN_AGE_DAYS )); then
-    echo "PRESERVE $candidate  (age ${age_days}d < ${MIN_AGE_DAYS}d floor)"
+  if worktree_is_recently_active_minutes "$candidate" "$MIN_AGE_MIN"; then
+    echo "PRESERVE $candidate  (age ${age_days}d < $(worktree_floor_label "$MIN_AGE_MIN") floor)"
     PRESERVED_YOUNG_COUNT=$((PRESERVED_YOUNG_COUNT + 1))
     continue
   fi
@@ -461,6 +446,6 @@ echo
 echo "=== Summary ==="
 echo "Eligible: $ELIGIBLE_COUNT dirs, $(fmt_kb "$TOTAL_ELIGIBLE_KB")"
 echo "NEEDS-REVIEW (preserved): $NEEDS_REVIEW_COUNT"
-echo "Preserved (young, <${MIN_AGE_DAYS}d): $PRESERVED_YOUNG_COUNT"
+echo "Preserved (young, <$(worktree_floor_label "$MIN_AGE_MIN")): $PRESERVED_YOUNG_COUNT"
 echo "Preserved (open handles / lsof inconclusive): $PRESERVED_OPEN_COUNT"
 echo "Refused (symlink escape / outside root): $REFUSED_COUNT"

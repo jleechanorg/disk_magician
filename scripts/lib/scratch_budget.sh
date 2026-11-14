@@ -676,6 +676,13 @@ try:
         try:
             st = os.lstat(path)
             if stat.S_ISDIR(st.st_mode):
+                try:
+                    os.lstat(os.path.join(path, '.git'))
+                except FileNotFoundError:
+                    pass
+                else:
+                    node['flag'] = 'G'
+                    continue
                 node['flag'] = 'A'
                 node['identity'] = (st.st_dev, st.st_ino, st.st_mtime_ns)
                 with os.scandir(path) as entries:

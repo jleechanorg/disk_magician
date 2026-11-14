@@ -16,7 +16,7 @@
 # ------
 #   * Activated worktrees are never touched: the canonical recency helper
 #     (lib/worktree_recency.sh) must report the worktree inactive for --min-age
-#     days (default 3, the repo's worktree floor).
+#     days (default floor 48 h, the repo's worktree floor).
 #   * Live-cwd and safety_gate-protected worktrees are skipped.
 #   * A worktree with local modifications under an excluded path is skipped —
 #     excluding it would hide uncommitted work.
@@ -40,7 +40,7 @@ source "$SCRIPT_DIR/safety_lib.sh"
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh" 2>/dev/null || true
 
 DRY_RUN=true
-MIN_AGE_DAYS="${SLIM_MIN_AGE_DAYS:-3}"
+MIN_AGE_DAYS="${SLIM_MIN_AGE_DAYS:-}"
 EXCLUDE="docs"
 INCLUDE_AO=0
 ROOTS=("$HOME/.worktrees" "$HOME/projects" "$HOME/.ao/data/worktrees")
@@ -60,7 +60,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]] || { echo "min-age must be an integer" >&2; exit 2; }
+[[ -z "$MIN_AGE_DAYS" || "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]] || { echo "min-age must be an integer" >&2; exit 2; }
+# 48 h default floor (operator decision 2026-11-12); --min-age may only raise it.
+MIN_AGE_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
 IFS=',' read -r -a EXCLUDES <<< "$EXCLUDE"
 
 if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
@@ -131,7 +133,7 @@ skipped_safety=0
 seen="|"
 
 mode="DRY-RUN"; [[ "$DRY_RUN" == false ]] && mode="APPLY"
-echo "=== WORKTREE CHECKOUT SLIM ($mode) — floor ${MIN_AGE_DAYS}d, exclude=${EXCLUDE} ==="
+echo "=== WORKTREE CHECKOUT SLIM ($mode) — floor $(worktree_floor_label "$MIN_AGE_MIN"), exclude=${EXCLUDE} ==="
 
 for root in "${ROOTS[@]}"; do
   [[ -d "$root" ]] || continue
@@ -141,8 +143,24 @@ for root in "${ROOTS[@]}"; do
     seen+="$wt|"
 
     if [[ "$INCLUDE_AO" != 1 ]] && is_ao_owned "$wt"; then skipped_ao=$((skipped_ao+1)); continue; fi
-    if is_sparse "$wt"; then skipped_sparse=$((skipped_sparse+1)); continue; fi
-    if worktree_is_recently_active "$wt" "$MIN_AGE_DAYS" "$now"; then skipped_recent=$((skipped_recent+1)); continue; fi
+    # An already-sparse worktree keeps its existing exclusions and gains any requested
+    # one it lacks; it is skipped only when every requested exclusion is present.
+    # Measured 2026-11-13: 198 Mac worktrees were sparse on docs/ only and held
+    # ~40 GiB of other tracked trees (backup/, dashboards/, evidence) the skip hid.
+    existing=()
+    if is_sparse "$wt"; then
+      while IFS= read -r line; do
+        [[ "$line" =~ ^\!/(.+)/$ ]] && existing+=("${BASH_REMATCH[1]}")
+      done < "$(gitdir_of "$wt")/info/sparse-checkout"
+      missing=0
+      for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+        found=0
+        for e in ${existing[@]+"${existing[@]}"}; do [[ "$e" == "$ex" ]] && { found=1; break; }; done
+        (( found )) || missing=1
+      done
+      if (( ! missing )); then skipped_sparse=$((skipped_sparse+1)); continue; fi
+    fi
+    if worktree_is_recently_active_minutes "$wt" "$MIN_AGE_MIN" "$now"; then skipped_recent=$((skipped_recent+1)); continue; fi
     if is_live "$wt"; then skipped_live=$((skipped_live+1)); continue; fi
     if ! _reason="$(safety_gate "$wt" 2>/dev/null)"; then skipped_safety=$((skipped_safety+1)); echo "  SAFETY-SKIP $wt ($_reason)"; continue; fi
 
@@ -168,7 +186,12 @@ for root in "${ROOTS[@]}"; do
       echo "  WOULD-SLIM ${kb}KB $wt"
     else
       patterns=("/*")
-      for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do patterns+=("!/$ex/"); done
+      for e in ${existing[@]+"${existing[@]}"}; do patterns+=("!/$e/"); done
+      for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+        dup=0
+        for e in ${existing[@]+"${existing[@]}"}; do [[ "$e" == "$ex" ]] && { dup=1; break; }; done
+        (( dup )) || patterns+=("!/$ex/")
+      done
       if git -C "$wt" sparse-checkout set --no-cone "${patterns[@]}" >/dev/null 2>&1; then
         echo "  SLIMMED    ${kb}KB $wt"
         deletion_log "$(basename "$0")" slim "$kb" "$wt"

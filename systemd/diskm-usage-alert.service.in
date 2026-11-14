@@ -1,0 +1,19 @@
+[Unit]
+Description=Disk Magician free-space and Scratch headroom alert
+Documentation=https://github.com/jleechanorg/disk-magician
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Non-secret defaults only; systemd Zero-Environment Unit Principle.
+Environment=HOME=@HOME@
+Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
+UnsetEnvironment=GITHUB_TOKEN GH_TOKEN
+# The alert script exits 1 to mean "an alert fired" — that is the intended
+# signal, not a unit failure. Only the log line is the delivery channel.
+ExecStart=/usr/bin/bash @ALERT_SCRIPT@
+SuccessExitStatus=0 1
+# A stalled free-space probe must not wedge the timer.
+TimeoutStartSec=300
+StandardOutput=append:@STATE_PATH@/disk-usage-alert.log
+StandardError=append:@STATE_PATH@/disk-usage-alert.log

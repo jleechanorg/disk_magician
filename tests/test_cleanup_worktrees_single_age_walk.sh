@@ -23,8 +23,11 @@ FAIL=0
 # Keep every sourced helper at the corresponding revision. In particular, never
 # replace worktree_recency.sh with a stub that drops worktree_is_recently_active.
 mkdir -p "$TMP_ROOT/baseline" "$TMP_ROOT/batch_baseline" "$TMP_ROOT/branch" "$TMP_ROOT/unstubbed"
-git -C "$REPO_ROOT" archive "$BASE_SHA" scripts | tar -x -C "$TMP_ROOT/baseline"
-git -C "$REPO_ROOT" archive 2f35dfcd063f1c24f418b013ec9668547bccafff scripts | tar -x -C "$TMP_ROOT/batch_baseline"
+# Keep producer status separate; tar may stop after the valid archive trailer.
+"$REAL_GIT" -C "$REPO_ROOT" archive --output="$TMP_ROOT/baseline-scripts.tar" "$BASE_SHA" scripts
+tar -xf "$TMP_ROOT/baseline-scripts.tar" -C "$TMP_ROOT/baseline"
+"$REAL_GIT" -C "$REPO_ROOT" archive --output="$TMP_ROOT/batch-baseline-scripts.tar" 2f35dfcd063f1c24f418b013ec9668547bccafff scripts
+tar -xf "$TMP_ROOT/batch-baseline-scripts.tar" -C "$TMP_ROOT/batch_baseline"
 cp -R "$REPO_ROOT/scripts" "$TMP_ROOT/branch/"
 cp -R "$REPO_ROOT/scripts" "$TMP_ROOT/unstubbed/"
 # resolve_config falls back to the template beside the scripts directory.
@@ -55,6 +58,16 @@ worktree_is_recently_active() {
     rc="$(awk -F '\t' -v p="$1" '$1 == p { print $3; exit }' "$AGE_MAP")"
     [[ "$rc" == 0 && "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 0
     (( value < $2 ))
+}
+# 48 h floor (operator decision 2026-11-12): the script asks the minutes flavour. Fold it
+# onto the same day-valued fixture so the call-count assertions stay comparable.
+worktree_is_recently_active_minutes() {
+    printf '%s\t%s\t%s\n' "$1" "$(( $2 / 1440 ))" "${3:-}" >> "$PREDICATE_COUNTER"
+    local value rc
+    value="$(awk -F '\t' -v p="$1" '$1 == p { print $2; found=1; exit } END { if (!found) exit 1 }' "$AGE_MAP")" || return 0
+    rc="$(awk -F '\t' -v p="$1" '$1 == p { print $3; exit }' "$AGE_MAP")"
+    [[ "$rc" == 0 && "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 0
+    (( value * 1440 < $2 ))
 }
 SH
 

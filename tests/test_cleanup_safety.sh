@@ -359,7 +359,7 @@ assert_exists "dylib created after candidate freeze is preserved" "$RACE_DYLIB"
 assert_contains "open libopentui dylib is reported skipped" \
   "Skipping in-use OpenCode dylib: $OPEN_DYLIB" "$(cat "$OUT7_CLEAN")"
 assert_contains "closed libopentui dylib reports C14 keep" \
-  "Preserving OpenCode dylib (C14 kept:unproven-content)" "$(cat "$OUT7_CLEAN")"
+  "Preserving OpenCode dylib (C14 kept:protected)" "$(cat "$OUT7_CLEAN")"
 
 printf 'closed' > "$FAIL_DYLIB"
 OUT7_LSOF_FAIL="$TMP_ROOT/dylib-lsof-fail.out"

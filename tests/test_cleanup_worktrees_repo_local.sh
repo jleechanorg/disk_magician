@@ -248,7 +248,8 @@ for wt in r/old r/young r/busy ao-proj/sess-1 lazy/sess-2 lazyrepo/sess-3 sess-4
   git -C "$STD_REPO" worktree add -q -B "std-${wt//\//-}" "$STD_ROOT/$wt" main
 done
 for wt in r/old r/busy ao-proj/sess-1 lazy/sess-2 lazyrepo/sess-3 sess-4; do age_worktree_days_ago "$STD_ROOT/$wt" 10; done
-age_worktree_days_ago "$STD_ROOT/r/young" 2
+# 48 h default floor (operator decision 2026-11-12): a 2d worktree is now eligible, so "young" is 1d.
+age_worktree_days_ago "$STD_ROOT/r/young" 1
 
 AO_CFG="$TMP_ROOT/agent-orchestrator.yaml"
 # Live-config shape: a top-level default worktreeDir equal to the standard root
@@ -294,7 +295,7 @@ else
   record_fail "std root: 10d merged clean worktree eligible" "no ELIGIBLE ledger line for .worktrees/r/old"
 fi
 assert_contains "std root: old path listed" ".worktrees/r/old | age=" "$STD_OUT"
-assert_contains "std root: 2d worktree protected" ".worktrees/r/young | young" "$STD_OUT"
+assert_contains "std root: 1d worktree protected" ".worktrees/r/young | young" "$STD_OUT"
 assert_contains "std root: AO worktreeDir skipped" ".worktrees/ao-proj/sess-1 | ao-owned" "$STD_OUT"
 assert_contains "std root: live-cwd worktree skipped" ".worktrees/r/busy | live-cwd" "$STD_OUT"
 assert_contains "std root: project w/o worktreeDir (key) skipped" ".worktrees/lazy/sess-2 | ao-owned" "$STD_OUT"

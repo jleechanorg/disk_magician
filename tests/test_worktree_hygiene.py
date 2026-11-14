@@ -143,7 +143,7 @@ class IdentifyCandidatesTest(unittest.TestCase):
         _git(repo, "worktree", "add", "-B", "wt-young", str(young_wt), "main")
         _age_tree(young_wt, 3)
 
-        result = _call("identify_candidates", str(repo), "14")
+        result = _call("identify_candidates", str(repo), "20160")
         self.assertEqual(result.returncode, 0, result.stderr)
         candidates = [line for line in result.stdout.splitlines() if line.strip()]
 
@@ -169,7 +169,7 @@ class IdentifyCandidatesTest(unittest.TestCase):
             _set_mtime(nested, 0.1)
             _set_mtime(wt / excluded, 0.1)
 
-        result = _call("identify_candidates", str(repo), "14")
+        result = _call("identify_candidates", str(repo), "20160")
         self.assertEqual(result.returncode, 0, result.stderr)
         candidates = [line for line in result.stdout.splitlines() if line.strip()]
         self.assertIn(str(wt), candidates)
@@ -193,7 +193,7 @@ class IdentifyCandidatesTest(unittest.TestCase):
         # fresh (simulating worktree-metadata-only activity).
         os.utime(wt / ".git", None)
 
-        result = _call("identify_candidates", str(repo), "14")
+        result = _call("identify_candidates", str(repo), "20160")
         self.assertEqual(result.returncode, 0, result.stderr)
         candidates = [line for line in result.stdout.splitlines() if line.strip()]
         self.assertIn(str(wt), candidates)
@@ -327,7 +327,7 @@ class IntegrationRealGitRepoTest(unittest.TestCase):
         _git(repo, "worktree", "add", "-B", "wt-clean", str(wt), "main")
         _age_tree(wt, 30)
 
-        identify = _call("identify_candidates", str(repo), "14")
+        identify = _call("identify_candidates", str(repo), "20160")
         self.assertEqual(identify.returncode, 0, identify.stderr)
         candidates = [line for line in identify.stdout.splitlines() if line.strip()]
         self.assertIn(str(wt), candidates)

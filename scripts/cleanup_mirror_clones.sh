@@ -47,6 +47,7 @@ DRY_RUN=true
 # NTFS) as <name>-<sha>.tar.zst instead of destroying it, and remove the source
 # only after the archive verifies when read back FROM DIR.
 ARCHIVE_TO=""
+REGISTRY_READER_IMAGE=""
 # --archive-relaxed-content-gates: with --archive-to, stop treating the gates
 # whose only purpose is to prove the content exists elsewhere (dirty, untracked,
 # hidden state, stash, unpushed refs) as preservation gates — the tar IS the
@@ -107,6 +108,11 @@ Options:
   --max-depth N      Maximum find depth of a candidate's .git entry below a
                      root (default 3, i.e. root/<a>/<b>/.git;
                      env DISK_MAGICIAN_MIRROR_CLONE_MAX_DEPTH).
+  --registry-reader-image sha256:<64hex>
+                     On Linux, use this pre-existing pinned image only as a
+                     read-only fixed-find fallback for registry discovery
+                     beneath the registered active Scratch root. C14 still
+                     gates every preview/removal; archive options are disabled.
   --archive-to DIR   Archive each eligible clone to DIR/<name>-<sha>.tar.zst and
                      remove the source ONLY after the archive verifies when read
                      back from DIR. DIR must be an existing directory outside
@@ -151,6 +157,11 @@ while [[ $# -gt 0 ]]; do
     --max-depth)
       [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { echo "Error: --max-depth requires an integer" >&2; exit 2; }
       MAX_DEPTH="$2"; shift 2 ;;
+    --registry-reader-image)
+      [[ $# -ge 2 && "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+        echo "Error: --registry-reader-image requires sha256:<64 lowercase hex>" >&2; exit 2;
+      }
+      REGISTRY_READER_IMAGE="$2"; shift 2 ;;
     --archive-to)
       [[ $# -ge 2 && -n "$2" ]] || { echo "Error: --archive-to requires a directory" >&2; exit 2; }
       ARCHIVE_TO="${2%/}"; shift 2 ;;
@@ -168,6 +179,21 @@ MAX_KB=$(( MAX_GIB * 1024 * 1024 ))
 [[ "$MAX_DEPTH" =~ ^[0-9]+$ ]] || MAX_DEPTH=3
 MAX_DEPTH=$((10#$MAX_DEPTH))
 (( MAX_DEPTH >= 1 )) || MAX_DEPTH=1
+
+if [[ -n "$REGISTRY_READER_IMAGE" ]]; then
+  [[ "$(uname -s 2>/dev/null || true)" == Linux ]] || {
+    echo "Error: --registry-reader-image is supported only on Linux" >&2; exit 2;
+  }
+  if [[ -n "$ARCHIVE_TO" || "$RELAX_CONTENT_GATES" == true ]]; then
+    echo "Error: registry reader mode is incompatible with archive options" >&2
+    exit 2
+  fi
+  # This mode is the only clone-removal route that receives a filesystem view
+  # from a privileged directory reader; load the shared C14 remover here and
+  # use it for both the preview verdict and any approved removal.
+  # shellcheck source=scripts/lib/quarantine.sh
+  source "$SCRIPT_DIR/lib/quarantine.sh"
+fi
 
 log() { printf '%s\n' "$*"; }
 dry_prefix() { [[ "$DRY_RUN" == true ]] && printf 'DRY RUN: ' || true; }
@@ -271,34 +297,154 @@ done < <(
 
 REGISTRY_INDEX="$RUN_TMP/registered-worktrees.txt"
 REGISTRY_COMPLETE=true
+
+registered_scratch_root() {
+  local diskm path
+  diskm="$(type -P diskm 2>/dev/null)" || return 1
+  path="$("$diskm" volume path scratch 2>/dev/null)" || return 1
+  [[ -n "$path" && "$path" != / && "$path" == /* && "$path" != *$'\n'* &&
+    "$path" != *$'\r'* && -d "$path" && ! -L "$path" ]] || return 1
+  (cd "$path" 2>/dev/null && pwd -P)
+}
+
+registry_reader_docker() {
+  local limit="$1" timeout_bin docker_bin
+  shift
+  timeout_bin="$(type -P timeout 2>/dev/null)" || { log "registry reader timeout utility unavailable"; return 1; }
+  docker_bin="$(type -P docker 2>/dev/null)" || { log "registry reader Docker client unavailable"; return 1; }
+  env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+    "$timeout_bin" --signal=TERM --kill-after=5s "$limit" \
+    "$docker_bin" --host unix:///var/run/docker.sock "$@"
+}
+
+registry_reader_validate_paths() {
+  local root="$1" raw="$2" output="$3" path rel host canonical last_byte
+  : >"$output" || return 1
+  if [[ -s "$raw" ]]; then
+    last_byte="$(tail -c 1 "$raw" | od -An -t u1 | tr -d '[:space:]')" || return 1
+    [[ "$last_byte" == 0 ]] || return 1
+  fi
+  while IFS= read -r -d '' path; do
+    [[ "$path" == /registry-root/* && "$path" != *$'\n'* && "$path" != *$'\r'* ]] || return 1
+    rel="${path#/registry-root/}"
+    [[ -n "$rel" && "$rel" != /* && "$rel" == */.git/worktrees ]] || return 1
+    case "/$rel/" in *"//"*|*"/./"*|*"/../"*) return 1 ;; esac
+    host="$root/$rel"
+    [[ "$host" == "$root/"* && -d "$host" && ! -L "$host" ]] || return 1
+    canonical="$(cd "$host" 2>/dev/null && pwd -P)" || return 1
+    [[ "$canonical" == "$root/"* && "$canonical" == "$host" ]] || return 1
+    printf '%s\0' "$host" >>"$output" || return 1
+  done <"$raw"
+}
+
+registry_reader_admins() {
+  local root="$1" output="$2" scratch_root image_id mount_arg raw="$RUN_TMP/reader.$$.out" \
+    err="$RUN_TMP/reader.$$.err" validated="$RUN_TMP/reader.$$.validated"
+  scratch_root="$(registered_scratch_root)" || { log "registry reader unavailable: active Scratch root is unverified"; return 1; }
+  case "$root/" in
+    "$scratch_root/"*) ;;
+    *) log "registry reader refused non-Scratch root: $root"; return 1 ;;
+  esac
+  case "$root" in *$'\n'*|*$'\r'*|*','*) log "registry reader refused unmountable root path"; return 1 ;; esac
+
+  if ! registry_reader_docker 20s image inspect --format '{{.Id}}' "$REGISTRY_READER_IMAGE" \
+      >"$RUN_TMP/reader.$$.image" 2>"$err" || [[ -s "$err" ]]; then
+    log "registry reader image unavailable locally or inspect timed out"
+    return 1
+  fi
+  image_id="$(<"$RUN_TMP/reader.$$.image")"
+  [[ "$image_id" == "$REGISTRY_READER_IMAGE" ]] || { log "registry reader image digest mismatch"; return 1; }
+
+  mount_arg="type=bind,src=$root,dst=/registry-root,readonly"
+  # The in-container timeout bounds find even if the host client loses its
+  # connection. The outer timeout bounds that client; --rm removes the reader
+  # container when its fixed command exits.
+  if ! registry_reader_docker 120s run --rm --pull=never --network=none --read-only \
+      --security-opt=no-new-privileges:true --cap-drop=ALL --cap-add=DAC_READ_SEARCH \
+      --user=0:0 --memory=128m --memory-swap=128m --pids-limit=32 --cpus=0.5 \
+      --mount="$mount_arg" --entrypoint=/usr/bin/timeout "$REGISTRY_READER_IMAGE" \
+      --signal=TERM --kill-after=5s 90s /usr/bin/find \
+      /registry-root -maxdepth $((MAX_DEPTH + 2)) -type d -path '*/.git/worktrees' -print0 \
+      >"$raw" 2>"$err" || [[ -s "$err" ]]; then
+    log "registry reader Docker/find failed or returned diagnostics"
+    return 1
+  fi
+  if ! registry_reader_validate_paths "$root" "$raw" "$validated"; then
+    log "registry reader returned malformed or out-of-root paths"
+    return 1
+  fi
+  cat "$validated" >"$output" || return 1
+}
+
 build_registry_index() {
-  local root wtadmin pointer path
+  local root wtadmin pointer path find_err pointer_err pointer_path canonical
   : >"$REGISTRY_INDEX" || { REGISTRY_COMPLETE=false; return 0; }
   for root in ${REGISTRY_ROOTS[@]+"${REGISTRY_ROOTS[@]}"}; do
     [[ -d "$root" ]] || continue
     # The find result is staged in a file: an rc read inside a process
     # substitution could not clear REGISTRY_COMPLETE in this shell.
+    find_err="$RUN_TMP/admins.err.$$"
     if ! "$FIND_BIN" "$root" -maxdepth $((MAX_DEPTH + 2)) -type d -path '*/.git/worktrees' \
-        -print0 2>/dev/null >"$RUN_TMP/admins.$$"; then
-      REGISTRY_COMPLETE=false
+        -print0 >"$RUN_TMP/admins.$$" 2>"$find_err" || [[ -s "$find_err" ]]; then
       rm -f "$RUN_TMP/admins.$$"
-      continue
+      if [[ -z "$REGISTRY_READER_IMAGE" ]] || ! registry_reader_admins "$root" "$RUN_TMP/admins.$$"; then
+        REGISTRY_COMPLETE=false
+        rm -f "$RUN_TMP/admins.$$"
+        continue
+      fi
     fi
     while IFS= read -r -d '' wtadmin; do
+      [[ "$wtadmin" == "$root/"* && -d "$wtadmin" && ! -L "$wtadmin" ]] || {
+        REGISTRY_COMPLETE=false
+        continue
+      }
+      canonical="$(cd "$wtadmin" 2>/dev/null && pwd -P)" || { REGISTRY_COMPLETE=false; continue; }
+      [[ "$canonical" == "$root/"* && "$canonical" == "$wtadmin" ]] || { REGISTRY_COMPLETE=false; continue; }
+      pointer_err="$RUN_TMP/gitdirs.err.$$"
       if ! "$FIND_BIN" "$wtadmin" -mindepth 2 -maxdepth 2 -name gitdir -type f -print0 \
-        2>/dev/null >"$RUN_TMP/gitdirs.$$"; then
+        >"$RUN_TMP/gitdirs.$$" 2>"$pointer_err" || [[ -s "$pointer_err" ]]; then
         REGISTRY_COMPLETE=false
         continue
       fi
       while IFS= read -r -d '' pointer; do
-        if ! path="$(head -c 4096 "$pointer" 2>/dev/null)"; then
+        [[ "$pointer" == "$wtadmin/"* && -f "$pointer" && ! -L "$pointer" ]] || {
           REGISTRY_COMPLETE=false
           continue
+        }
+        pointer_path="$RUN_TMP/gitdir-path.$$"
+        if ! "$PYTHON" - "$pointer" "$pointer_path" <<'PYREGISTRYPOINTER' 2>/dev/null
+import sys
+source, target = sys.argv[1:]
+try:
+    with open(source, "rb") as f:
+        raw = f.read(4097)
+    if (len(raw) > 4096 or b"\0" in raw or raw.count(b"\n") != 1 or
+            not raw.endswith(b"\n")):
+        raise ValueError("invalid gitdir pointer bytes")
+    path = raw[:-1]
+    if (not path.startswith(b"/") or path == b"/" or b"\r" in path or
+            any(part in (b"", b".", b"..") for part in path.split(b"/")[1:])):
+        raise ValueError("invalid gitdir pointer path")
+    with open(target, "wb") as f:
+        f.write(path + b"\0")
+except Exception:
+    sys.exit(1)
+PYREGISTRYPOINTER
+        then
+          REGISTRY_COMPLETE=false
+          rm -f "$pointer_path"
+          continue
         fi
-        path="${path%$'\n'}"
+        if ! IFS= read -r -d '' path <"$pointer_path"; then
+          REGISTRY_COMPLETE=false
+          rm -f "$pointer_path"
+          continue
+        fi
+        rm -f "$pointer_path"
         case "$path" in
           /*/.git) printf '%s\n' "${path%/.git}" >>"$REGISTRY_INDEX" ;;
           /*) printf '%s\n' "$path" >>"$REGISTRY_INDEX" ;;
+          *) REGISTRY_COMPLETE=false ;;
         esac
       done <"$RUN_TMP/gitdirs.$$"
       rm -f "$RUN_TMP/gitdirs.$$"
@@ -313,12 +459,40 @@ build_registry_index
 # registry_hit <path>: prints "registered-worktree" when <path> is a registered
 # worktree path, contains one, or lives inside one.
 registry_hit() {
+  local candidate="$1"
   [[ -s "$REGISTRY_INDEX" ]] || return 1
-  awk -v c="$1" '
+  [[ "$candidate" != *$'\n'* && "$candidate" != *$'\r'* ]] || {
+    echo "registry-path-unrepresentable"
+    return 0
+  }
+  # Do not pass paths with `-v`: awk decodes backslash escapes in assignments.
+  REGISTRY_HIT_PATH="$candidate" awk '
+    BEGIN { c = ENVIRON["REGISTRY_HIT_PATH"] }
     { p = $0
       if (p == "" ) next
       if (p == c || index(p, c "/") == 1 || index(c, p "/") == 1) { hit = 1; exit } }
     END { if (hit) print "registered-worktree" }' "$REGISTRY_INDEX"
+}
+
+# reader_clone_verdict <clone>: the mounted reader supplies no content decision.
+# The canonical content-mtime helper protects recent or unreadable trees, with
+# the machine's safety floor allowed only to raise seven days; C14 then decides
+# whether the clone and its leases are actually removable.
+reader_clone_verdict() {
+  local dir="$1" min_days rc=0 verdict
+  min_days="$(safety_min_stale_days 2>/dev/null)" || min_days=7
+  [[ "$min_days" =~ ^[0-9]+$ ]] || min_days=7
+  (( min_days >= 7 )) || min_days=7
+  declare -F worktree_is_recently_active >/dev/null || { echo c14:check-failed; return 0; }
+  worktree_is_recently_active "$dir" "$min_days" || rc=$?
+  if (( rc == 0 )); then
+    echo recent-activity
+    return 0
+  fi
+  (( rc == 1 )) || { echo c14:recency-unmeasurable; return 0; }
+  declare -F artifact_removal_verdict >/dev/null || { echo c14:check-failed; return 0; }
+  verdict="$(artifact_removal_verdict "$dir" 2>/dev/null)" || verdict=kept:check-failed
+  [[ "$verdict" == remove ]] || echo "c14:$verdict"
 }
 
 # ── Live-cwd snapshot (one lsof observation per run) ───────────────────────
@@ -377,6 +551,11 @@ candidate_reason() {
   [[ "$REGISTRY_COMPLETE" == true ]] || { echo "registry-incomplete"; return 0; }
   reason="$(registry_hit "$dir")"
   [[ -z "$reason" ]] || { echo "$reason"; return 0; }
+
+  if [[ -n "$REGISTRY_READER_IMAGE" ]]; then
+    reason="$(reader_clone_verdict "$dir")"
+    [[ -z "$reason" ]] || { echo "$reason"; return 0; }
+  fi
 
   local status_porcelain
   if ! status_porcelain="$(GIT_OPTIONAL_LOCKS=0 git -C "$dir" status --porcelain \
@@ -470,7 +649,14 @@ ntfs_safe_name() {
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 file_dev_ino() {
-  stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null || true
+  local identity
+  if identity="$(stat -c '%d:%i' "$1" 2>/dev/null)" && [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
+    printf '%s\n' "$identity"
+  elif identity="$(stat -f '%d:%i' "$1" 2>/dev/null)" && [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
+    printf '%s\n' "$identity"
+  else
+    return 1
+  fi
 }
 
 # archive_target_available <basename>: rc 1 when an existing archive entry
@@ -643,7 +829,12 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     # --archive-to with --clean would otherwise need a live re-clone to recover;
     # record what the clone was so the archive name and log line stay truthful.
     dir_sha="$(git -C "$dir" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
-    dir_dev_ino="$(file_dev_ino "$dir")"
+    dir_dev_ino=""
+    if [[ -n "$ARCHIVE_TO" ]] && ! dir_dev_ino="$(file_dev_ino "$dir")"; then
+      printf '%s\n' "archive-identity-unavailable" >>"$REASONS_FILE"
+      log "KEEP [archive-identity-unavailable] $dir (source identity could not be verified)"
+      continue
+    fi
     ELIGIBLE=$(( ELIGIBLE + 1 ))
 
     if (( MAX_KB > 0 )) && (( REAL_KB + dir_kb > MAX_KB )); then
@@ -676,8 +867,9 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
 
       post_reason="$(candidate_reason "$dir")"
       if [[ -z "$post_reason" ]]; then
-        current_dev_ino="$(file_dev_ino "$dir")"
-        if [[ -n "$dir_dev_ino" && "$current_dev_ino" != "$dir_dev_ino" ]]; then
+        if ! current_dev_ino="$(file_dev_ino "$dir")"; then
+          post_reason="identity-unavailable"
+        elif [[ "$current_dev_ino" != "$dir_dev_ino" ]]; then
           post_reason="identity-changed"
         fi
       fi
@@ -716,7 +908,20 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
       continue
     fi
 
-    if DM_DELETION_LOGGED=1 rm_logged "$dir" && [[ ! -e "$dir" ]]; then
+    if [[ -n "$REGISTRY_READER_IMAGE" ]]; then
+      c14_removal="$(quarantine_remove "$dir" 2>/dev/null)" || c14_removal=kept:check-failed
+      if [[ "$c14_removal" == removed:* && ! -e "$dir" ]]; then
+        log "C14 $c14_removal $dir ($(( dir_kb / 1024 )) MB, origin=$origin)"
+        REAL_KB=$(( REAL_KB + dir_kb ))
+        REMOVED=$(( REMOVED + 1 ))
+        REMOVED_KB=$(( REMOVED_KB + dir_kb ))
+      else
+        reason="c14:$c14_removal"
+        printf '%s\n' "$reason" >>"$REASONS_FILE"
+        ELIGIBLE=$(( ELIGIBLE - 1 ))
+        log "KEEP [$reason] $dir"
+      fi
+    elif DM_DELETION_LOGGED=1 rm_logged "$dir" && [[ ! -e "$dir" ]]; then
       deletion_log_removal "$dir" "$dir_kb" remove "mirror-clone origin=$origin"
       log "removed $dir ($(( dir_kb / 1024 )) MB, origin=$origin)"
       REAL_KB=$(( REAL_KB + dir_kb ))

@@ -65,6 +65,11 @@ class InventoryPackageTests(unittest.TestCase):
 
                 self.assertEqual(wheel.read("disk_magician/cli.py"), (REPO / "src/disk_magician/cli.py").read_bytes())
                 self.assertIn("disk_magician/scripts/directory_inventory.py", names)
+                # Every runtime helper under scripts/lib ships: a missing .py made the deployed
+                # scratch_budget_artifact_children helper absent from 2026-11-09 to 2026-11-12.
+                lib_files = {f"disk_magician/scripts/lib/{p.name}" for p in (REPO / "scripts/lib").iterdir()
+                             if p.is_file() and p.suffix in {".sh", ".py"}}
+                self.assertTrue(lib_files <= names, sorted(lib_files - names))
                 expected_wheel_systemd = {f"disk_magician/{rel}" for rel in EXPECTED_SYSTEMD}
                 self.assertTrue(expected_wheel_systemd <= names, expected_wheel_systemd - names)
                 entry_points_files = [n for n in names if n.endswith("/entry_points.txt")]

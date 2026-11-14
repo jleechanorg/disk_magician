@@ -129,7 +129,7 @@ wrh_ao_skip_reason() {
 # wrh_removal_verdict <real_path> <recency_spec> [pushed_scope]
 # Pure verdict: prints "remove" or "kept:<token>" and always returns rc 0.
 # It NEVER deletes anything — the caller (wrh_main or the reaper) acts on the
-# token. recency_spec is days:N or minutes:N. pushed_scope is all-remotes
+# token. recency_spec is hours:N, days:N or minutes:N. pushed_scope is all-remotes
 # (the hook's historical default), origin, or origin-or-merged-pr (origin
 # containment OR a gh-verified merged PR head via worktree_merged_pr.sh;
 # fails closed when that library is not loaded). Check order matches the
@@ -154,6 +154,8 @@ wrh_removal_verdict() {
     unit="${spec%%:*}"
     amount="${spec#*:}"
     case "$unit" in
+        hours)
+            worktree_is_recently_active_minutes "$real" "$(( amount * 60 ))" && { printf 'kept:recent-activity\n'; return 0; } ;;
         days)
             worktree_is_recently_active "$real" "$amount" && { printf 'kept:recent-activity\n'; return 0; } ;;
         minutes)
@@ -223,7 +225,7 @@ wrh_remove_now() {
     main="$(wtn_main_repo "$real")" || return 1
     branch="$(git -C "$real" symbolic-ref -q --short HEAD 2>/dev/null)"
     dkb="$(deletion_size_kb "$real")"
-    if [[ ${WRH_RECENCY_SPEC:-days:7} == minutes:* && -z ${DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS:-} ]]; then
+    if [[ ${WRH_RECENCY_SPEC:-hours:48} == minutes:* && -z ${DISK_MAGICIAN_WORKTREE_RESTORE_RECEIPTS:-} ]]; then
         wrh_log "kept $display: minute recency override requires durable restore receipt"
         return 1
     fi
@@ -278,23 +280,28 @@ print(v)
     real="$(cd "$p" 2>/dev/null && pwd -P)" || { wrh_log "kept $p: not a directory"; return 0; }
     main="$(wtn_main_repo "$real")" || { wrh_log "kept $p: not a git repo"; return 0; }
 
-    # Idle-floor override (operator decision 2026-10-20): DISK_MAGICIAN_REMOVE_HOOK_RECENCY=days:N (N>=7)
-    # or minutes:N (N>=60). Anything else, including a lower floor, falls back to days:7.
-    local recency_spec=days:7 env_spec="${DISK_MAGICIAN_REMOVE_HOOK_RECENCY:-}"
+    # Default floor 48 h (operator decision 2026-11-12, was days:7). Idle-floor override
+    # (operator decision 2026-10-20): DISK_MAGICIAN_REMOVE_HOOK_RECENCY=days:N (N>=7)
+    # or minutes:N (N>=60). Anything else, including a lower floor, falls back to hours:48.
+    local recency_spec=hours:48 env_spec="${DISK_MAGICIAN_REMOVE_HOOK_RECENCY:-}"
     if [[ "$env_spec" =~ ^days:([0-9]{1,4})$ && "${BASH_REMATCH[1]}" -ge 7 ]] ||
        [[ "$env_spec" =~ ^minutes:([0-9]{1,7})$ && "${BASH_REMATCH[1]}" -ge 60 ]]; then
         recency_spec="$env_spec"
     fi
-    if [[ "$recency_spec" != days:7 ]]; then
+    if [[ "$recency_spec" != hours:48 ]]; then
         # Audit-first: a shorter floor is used only if its record was actually written.
         local sdir="$HOME/.disk_magician_state"
         if ! { mkdir -p "$sdir" && printf '%s worktree-remove-hook: recency override active: %s (%s)\n' \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$recency_spec" "$p" >>"$sdir/worktree_guard.log"; } 2>/dev/null; then
-            echo "worktree-remove-hook: cannot record recency override $recency_spec; using days:7" >&2
-            recency_spec=days:7
+            echo "worktree-remove-hook: cannot record recency override $recency_spec; using hours:48" >&2
+            recency_spec=hours:48
         fi
     fi
-    [[ "$recency_spec" == days:* ]] && min_idle=$(( ${recency_spec#days:} * 1440 )) || min_idle=${recency_spec#minutes:}
+    case "$recency_spec" in
+        days:*) min_idle=$(( ${recency_spec#days:} * 1440 )) ;;
+        hours:*) min_idle=$(( ${recency_spec#hours:} * 60 )) ;;
+        *) min_idle=${recency_spec#minutes:} ;;
+    esac
     WRH_RECENCY_SPEC=$recency_spec
     verdict="$(wrh_removal_verdict "$real" "$recency_spec")"
     case "$verdict" in
