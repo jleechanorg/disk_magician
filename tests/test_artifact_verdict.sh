@@ -598,7 +598,7 @@ assert_eq "$(eph "$PT/pr-sec")" kept:secret-like ".env in an E3 dir at 30 d"
 assert_eq "$(eph "$PT/pr-key")" kept:secret-like "id_ed25519 in an E3 dir at 30 d"
 mkdir -p "$PT/pr-review-only.pem" && printf 'synthetic sentinel\n' >"$PT/pr-review-only.pem/payload"
 age "$PT/pr-review-only.pem" 43200
-assert_eq "$(eph "$PT/pr-review-only.pem")" kept:secret-like "secret-like root name in an E3 directory"
+assert_eq "$(eph "$PT/pr-review-only.pem")" remove "a secret-like suffix on a directory is not a secret file"
 printf 'synthetic sentinel\n' >"$PT/review-only.pem"
 root_file_inventory="$TMPROOT/root-secret-file-inventory.json"
 assert_eq "$(python3 "$PROBE" inventory "$PT/review-only.pem" "$root_file_inventory")" ok "inventory of a regular-file candidate"

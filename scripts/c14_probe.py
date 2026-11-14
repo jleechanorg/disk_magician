@@ -1037,14 +1037,19 @@ def _public_ca_bundle(n):
 _DISCOVERY_DOC_RE = re.compile(r"^[a-z][a-z0-9]*\.[v0-9][a-z0-9]*\.json$")
 
 def _google_discovery_doc(parts, n):
-    """True only for vendored googleapiclient discovery JSON under dependency dirs."""
-    if len(parts) < 2:
+    """True only for public service metadata in googleapiclient discovery JSON."""
+    if len(parts) < 3:
+        return False
+    components = {c.lower() for c in parts[:-3]}
+    if "googleapiclient" not in components:
         return False
     if parts[-2].lower() != "documents" or parts[-3].lower() != "discovery_cache":
         return False
     if not _DISCOVERY_DOC_RE.fullmatch(n):
         return False
-    return bool(_DEP_DIRS & {c.lower() for c in parts[:-3]})
+    if n.split(".", 1)[0] in _SECRET_EXACT:
+        return False
+    return bool(_DEP_DIRS & components)
 
 def exempt_name(path):
     """Single owner of the secret-name exemption (relative path; used by every secret gate).
