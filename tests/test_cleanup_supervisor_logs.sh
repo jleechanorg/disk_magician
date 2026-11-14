@@ -6,7 +6,7 @@
 # not by invoking scripts/cleanup_supervisor_logs.sh directly. The dispatcher
 # must forward arguments and exit status, and the script itself must keep the
 # active log, stderr log, and state file while removing only timestamped
-# rotations older than its 7-day threshold (safety rules always win).
+# rotations older than the shared 48-hour threshold (safety rules always win).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
