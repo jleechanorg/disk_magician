@@ -384,6 +384,25 @@ out="$(RUN_PATH="$SHIM_DIR:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" legacy_bud
 [[ "$rc" == 75 ]] && ok "replaced artifact child fails closed with rc=75" || bad "replaced artifact child fails closed with rc=75" "rc=$rc out=$out"
 check "replaced artifact child emits path-changed" "deferred:artifact-discovery-path-changed" "$out"
 
+echo "Test 14: DISK_MAGICIAN_SCRATCH_DETAIL=off skips detail lines in manual mode only"
+use_root
+make_tree old-detail 3000
+make_tree pressure 45
+out_off="$(legacy_budget env DISK_MAGICIAN_SCRATCH_DETAIL=off bash "$SCRIPT" --dry-run --budget-pct 1 2>&1)"; rc=$?
+[[ "$rc" == 0 ]] && ok "manual detail=off exits 0" || bad "manual detail=off exits 0" "rc=$rc"
+[[ "$out_off" != *"detail:"* ]] && ok "manual detail=off skips detail lines" || bad "manual detail=off skips detail lines" "$out_off"
+FAKE_AUTO_DISKM="$T/fake-auto-diskm"
+cat >"$FAKE_AUTO_DISKM" <<'FAKEAUTO'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "volume path"|"volume verify-mount") printf '%s\n' "$FAKE_SCRATCH_ROOT" ;;
+  *) exit 2 ;;
+esac
+FAKEAUTO
+chmod +x "$FAKE_AUTO_DISKM"
+out_auto="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="" DISK_MAGICIAN_DISKM_BIN="$FAKE_AUTO_DISKM" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 DISK_MAGICIAN_SCRATCH_DETAIL=off bash "$SCRIPT" --dry-run 2>&1)"
+[[ "$out_auto" == *"detail-summary:"* ]] && ok "automatic mode ignores detail=off" || bad "automatic mode ignores detail=off" "$out_auto"
+
 echo
 echo "test_scratch_prune_lru_budget: $PASS passed, $FAIL failed"
 [[ "$FAIL" == 0 ]]
