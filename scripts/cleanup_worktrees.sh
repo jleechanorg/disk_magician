@@ -48,12 +48,56 @@ MANUAL_BASE_STATUS=""
 MANUAL_SNAPSHOT_HEAD=""
 MANUAL_SNAPSHOT_STATUS=""
 MANUAL_RECOVERY_REF=""
+GOVERN_RUN_ID=""
+GOVERN_FREE_BEFORE=""
+GOVERN_RECEIPT_CLOSED=0
+CW_REGISTRY_LOCK_HELD=0
+CW_CURRENT_INV=""
 # Cache allocation is optional: disk-pressure failures retain the existing
 # per-row lookup and lsof fail-closed behavior rather than aborting the run.
 RUN_TMP="$(mktemp -d)" || RUN_TMP=""
-if [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]]; then
-    trap 'rm -rf "$RUN_TMP"' EXIT
-fi
+govern_temp_cleanup() {
+    if [[ -n "${CW_CURRENT_INV:-}" ]]; then
+        rm -f "$CW_CURRENT_INV" 2>/dev/null || true
+        CW_CURRENT_INV=""
+    fi
+    [[ -n "${RUN_TMP:-}" && -d "$RUN_TMP" ]] || return 0
+    python3 -c 'import os,shutil,sys; p=sys.argv[1]; p and os.path.isabs(p) and p != "/" and shutil.rmtree(p, ignore_errors=True)' "$RUN_TMP" 2>/dev/null || true
+}
+govern_receipt_finish() {
+    [[ -n "${GOVERN_RUN_ID:-}" && "${GOVERN_RECEIPT_CLOSED:-0}" == 0 ]] || return 0
+    GOVERN_RECEIPT_CLOSED=1
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
+      --outcome "${GOVERN_OUTCOME:-error}" --reason "${GOVERN_REASON:-early_exit}" \
+      --candidates "{\"removed_count\":${GOVERN_REMOVED:-0},\"deferred_count\":${ACT_DEFERRED_COUNT:-0},\"interrupted_count\":${ACT_INTERRUPTED_COUNT:-0}}" \
+      --postcondition "{\"df_delta_bytes\":null,\"freed_bytes\":null,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":null}" >/dev/null 2>&1 || true
+}
+cleanup_worktrees_release_leases() {
+    if [[ "${CW_REGISTRY_LOCK_HELD:-0}" == 1 ]]; then
+        CW_REGISTRY_LOCK_HELD=0
+        lease_registry_mutation_lock_exit || true
+    fi
+    _lease_scope_cleanup 2>/dev/null || true
+}
+cleanup_worktrees_exit_trap() {
+    local rc="$1" sig="${2:-0}"
+    trap - EXIT INT TERM
+    if (( sig != 0 )); then
+        rc=$((128 + sig))
+        if [[ -z "${GOVERN_OUTCOME:-}" ]]; then
+            GOVERN_OUTCOME="timeout"
+            GOVERN_REASON="interrupted; signal=${sig}; exit=${rc}"
+        fi
+        ACT_INTERRUPTED_COUNT=$(( ${ACT_INTERRUPTED_COUNT:-0} + 1 ))
+    fi
+    cleanup_worktrees_release_leases
+    govern_receipt_finish
+    govern_temp_cleanup
+    exit "$rc"
+}
+trap 'cleanup_worktrees_exit_trap $? 0' EXIT
+trap 'cleanup_worktrees_exit_trap $? 2' INT
+trap 'cleanup_worktrees_exit_trap $? 15' TERM
 
 usage() {
   cat <<'EOF'
@@ -259,23 +303,10 @@ if [[ -n "$ACT_CURSOR" ]]; then
     GOVERN_FREE_BEFORE="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
     GOVERN_RUN_ID="$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job cleanup_worktrees --trigger govern)" || exit 3
 fi
-# A begun govern receipt must always reach a terminal state, including an early
-# checkpoint/cursor error (exit 3) that bypasses the normal finish block below.
-# Reuse the same job_receipt machinery rather than a second framework.
-GOVERN_RECEIPT_CLOSED=0
-govern_receipt_finish() {
-    [[ -n "$GOVERN_RUN_ID" && "$GOVERN_RECEIPT_CLOSED" == 0 ]] || return 0
-    GOVERN_RECEIPT_CLOSED=1
-    python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
-      --outcome "${GOVERN_OUTCOME:-error}" --reason "${GOVERN_REASON:-early_exit}" \
-      --candidates "{\"removed_count\":${GOVERN_REMOVED:-0},\"deferred_count\":$ACT_DEFERRED_COUNT,\"interrupted_count\":$ACT_INTERRUPTED_COUNT}" \
-      --postcondition "{\"df_delta_bytes\":null,\"freed_bytes\":null,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":null}" >/dev/null 2>&1 || true
-}
-govern_temp_cleanup() { [[ -z "$RUN_TMP" ]] || rm -rf "$RUN_TMP"; }
-trap 'govern_receipt_finish; govern_temp_cleanup' EXIT
 
 act_candidate_begin() {
     local path="$1" index items_before
+    [[ -z "${_lease_scope_signals:-}" ]] || return 130
     [[ -n "$ACT_CURSOR" ]] || return 0
     index="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c '
 import json,sys
@@ -309,8 +340,11 @@ print(json.dumps(items,separators=(",",":")))
     fi
     ACT_CURRENT_INDEX="$index"
     if [[ -n "${DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK:-}" ]]; then
-        "$DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK" "$path"
+        "$DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK" "$path" || {
+            [[ -z "${_lease_scope_signals:-}" ]] || return 130
+        }
     fi
+    [[ -z "${_lease_scope_signals:-}" ]] || return 130
     return 0
 }
 
@@ -968,6 +1002,10 @@ _process_repo_local_worktrees() {
     local wt_path="" head_sha="" branch="" locked=0 prunable=0
     flush_block() {
         [[ -n "$wt_path" ]] || return 0
+        if [[ -n "${_lease_scope_signals:-}" ]]; then
+            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+            return 130
+        fi
 
         local abs_path
         abs_path=$(expand_path "$wt_path")
@@ -1045,7 +1083,11 @@ _process_repo_local_worktrees() {
                 return 0
             fi
         else
-            reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
+            reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")" || reason="check-failed"
+        fi
+        if [[ -n "${_lease_scope_signals:-}" ]]; then
+            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+            return 130
         fi
         size_fmt='-'
         age_label='-'
@@ -1146,12 +1188,21 @@ _process_repo_local_worktrees() {
                 # that receipt. No fresh inventory may reauthorize removal.
                 local cw_c14_inv cw_c14_verdict cw_removed=0 cw_lock_tries=600 cw_lock_ok=0
                 cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
+                CW_CURRENT_INV="$cw_c14_inv"
                 if [[ -n "$cw_c14_inv" ]]; then
                     while (( cw_lock_tries-- > 0 )); do
-                        if lease_registry_mutation_lock_enter; then cw_lock_ok=1; break; fi
+                        [[ -z "${_lease_scope_signals:-}" ]] || break
+                        if lease_registry_mutation_lock_enter; then cw_lock_ok=1; CW_REGISTRY_LOCK_HELD=1; break; fi
+                        [[ -z "${_lease_scope_signals:-}" ]] || break
                         sleep 0.1 2>/dev/null || sleep 1
                     done
                     if (( cw_lock_ok == 0 )); then
+                        if [[ -n "${_lease_scope_signals:-}" ]]; then
+                            rm -f "$cw_c14_inv"
+                            CW_CURRENT_INV=""
+                            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                            return 130
+                        fi
                         cw_c14_verdict=kept:lease-busy
                     else
                     # T3 context: this is the sanctioned cleanup_worktrees.sh
@@ -1172,15 +1223,22 @@ _process_repo_local_worktrees() {
                         fi
                     fi
                     WRH_REASON=""
+                    CW_REGISTRY_LOCK_HELD=0
                     lease_registry_mutation_lock_exit || true
                     fi
                     if [[ "$cw_removed" == 1 ]]; then
                         rm -f "$cw_c14_inv"
+                        CW_CURRENT_INV=""
                         ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
                         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
                         REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
                     else
                         rm -f "$cw_c14_inv"
+                        CW_CURRENT_INV=""
+                        if [[ -n "${_lease_scope_signals:-}" ]]; then
+                            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                            return 130
+                        fi
                         # A deferred verdict is a completed visit for this pass
                         # (the candidate stays put and the cursor advances via
                         # act_candidate_done); a failed quarantine is kept.
@@ -1200,7 +1258,7 @@ _process_repo_local_worktrees() {
     }
 
     while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$ACT_STOP" == 0 ]] || break
+        [[ "$ACT_STOP" == 0 && -z "${_lease_scope_signals:-}" ]] || break
         if [[ -z "$line" ]]; then
             flush_block || return $?
             continue
@@ -1227,7 +1285,9 @@ _process_repo_local_worktrees() {
                 ;;
         esac
     done <<<"$porcelain"
-    if [[ "$ACT_STOP" == 0 ]]; then
+    if [[ -n "${_lease_scope_signals:-}" ]]; then
+        return 130
+    elif [[ "$ACT_STOP" == 0 ]]; then
         flush_block || return $?
     else
         # A cooperative deadline stop is a normal partial pass, not an error.

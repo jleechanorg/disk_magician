@@ -508,17 +508,58 @@ _reuse_lock_dead_pid() {
     return "$rc"
 }
 
-lease_reuse_lock_recover() {
-    local lease="$1" lock="$1.reuse-lock" gate="$1.reuse-lock.reclaim_gate" pid stamp
+_reuse_lock_dir_mtime() {
+    local dir="$1" mtime=""
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
+    if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+        mtime="$(stat -f %m "$dir" 2>/dev/null || true)"
+    else
+        mtime="$(stat -c %Y "$dir" 2>/dev/null || true)"
+    fi
+    [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$mtime"
+}
+
+_reuse_lock_is_stale() {
+    local lock="$1" pid="" stamp="" now mtime entry base
     [[ -d "$lock" && ! -L "$lock" ]] || return 1
-    pid="$(cat "$lock/pid" 2>/dev/null)"; stamp="$(cat "$lock/acquired_at" 2>/dev/null)"
-    [[ "$pid" =~ ^[1-9][0-9]*$ && "$stamp" =~ ^[0-9]+$ ]] || return 1
-    (( $(date +%s) - stamp > LEASE_REUSE_LOCK_TTL_SEC )) || return 1
-    _reuse_lock_dead_pid "$pid" || return 1
+    for entry in "$lock"/* "$lock"/.*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        base="${entry##*/}"
+        [[ "$base" == "." || "$base" == ".." || "$base" == "pid" || "$base" == "acquired_at" ]] || return 1
+    done
+    if [[ -e "$lock/pid" || -L "$lock/pid" ]]; then
+        [[ -f "$lock/pid" && ! -L "$lock/pid" ]] || return 1
+        pid="$(cat "$lock/pid" 2>/dev/null)" || pid=""
+    fi
+    if [[ -e "$lock/acquired_at" || -L "$lock/acquired_at" ]]; then
+        [[ -f "$lock/acquired_at" && ! -L "$lock/acquired_at" ]] || return 1
+        stamp="$(cat "$lock/acquired_at" 2>/dev/null)" || stamp=""
+    fi
+    [[ -z "$pid" || "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ -z "$stamp" || "$stamp" =~ ^[0-9]+$ ]] || return 1
+    now="$(date +%s)" || return 1
+    if [[ -n "$pid" && -n "$stamp" ]]; then
+        (( now - stamp > LEASE_REUSE_LOCK_TTL_SEC )) || return 1
+        _reuse_lock_dead_pid "$pid" || return 1
+        return 0
+    fi
+    mtime="$(_reuse_lock_dir_mtime "$lock")" || return 1
+    (( now - mtime > LEASE_REUSE_LOCK_TTL_SEC )) || return 1
+    if [[ -n "$stamp" ]]; then
+        (( now - stamp > LEASE_REUSE_LOCK_TTL_SEC )) || return 1
+    fi
+    if [[ -n "$pid" ]]; then
+        _reuse_lock_dead_pid "$pid" || return 1
+    fi
+    return 0
+}
+
+lease_reuse_lock_recover() {
+    local lock="$1.reuse-lock" gate="$1.reuse-lock.reclaim_gate"
+    _reuse_lock_is_stale "$lock" || return 1
     mkdir "$gate" 2>/dev/null || return 1
-    pid="$(cat "$lock/pid" 2>/dev/null)"; stamp="$(cat "$lock/acquired_at" 2>/dev/null)"
-    if [[ "$pid" =~ ^[1-9][0-9]*$ && "$stamp" =~ ^[0-9]+$ ]] &&
-        (( $(date +%s) - stamp > LEASE_REUSE_LOCK_TTL_SEC )) && _reuse_lock_dead_pid "$pid"; then
+    if _reuse_lock_is_stale "$lock"; then
         rm -f "$lock/pid" "$lock/acquired_at"
         rmdir "$lock" 2>/dev/null || { rmdir "$gate" 2>/dev/null; return 1; }
         rmdir "$gate" 2>/dev/null
