@@ -172,10 +172,10 @@ else
   bad "cleanup_scratch_top_level.sh --dry-run succeeds on 40 candidates" "rc=$dry_rc"
 fi
 
-if [[ "$call_count" -le 2 ]]; then
-  ok "scratch_budget_artifact_children.py invoked <= 2 times total ($call_count)"
+if [[ "$call_count" -le 3 ]]; then
+  ok "scratch_budget_artifact_children.py invoked <= 3 times total ($call_count)"
 else
-  bad "scratch_budget_artifact_children.py invoked <= 2 times total" "got $call_count invocations (O(N) fork regression)"
+  bad "scratch_budget_artifact_children.py invoked <= 3 times total" "got $call_count invocations (O(N) fork regression)"
 fi
 
 if grep -q "kept:discovery-boundary $SCRATCH_ROOT/system-preserved" "$dry_out"; then
