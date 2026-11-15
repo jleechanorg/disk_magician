@@ -348,6 +348,61 @@ count="$(printf '%s\n' "$out" | grep -c "^would-remove:.* $SCRATCH_ROOT/worldai_
 check "preview reports one unit rather than duplicates" "would_evict=1" "$out"
 kept worldai_frontend/build/old-unit
 
+echo "Test 13: vanished artifact child skips safely while non-dir replacement fails closed"
+use_root
+make_tree ephemeral/dist 600
+make_tree ephemeral/build 600
+make_tree pressure 45
+REAL_PY="$(command -v python3)"
+SHIM_DIR="$SANDBOX/pyshim"
+mkdir -p "$SHIM_DIR"
+cat >"$SHIM_DIR/python3" <<EOF
+#!/usr/bin/env bash
+"$REAL_PY" "\$@"
+_rc=\$?
+if [[ "\$*" == *"scratch_budget_artifact_children.py batch"* && \$_rc -eq 0 ]]; then
+  if [[ -n "\${VANISH_TARGET:-}" ]]; then
+    rm -rf "\$VANISH_TARGET"
+  fi
+  if [[ -n "\${FILE_REPLACE_TARGET:-}" ]]; then
+    rm -rf "\$FILE_REPLACE_TARGET"
+    printf 'not-a-dir\n' >"\$FILE_REPLACE_TARGET"
+  fi
+fi
+exit \$_rc
+EOF
+chmod +x "$SHIM_DIR/python3"
+out="$(RUN_PATH="$SHIM_DIR:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" legacy_budget env VANISH_TARGET="$SCRATCH_ROOT/ephemeral/dist" bash "$SCRIPT" --dry-run --budget-pct 1 2>&1)"; rc=$?
+[[ "$rc" == 0 ]] && ok "vanished artifact child does not abort batch (rc=0)" || bad "vanished artifact child does not abort batch" "rc=$rc out=$out"
+[[ "$out" != *"deferred:artifact-discovery-path-changed"* ]] && ok "vanished child does not emit path-changed" || bad "vanished child does not emit path-changed" "$out"
+check "surviving sibling artifact still previewed" "would-remove:" "$out"
+
+use_root
+make_tree ephemeral/dist 600
+make_tree pressure 45
+out="$(RUN_PATH="$SHIM_DIR:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" legacy_budget env FILE_REPLACE_TARGET="$SCRATCH_ROOT/ephemeral/dist" bash "$SCRIPT" --dry-run --budget-pct 1 2>&1)"; rc=$?
+[[ "$rc" == 75 ]] && ok "replaced artifact child fails closed with rc=75" || bad "replaced artifact child fails closed with rc=75" "rc=$rc out=$out"
+check "replaced artifact child emits path-changed" "deferred:artifact-discovery-path-changed" "$out"
+
+echo "Test 14: DISK_MAGICIAN_SCRATCH_DETAIL=off skips detail lines in manual mode only"
+use_root
+make_tree old-detail 3000
+make_tree pressure 45
+out_off="$(legacy_budget env DISK_MAGICIAN_SCRATCH_DETAIL=off bash "$SCRIPT" --dry-run --budget-pct 1 2>&1)"; rc=$?
+[[ "$rc" == 0 ]] && ok "manual detail=off exits 0" || bad "manual detail=off exits 0" "rc=$rc"
+[[ "$out_off" != *"detail:"* ]] && ok "manual detail=off skips detail lines" || bad "manual detail=off skips detail lines" "$out_off"
+FAKE_AUTO_DISKM="$T/fake-auto-diskm"
+cat >"$FAKE_AUTO_DISKM" <<'FAKEAUTO'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "volume path"|"volume verify-mount") printf '%s\n' "$FAKE_SCRATCH_ROOT" ;;
+  *) exit 2 ;;
+esac
+FAKEAUTO
+chmod +x "$FAKE_AUTO_DISKM"
+out_auto="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="" DISK_MAGICIAN_DISKM_BIN="$FAKE_AUTO_DISKM" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 DISK_MAGICIAN_SCRATCH_DETAIL=off bash "$SCRIPT" --dry-run 2>&1)"
+[[ "$out_auto" == *"detail-summary:"* ]] && ok "automatic mode ignores detail=off" || bad "automatic mode ignores detail=off" "$out_auto"
+
 echo
 echo "test_scratch_prune_lru_budget: $PASS passed, $FAIL failed"
 [[ "$FAIL" == 0 ]]

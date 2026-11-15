@@ -310,6 +310,7 @@ if [[ ( -n "${DISK_MAGICIAN_TRIGGER:-}" || "$SCRATCH_AUTOMATIC" == 1 ) && "${DIS
   if mkdir -p "$_detail_dir" 2>/dev/null && : >"$_detail_dir/latest.txt" 2>/dev/null; then DETAIL_FILE="$_detail_dir/latest.txt"; fi
 fi
 report_candidate_detail() {
+  [[ "${SCRATCH_AUTOMATIC:-0}" != 1 && "${DISK_MAGICIAN_SCRATCH_DETAIL:-}" == off ]] && return 0
   local entry="$1" rows_file protocol bytes files newest flag path apparent_bytes metadata rc=0 n=0
   rows_file="$(mktemp "${TMPDIR:-/tmp}/dm-measure-display.XXXXXX")" || return 2
   scratch_budget_measure_files "$entry" "$DETAIL_MIB" --nul >"$rows_file" 2>/dev/null || rc=$?
@@ -674,11 +675,14 @@ if (( ${#candidates[@]} )); then
           exit 75
         fi
       done
-      if [[ ! -d "$_artifact_child" || -L "$_artifact_parent" ]]; then
+      if [[ -L "$_artifact_parent" || -L "$_artifact_child" ]] || [[ -e "$_artifact_child" && ! -d "$_artifact_child" ]]; then
         rm -f "$artifact_batch_output_file"
         artifact_batch_output_file=""
         emit_discovery_deferred_summary path-changed
         exit 75
+      fi
+      if [[ ! -e "$_artifact_child" && ! -L "$_artifact_child" ]]; then
+        continue
       fi
       _artifact_extra+=("$_artifact_child")
     done
@@ -734,7 +738,59 @@ if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
     done
   done
   LRU_LIST="$(mktemp "${TMPDIR:-/tmp}/dm-sp-lru.XXXXXX")" || { echo skipped:measurement-unavailable; exit 75; }
-  for entry in ${candidates[@]+"${candidates[@]}"}; do
+  _lru_candidates=(${candidates[@]+"${candidates[@]}"})
+  if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 && ${#_lru_candidates[@]} > 0 )); then
+    _min_kb_val=$((10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}))
+    _lru_keep_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-minkb.XXXXXX")" || { rm -f "$LRU_LIST"; echo skipped:measurement-unavailable; exit 75; }
+    _below_count="$(printf '%s\0' "${_lru_candidates[@]}" | python3 -c '
+import os, subprocess, sys
+min_kb = int(sys.argv[1])
+keep_path = sys.argv[2]
+raw = sys.stdin.buffer.read()
+entries = [os.fsdecode(p) for p in raw.split(b"\0") if p]
+dirs = []
+keep = []
+for p in entries:
+    if os.path.islink(p) or not os.path.isdir(p):
+        keep.append(p)
+    else:
+        dirs.append(p)
+sizes = {}
+for i in range(0, len(dirs), 200):
+    chunk = dirs[i:i+200]
+    res = subprocess.run(["du", "-sk", "--", *chunk], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    if res.returncode == 0 or res.stdout:
+        for line in res.stdout.splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) == 2 and parts[0].strip().isdigit():
+                sizes[parts[1]] = int(parts[0].strip())
+below = 0
+for p in dirs:
+    kb = sizes.get(p)
+    if kb is None:
+        r2 = subprocess.run(["du", "-sk", "--", p], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        kb = int(r2.stdout.split("\t", 1)[0].strip()) if r2.returncode == 0 and "\t" in r2.stdout else 0
+    if kb < min_kb:
+        print(f"kept:below-min-size {p} ({kb} KB)")
+        below += 1
+    else:
+        keep.append(p)
+keep_set = set(keep)
+with open(keep_path, "wb") as f:
+    for p in entries:
+        if p in keep_set:
+            f.write(os.fsencode(p) + b"\0")
+sys.stderr.write(f"{below}\n")
+' "$_min_kb_val" "$_lru_keep_file" 2>"${_lru_keep_file}.cnt")" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
+    _below_count="$(cat "${_lru_keep_file}.cnt" 2>/dev/null || echo 0)"
+    [[ "$_below_count" =~ ^[0-9]+$ ]] && kept=$(( kept + _below_count ))
+    _lru_candidates=()
+    while IFS= read -r -d '' _kentry; do
+      _lru_candidates+=("$_kentry")
+    done <"$_lru_keep_file"
+    rm -f "$_lru_keep_file" "${_lru_keep_file}.cnt"
+  fi
+  for entry in ${_lru_candidates[@]+"${_lru_candidates[@]}"}; do
     if deadline_exceeded; then
       rm -f "$LRU_LIST"
       echo "deferred:deadline (LRU ordering incomplete; nothing evicted)"

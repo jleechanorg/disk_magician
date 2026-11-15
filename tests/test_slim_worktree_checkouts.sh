@@ -120,6 +120,29 @@ OUT6=$(APPROVED=1 run --exclude docs,evidence --clean)
 assert_contains "fully-excluded worktree is skipped next run" "already sparse): 1" "$OUT6"
 assert_present  "dirty worktree still untouched" "$DIRTY/docs/user-stories-ui/readme.md"
 
+echo "== case 8: --min-age-hours enforces >=2h, requires WORKTREE_APPROVED=1, logs override =="
+OUT_LT2=$(APPROVED=1 run --min-age-hours 1 --clean); RC_LT2=$?
+[[ "$RC_LT2" -eq 2 ]] && record_pass "rejects min-age-hours < 2 (rc=2)" || record_fail "rejects min-age-hours < 2" "rc=$RC_LT2"
+assert_contains "rejects min-age-hours < 2 message" "minimum is 2 hours" "$OUT_LT2"
+
+OUT_UNAPPROVED=$(APPROVED=0 run --min-age-hours 2); RC_UNAPPROVED=$?
+[[ "$RC_UNAPPROVED" -eq 1 ]] && record_pass "rejects --min-age-hours without WORKTREE_APPROVED=1" || record_fail "rejects --min-age-hours without WORKTREE_APPROVED=1" "rc=$RC_UNAPPROVED"
+assert_contains "rejects unapproved --min-age-hours message" "WORKTREE_APPROVED=1" "$OUT_UNAPPROVED"
+
+H3_WT=$(mk_wt three-hour-clean)
+H1_WT=$(mk_wt one-hour-clean)
+ts_3h=$(date -v-3H +%Y%m%d%H%M 2>/dev/null || date -d "-3 hours" +%Y%m%d%H%M)
+ts_1h=$(date -v-1H +%Y%m%d%H%M 2>/dev/null || date -d "-1 hours" +%Y%m%d%H%M)
+find "$H3_WT" -path "$H3_WT/.git" -prune -o -exec touch -t "$ts_3h" {} + 2>/dev/null
+find "$H1_WT" -path "$H1_WT/.git" -prune -o -exec touch -t "$ts_1h" {} + 2>/dev/null
+STATE_TMP="$TMP_ROOT/state"
+OUT_H2=$(DISK_MAGICIAN_STATE_DIR="$STATE_TMP" WORKTREE_APPROVED=1 env -i PATH="$TEST_PATH" HOME="$TMP_ROOT/home" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_TMP" WORKTREE_APPROVED=1 bash "$TARGET_SCRIPT" --roots "$ROOTS" --min-age-hours 2 --clean 2>&1)
+assert_contains "3h worktree slimmed with --min-age-hours 2" "SLIMMED" "$OUT_H2"
+assert_absent "3h worktree docs removed" "$H3_WT/docs/user-stories-ui"
+assert_present "1h worktree docs preserved" "$H1_WT/docs/user-stories-ui"
+assert_contains "guard log records hours:2 override" "slim-worktrees: recency override active: hours:2" "$(cat "$STATE_TMP/worktree_guard.log" 2>/dev/null || true)"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
