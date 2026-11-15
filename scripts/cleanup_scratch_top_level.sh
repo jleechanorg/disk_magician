@@ -577,7 +577,9 @@ fi
 # once for all real-directory candidates before any candidate can be removed.
 # On Bash 3.2, avoid an empty array expansion and do not create a temp file or
 # invoke Python when there are no candidate directories.
+_scope_out_of_scope=()
 if (( ${#candidates[@]} )); then
+  _scope_candidates=()
   candidate_dirs=()
   for _candidate in ${candidates[@]+"${candidates[@]}"}; do
     [[ -d "$_candidate" && ! -L "$_candidate" ]] || continue
@@ -590,17 +592,33 @@ if (( ${#candidates[@]} )); then
     # and /Volumes/diskm-scratch/.Spotlight-V100 did the same on macOS.
     # Skip candidates this process cannot read and keep the batch contract.
     [[ -r "$_candidate" && -x "$_candidate" ]] || continue
-    if [[ "$root_registered" == true ]]; then
-      python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$_candidate"
-      _scope_rc=$?
-      case "$_scope_rc" in
-        0) ;;
-        3) continue ;;
-        *) emit_discovery_deferred_summary unmeasurable-scope; exit 75 ;;
-      esac
-    fi
-    candidate_dirs+=("$_candidate")
+    _scope_candidates+=("$_candidate")
   done
+  if [[ "$root_registered" == true ]] && (( ${#_scope_candidates[@]} )); then
+    _scope_batch_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-scope.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable-scope; exit 75; }
+    printf '%s\0' "${_scope_candidates[@]}" | python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope-batch "$root" >"$_scope_batch_file"
+    _scope_rc=$?
+    if (( _scope_rc != 0 )); then
+      rm -f "$_scope_batch_file"
+      emit_discovery_deferred_summary unmeasurable-scope
+      exit 75
+    fi
+    _scope_entry=""
+    while IFS= read -r -d '' _scope_entry; do
+      candidate_dirs+=("$_scope_entry")
+    done <"$_scope_batch_file"
+    rm -f "$_scope_batch_file"
+    _in_i=0
+    for _candidate in "${_scope_candidates[@]}"; do
+      if (( _in_i < ${#candidate_dirs[@]} )) && [[ "${candidate_dirs[$_in_i]}" == "$_candidate" ]]; then
+        _in_i=$(( _in_i + 1 ))
+      else
+        _scope_out_of_scope+=("$_candidate")
+      fi
+    done
+  else
+    candidate_dirs=(${_scope_candidates[@]+"${_scope_candidates[@]}"})
+  fi
   _artifact_extra=()
   if (( ${#candidate_dirs[@]} )); then
     artifact_batch_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-artifacts.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable; exit 75; }
@@ -619,74 +637,22 @@ if (( ${#candidates[@]} )); then
       exit 75
     fi
 
-    _artifact_fields=()
-    _artifact_field=""
-    while IFS= read -r -d '' _artifact_field; do
-      _artifact_fields+=("$_artifact_field")
-    done <"$artifact_batch_output_file"
-    _artifact_tail="$_artifact_field"
-    if [[ -n "$_artifact_tail" || ${#_artifact_fields[@]} -lt 2 || "${_artifact_fields[0]}" != diskm-artifact-children-v1 || ! "${_artifact_fields[1]}" =~ ^(0|[1-9][0-9]*)$ ]]; then
-      rm -f "$artifact_batch_output_file"
+    _validated_file="${artifact_batch_output_file}.validated"
+    _validated_err="${artifact_batch_output_file}.err"
+    printf '%s\0' "${candidate_dirs[@]}" | python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" validate-batch-output "$artifact_batch_output_file" >"$_validated_file" 2>"$_validated_err"
+    _val_rc=$?
+    if (( _val_rc != 0 )); then
+      _val_err_tok="$(cat "$_validated_err" 2>/dev/null || echo malformed-header)"
+      rm -f "$artifact_batch_output_file" "$_validated_file" "$_validated_err"
       artifact_batch_output_file=""
-      emit_discovery_deferred_summary malformed-header
+      emit_discovery_deferred_summary "${_val_err_tok:-malformed-header}"
       exit 75
     fi
-    _artifact_expected_pairs=$(( (${#_artifact_fields[@]} - 2) / 2 ))
-    if (( (${#_artifact_fields[@]} - 2) % 2 != 0 )) || [[ "${_artifact_fields[1]}" != "$_artifact_expected_pairs" ]]; then
-      rm -f "$artifact_batch_output_file"
-      artifact_batch_output_file=""
-      emit_discovery_deferred_summary pair-count-mismatch
-      exit 75
-    fi
-    for ((_artifact_i=2; _artifact_i<${#_artifact_fields[@]}; _artifact_i+=2)); do
-      _artifact_parent="${_artifact_fields[_artifact_i]}"
-      _artifact_child="${_artifact_fields[_artifact_i+1]}"
-      _artifact_parent_submitted=false
-      for _candidate in ${candidate_dirs[@]+"${candidate_dirs[@]}"}; do
-        [[ "$_candidate" == "$_artifact_parent" ]] && { _artifact_parent_submitted=true; break; }
-      done
-      if [[ "$_artifact_parent_submitted" != true || "$_artifact_child" != "$_artifact_parent"/* ]]; then
-        rm -f "$artifact_batch_output_file"
-        artifact_batch_output_file=""
-        emit_discovery_deferred_summary candidate-child-mismatch
-        exit 75
-      fi
-      _artifact_relative="${_artifact_child#"$_artifact_parent"/}"
-      if [[ -z "$_artifact_relative" || "$_artifact_relative" == */ || "$_artifact_relative" == *//* ]]; then
-        rm -f "$artifact_batch_output_file"
-        artifact_batch_output_file=""
-        emit_discovery_deferred_summary invalid-child-path
-        exit 75
-      fi
-      IFS='/' read -r -a _artifact_components <<<"$_artifact_relative"
-      _artifact_check_path="$_artifact_parent"
-      for _artifact_component in "${_artifact_components[@]}"; do
-        if [[ -z "$_artifact_component" || "$_artifact_component" == . || "$_artifact_component" == .. ]]; then
-          rm -f "$artifact_batch_output_file"
-          artifact_batch_output_file=""
-          emit_discovery_deferred_summary invalid-child-component
-          exit 75
-        fi
-        _artifact_check_path="$_artifact_check_path/$_artifact_component"
-        if [[ -L "$_artifact_check_path" ]]; then
-          rm -f "$artifact_batch_output_file"
-          artifact_batch_output_file=""
-          emit_discovery_deferred_summary symlink-component
-          exit 75
-        fi
-      done
-      if [[ -L "$_artifact_parent" || -L "$_artifact_child" ]] || [[ -e "$_artifact_child" && ! -d "$_artifact_child" ]]; then
-        rm -f "$artifact_batch_output_file"
-        artifact_batch_output_file=""
-        emit_discovery_deferred_summary path-changed
-        exit 75
-      fi
-      if [[ ! -e "$_artifact_child" && ! -L "$_artifact_child" ]]; then
-        continue
-      fi
+    _artifact_child=""
+    while IFS= read -r -d '' _artifact_child; do
       _artifact_extra+=("$_artifact_child")
-    done
-    rm -f "$artifact_batch_output_file"
+    done <"$_validated_file"
+    rm -f "$artifact_batch_output_file" "$_validated_file" "$_validated_err"
     artifact_batch_output_file=""
   fi
   for _artifact_child in ${_artifact_extra[@]+"${_artifact_extra[@]}"}; do
@@ -719,24 +685,38 @@ if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
   # whole <repo> container; a vanished nested unit is skipped in the main loop.
   # Expand each level only after checking it: a leaf-only symlink check does
   # not prevent a glob from traversing a symlinked repository or unit parent.
-  for _top in "$root"/*; do
-    [[ -d "$_top" && ! -L "$_top" ]] || continue
-    for _unit_parent in "$_top/build" "$_top/evidence"; do
-      [[ -d "$_unit_parent" && ! -L "$_unit_parent" ]] || continue
-      for _sub in "$_unit_parent"/*; do
-        [[ -d "$_sub" && ! -L "$_sub" ]] || continue
-        # Managed containers above may already have supplied this exact unit.
-        _already_candidate=0
-        for _candidate in ${candidates[@]+"${candidates[@]}"}; do
-          if [[ "$_candidate" == "$_sub" ]]; then
-            _already_candidate=1
-            break
-          fi
-        done
-        (( _already_candidate )) || candidates+=("$_sub")
-      done
-    done
-  done
+  _new_subs_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-subs.XXXXXX")" || { echo skipped:measurement-unavailable; exit 75; }
+  { (( ${#candidates[@]} )) && printf '%s\0' "${candidates[@]}"; } | python3 -c '
+import os, sys
+root = sys.argv[1]
+raw = sys.stdin.buffer.read()
+seen = set(os.fsdecode(p) for p in (raw[:-1].split(b"\0") if raw.endswith(b"\0") else raw.split(b"\0")) if p)
+out = bytearray()
+try:
+    with os.scandir(root) as it1:
+        for e1 in sorted(it1, key=lambda e: e.name):
+            if e1.name.startswith(".") or not e1.is_dir(follow_symlinks=False):
+                continue
+            for kind in ("build", "evidence"):
+                up = os.path.join(e1.path, kind)
+                if not os.path.isdir(up) or os.path.islink(up):
+                    continue
+                with os.scandir(up) as it2:
+                    for e2 in sorted(it2, key=lambda e: e.name):
+                        if e2.name.startswith(".") or not e2.is_dir(follow_symlinks=False):
+                            continue
+                        if e2.path not in seen:
+                            seen.add(e2.path)
+                            out.extend(os.fsencode(e2.path) + b"\0")
+except OSError:
+    pass
+sys.stdout.buffer.write(out)
+' "$root" >"$_new_subs_file"
+  _new_sub=""
+  while IFS= read -r -d '' _new_sub; do
+    candidates+=("$_new_sub")
+  done <"$_new_subs_file"
+  rm -f "$_new_subs_file"
   LRU_LIST="$(mktemp "${TMPDIR:-/tmp}/dm-sp-lru.XXXXXX")" || { echo skipped:measurement-unavailable; exit 75; }
   _lru_candidates=(${candidates[@]+"${candidates[@]}"})
   if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 && ${#_lru_candidates[@]} > 0 )); then
@@ -826,11 +806,30 @@ while IFS= read -r -d '' entry; do
   [[ -e "$entry" || -L "$entry" ]] || continue
   base="${entry##*/}"
   case "$base" in .*) continue ;; esac
-  if [[ "$root_registered" == true && -d "$entry" && ! -L "$entry" ]] &&
-      ! python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$entry"; then
-    echo "kept:discovery-boundary $entry"
-    kept=$(( kept + 1 ))
-    continue
+  if [[ "$root_registered" == true && -d "$entry" && ! -L "$entry" ]]; then
+    _scope_known_out=false
+    for _oos in ${_scope_out_of_scope[@]+"${_scope_out_of_scope[@]}"}; do
+      if [[ "$entry" == "$_oos" ]]; then _scope_known_out=true; break; fi
+    done
+    if [[ "$_scope_known_out" == true ]]; then
+      echo "kept:discovery-boundary $entry"
+      kept=$(( kept + 1 ))
+      continue
+    fi
+    _scope_already_ok=false
+    if [[ -r "$entry" && -x "$entry" ]]; then
+      if [[ -z "$BUDGET_PCT" ]]; then
+        _scope_already_ok=true
+      elif [[ "${entry#"$root"/}" != */* ]] || [[ "$entry" == "$root/tmp/"* && "${entry#"$root/tmp/"}" != */* ]]; then
+        _scope_already_ok=true
+      fi
+    fi
+    if [[ "$_scope_already_ok" != true ]] &&
+        ! python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$entry"; then
+      echo "kept:discovery-boundary $entry"
+      kept=$(( kept + 1 ))
+      continue
+    fi
   fi
   _artifact_blocked=false
   for _blocked in ${_artifact_discovery_blocked[@]+"${_artifact_discovery_blocked[@]}"}; do
