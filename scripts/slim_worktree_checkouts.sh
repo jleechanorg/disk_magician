@@ -26,8 +26,8 @@
 #
 # USAGE
 #   slim_worktree_checkouts.sh [--clean] [--dry-run] [--min-age N]
-#                              [--roots A,B] [--exclude docs,evidence]
-#                              [--include-ao]
+#                              [--min-age-hours N] [--roots A,B]
+#                              [--exclude docs,evidence] [--include-ao]
 
 set -uo pipefail
 
@@ -41,17 +41,19 @@ source "$SCRIPT_DIR/lib/ao_worktree_config.sh" 2>/dev/null || true
 
 DRY_RUN=true
 MIN_AGE_DAYS="${SLIM_MIN_AGE_DAYS:-}"
+MIN_AGE_HOURS="${SLIM_MIN_AGE_HOURS:-}"
 EXCLUDE="docs"
 INCLUDE_AO=0
 ROOTS=("$HOME/.worktrees" "$HOME/projects" "$HOME/.ao/data/worktrees")
 
-usage() { echo "Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--roots A,B] [--exclude docs,evidence] [--include-ao]"; }
+usage() { echo "Usage: $(basename "$0") [--clean] [--dry-run] [--min-age N] [--min-age-hours N] [--roots A,B] [--exclude docs,evidence] [--include-ao]"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) DRY_RUN=false; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
-    --min-age) MIN_AGE_DAYS="$2"; shift 2 ;;
+    --min-age) [[ $# -ge 2 ]] || { echo "min-age requires an argument" >&2; exit 2; }; MIN_AGE_DAYS="$2"; shift 2 ;;
+    --min-age-hours) [[ $# -ge 2 ]] || { echo "min-age-hours requires an argument" >&2; exit 2; }; MIN_AGE_HOURS="$2"; shift 2 ;;
     --roots) IFS=',' read -r -a ROOTS <<< "$2"; shift 2 ;;
     --exclude) EXCLUDE="$2"; shift 2 ;;
     --include-ao) INCLUDE_AO=1; shift ;;
@@ -61,8 +63,30 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$MIN_AGE_DAYS" || "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]] || { echo "min-age must be an integer" >&2; exit 2; }
+[[ -z "$MIN_AGE_HOURS" || "$MIN_AGE_HOURS" =~ ^[0-9]+$ ]] || { echo "min-age-hours must be an integer" >&2; exit 2; }
 # 48 h default floor (operator decision 2026-11-12); --min-age may only raise it.
 MIN_AGE_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
+if [[ -n "$MIN_AGE_HOURS" ]]; then
+  _min_age_hours_val=$((10#$MIN_AGE_HOURS))
+  if (( _min_age_hours_val < 2 )); then
+    echo "Refusing min-age-hours < 2: minimum is 2 hours." >&2
+    exit 2
+  fi
+  if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+    echo "Refusing --min-age-hours without WORKTREE_APPROVED=1." >&2
+    exit 1
+  fi
+  _guard_state_dir="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+  if ! { mkdir -p "$_guard_state_dir" && printf '%s slim-worktrees: recency override active: hours:%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_min_age_hours_val" >>"$_guard_state_dir/worktree_guard.log"; } 2>/dev/null; then
+    echo "slim-worktrees: cannot record recency override hours:$_min_age_hours_val" >&2
+    exit 1
+  fi
+  _hours_min=$(( _min_age_hours_val * 60 ))
+  if [[ -z "$MIN_AGE_DAYS" ]] || (( _hours_min > MIN_AGE_MIN )); then
+    MIN_AGE_MIN="$_hours_min"
+  fi
+fi
 IFS=',' read -r -a EXCLUDES <<< "$EXCLUDE"
 
 if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then

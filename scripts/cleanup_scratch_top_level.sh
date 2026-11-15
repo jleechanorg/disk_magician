@@ -674,11 +674,14 @@ if (( ${#candidates[@]} )); then
           exit 75
         fi
       done
-      if [[ ! -d "$_artifact_child" || -L "$_artifact_parent" ]]; then
+      if [[ -L "$_artifact_parent" || -L "$_artifact_child" ]] || [[ -e "$_artifact_child" && ! -d "$_artifact_child" ]]; then
         rm -f "$artifact_batch_output_file"
         artifact_batch_output_file=""
         emit_discovery_deferred_summary path-changed
         exit 75
+      fi
+      if [[ ! -e "$_artifact_child" && ! -L "$_artifact_child" ]]; then
+        continue
       fi
       _artifact_extra+=("$_artifact_child")
     done
