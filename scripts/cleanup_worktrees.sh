@@ -470,7 +470,7 @@ rescue_find_secret_file() {
             .env.example|.env.sample|.env.template) continue ;;
         esac
         case "$lower" in
-            */__pycache__/*.pyc|__pycache__/*.pyc) continue ;;
+            */__pycache__/*.pyc|__pycache__/*.pyc|*/node_modules/*|node_modules/*|*/.venv/*|.venv/*|*/venv/*|venv/*) continue ;;
         esac
         case "$base_lower" in
             .env|.env.*|*.pem|*.key|*.p12|*.pfx|id_rsa*|id_ed25519*|.npmrc|.netrc|*credentials*.json|*secret*)
