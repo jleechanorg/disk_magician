@@ -310,7 +310,7 @@ if [[ ( -n "${DISK_MAGICIAN_TRIGGER:-}" || "$SCRATCH_AUTOMATIC" == 1 ) && "${DIS
   if mkdir -p "$_detail_dir" 2>/dev/null && : >"$_detail_dir/latest.txt" 2>/dev/null; then DETAIL_FILE="$_detail_dir/latest.txt"; fi
 fi
 report_candidate_detail() {
-  [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_DETAIL:-}" == off ]] && return 0
+  [[ "${SCRATCH_AUTOMATIC:-0}" != 1 && "${DISK_MAGICIAN_SCRATCH_DETAIL:-}" == off ]] && return 0
   local entry="$1" rows_file protocol bytes files newest flag path apparent_bytes metadata rc=0 n=0
   rows_file="$(mktemp "${TMPDIR:-/tmp}/dm-measure-display.XXXXXX")" || return 2
   scratch_budget_measure_files "$entry" "$DETAIL_MIB" --nul >"$rows_file" 2>/dev/null || rc=$?
