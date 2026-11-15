@@ -469,6 +469,9 @@ rescue_find_secret_file() {
         case "$base_lower" in
             .env.example|.env.sample|.env.template) continue ;;
         esac
+        case "$lower" in
+            */__pycache__/*.pyc|__pycache__/*.pyc) continue ;;
+        esac
         case "$base_lower" in
             .env|.env.*|*.pem|*.key|*.p12|*.pfx|id_rsa*|id_ed25519*|.npmrc|.netrc|*credentials*.json|*secret*)
                 printf '%s\n' "$relpath"
@@ -569,11 +572,18 @@ rescue_push_and_verify() {
     wt_slug="${wt_slug//[^A-Za-z0-9._-]/_}"
     ref="refs/heads/backup/diskm-rescue/${host}/${today}/${repo_slug}-${wt_slug}-${commit:0:8}"
 
-    if ! GIT_TERMINAL_PROMPT=0 rescue_timeout 60 git -C "$wt_path" push -q origin "$commit:$ref" </dev/null >/dev/null 2>&1; then
+    local -a cred_args=()
+    local origin_url
+    origin_url="$(git -C "$wt_path" remote get-url origin 2>/dev/null || true)"
+    if [[ "$origin_url" == http://* || "$origin_url" == https://* ]] && command -v gh >/dev/null 2>&1; then
+        cred_args=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
+    fi
+
+    if ! GIT_TERMINAL_PROMPT=0 rescue_timeout 60 git -C "$wt_path" ${cred_args[@]+"${cred_args[@]}"} push --no-verify -q origin "$commit:$ref" </dev/null >/dev/null 2>&1; then
         RESCUE_REASON="rescue-push-failed"
         return 1
     fi
-    ls_out="$(GIT_TERMINAL_PROMPT=0 rescue_timeout 30 git -C "$wt_path" ls-remote origin "$ref" </dev/null 2>/dev/null || true)"
+    ls_out="$(GIT_TERMINAL_PROMPT=0 rescue_timeout 30 git -C "$wt_path" ${cred_args[@]+"${cred_args[@]}"} ls-remote origin "$ref" </dev/null 2>/dev/null || true)"
     if [[ "$ls_out" != "${commit}"$'\t'"${ref}" ]]; then
         RESCUE_REASON="rescue-push-failed"
         return 1
@@ -712,8 +722,14 @@ worktree_head_on_live_origin() {
         refs="$(cat "$cache_file")"
     else
         command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+        local -a cred_args=()
+        local origin_url
+        origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+        if [[ "$origin_url" == http://* || "$origin_url" == https://* ]] && command -v gh >/dev/null 2>&1; then
+            cred_args=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
+        fi
         # shellcheck disable=SC2086
-        refs="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ls-remote origin 'refs/heads/*' 'refs/pull/*/head' </dev/null 2>/dev/null)" || return 1
+        refs="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ${cred_args[@]+"${cred_args[@]}"} ls-remote origin 'refs/heads/*' 'refs/pull/*/head' </dev/null 2>/dev/null)" || return 1
         [[ -n "$cache_file" ]] && printf '%s\n' "$refs" >"$cache_file"
     fi
     [[ -n "$refs" ]] || return 1
