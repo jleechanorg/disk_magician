@@ -157,6 +157,79 @@ def main():
             return 0 if generic_scope(sys.argv[2], sys.argv[3]) else 3
         except OSError:
             return 1
+    if mode == "scope-batch":
+        if len(sys.argv) != 3:
+            return 2
+        root = sys.argv[2]
+        raw = sys.stdin.buffer.read()
+        if raw and not raw.endswith(b"\0"):
+            return 1
+        paths = raw[:-1].split(b"\0") if raw else []
+        in_scope = bytearray()
+        try:
+            for path_bytes in paths:
+                if not path_bytes:
+                    return 1
+                path = os.fsdecode(path_bytes)
+                if generic_scope(root, path):
+                    in_scope.extend(path_bytes + b"\0")
+        except OSError:
+            return 1
+        sys.stdout.buffer.write(in_scope)
+        return 0
+    if mode == "validate-batch-output":
+        if len(sys.argv) != 3:
+            return 2
+        batch_file = sys.argv[2]
+        raw_cands = sys.stdin.buffer.read()
+        cand_set = set(
+            os.fsdecode(p) for p in (raw_cands[:-1].split(b"\0") if raw_cands.endswith(b"\0") else raw_cands.split(b"\0")) if p
+        )
+        try:
+            with open(batch_file, "rb") as f:
+                raw = f.read()
+        except OSError:
+            sys.stderr.write("malformed-header\n")
+            return 75
+        if not raw.endswith(b"\0"):
+            sys.stderr.write("malformed-header\n")
+            return 75
+        fields = [os.fsdecode(x) for x in raw[:-1].split(b"\0")]
+        if len(fields) < 2 or fields[0] != "diskm-artifact-children-v1" or not fields[1].isdigit() or (len(fields[1]) > 1 and fields[1].startswith("0")):
+            sys.stderr.write("malformed-header\n")
+            return 75
+        expected_pairs = (len(fields) - 2) // 2
+        if (len(fields) - 2) % 2 != 0 or int(fields[1]) != expected_pairs:
+            sys.stderr.write("pair-count-mismatch\n")
+            return 75
+        out = bytearray()
+        for i in range(2, len(fields), 2):
+            parent = fields[i]
+            child = fields[i + 1]
+            if parent not in cand_set or not child.startswith(parent + "/"):
+                sys.stderr.write("candidate-child-mismatch\n")
+                return 75
+            rel = child[len(parent) + 1:]
+            if not rel or rel.endswith("/") or "//" in rel:
+                sys.stderr.write("invalid-child-path\n")
+                return 75
+            check_path = parent
+            for comp in rel.split("/"):
+                if not comp or comp in (".", ".."):
+                    sys.stderr.write("invalid-child-component\n")
+                    return 75
+                check_path = check_path + "/" + comp
+                if os.path.islink(check_path):
+                    sys.stderr.write("symlink-component\n")
+                    return 75
+            if os.path.islink(parent) or os.path.islink(child) or (os.path.lexists(child) and not os.path.isdir(child)):
+                sys.stderr.write("path-changed\n")
+                return 75
+            if not os.path.lexists(child):
+                continue
+            out.extend(os.fsencode(child) + b"\0")
+        sys.stdout.buffer.write(out)
+        return 0
     deadline = parse_deadline(sys.argv[-1])
     if mode == "stream-generic-leaves":
         if len(sys.argv) != 4:

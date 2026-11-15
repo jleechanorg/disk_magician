@@ -48,6 +48,12 @@ MANUAL_BASE_STATUS=""
 MANUAL_SNAPSHOT_HEAD=""
 MANUAL_SNAPSHOT_STATUS=""
 MANUAL_RECOVERY_REF=""
+RESCUE_PUSH=false
+RESCUE_AO_IDLE=false
+EXTRA_CLONES_FILE=""
+RESCUE_REASON=""
+RESCUE_BRANCH=""
+RESCUE_COMMIT=""
 # Cache allocation is optional: disk-pressure failures retain the existing
 # per-row lookup and lsof fail-closed behavior rather than aborting the run.
 RUN_TMP="$(mktemp -d)" || RUN_TMP=""
@@ -57,7 +63,7 @@ fi
 
 usage() {
   cat <<'EOF'
-Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [--discard-local-state [--include-live] --targets-file FILE] [-h|--help]
+Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [--rescue-push] [--rescue-ao-idle] [--extra-clones-file FILE] [--discard-local-state [--include-live] --targets-file FILE] [-h|--help]
 
 Safely prunes stale linked git worktrees (default: >=48 hours idle, merged or pristine).
 
@@ -69,6 +75,15 @@ Options:
   --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 $HOME/projects/worldarchitect.ai).
+  --rescue-push Snapshot dirty/untracked/unpushed >=48h worktrees to a remote
+                backup branch (refs/heads/backup/diskm-rescue/...) and verify
+                via git ls-remote before removal. Enforces secret-file guard.
+  --rescue-ao-idle
+                Allow --rescue-push to reclaim >=48h idle AO-owned worktrees
+                when no live process or tmux pane holds their CWD.
+  --extra-clones-file FILE
+                Newline-delimited paths of standalone clones or worktree roots
+                outside ~/.worktrees to audit/clean with --rescue-push.
   --discard-local-state
                 Explicitly permit discarding local changes in exact targets.
                 Requires --targets-file and DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=12.
@@ -103,6 +118,13 @@ while [[ $# -gt 0 ]]; do
             ;;
         --discard-local-state) MANUAL_DISCARD=true ;;
         --include-live) MANUAL_INCLUDE_LIVE=true ;;
+        --rescue-push) RESCUE_PUSH=true ;;
+        --rescue-ao-idle) RESCUE_AO_IDLE=true ;;
+        --extra-clones-file)
+            [[ $# -ge 2 ]] || { echo "--extra-clones-file requires a value" >&2; exit 2; }
+            EXTRA_CLONES_FILE="$2"
+            shift
+            ;;
         --targets-file)
             [[ $# -ge 2 ]] || { echo "--targets-file requires a value" >&2; exit 2; }
             MANUAL_TARGETS_FILE="$2"
@@ -134,7 +156,18 @@ if [[ "$MANUAL_INCLUDE_LIVE" == true && "$MANUAL_DISCARD" == false ]]; then
     exit 2
 fi
 
-if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
+if [[ -n "$EXTRA_CLONES_FILE" ]]; then
+    if [[ ! -f "$EXTRA_CLONES_FILE" || ! -r "$EXTRA_CLONES_FILE" ]]; then
+        echo "--extra-clones-file must be a readable regular file: $EXTRA_CLONES_FILE" >&2
+        exit 2
+    fi
+    if [[ "$RESCUE_PUSH" != true ]]; then
+        echo "--extra-clones-file requires --rescue-push" >&2
+        exit 2
+    fi
+fi
+
+if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 && -z "$EXTRA_CLONES_FILE" ]]; then
     if [[ -n "${CLAUDE_WORKTREE_REPOS:-}" ]]; then
         IFS=',' read -ra REPO_LOCAL_REPOS <<<"${CLAUDE_WORKTREE_REPOS// /,}"
     else
@@ -403,6 +436,167 @@ if [[ "$MANUAL_DISCARD" == true && "$DRY_RUN" == false ]]; then
     echo "MANUAL DF BEFORE $MANUAL_DF_BEFORE"
 fi
 
+rescue_timeout() {
+    local secs="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then timeout "${secs}s" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "${secs}s" "$@"
+    else "$@"; fi
+}
+
+GLOBAL_TMUX_CWDS=""
+if command -v tmux >/dev/null 2>&1; then
+    GLOBAL_TMUX_CWDS="$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null || true)"
+fi
+
+rescue_has_live_tmux() {
+    local wt="$1" real_wt="$2"
+    [[ -n "$GLOBAL_TMUX_CWDS" ]] || return 1
+    list_has_child_of "$real_wt" "$GLOBAL_TMUX_CWDS" || list_has_child_of "$wt" "$GLOBAL_TMUX_CWDS"
+}
+
+rescue_find_secret_file() {
+    local wt="$1" line status_xy relpath base base_lower lower _old_relpath
+    while IFS= read -r -d '' line; do
+        [[ -n "$line" ]] || continue
+        status_xy="${line:0:2}"
+        relpath="${line:3}"
+        if [[ "$status_xy" == R* || "$status_xy" == C* ]]; then
+            IFS= read -r -d '' _old_relpath || true
+        fi
+        base="$(basename "$relpath")"
+        base_lower="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+        lower="$(printf '%s' "$relpath" | tr '[:upper:]' '[:lower:]')"
+        case "$base_lower" in
+            .env.example|.env.sample|.env.template) continue ;;
+        esac
+        case "$lower" in
+            */__pycache__/*.pyc|__pycache__/*.pyc|*/node_modules/*|node_modules/*|*/.venv/*|.venv/*|*/venv/*|venv/*) continue ;;
+        esac
+        case "$base_lower" in
+            .env|.env.*|*.pem|*.key|*.p12|*.pfx|id_rsa*|id_ed25519*|.npmrc|.netrc|*credentials*.json|*secret*)
+                printf '%s\n' "$relpath"
+                return 0
+                ;;
+        esac
+        case "$lower" in
+            *secret*|*credentials*.json)
+                printf '%s\n' "$relpath"
+                return 0
+                ;;
+        esac
+    done < <(GIT_OPTIONAL_LOCKS=0 git -C "$wt" status --porcelain=v1 -z --untracked-files=all --ignored 2>/dev/null || true)
+    return 1
+}
+
+rescue_has_nested_git() {
+    local wt="$1"
+    [[ -n "$(find "$wt" -mindepth 2 -maxdepth 5 -name .git -print -quit 2>/dev/null || true)" ]]
+}
+
+rescue_push_and_verify() {
+    local repo_or_wt="$1" wt_path="$2" head_sha="$3" branch="$4" size_kb_val="${5:-0}"
+    RESCUE_REASON=""
+    RESCUE_BRANCH=""
+    RESCUE_COMMIT=""
+
+    local status_rc=0 sec
+    GIT_OPTIONAL_LOCKS=0 git -C "$wt_path" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none >/dev/null 2>&1 || status_rc=$?
+    if [[ "$status_rc" -ne 0 ]]; then
+        RESCUE_REASON="status-failed"
+        return 1
+    fi
+    if sec="$(rescue_find_secret_file "$wt_path")"; then
+        RESCUE_REASON="secret-like-file:$sec"
+        return 1
+    fi
+    if rescue_has_nested_git "$wt_path"; then
+        RESCUE_REASON="nested-git"
+        return 1
+    fi
+    if ! git -C "$wt_path" remote get-url origin >/dev/null 2>&1; then
+        RESCUE_REASON="no-origin"
+        return 1
+    fi
+
+    local tmp_dir idx head_tree tree commit
+    tmp_dir="$(mktemp -d)" || { RESCUE_REASON="mktemp-failed"; return 1; }
+    idx="$tmp_dir/index"
+    if [[ -n "$head_sha" ]] && git -C "$wt_path" rev-parse --verify -q "${head_sha}^{commit}" >/dev/null 2>&1; then
+        if ! GIT_INDEX_FILE="$idx" git -C "$wt_path" read-tree "$head_sha" 2>/dev/null; then
+            rm -rf -- "${tmp_dir:?}"
+            RESCUE_REASON="read-tree-failed"
+            return 1
+        fi
+        head_tree="$(git -C "$wt_path" rev-parse --verify -q "${head_sha}^{tree}" 2>/dev/null || true)"
+    else
+        head_sha=""
+        head_tree=""
+    fi
+
+    if ! GIT_INDEX_FILE="$idx" git -C "$wt_path" add -A . >/dev/null 2>&1; then
+        rm -rf -- "${tmp_dir:?}"
+        RESCUE_REASON="index-add-failed"
+        return 1
+    fi
+    if ! tree="$(GIT_INDEX_FILE="$idx" git -C "$wt_path" write-tree 2>/dev/null)"; then
+        rm -rf -- "${tmp_dir:?}"
+        RESCUE_REASON="write-tree-failed"
+        return 1
+    fi
+    rm -rf -- "${tmp_dir:?}"
+
+    if [[ -n "$head_sha" && -n "$head_tree" && "$tree" == "$head_tree" ]]; then
+        commit="$head_sha"
+    else
+        if ! commit="$(GIT_AUTHOR_NAME=diskm GIT_AUTHOR_EMAIL=diskm@localhost \
+            GIT_COMMITTER_NAME=diskm GIT_COMMITTER_EMAIL=diskm@localhost \
+            git -C "$wt_path" commit-tree "$tree" ${head_sha:+-p "$head_sha"} \
+            -m "diskm rescue snapshot of $wt_path (branch: ${branch:-detached})" 2>/dev/null)"; then
+            RESCUE_REASON="commit-tree-failed"
+            return 1
+        fi
+    fi
+
+    if [[ "$commit" == "$head_sha" ]] && worktree_head_on_live_origin "$wt_path" "$commit"; then
+        RESCUE_COMMIT="$commit"
+        return 0
+    fi
+
+    local host today repo_slug wt_slug ref ls_out
+    host="$(hostname -s 2>/dev/null || echo host)"
+    host="${host//[^A-Za-z0-9._-]/_}"
+    today="$(date -u +%Y%m%d)"
+    repo_slug="$(basename "$repo_or_wt")"
+    repo_slug="${repo_slug//[^A-Za-z0-9._-]/_}"
+    wt_slug="$(basename "$wt_path")"
+    wt_slug="${wt_slug//[^A-Za-z0-9._-]/_}"
+    ref="refs/heads/backup/diskm-rescue/${host}/${today}/${repo_slug}-${wt_slug}-${commit:0:8}"
+
+    local -a cred_args=()
+    local origin_url
+    origin_url="$(git -C "$wt_path" remote get-url origin 2>/dev/null || true)"
+    if [[ "$origin_url" == http://* || "$origin_url" == https://* ]] && command -v gh >/dev/null 2>&1; then
+        cred_args=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
+    fi
+
+    if ! GIT_TERMINAL_PROMPT=0 rescue_timeout 60 git -C "$wt_path" ${cred_args[@]+"${cred_args[@]}"} push --no-verify -q origin "$commit:$ref" </dev/null >/dev/null 2>&1; then
+        RESCUE_REASON="rescue-push-failed"
+        return 1
+    fi
+    ls_out="$(GIT_TERMINAL_PROMPT=0 rescue_timeout 30 git -C "$wt_path" ${cred_args[@]+"${cred_args[@]}"} ls-remote origin "$ref" </dev/null 2>/dev/null || true)"
+    if [[ "$ls_out" != "${commit}"$'\t'"${ref}" ]]; then
+        RESCUE_REASON="rescue-push-failed"
+        return 1
+    fi
+
+    RESCUE_BRANCH="$ref"
+    RESCUE_COMMIT="$commit"
+    if declare -F deletion_log >/dev/null 2>&1; then
+        deletion_log rescue_push rescue "$size_kb_val" "$wt_path" "rescue_branch=$ref commit=$commit"
+    fi
+    return 0
+}
+
 classify_repo_local_worktree() {
     local repo="$1" wt_path="$2" head_sha="$3" locked="$4" prunable="$5" branch="${6:-}"
 
@@ -443,6 +637,38 @@ classify_repo_local_worktree() {
 
     if [[ "$recently_active" == true ]]; then
         echo "young"
+        return 0
+    fi
+
+    if [[ "$RESCUE_PUSH" == true ]]; then
+        if rescue_has_live_tmux "$wt_path" "$real_wt"; then
+            echo "live-tmux"
+            return 0
+        fi
+        local skip_reason sec
+        skip_reason="$(std_root_skip_reason "$wt_path" "$real_wt")"
+        if [[ -n "$skip_reason" && "$skip_reason" != "ao-owned" ]]; then
+            echo "$skip_reason"
+            return 0
+        fi
+        local status_rc=0
+        GIT_OPTIONAL_LOCKS=0 git -C "$wt_path" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none >/dev/null 2>&1 || status_rc=$?
+        if [[ "$status_rc" -ne 0 ]]; then
+            echo "status-failed"
+            return 0
+        fi
+        if sec="$(rescue_find_secret_file "$wt_path")"; then
+            echo "secret-like-file:$sec"
+            return 0
+        fi
+        if rescue_has_nested_git "$wt_path"; then
+            echo "nested-git"
+            return 0
+        fi
+        if ! git -C "$wt_path" remote get-url origin >/dev/null 2>&1; then
+            echo "no-origin"
+            return 0
+        fi
         return 0
     fi
 
@@ -496,8 +722,14 @@ worktree_head_on_live_origin() {
         refs="$(cat "$cache_file")"
     else
         command -v timeout >/dev/null 2>&1 && t="timeout 30s"
+        local -a cred_args=()
+        local origin_url
+        origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+        if [[ "$origin_url" == http://* || "$origin_url" == https://* ]] && command -v gh >/dev/null 2>&1; then
+            cred_args=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
+        fi
         # shellcheck disable=SC2086
-        refs="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ls-remote origin 'refs/heads/*' 'refs/pull/*/head' </dev/null 2>/dev/null)" || return 1
+        refs="$(env -u GH_TOKEN -u GITHUB_TOKEN GIT_TERMINAL_PROMPT=0 $t git -C "$repo" ${cred_args[@]+"${cred_args[@]}"} ls-remote origin 'refs/heads/*' 'refs/pull/*/head' </dev/null 2>/dev/null)" || return 1
         [[ -n "$cache_file" ]] && printf '%s\n' "$refs" >"$cache_file"
     fi
     [[ -n "$refs" ]] || return 1
@@ -1023,7 +1255,7 @@ _process_repo_local_worktrees() {
         if [[ -n "$std_real" && "$MANUAL_INCLUDE_LIVE" != true ]]; then
             local std_skip
             std_skip="$(std_root_skip_reason "$abs_path" "$std_real")"
-            if [[ -n "$std_skip" ]]; then
+            if [[ -n "$std_skip" ]] && { [[ "$RESCUE_PUSH" != true ]] || [[ "$std_skip" != "ao-owned" ]]; }; then
                 ledger_line "repo-local" "PRESERVE" "$abs_path" "$std_skip"
                 REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
                 act_candidate_done || return 3
@@ -1087,10 +1319,40 @@ _process_repo_local_worktrees() {
             REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
         else
             if [[ "$DRY_RUN" == true ]]; then
-                ledger_line "repo-local" "ELIGIBLE" "$abs_path" "" "$extra"
+                if [[ "$RESCUE_PUSH" == true ]]; then
+                    ledger_line "repo-local" "ELIGIBLE" "$abs_path" "WOULD-RESCUE-PUSH-AND-DELETE" "$extra"
+                else
+                    ledger_line "repo-local" "ELIGIBLE" "$abs_path" "" "$extra"
+                fi
                 TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
                 REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
             else
+                if [[ "$RESCUE_PUSH" == true ]]; then
+                    if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+                        ledger_line "repo-local" "PRESERVE" "$abs_path" "unapproved-rescue-push" "$extra"
+                        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                        act_candidate_done || return 3
+                        wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                        return 0
+                    fi
+                    if rescue_push_and_verify "$repo_abs" "$abs_path" "$head_sha" "$branch" "$size_kb_val"; then
+                        if git -C "$repo_abs" worktree remove --force -- "$abs_path" && [[ ! -e "$abs_path" && ! -L "$abs_path" ]]; then
+                            deletion_log_removal "$abs_path" "$size_kb_val" remove "rescue-push${RESCUE_BRANCH:+ rescue_branch=$RESCUE_BRANCH commit=$RESCUE_COMMIT}"
+                            ledger_line "repo-local" "DELETE" "$abs_path" "rescue-pushed${RESCUE_BRANCH:+; rescue_branch=$RESCUE_BRANCH}" "$extra"
+                            TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+                            REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+                        else
+                            ledger_line "repo-local" "PRESERVE" "$abs_path" "git-worktree-remove-failed" "$extra"
+                            REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                        fi
+                    else
+                        ledger_line "repo-local" "PRESERVE" "$abs_path" "${RESCUE_REASON:-rescue-push-failed}" "$extra"
+                        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+                    fi
+                    act_candidate_done || return 3
+                    wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                    return 0
+                fi
                 if [[ "$MANUAL_DISCARD" == true && "$is_manual_target" == true ]]; then
                     if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
                         ledger_line "repo-local" "PRESERVE" "$abs_path" "unapproved-manual-discard" "$extra"
@@ -1386,11 +1648,133 @@ manual_discard_remove() {
     return 0
 }
 
+process_extra_clone() {
+    local clone_dir="$1"
+    local abs_dir real_dir head_sha branch size_kb_val size_fmt age_days extra reason=""
+    [[ -d "$clone_dir" && ! -L "$clone_dir" ]] || return 0
+    abs_dir="$(cd "$clone_dir" 2>/dev/null && pwd -P)" || return 0
+    if [[ -z "$abs_dir" || "$abs_dir" == "/" || "$abs_dir" == "$HOME" || "$abs_dir" != "$HOME/"* ]]; then
+        ledger_line "extra-clone" "PRESERVE" "$clone_dir" "unsafe-path"
+        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+        return 0
+    fi
+    real_dir="$abs_dir"
+    if [[ -n "$GLOBAL_CWD_BLOCKED" ]]; then
+        reason="$GLOBAL_CWD_BLOCKED"
+    elif list_has_child_of "$real_dir" "$GLOBAL_LIVE_CWDS"; then
+        reason="live-cwd"
+    elif rescue_has_live_tmux "$abs_dir" "$real_dir"; then
+        reason="live-tmux"
+    elif worktree_is_recently_active_minutes "$abs_dir" "$MIN_AGE_MIN" "$(date +%s)"; then
+        reason="young"
+    elif safety_is_protected "$abs_dir" >/dev/null 2>&1; then
+        reason="machine-safety:protected"
+    fi
+
+    if [[ -z "$reason" ]]; then
+        local status_rc=0 sec
+        GIT_OPTIONAL_LOCKS=0 git -C "$abs_dir" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none >/dev/null 2>&1 || status_rc=$?
+        if [[ "$status_rc" -ne 0 ]]; then
+            reason="status-failed"
+        elif sec="$(rescue_find_secret_file "$abs_dir")"; then
+            reason="secret-like-file:$sec"
+        elif rescue_has_nested_git "$abs_dir"; then
+            reason="nested-git"
+        elif ! git -C "$abs_dir" remote get-url origin >/dev/null 2>&1; then
+            reason="no-origin"
+        fi
+    fi
+
+    head_sha="$(git -C "$abs_dir" rev-parse --verify -q HEAD^{commit} 2>/dev/null || true)"
+    branch="$(git -C "$abs_dir" symbolic-ref -q --short HEAD 2>/dev/null || echo "detached")"
+    size_kb_val="$(size_kb "$abs_dir")"
+    size_fmt="$(fmt_kb "$size_kb_val")"
+    age_days="$(worktree_age_days "$abs_dir" 2>/dev/null || echo '?')"
+    extra=" | age=${age_days}d size=${size_fmt} head=${head_sha:0:8} branch=${branch}"
+
+    if [[ -n "$reason" ]]; then
+        ledger_line "extra-clone" "PRESERVE" "$abs_dir" "$reason" "$extra"
+        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        ledger_line "extra-clone" "ELIGIBLE" "$abs_dir" "WOULD-RESCUE-PUSH-AND-DELETE" "$extra"
+        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+        REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+        return 0
+    fi
+
+    if [[ "${WORKTREE_APPROVED:-0}" != "1" ]]; then
+        ledger_line "extra-clone" "PRESERVE" "$abs_dir" "unapproved-rescue-push" "$extra"
+        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+        return 0
+    fi
+
+    if ! rescue_push_and_verify "$abs_dir" "$abs_dir" "$head_sha" "$branch" "$size_kb_val"; then
+        ledger_line "extra-clone" "PRESERVE" "$abs_dir" "${RESCUE_REASON:-rescue-push-failed}" "$extra"
+        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+        return 0
+    fi
+
+    local removed=0
+    if [[ -f "$abs_dir/.git" ]]; then
+        local gitdir_line git_dir main_repo
+        gitdir_line="$(grep '^gitdir: ' "$abs_dir/.git" 2>/dev/null || true)"
+        git_dir="${gitdir_line#gitdir: }"
+        main_repo="${git_dir%/.git/worktrees/*}"
+        if [[ -n "$main_repo" && -d "$main_repo/.git" ]] && git -C "$main_repo" worktree remove --force -- "$abs_dir" 2>/dev/null && [[ ! -e "$abs_dir" ]]; then
+            removed=1
+        fi
+    fi
+    if [[ "$removed" == 0 ]]; then
+        rm -rf -- "${abs_dir:?}" && [[ ! -e "$abs_dir" && ! -L "$abs_dir" ]] && removed=1
+    fi
+    if [[ "$removed" == 1 ]]; then
+        deletion_log_removal "$abs_dir" "$size_kb_val" remove "rescue-push-extra${RESCUE_BRANCH:+ rescue_branch=$RESCUE_BRANCH commit=$RESCUE_COMMIT}"
+        ledger_line "extra-clone" "DELETE" "$abs_dir" "rescue-pushed${RESCUE_BRANCH:+; rescue_branch=$RESCUE_BRANCH}" "$extra"
+        TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
+        REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
+    else
+        ledger_line "extra-clone" "PRESERVE" "$abs_dir" "remove-failed" "$extra"
+        REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+    fi
+}
+
+process_extra_clones_file() {
+    local file="$1" raw entry expanded git_entry clone_dir
+    echo ""
+    echo "--- Extra clones ($file) ---"
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+        [[ -z "$raw" || "$raw" == \#* ]] && continue
+        expanded="$(expand_path "$raw")"
+        if [[ ! -d "$expanded" || -L "$expanded" ]]; then
+            ledger_line "extra-clone" "PRESERVE" "$expanded" "missing-or-symlink"
+            REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
+            continue
+        fi
+        if [[ -e "$expanded/.git" ]]; then
+            process_extra_clone "$expanded"
+        else
+            # Container root: discover git checkouts deepest-first so nested repos are processed before parents.
+            while IFS= read -r git_entry; do
+                [[ -n "$git_entry" ]] || continue
+                clone_dir="$(dirname "$git_entry")"
+                process_extra_clone "$clone_dir"
+            done < <(find "$expanded" -maxdepth 4 -name .git 2>/dev/null | awk '{print length($0) "\t" $0}' | sort -rn | cut -f2-)
+        fi
+    done < "$file"
+}
+
 if ((${#REPO_LOCAL_REPOS[@]})); then
     for repo in "${REPO_LOCAL_REPOS[@]}"; do
         [[ "$ACT_STOP" == 0 ]] || break
         process_repo_local_worktrees "$repo"
     done
+fi
+
+if [[ -n "$EXTRA_CLONES_FILE" ]]; then
+    process_extra_clones_file "$EXTRA_CLONES_FILE"
 fi
 
 if [[ "$MANUAL_DISCARD" == true ]]; then
