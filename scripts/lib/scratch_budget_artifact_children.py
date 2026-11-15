@@ -157,6 +157,26 @@ def main():
             return 0 if generic_scope(sys.argv[2], sys.argv[3]) else 3
         except OSError:
             return 1
+    if mode == "scope-batch":
+        if len(sys.argv) != 3:
+            return 2
+        root = sys.argv[2]
+        raw = sys.stdin.buffer.read()
+        if raw and not raw.endswith(b"\0"):
+            return 1
+        paths = raw[:-1].split(b"\0") if raw else []
+        in_scope = bytearray()
+        try:
+            for path_bytes in paths:
+                if not path_bytes:
+                    return 1
+                path = os.fsdecode(path_bytes)
+                if generic_scope(root, path):
+                    in_scope.extend(path_bytes + b"\0")
+        except OSError:
+            return 1
+        sys.stdout.buffer.write(in_scope)
+        return 0
     deadline = parse_deadline(sys.argv[-1])
     if mode == "stream-generic-leaves":
         if len(sys.argv) != 4:

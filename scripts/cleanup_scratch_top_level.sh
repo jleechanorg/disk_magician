@@ -577,7 +577,9 @@ fi
 # once for all real-directory candidates before any candidate can be removed.
 # On Bash 3.2, avoid an empty array expansion and do not create a temp file or
 # invoke Python when there are no candidate directories.
+_scope_out_of_scope=()
 if (( ${#candidates[@]} )); then
+  _scope_candidates=()
   candidate_dirs=()
   for _candidate in ${candidates[@]+"${candidates[@]}"}; do
     [[ -d "$_candidate" && ! -L "$_candidate" ]] || continue
@@ -590,17 +592,33 @@ if (( ${#candidates[@]} )); then
     # and /Volumes/diskm-scratch/.Spotlight-V100 did the same on macOS.
     # Skip candidates this process cannot read and keep the batch contract.
     [[ -r "$_candidate" && -x "$_candidate" ]] || continue
-    if [[ "$root_registered" == true ]]; then
-      python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$_candidate"
-      _scope_rc=$?
-      case "$_scope_rc" in
-        0) ;;
-        3) continue ;;
-        *) emit_discovery_deferred_summary unmeasurable-scope; exit 75 ;;
-      esac
-    fi
-    candidate_dirs+=("$_candidate")
+    _scope_candidates+=("$_candidate")
   done
+  if [[ "$root_registered" == true ]] && (( ${#_scope_candidates[@]} )); then
+    _scope_batch_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-scope.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable-scope; exit 75; }
+    printf '%s\0' "${_scope_candidates[@]}" | python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope-batch "$root" >"$_scope_batch_file"
+    _scope_rc=$?
+    if (( _scope_rc != 0 )); then
+      rm -f "$_scope_batch_file"
+      emit_discovery_deferred_summary unmeasurable-scope
+      exit 75
+    fi
+    _scope_entry=""
+    while IFS= read -r -d '' _scope_entry; do
+      candidate_dirs+=("$_scope_entry")
+    done <"$_scope_batch_file"
+    rm -f "$_scope_batch_file"
+    _in_i=0
+    for _candidate in "${_scope_candidates[@]}"; do
+      if (( _in_i < ${#candidate_dirs[@]} )) && [[ "${candidate_dirs[$_in_i]}" == "$_candidate" ]]; then
+        _in_i=$(( _in_i + 1 ))
+      else
+        _scope_out_of_scope+=("$_candidate")
+      fi
+    done
+  else
+    candidate_dirs=(${_scope_candidates[@]+"${_scope_candidates[@]}"})
+  fi
   _artifact_extra=()
   if (( ${#candidate_dirs[@]} )); then
     artifact_batch_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-artifacts.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable; exit 75; }
@@ -826,11 +844,30 @@ while IFS= read -r -d '' entry; do
   [[ -e "$entry" || -L "$entry" ]] || continue
   base="${entry##*/}"
   case "$base" in .*) continue ;; esac
-  if [[ "$root_registered" == true && -d "$entry" && ! -L "$entry" ]] &&
-      ! python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$entry"; then
-    echo "kept:discovery-boundary $entry"
-    kept=$(( kept + 1 ))
-    continue
+  if [[ "$root_registered" == true && -d "$entry" && ! -L "$entry" ]]; then
+    _scope_known_out=false
+    for _oos in ${_scope_out_of_scope[@]+"${_scope_out_of_scope[@]}"}; do
+      if [[ "$entry" == "$_oos" ]]; then _scope_known_out=true; break; fi
+    done
+    if [[ "$_scope_known_out" == true ]]; then
+      echo "kept:discovery-boundary $entry"
+      kept=$(( kept + 1 ))
+      continue
+    fi
+    _scope_already_ok=false
+    if [[ -r "$entry" && -x "$entry" ]]; then
+      if [[ -z "$BUDGET_PCT" ]]; then
+        _scope_already_ok=true
+      elif [[ "${entry#"$root"/}" != */* ]] || [[ "$entry" == "$root/tmp/"* && "${entry#"$root/tmp/"}" != */* ]]; then
+        _scope_already_ok=true
+      fi
+    fi
+    if [[ "$_scope_already_ok" != true ]] &&
+        ! python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$entry"; then
+      echo "kept:discovery-boundary $entry"
+      kept=$(( kept + 1 ))
+      continue
+    fi
   fi
   _artifact_blocked=false
   for _blocked in ${_artifact_discovery_blocked[@]+"${_artifact_discovery_blocked[@]}"}; do
