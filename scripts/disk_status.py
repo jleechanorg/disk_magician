@@ -52,10 +52,7 @@ try:
 except ImportError:
     history_diff = None
 
-try:
-    import resolve_state_repo_path  # type: ignore
-except ImportError:
-    resolve_state_repo_path = None
+import resolve_state_repo_path  # sibling in SCRIPTS_DIR; honors DISK_MAGICIAN_STATE_REPO
 
 try:
     from job_receipt import JobReceiptStore, resolve_identity, resolve_state_dir  # type: ignore
@@ -331,12 +328,8 @@ class DiskStatusEvaluator:
         # Resolve state repo (snapshots, ledger, markdown)
         if state_repo:
             self.state_repo = Path(state_repo).expanduser().resolve()
-        elif "DISK_MAGICIAN_STATE_REPO" in os.environ and os.environ["DISK_MAGICIAN_STATE_REPO"].strip():
-            self.state_repo = Path(os.environ["DISK_MAGICIAN_STATE_REPO"].strip()).expanduser().resolve()
-        elif resolve_state_repo_path:
-            self.state_repo = Path(resolve_state_repo_path.resolve()).expanduser().resolve()
         else:
-            self.state_repo = Path.home() / ".local/state/disk-magician"
+            self.state_repo = Path(resolve_state_repo_path.resolve()).expanduser().resolve()
 
         self.fleet_json = Path(fleet_json).expanduser().resolve() if fleet_json else None
         self.strict_ledger_max_age_hours = strict_ledger_max_age_hours

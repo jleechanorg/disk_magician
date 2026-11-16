@@ -100,7 +100,7 @@ make_multiline_du_stub "$T1_BIN" "pr9999-scratch" 12345
 
 T1_OUT="$TMP_ROOT/t1.out"
 set +e
-env -i HOME="$TMP_ROOT/t1-home" \
+env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/t1-home" \
   PATH="$T1_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
@@ -133,7 +133,7 @@ make_multiline_du_stub "$T2_BIN" "pr8888-scratch" 6789
 
 T2_OUT="$TMP_ROOT/t2.out"
 set +e
-HOME="$TMP_ROOT/t2-home" \
+DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/t2-home" \
   PATH="$T2_BIN:$PATH" \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
   DISK_MAGICIAN_TEST_SANDBOX="$T2_DIR" \
@@ -171,7 +171,7 @@ chmod +x "$T3_BIN/du"
 
 T3_OUT="$TMP_ROOT/t3.out"
 set +e
-env -i HOME="$TMP_ROOT/t3-home" \
+env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/t3-home" \
   PATH="$T3_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
@@ -300,6 +300,37 @@ T7_OUT_CONTENT="$(cat "$T7_OUT")"
 assert_rc "Test 7: cleanup_downloads_evidence.sh exits 0 on multi-line du" 0 "$T7_RC"
 assert_not_contains "Test 7: no syntax error in expression" "syntax error in expression" "$T7_OUT_CONTENT"
 assert_contains "Test 7: reports last-line kb (3072 KB)" "(3072 KB)" "$T7_OUT_CONTENT"
+
+echo "Test 8: private-size sizing does not count APFS clone-shared bytes (bead k1yf, macOS only)"
+if [[ "$(uname -s)" == Darwin ]]; then
+  T8_DIR="$TMP_ROOT/t8"
+  mkdir -p "$T8_DIR/orig" "$T8_DIR/clone"
+  head -c 4194304 </dev/urandom >"$T8_DIR/orig/blob.bin"
+  cp -c "$T8_DIR/orig/blob.bin" "$T8_DIR/clone/blob.bin"
+  T8_FRESH="$TMP_ROOT/t8-fresh"; mkdir -p "$T8_FRESH"
+  head -c 4194304 </dev/urandom >"$T8_FRESH/blob.bin"
+  T8_CLONE_KB="$(python3 "$REPO_ROOT/scripts/private_size_kb.py" "$T8_DIR/clone" | cut -f1)"
+  T8_FRESH_KB="$(python3 "$REPO_ROOT/scripts/private_size_kb.py" "$T8_FRESH" | cut -f1)"
+  if (( T8_CLONE_KB < 256 )); then record_pass "Test 8: clone dir private size < 256 KB (got ${T8_CLONE_KB})"
+  else record_fail "Test 8: clone dir private size" "expected < 256 KB, got ${T8_CLONE_KB}"; fi
+  if (( T8_FRESH_KB >= 4096 )); then record_pass "Test 8: unshared 4 MiB file still measures >= 4096 KB (got ${T8_FRESH_KB})"
+  else record_fail "Test 8: unshared file size" "expected >= 4096 KB, got ${T8_FRESH_KB}"; fi
+  # Same sizer path the budget uses: cleanup_tmp.sh dry-run reports the private size.
+  T8_PTMP="$TMP_ROOT/t8-ptmp"; mkdir -p "$T8_PTMP/pr8888-scratch" "$TMP_ROOT/t8-tmp" "$TMP_ROOT/t8-home"
+  chmod 0700 "$TMP_ROOT/t8-home"
+  cp -c "$T8_DIR/orig/blob.bin" "$T8_PTMP/pr8888-scratch/blob.bin"
+  /usr/bin/find "$T8_PTMP/pr8888-scratch" -exec touch -t 202001010000 {} +
+  T8_OUT="$(env -i HOME="$TMP_ROOT/t8-home" PATH="/usr/bin:/bin:$(dirname "$(command -v python3)")" \
+    LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
+    DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
+    DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T8_PTMP" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$TMP_ROOT/t8-tmp" \
+    DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMP_ROOT/t8-tmp" DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/t8-archive" \
+    bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --dry-run --large 2>&1 || true)"
+  assert_not_contains "Test 8: cleanup_tmp.sh does not size the clone at its shared 4096 KB" "(4096 KB)" "$T8_OUT"
+  assert_contains "Test 8: cleanup_tmp.sh saw the clone candidate" "pr8888-scratch" "$T8_OUT"
+else
+  echo "  SKIP  Test 8 (APFS clones are macOS only)"
+fi
 
 echo
 echo "===================================="

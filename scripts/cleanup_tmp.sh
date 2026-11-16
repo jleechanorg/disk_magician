@@ -469,6 +469,13 @@ resolve_timeout_bin() {
   done
 }
 
+# Budget sizing counts APFS private bytes (clone-shared blocks are not freed by a
+# delete); DISK_MAGICIAN_SIZE_METHOD=du or a non-macOS host keeps plain du.
+SIZE_CMD=(du -sk -x)
+if [[ "$(uname -s)" == Darwin && "${DISK_MAGICIAN_SIZE_METHOD:-}" != du && -f "$SCRIPT_DIR/private_size_kb.py" ]]; then
+  SIZE_CMD=(python3 "$SCRIPT_DIR/private_size_kb.py")
+fi
+
 path_size_kb() {
   scratch_budget_report_measurement "$1" || return $?
   # Bead disk_magician-lsl: `du -sk` can emit zero, one, or (under a TOCTOU
@@ -489,7 +496,7 @@ path_size_kb() {
   local tbin out rc=0 total
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
   if [[ -n "$tbin" ]]; then
-    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" du -sk -x "$1" 2>/dev/null)" || rc=$?
+    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" "${SIZE_CMD[@]}" "$1" 2>/dev/null)" || rc=$?
     if (( rc == 124 || rc == 137 )); then
       log "du exceeded ${PROBE_TIMEOUT_SEC}s, size unknown (preserving): $1"
       echo -1
@@ -502,7 +509,7 @@ path_size_kb() {
     fi
   else
     warn_unbounded_probes_once
-    out="$(du -sk -x "$1" 2>/dev/null)" || rc=$?
+    out="$("${SIZE_CMD[@]}" "$1" 2>/dev/null)" || rc=$?
   fi
   total="$(awk '$1 ~ /^[0-9]+$/ {f=$1; n=1} END{if (n) print f}' <<<"$out")"
   if [[ -z "$total" ]] && (( rc != 0 )); then

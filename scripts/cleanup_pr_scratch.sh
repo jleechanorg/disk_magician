@@ -281,6 +281,13 @@ find_cmd() {
   fi
 }
 
+# Budget sizing counts APFS private bytes (clone-shared blocks are not freed by a
+# delete); DISK_MAGICIAN_SIZE_METHOD=du or a non-macOS host keeps plain du.
+SIZE_CMD=(du -sk)
+if [[ "$(uname -s)" == Darwin && "${DISK_MAGICIAN_SIZE_METHOD:-}" != du && -f "$SCRIPT_DIR/private_size_kb.py" ]]; then
+  SIZE_CMD=(python3 "$SCRIPT_DIR/private_size_kb.py")
+fi
+
 path_size_kb() {
   scratch_budget_report_measurement "$1" || exit $?
   # Bead disk_magician-lsl: same fragility as cleanup_tmp.sh's twin --
@@ -289,7 +296,7 @@ path_size_kb() {
   # default to 0 when there is no line at all. `du`'s own exit status is
   # neutralized with `|| true` so a `du` failure never aborts the caller
   # under `set -eo pipefail`.
-  { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
+  { "${SIZE_CMD[@]}" "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
 }
 
 is_protected_root() {
