@@ -139,6 +139,30 @@ else
     fi
 fi
 
+echo "== 7. Complete metadata, dead pid, FRESH stamp IS recovered immediately =="
+LEASE6="$DISK_MAGICIAN_STATE_DIR/worktree_leases/dead-pid-fresh.json"
+LOCK6="${LEASE6}.reuse-lock"
+mkdir -p "$LOCK6"
+printf '%s\n' "$DEAD_PID" > "$LOCK6/pid"
+date +%s > "$LOCK6/acquired_at"
+if LEASE_REUSE_LOCK_TTL_SEC=3600 lease_reuse_lock_recover "$LEASE6" && [[ ! -e "$LOCK6" ]]; then
+    ok "fresh complete lock with dead owner reaped without waiting for TTL"
+else
+    bad "fresh complete lock with dead owner was not reaped"
+fi
+
+echo "== 8. Complete metadata, live pid, fresh stamp is NOT reaped =="
+LEASE7="$DISK_MAGICIAN_STATE_DIR/worktree_leases/live-pid-fresh.json"
+LOCK7="${LEASE7}.reuse-lock"
+mkdir -p "$LOCK7"
+printf '%s\n' "$$" > "$LOCK7/pid"
+date +%s > "$LOCK7/acquired_at"
+if LEASE_REUSE_LOCK_TTL_SEC=3600 lease_reuse_lock_recover "$LEASE7"; then
+    bad "live-owner fresh lock was reaped"
+else
+    [[ -d "$LOCK7" ]] && ok "live-owner fresh lock preserved" || bad "live-owner lock disappeared"
+fi
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

@@ -171,6 +171,34 @@ else
   bad "missing git command reported safe — FAIL-OPEN ERROR"
 fi
 
+echo "── Case 12: Pushed HEAD but another local branch has unpushed commits is unsafe ──"
+CLEAN2="$TMPROOT/repo2"
+git clone "$UPSTREAM" "$CLEAN2" >/dev/null 2>&1
+git -C "$CLEAN2" checkout main >/dev/null 2>&1
+if worktree_has_unsaved_work "$CLEAN2"; then
+  bad "baseline clone for cases 12/13 not safe"
+fi
+git -C "$CLEAN2" checkout -b side >/dev/null 2>&1
+echo side > "$CLEAN2/side.txt"
+git -C "$CLEAN2" add side.txt
+git -C "$CLEAN2" commit -m side >/dev/null 2>&1
+git -C "$CLEAN2" checkout main >/dev/null 2>&1
+if worktree_has_unsaved_work "$CLEAN2"; then
+  ok "unpushed commits on a non-current branch reported unsafe (rc 0)"
+else
+  bad "unpushed side-branch commits reported safe — DATA LOSS RISK"
+fi
+git -C "$CLEAN2" branch -D side >/dev/null 2>&1
+
+echo "── Case 13: Stash entry is unsafe ──"
+echo dirty >> "$CLEAN2/README.md"
+git -C "$CLEAN2" stash >/dev/null 2>&1
+if worktree_has_unsaved_work "$CLEAN2"; then
+  ok "stash reported unsafe (rc 0)"
+else
+  bad "stash reported safe — DATA LOSS RISK"
+fi
+
 echo ""
 echo "=== Test Results: $PASS pass, $FAIL fail ==="
 if [[ "$FAIL" -gt 0 ]]; then

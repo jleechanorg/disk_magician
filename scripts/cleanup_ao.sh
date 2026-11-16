@@ -346,6 +346,7 @@ workspace_preservation_reason() {
   [[ -n "$branch" ]] || { printf '%s' 'detached HEAD requires preservation'; return; }
   upstream="$(git -C "$path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
   [[ -n "$upstream" ]] || { printf '%s' 'branch has no upstream; pushed state is unknown'; return; }
+  worktree_has_unsaved_work "$path" && { printf '%s' 'workspace has unpushed branches, a stash, or unverifiable git state'; return; }
   remote="$(git -C "$path" config --get "branch.$branch.remote" 2>/dev/null || true)"
   merge_ref="$(git -C "$path" config --get "branch.$branch.merge" 2>/dev/null || true)"
   [[ -n "$remote" && "$remote" != . && "$merge_ref" == refs/heads/* ]] || { printf '%s' 'upstream remote could not be verified'; return; }
@@ -428,6 +429,7 @@ source "$SCRIPT_DIR/lib/lsof_linux.sh"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 source "$SCRIPT_DIR/lib/artifact_verdict.sh"
 source "$SCRIPT_DIR/lib/worktree_restore_receipt.sh"
+source "$SCRIPT_DIR/lib/worktree_safety.sh"
 
 log "Stage 1: producer quiescence"
 if [[ "$STOP_PRODUCERS" == true ]]; then stop_producers; else log "[dry-run] pass --stop-producers to enable producer stop"; fi

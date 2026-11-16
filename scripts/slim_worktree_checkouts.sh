@@ -36,6 +36,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/worktree_recency.sh"
 # shellcheck source=safety_lib.sh
 source "$SCRIPT_DIR/safety_lib.sh"
+# shellcheck source=lib/lsof_linux.sh
+source "$SCRIPT_DIR/lib/lsof_linux.sh"
 # shellcheck source=lib/ao_worktree_config.sh
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh" 2>/dev/null || true
 
@@ -94,19 +96,12 @@ if [[ "$DRY_RUN" == false && "${WORKTREE_APPROVED:-0}" != "1" ]]; then
   exit 1
 fi
 
-# Live-cwd evidence: a worktree a shell or agent is sitting in must not lose
-# files under its own feet. /proc is authoritative on Linux; sysctl/lsof is the
-# macOS path used by the rest of this repo.
-live_cwds() {
-  if [[ -d /proc ]]; then
-    for p in /proc/[0-9]*/cwd; do
-      readlink "$p" 2>/dev/null || true
-    done
-  else
-    lsof -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
-  fi
-}
-LIVE_CWDS="$(live_cwds)"
+# Live-cwd evidence must be complete; otherwise refuse to touch anything. The
+# shared strict parser is the only place that interprets lsof output.
+if ! lsof_snapshot_cwds; then
+  echo "lsof output incomplete ($LSOF_CWD_REASON): cwd unknown, refusing."; exit 0
+fi
+LIVE_CWDS="$LSOF_CWDS"
 
 is_live() {
   local wt="$1" c
