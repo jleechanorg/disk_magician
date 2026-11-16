@@ -1263,6 +1263,11 @@ def open_file(root, deadline=None):
 
 if __name__ == "__main__":
     a = sys.argv[1:]
+
+    def _probe_timeout(*_):
+        raise TimeoutError("c14 probe timed out")
+    signal.signal(signal.SIGALRM, _probe_timeout)  # a blocked read/open must fail closed, not hang
+    signal.alarm(int(os.environ.get("C14_PROBE_TIMEOUT", "1800")))
     if a and a[0] == "any-secret":
         sys.exit(any_secret(a[1:]))
     try:

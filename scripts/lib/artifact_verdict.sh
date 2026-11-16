@@ -50,6 +50,17 @@ c14_discover_repos() {
     [[ -n "$done" ]]
 }
 
+# _av_git <git args...>: git bounded by C14_GIT_TIMEOUT seconds (default 120); the process
+# group is killed on expiry and rc is 124, which every caller treats as kept:check-failed.
+_av_git() {
+    python3 -c 'import os,signal,subprocess,sys
+t,*c=sys.argv[1:]
+p=subprocess.Popen(["git",*c],start_new_session=True)
+try: sys.exit(p.wait(timeout=float(t)))
+except subprocess.TimeoutExpired:
+ os.killpg(p.pid,signal.SIGKILL); p.wait(); sys.exit(124)' "${C14_GIT_TIMEOUT:-120}" "$@"
+}
+
 # c14_repo_content_ok <repo> [--overlay-manifest <receipt>]: print `ok` (rc 0) or `kept:<reason>` (rc 1).
 # Git env dropped; git must resolve <repo> itself, not an ancestor (broken .git).
 c14_repo_content_ok() (
@@ -62,13 +73,13 @@ c14_repo_content_ok() (
     elif [[ -n "$mode" || -n "$receipt" ]]; then
         echo kept:check-failed; return 1
     fi
-    case "$(git -C "$r" rev-parse --is-bare-repository 2>/dev/null)" in
-        true) [[ "$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" == "$r" ]] && { echo ok; return 0; } ;;
-        false) [[ "$(git -C "$r" rev-parse --show-toplevel 2>/dev/null)" == "$r" ]] ;;
+    case "$(_av_git -C "$r" rev-parse --is-bare-repository 2>/dev/null)" in
+        true) [[ "$(_av_git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" == "$r" ]] && { echo ok; return 0; } ;;
+        false) [[ "$(_av_git -C "$r" rev-parse --show-toplevel 2>/dev/null)" == "$r" ]] ;;
         *) false ;;
     esac || { echo kept:check-failed; return 1; }
-    if ! st="$(git -C "$r" status --porcelain=v1 --untracked-files=all --ignore-submodules=none 2>/dev/null)" ||
-        ! flags="$(git -C "$r" ls-files -v 2>/dev/null)"; then
+    if ! st="$(_av_git -C "$r" status --porcelain=v1 --untracked-files=all --ignore-submodules=none 2>/dev/null)" ||
+        ! flags="$(_av_git -C "$r" ls-files -v 2>/dev/null)"; then
         echo kept:check-failed; return 1
     fi
     # Tracked or submodule changes, untracked files, or hidden index flags.
@@ -88,7 +99,7 @@ c14_repo_pushed_ok() (
     local r=$1 root=${2:-$1} deadline=${3:-} owner_context=${4:-} gd cd kv out adv='' have tips='' unp v linked= scope=(--all --reflog)
     case "$owner_context" in ''|ao-owner-validated) ;; *) echo kept:check-failed; return 1 ;; esac
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
-    gd="$(git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" &&
+    gd="$(_av_git -C "$r" rev-parse --absolute-git-dir 2>/dev/null)" &&
         cd="$(git -C "$r" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
         { echo kept:check-failed; return 1; }
     # Fail closed when the candidate contains the common admin storage but a
@@ -116,7 +127,7 @@ c14_repo_pushed_ok() (
         adv+="$out"$'\n'
     done < <(git -C "$r" config -z --get-regexp '^remote\..*\.url$' 2>/dev/null)
     # Advertised SHAs present locally become negative tips.
-    have="$(cut -f1 <<<"$adv" | GIT_NO_LAZY_FETCH=1 git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
+    have="$(cut -f1 <<<"$adv" | GIT_NO_LAZY_FETCH=1 _av_git -C "$r" cat-file --batch-check='%(objectname)' 2>/dev/null | grep -v ' missing$' | sed 's/^/^/')"
     unp="$(git -C "$r" rev-list ${scope[@]+"${scope[@]}"} --stdin -n1 < <(printf '%s\n' $tips $have) 2>/dev/null)" || { echo kept:check-failed; return 1; }
     [[ -z "$unp" ]] || { echo kept:not-pushed; return 1; }
     if [[ -n "$linked" ]]; then  # linked: unreachable objects stay in the common store
@@ -127,7 +138,7 @@ c14_repo_pushed_ok() (
         [[ "$v" == remove ]] && { echo ok; return 0; }
         echo "$v"; return 1
     fi
-    out="$(git -C "$r" fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>/dev/null)" ||
+    out="$(_av_git -C "$r" fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>/dev/null)" ||
         { echo kept:check-failed; return 1; }
     grep -q '^unreachable ' <<<"$out" && { echo kept:unreachable-object; return 1; }
     v="$(python3 "$_AV_DIR/../c14_probe.py" gitmeta "$gd" "$(lease_path_for "$r" 2>/dev/null)")"

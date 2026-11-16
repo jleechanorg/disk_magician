@@ -44,17 +44,6 @@ def main():
     args = sys.argv[1:]
     # Dispatches all diskm subcommands (including scratch-dir and cleanup-task-scratch) via disk_magician.sh.
     
-    # Handle environment variables
-    # DISK_MAGICIAN_AUTO_CLEAN or DISK_MAGICIAN_SAFE_AUTO
-    auto_clean_env = os.environ.get("DISK_MAGICIAN_AUTO_CLEAN") or os.environ.get("DISK_MAGICIAN_SAFE_AUTO")
-    
-    # If the user ran 'clean' command:
-    # - If DISK_MAGICIAN_AUTO_CLEAN=1, safe cleanups can proceed without interactive confirmation.
-    # - If the variable is NOT set, safe cleanups must default to dry-run/preview mode unless the user explicitly passes the clean command.
-    # Note: running "disk-magician clean" is explicitly passing the clean command.
-    # But if they run it automatically or we want to double check:
-    # If they run "clean" and we want to allow it:
-    
     # Ensure environment variables are passed along
     env = _build_orchestrator_env()
     if args and args[0] in ("scratch-new", "scratch_new"):
@@ -70,8 +59,6 @@ def main():
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             print(f"Error: scratch producer identity unavailable: {exc}", file=sys.stderr)
             sys.exit(75)
-    if auto_clean_env:
-        env["DISK_MAGICIAN_AUTO_CLEAN"] = auto_clean_env
 
     # Scheduled cleanup owns signal forwarding, reserve recovery and receipts.
     # Replace this CLI process so scheduler signals reach that owner directly.
