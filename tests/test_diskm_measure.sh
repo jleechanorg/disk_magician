@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scratch_budget_measure_files lives in scripts/diskm_measure.py; the bash
-# wrapper must stay byte-identical to the pre-move heredoc on origin/main.
+# wrapper must stay byte-identical to the pre-move heredoc (pinned at GOLDEN_BASE; origin/main holds the module after merge).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${TMPDIR:?admitted Scratch TMPDIR required}"
@@ -15,8 +15,9 @@ bad() { printf 'FAIL: %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # Old function from the pre-change base, loaded from a copy of scripts/ so its relative sources resolve.
 mkdir "$T/old"
 cp -R "$ROOT/scripts" "$T/old/scripts"
-git -C "$ROOT" show origin/main:scripts/lib/scratch_budget.sh >"$T/old/scripts/lib/scratch_budget.sh" || { bad 'cannot read origin/main scratch_budget.sh'; exit 1; }
-grep -q 'python3 - "\$path"' "$T/old/scripts/lib/scratch_budget.sh" || { bad 'origin/main no longer holds the heredoc; golden base is wrong'; exit 1; }
+GOLDEN_BASE=4aa2c6208b6db217bb9316764bba5389743e2674
+git -C "$ROOT" show "$GOLDEN_BASE":scripts/lib/scratch_budget.sh >"$T/old/scripts/lib/scratch_budget.sh" || { bad 'cannot read GOLDEN_BASE scratch_budget.sh'; exit 1; }
+grep -q 'python3 - "\$path"' "$T/old/scripts/lib/scratch_budget.sh" || { bad 'GOLDEN_BASE does not hold the heredoc'; exit 1; }
 
 F="$T/fx"
 mkdir -p "$F/sparse" "$F/hl" "$F/repo/.git" "$F/empty" "$F/plain/sub"
