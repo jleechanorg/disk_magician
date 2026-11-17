@@ -31,8 +31,9 @@ echo "== 1. status reports the required keys for every device =="
 fixture="$TMP/fixture"
 mkdir -p "$fixture/pool-a"
 # two fixture devices: one booted, one shutdown
-sim_fixture_device "$fixture" "AAAAAAAA-1111-2222-3333-444444444444" "wai-shared-ios-26-5-a" "Booted"  10
+sim_fixture_device "$fixture" "AAAAAAAA-1111-2222-3333-444444444444" "wai-shared-ios-26-5-a" "Shutdown" 10
 sim_fixture_device "$fixture" "BBBBBBBB-1111-2222-3333-444444444444" "task-named-old"         "Shutdown" 100
+sim_fixture_device "$fixture" "cccccccc-1111-2222-3333-444444444444" "wai-shared-booted"      "Booted"   10
 out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_status_json 2>/dev/null)"
 if printf '%s' "$out" | grep -q '"udid"' && \
    printf '%s' "$out" | grep -q '"state"' && \
@@ -72,12 +73,16 @@ rc=$?
 [[ "$rc" -ne 0 ]] && ok "release without --token refused" || bad "release without a token was accepted"
 
 echo "== 4. a stale-generation token fails closed and writes no receipt =="
+# Isolated state dir: earlier cases legitimately wrote their own receipts.
+c4_state="$TMP/state4"; mkdir -p "$c4_state"
+export DISK_MAGICIAN_STATE_DIR="$c4_state"
 tok_old="lt_stale_generation"
 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_release "AAAAAAAA-1111-2222-3333-444444444444" --token "$tok_old" >/dev/null 2>&1
 rc=$?
 receipts_before=$(find "$DISK_MAGICIAN_STATE_DIR" -name '*release*' 2>/dev/null | wc -l | tr -d ' ')
 [[ "$rc" -ne 0 ]] && ok "stale token refused (exit $rc)" || bad "stale token was accepted"
 [[ "$receipts_before" -eq 0 ]] && ok "no receipt written for a stale token" || bad "stale token wrote a receipt"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 
 echo "== 5. prune preserves Booted, leased, young, and unreleased devices =="
 out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_prune --dry-run 2>/dev/null)"
@@ -126,7 +131,7 @@ DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_create >/dev/null 2>"$TMP/e9"
 echo "== 10. create refuses when a free pool slot exists =="
 # Dedicated fixture so state from earlier cases cannot mask the slot check.
 slot_fx="$TMP/slotfx"; mkdir -p "$slot_fx"
-sim_fixture_device "$slot_fx" "FFFFFFFF-1111-2222-3333-444444444444" "wai-shared-ios-26-5-z" "Shutdown" 10
+sim_fixture_device "$slot_fx" "dddddddd-1111-2222-3333-444444444444" "wai-shared-ios-26-5-z" "Shutdown" 10
 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$slot_fx" sim_create --reason "test" >/dev/null 2>"$TMP/e10"
 rc10=$?
 [[ "$rc10" -eq 21 ]] && ok "create refused because a slot was available (exit 21)" || bad "create ignored an available slot (rc=$rc10: $(head -1 "$TMP/e10"))"
@@ -150,9 +155,55 @@ after="$(find "$DISK_MAGICIAN_STATE_DIR/sim_reservations" -maxdepth 1 -type d ! 
 echo "== 13. a reservation that recorded a UDID is reconciled, not silently dropped =="
 mkdir -p "$DISK_MAGICIAN_STATE_DIR/sim_reservations/created-1"
 printf 'status=created\n' >"$DISK_MAGICIAN_STATE_DIR/sim_reservations/created-1/meta"
-printf 'EEEEEEEE-1111-2222-3333-444444444444\n' >"$DISK_MAGICIAN_STATE_DIR/sim_reservations/created-1/udid"
+printf 'eeeeeeee-1111-2222-3333-444444444444\n' >"$DISK_MAGICIAN_STATE_DIR/sim_reservations/created-1/udid"
 msg="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_recover_reservations 2>&1)"
 printf '%s' "$msg" | grep -q 'recover:' && ok "recorded-UDID reservation reconciled with a receipt line" || bad "recorded-UDID reservation produced no recovery line"
+
+echo "== 14. floor cannot be lowered below 2880 minutes =="
+low="$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 sim_floor_minutes)"
+[[ "$low" -eq 2880 ]] && ok "floor clamped to the hard 2880-minute minimum" || bad "floor was lowered to $low by configuration"
+high="$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=99999 sim_floor_minutes)"
+[[ "$high" -eq 99999 ]] && ok "floor may be lengthened" || bad "floor did not honour a longer value"
+
+echo "== 15. generation is monotonic across release, never reset to 1 =="
+g15_state="$TMP/state15"; g15_fx="$TMP/fx15"; mkdir -p "$g15_state" "$g15_fx"
+sim_fixture_device "$g15_fx" "aabbccdd-1111-2222-3333-444444444444" "wai-shared-ios-26-5-g" "Shutdown" 5
+export DISK_MAGICIAN_STATE_DIR="$g15_state"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$g15_fx" sim_lease --wait-seconds 0 >"$TMP/g-le1" 2>/dev/null
+tk1="$(grep -oE 'lt_[A-Za-z0-9_]+' "$TMP/g-le1" | head -1)"
+ug1="$(grep -oE '"[0-9a-fA-F-]{8,}"' "$TMP/g-le1" | head -1 | tr -d '"')"
+g1="$(sed -nE 's/.*"lease_generation": ([0-9]+).*/\1/p' "$TMP/g-le1" | head -1)"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$g15_fx" sim_release "$ug1" --token "$tk1" >/dev/null 2>&1
+rel_rc=$?
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$g15_fx" sim_lease --wait-seconds 0 >"$TMP/g-le2" 2>/dev/null
+g2="$(sed -nE 's/.*"lease_generation": ([0-9]+).*/\1/p' "$TMP/g-le2" | head -1)"
+if [ -n "${g1:-}" ] && [ -n "${g2:-}" ] && [ "${g2:-0}" -gt "${g1:-0}" ]; then
+    ok "generation advanced (${g1} -> ${g2}) across release/re-lease"
+else
+    bad "generation did not advance (g1=${g1:-none} g2=${g2:-none} release_rc=${rel_rc:-?})"
+fi
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 16. an old receipt does not authorise a newer lease (generation fencing) =="
+export DISK_MAGICIAN_STATE_DIR="$g15_state"
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$g15_fx" sim_prune --dry-run 2>/dev/null)"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+printf '%s' "$out" | grep -q 'keep:leased' && ok "re-leased device is keep:leased, old receipt ignored" || bad "stale-generation receipt was honoured"
+
+echo "== 17. concurrent release is serialized (only one succeeds) =="
+conc_fx="$TMP/concfx"; conc_state="$TMP/state17"; mkdir -p "$conc_fx" "$conc_state"
+export DISK_MAGICIAN_STATE_DIR="$conc_state"
+sim_fixture_device "$conc_fx" "bbbbbbbb-1111-2222-3333-444444444444" "wai-shared-ios-26-5-c" "Shutdown" 5
+cle="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$conc_fx" sim_lease --wait-seconds 0 2>/dev/null)"
+ctk="$(printf '%s' "$cle" | grep -oE 'lt_[A-Za-z0-9_]+' | head -1)"
+cud="$(printf '%s' "$cle" | grep -oE '"[0-9a-fA-F-]{8,}"' | head -1 | tr -d '"')"
+( DISK_MAGICIAN_SIM_FIXTURE_ROOT="$conc_fx" sim_release "$cud" --token "$ctk" >/dev/null 2>"$TMP/e17a"; echo $? >"$TMP/r1" ) &
+( DISK_MAGICIAN_SIM_FIXTURE_ROOT="$conc_fx" sim_release "$cud" --token "$ctk" >/dev/null 2>"$TMP/e17b"; echo $? >"$TMP/r2" ) &
+wait
+r1="$(cat "$TMP/r1" 2>/dev/null)"; r2="$(cat "$TMP/r2" 2>/dev/null)"
+wins=0; [[ "$r1" == "0" ]] && wins=$((wins+1)); [[ "$r2" == "0" ]] && wins=$((wins+1))
+[[ "$wins" -eq 1 ]] && ok "exactly one of two concurrent releases succeeded" || bad "concurrent release outcome wrong (r1=$r1 r2=$r2: $(cat "$TMP/e17a" "$TMP/e17b" 2>/dev/null | head -2 | tr '\n' ' '))"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="

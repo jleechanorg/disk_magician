@@ -19,22 +19,29 @@
 # atomic acquisition via mkdir (the same single-writer primitive the worktree
 # lease registry already uses).
 
-SIM_STATE_ROOT="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
-SIM_LEASE_DIR="$SIM_STATE_ROOT/sim_leases"
-SIM_RECEIPT_DIR="$SIM_STATE_ROOT/receipts"
+# Resolved on EVERY call, never captured at source time: a captured value ignores
+# a caller's DISK_MAGICIAN_STATE_DIR override, which made the test suite write
+# leases into the real state dir (found 2026-11-16).
+sim_state_root()    { printf '%s\n' "${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"; }
+sim_lease_dir()     { printf '%s/sim_leases\n' "$(sim_state_root)"; }
+sim_receipt_dir()   { printf '%s/receipts\n' "$(sim_state_root)"; }
 SIM_DEFAULT_FLOOR_MINUTES=2880
 
 sim_now() { date +%s; }
 
+# The simulator floor is FIXED at 48 h. Unlike disposable scratch, a device is
+# expensive-to-rebuild evidence state, so DISK_MAGICIAN_AGE_FLOOR_MINUTES can
+# lengthen it but NEVER shorten it (review finding, 2026-11-16: an env var must
+# not turn a 48 h floor into 2 h).
+SIM_HARD_FLOOR_MINUTES=2880
+
 sim_floor_minutes() {
-  local m="${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}"
+  local m="${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" out=$SIM_HARD_FLOOR_MINUTES
   if [[ "$m" =~ ^[0-9]{1,7}$ ]]; then
     m=$((10#$m))
-    (( m >= 120 )) || m=120
-    printf '%s\n' "$m"
-  else
-    printf '%s\n' "$SIM_DEFAULT_FLOOR_MINUTES"
+    (( m > out )) && out=$m
   fi
+  printf '%s\n' "$out"
 }
 
 # sim_device_root — the CoreSimulator device store, or the test fixture root.
@@ -115,7 +122,23 @@ for runtime, devs in (d.get("devices") or {}).items():
   done
 }
 
-sim_lease_path()   { printf '%s/%s\n' "$SIM_LEASE_DIR" "$1"; }
+sim_lease_path()   { printf '%s/%s\n' "$(sim_lease_dir)" "$1"; }
+
+# Generation is persisted in its OWN file that survives release, so a later lease
+# can never reuse a superseded generation number (review finding: release deleted
+# the lease dir, so generation reset to 1 and receipt validation could not tell a
+# new lease from the old one).
+sim_generation_path() { printf '%s/gen/%s\n' "$(sim_state_root)" "$1"; }
+sim_release_lock_path() { printf '%s/lock/%s.release-lock\n' "$(sim_state_root)" "$1"; }
+sim_next_generation() {
+  local udid="$1" p prev=0
+  p="$(sim_generation_path "$udid")"
+  mkdir -p "$(dirname "$p")" 2>/dev/null || true
+  [[ -f "$p" ]] && prev="$(cat "$p" 2>/dev/null)"
+  [[ "$prev" =~ ^[0-9]+$ ]] || prev=0
+  printf '%s\n' "$(( prev + 1 ))" >"$p"
+  printf '%s\n' "$(( prev + 1 ))"
+}
 sim_generation()   { cat "$(sim_lease_path "$1")/generation" 2>/dev/null; }
 sim_lease_owner()  { cat "$(sim_lease_path "$1")/owner" 2>/dev/null; }
 
@@ -158,7 +181,7 @@ sim_lease() {
       *) shift ;;
     esac
   done
-  mkdir -p "$SIM_LEASE_DIR" || { echo "sim lease: cannot create lease dir" >&2; return 22; }
+  mkdir -p "$(sim_lease_dir)" || { echo "sim lease: cannot create lease dir" >&2; return 22; }
 
   local deadline=$(( $(sim_now) + wait_seconds )) udid name state newest
   while :; do
@@ -166,13 +189,18 @@ sim_lease() {
       [[ -n "$udid" ]] || continue
       # only pool devices are leaseable; task-named devices need explicit adopt
       [[ "$name" == wai-shared-* ]] || continue
+      # Never hand out a Booted (in-use) device, and require a positive safe state.
+      [[ "$state" == "Shutdown" ]] || continue
+      # Honour the requested runtime when one is named (device names encode it).
+      if [[ -n "$runtime" ]]; then
+        local rt_slug; rt_slug="$(printf '%s' "$runtime" | tr ' .' '--' | tr 'A-Z' 'a-z')"
+        [[ "$name" == *"$runtime"* || "$name" == *"$rt_slug"* ]] || continue
+      fi
       local d; d="$(sim_lease_path "$udid")"
       if mkdir "$d" 2>/dev/null; then
-        local gen=1
-        [[ -f "$d/last_generation" ]] && gen=$(( $(cat "$d/last_generation") + 1 ))
         local token="lt_$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-        printf '%s\n' "$(( gen ))" >"$d/generation"
-        printf '%s\n' "$(( gen ))" >"$d/last_generation"
+        local gen; gen="$(sim_next_generation "$udid")"
+        printf '%s\n' "$gen" >"$d/generation"
         printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner"
         printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"
         chmod 600 "$d/token_fingerprint" "$d/generation" "$d/owner" 2>/dev/null || true
@@ -209,33 +237,66 @@ sim_release() {
   }
   local d; d="$(sim_lease_path "$udid")"
   [[ -d "$d" ]] || { echo "sim release: no lease for $udid" >&2; return 23; }
+
+  # Serialize check-and-delete. Without this lock two releases can both pass the
+  # token check, and a delayed one can then delete a NEWLY acquired lease
+  # (review finding, 2026-11-16). The lock covers validate -> receipt -> delete.
+  local lock; lock="$(sim_release_lock_path "$udid")"
+  mkdir -p "$(dirname "$lock")" 2>/dev/null || true
+  local waited=0
+  until mkdir "$lock" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited+1))
+    (( waited < 300 )) || { echo "sim release: could not serialize (lock busy)" >&2; return 25; }
+  done
+  # No RETURN trap: a RETURN trap outlives this function and later fires with
+  # ${lock} out of scope, aborting the caller under `set -u` (found by the
+  # concurrency test). Every exit path below removes the lock explicitly.
+
+  # Re-read the fingerprint UNDER the lock: a concurrent acquire may have swapped it.
   local expected actual gen
   expected="$(cat "$d/token_fingerprint" 2>/dev/null)"
   actual="$(sim_token_fingerprint "$token")"
   if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+    rmdir "${lock}" 2>/dev/null || true
     echo "sim release: stale-lease-token (generation superseded)" >&2
     return 23
   fi
   gen="$(sim_generation "$udid")"
-  mkdir -p "$SIM_RECEIPT_DIR" || true
-  # Receipt carries the fingerprint, never the raw token.
-  printf '{"action": "release", "udid": "%s", "lease_generation": %s, "token_fingerprint": "%s", "released_at": "%s"}\n' \
+
+  # A receipt-write failure must fail the release, not be ignored: the receipt is
+  # the ONLY thing that makes a device prunable, so silently dropping it would
+  # leave a released device permanently unpickable while reporting success.
+  mkdir -p "$(sim_receipt_dir)" 2>/dev/null || {
+    rmdir "${lock}" 2>/dev/null || true
+    echo "sim release: cannot create receipt dir; refusing" >&2
+    return 24
+  }
+  if ! printf '{"action": "release", "udid": "%s", "lease_generation": %s, "token_fingerprint": "%s", "released_at": "%s"}\n' \
     "$udid" "${gen:-0}" "$expected" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    >>"$SIM_RECEIPT_DIR/sim_release_receipts.jsonl"
+    >>"$(sim_receipt_dir)/sim_release_receipts.jsonl" 2>/dev/null; then
+    rmdir "${lock}" 2>/dev/null || true
+    echo "sim release: receipt write failed; refusing" >&2
+    return 24
+  fi
   rm -rf "${d:?}" 2>/dev/null
+  rmdir "${lock}" 2>/dev/null || true
   return 0
 }
 
 # sim_released_and_idle <udid> — true only with a receipt for the current
 # generation AND the floor elapsed since the recorded release time.
 sim_released_and_idle() {
-  local udid="$1" receipts="$SIM_RECEIPT_DIR/sim_release_receipts.jsonl"
+  local udid="$1" receipts; receipts="$(sim_receipt_dir)/sim_release_receipts.jsonl"
   [[ -f "$receipts" ]] || return 1
-  local gen; gen="$(sim_generation "$udid")"
-  # No live lease means the receipt must be the newest for that UDID.
-  python3 - "$receipts" "$udid" "$(sim_floor_minutes)" <<'PY' 2>/dev/null
+  # The receipt must match the CURRENT persisted generation, and a NEWER lease
+  # must invalidate an older receipt. Generation is read from the persisted file
+  # that survives release (review finding: it used to reset to 1).
+  local cur_gen; cur_gen="$(cat "$(sim_generation_path "$udid")" 2>/dev/null)"
+  [[ "$cur_gen" =~ ^[0-9]+$ ]] || return 1
+  python3 - "$receipts" "$udid" "$(sim_floor_minutes)" "$cur_gen" <<'PY' 2>/dev/null
 import json,sys,time
-path,udid,floor=sys.argv[1],sys.argv[2],int(sys.argv[3])
+path,udid,floor,cur=sys.argv[1],sys.argv[2],int(sys.argv[3]),int(sys.argv[4])
 best=None
 for line in open(path, errors='replace'):
     line=line.strip()
@@ -243,6 +304,10 @@ for line in open(path, errors='replace'):
     try: r=json.loads(line)
     except Exception: continue
     if r.get('udid')!=udid or r.get('action')!='release': continue
+    # only the receipt for the CURRENT generation counts
+    try:
+        if int(r.get('lease_generation'))!=cur: continue
+    except Exception: continue
     try:
         t=time.mktime(time.strptime(r['released_at'],'%Y-%m-%dT%H:%M:%SZ'))-time.timezone
     except Exception: continue
@@ -312,7 +377,7 @@ sim_prune() {
 #      leased, so prune skips it, and it is visible in `sim status`.
 # ---------------------------------------------------------------------------
 SIM_POOL_SLOTS="${DISK_MAGICIAN_SIM_POOL_SLOTS:-3}"
-SIM_RESERVE_DIR="${DISK_MAGICIAN_SIM_RESERVE_DIR:-$SIM_STATE_ROOT/sim_reservations}"
+sim_reserve_dir() { printf '%s\n' "${DISK_MAGICIAN_SIM_RESERVE_DIR:-$(sim_state_root)/sim_reservations}"; }
 
 sim_pool_slots() {
   local n="${SIM_POOL_SLOTS:-3}"
@@ -324,7 +389,7 @@ sim_pool_slots() {
 sim_pool_used() {
   local devices reservations
   devices="$(sim_devices | awk -F'\t' '$2 ~ /^wai-shared-/ {n++} END{print n+0}')"
-  reservations="$(find "$SIM_RESERVE_DIR" -maxdepth 1 -type d ! -path "$SIM_RESERVE_DIR" 2>/dev/null | wc -l | tr -d ' ')"
+  reservations="$(find "$(sim_reserve_dir)" -maxdepth 1 -type d ! -path "$(sim_reserve_dir)" 2>/dev/null | wc -l | tr -d ' ')"
   printf '%s\n' "$(( ${devices:-0} + ${reservations:-0} ))"
 }
 
@@ -333,7 +398,7 @@ sim_pool_used() {
 # reclaimed). One that recorded a UDID is reconciled: if the device exists it is
 # kept as an inert leased device; the reservation itself is released.
 sim_recover_reservations() {
-  local rdir_override="${DISK_MAGICIAN_SIM_RESERVE_DIR:-$SIM_RESERVE_DIR}"
+  local rdir_override; rdir_override="$(sim_reserve_dir)"
   [[ -d "$rdir_override" ]] || return 0
   local rf udid r
   for r in "$rdir_override"/*; do
@@ -382,10 +447,10 @@ sim_create() {
   }
 
   # Step 1: durable reservation BEFORE touching simctl.
-  mkdir -p "$SIM_RESERVE_DIR" || { echo "sim create: cannot create reservation dir" >&2; return 22; }
+  mkdir -p "$(sim_reserve_dir)" || { echo "sim create: cannot create reservation dir" >&2; return 22; }
   local stamp rdir
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  rdir="$SIM_RESERVE_DIR/${stamp}-$$"
+  rdir="$(sim_reserve_dir)/${stamp}-$$"
   mkdir "$rdir" 2>/dev/null || { echo "sim create: reservation race lost" >&2; return 21; }
   printf 'status=reserving\nreason=%s\npid=%s\nruntime=%s\n' "$reason" "$$" "$runtime" >"$rdir/meta"
 
@@ -418,21 +483,24 @@ sim_create() {
   # Step 2: record the produced UDID, then lease it so it is never unleased.
   printf '%s\n' "$udid" >"$rdir/udid"
   printf 'status=created\n' >>"$rdir/meta"
-  mkdir -p "$SIM_LEASE_DIR"
+  mkdir -p "$(sim_lease_dir)"
   local d; d="$(sim_lease_path "$udid")"
   mkdir "$d" 2>/dev/null || true
   local token="lt_$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-  printf '1\n' >"$d/generation"; printf '1\n' >"$d/last_generation"
+  local gen; gen="$(sim_next_generation "$udid")"
+  printf '%s\n' "$gen" >"$d/generation"
   printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner"
   printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"
   chmod 600 "$d/generation" "$d/last_generation" "$d/owner" "$d/token_fingerprint" 2>/dev/null || true
   rm -rf "${rdir:?}"
 
   if [[ "$json" == true ]]; then
-    printf '{"schema_version": 1, "udid": "%s", "name": "%s", "state": "Shutdown", "lease_generation": 1, "lease_token": "%s", "created": true}\n' \
-      "$udid" "$name" "$token"
+    printf '{"schema_version": 1, "udid": "%s", "name": "%s", "state": "Shutdown", "lease_generation": %s, "lease_token": "%s", "created": true}\n' \
+      "$udid" "$name" "$gen" "$token"
   else
-    printf '%s\n' "$udid"
+    # Print the token as well: a caller that only received the UDID could never
+    # release the device it just created (review finding).
+    printf '%s %s\n' "$udid" "$token"
   fi
   return 0
 }
