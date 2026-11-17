@@ -375,6 +375,36 @@ out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r30/fx" sim_prune --clean 2>&1)"
 unset -f artifact_removal_verdict 2>/dev/null || true
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
 
+echo "== 31. /dot repro: lease must not succeed for a device prune just deleted =="
+r31="$TMP/r31"; mkdir -p "$r31/state" "$r31/fx"
+export DISK_MAGICIAN_STATE_DIR="$r31/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+sim_fixture_device "$r31/fx" "babababa-1111-2222-3333-444444444444" "wai-shared-gone" "Shutdown" 5
+# Simulate prune winning the race: the device disappears between listing and lock.
+sim_devices_stale() { printf '%s\twai-shared-gone\tShutdown\t%s\n' "babababa-1111-2222-3333-444444444444" "$(date +%s)"; }
+out31="$(sim_devices_stale)"
+# Remove it from the fixture so the under-lock re-read sees nothing.
+rm -rf "$r31/fx/babababa-1111-2222-3333-444444444444"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r31/fx" sim_lease --wait-seconds 0 >"$TMP/l31" 2>&1
+if grep -q 'lease_token' "$TMP/l31"; then
+    bad "lease returned a token for a device that no longer exists"
+else
+    ok "lease refused after the device vanished (under-lock re-verify)"
+fi
+unset -f sim_devices_stale 2>/dev/null || true
+
+echo "== 32. /dot repro: a FAILED inventory lookup must not clear an orphan exclusion =="
+r32="$TMP/r32"; mkdir -p "$r32/state/sim_reservations/dead-1" "$r32/fx"
+printf 'status=reserving\nreason=t\npid=999999\nname=wai-shared-unk\n' >"$r32/state/sim_reservations/dead-1/meta"
+export DISK_MAGICIAN_STATE_DIR="$r32/state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$r32/state/sim_reservations"
+# A fake xcrun that fails the inventory read.
+faker="$TMP/fakebin32"; mkdir -p "$faker"
+printf '#!/bin/bash\nexit 75\n' >"$faker/xcrun"; chmod +x "$faker/xcrun"
+PATH="$faker:$PATH" sim_recover_reservations >"$TMP/r32out" 2>&1
+[[ -d "$r32/state/sim_reservations/dead-1" ]] && ok "reservation preserved when inventory failed" || bad "failed inventory cleared the reservation"
+grep -q 'recover:inventory-unavailable' "$TMP/r32out" && ok "reported inventory-unavailable rather than concluding absence" || bad "no inventory-unavailable verdict"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

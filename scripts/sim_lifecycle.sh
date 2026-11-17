@@ -232,6 +232,15 @@ sim_lease() {
         echo "sim lease: acquire lock busy for $udid; skipping" >&2
         continue
       fi
+      # Re-verify UNDER the lock: prune may have removed this device while we
+      # waited, and a stale listing must not produce a lease for a missing device
+      # (review P0).
+      local live
+      live="$(sim_devices | awk -F'\t' -v u="$udid" '$1==u {print $3}')"
+      if [[ "$live" != "Shutdown" ]] || sim_is_leased "$udid" || sim_name_reserved "$udid" "$name"; then
+        rmdir "$alock" 2>/dev/null || true
+        continue
+      fi
       if ! mkdir "$d" 2>/dev/null; then
         rmdir "$alock" 2>/dev/null || true
         continue
@@ -539,6 +548,18 @@ sim_recover_reservations() {
     owner_pid="$(sed -n 's/^pid=//p' "$r/meta" 2>/dev/null | head -1)"
     if [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
       echo "recover:skipped-live-creator $(basename "$r") pid=$owner_pid" >&2
+      continue
+    fi
+    # A failed/unparseable inventory is NOT proof of absence. Only a successful
+    # read whose result positively lacks the device may clear a reservation
+    # (review P0: a fake simctl exiting 75 caused a dead creator's reservation to
+    # be deleted, and the next lease handed out the unregistered device).
+    local inv_ok=1
+    if [[ -z "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]] && command -v xcrun >/dev/null 2>&1; then
+      xcrun simctl list devices --json >/dev/null 2>&1 || inv_ok=0
+    fi
+    if [[ "$inv_ok" -eq 0 ]]; then
+      echo "recover:inventory-unavailable $(basename "$r") — reservation preserved, no conclusion drawn" >&2
       continue
     fi
     udid="$(cat "$r/udid" 2>/dev/null)"
