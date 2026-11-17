@@ -56,6 +56,15 @@ find_gitleaks() {
   return 1
 }
 
+# timeout(1) is absent from macOS /usr/bin; fall back to gtimeout, then perl alarm.
+# The perl path dies by SIGALRM (rc 142), which callers treat like rc 124.
+bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else perl -e 'alarm shift; exec @ARGV or exit 127' "$secs" "$@"; fi
+}
+
 remote_has_embedded_credentials() {
   local remote_url="$1"
   python3 -c '
@@ -159,10 +168,10 @@ description = "machine-generated disk_magician evidence/ledger JSON"
 paths = ['^evidence/frontier-[^/]*\.json$', '^ledger/[^/]*\.json$']
 TOML
   gl_rc=0
-  timeout "${DISK_MAGICIAN_GITLEAKS_TIMEOUT:-600}" "$gitleaks_bin" git --no-banner --no-color --redact=100 \
+  bounded "${DISK_MAGICIAN_GITLEAKS_TIMEOUT:-600}" "$gitleaks_bin" git --no-banner --no-color --redact=100 \
     --config "$gl_conf" --log-opts="$scan_range" "$STATE_DIR" >/dev/null 2>&1 || gl_rc=$?
   rm -f "$gl_conf"; rmdir "$gl_dir"
-  if [[ "$gl_rc" -eq 124 ]]; then
+  if [[ "$gl_rc" -eq 124 || "$gl_rc" -eq 142 ]]; then
     echo "Snapshot history guard: secret scan timed out after ${DISK_MAGICIAN_GITLEAKS_TIMEOUT:-600}s; refusing unscanned push." >&2
     return 1
   elif [[ "$gl_rc" -ne 0 ]]; then
