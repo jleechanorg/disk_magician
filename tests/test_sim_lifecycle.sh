@@ -102,7 +102,9 @@ fi
 echo "== 6. unmeasurable mtime fails closed =="
 sim_fixture_device "$fixture" "CCCCCCCC-1111-2222-3333-444444444444" "unmeasurable" "Shutdown" -1
 out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_prune --dry-run 2>/dev/null)"
-printf '%s' "$out" | grep -q '^keep:mtime-unmeasurable unmeasurable' && ok "unmeasurable mtime preserved (asserted by NAME)" || bad "unmeasurable device not preserved by name"
+# The label now distinguishes "unmeasurable AND no receipt" from a young receipt;
+# what matters is that the device is still KEPT and named.
+printf '%s' "$out" | grep -qE '^keep:mtime-unmeasurable(-no-receipt)? unmeasurable' && ok "unmeasurable mtime preserved (asserted by NAME)" || bad "unmeasurable device not preserved by name"
 
 echo "== 7. release writes exactly one receipt line and is generation-fenced =="
 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_lease --wait-seconds 0 >"$TMP/l7" 2>/dev/null

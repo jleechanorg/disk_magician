@@ -460,11 +460,20 @@ sim_prune() {
     local lstate; lstate="$(sim_lease_state "$udid")"
     if [[ "$lstate" == "complete" ]]; then echo "keep:leased $name"; kept=$((kept+1)); continue; fi
     if [[ "$lstate" == "indeterminate" ]]; then echo "keep:lease-indeterminate $name"; kept=$((kept+1)); continue; fi
-    # 3. unmeasurable mtime fails closed
-    [[ "$newest" =~ ^[0-9]+$ ]] || { echo "keep:mtime-unmeasurable $name"; kept=$((kept+1)); continue; }
-    # 4. the only proof: a release receipt for the current generation, past the floor
+    # 3. the only proof: a release receipt for the current generation, past the
+    # floor measured from the RECORDED RELEASE TIME (design: "the 48 h floor
+    # counted from the recorded release time"). A device mtime is NOT the basis,
+    # so an unmeasurable/absent `lastUsedAt` must not veto a valid receipt --
+    # otherwise a freshly created, never-booted device (lastUsedAt: null) could
+    # never be reclaimed. Found by the uslx live proof on 2026-11-17.
     if ! sim_released_and_idle "$udid"; then
-      echo "keep:no-release-receipt $name"
+      # No trustworthy receipt. If mtime is also unmeasurable, say so explicitly
+      # rather than implying a receipt exists and is merely young.
+      if [[ ! "$newest" =~ ^[0-9]+$ ]]; then
+        echo "keep:mtime-unmeasurable-no-receipt $name"
+      else
+        echo "keep:no-release-receipt $name"
+      fi
       kept=$((kept+1)); continue
     fi
     echo "remove:candidate $name"
