@@ -120,7 +120,7 @@ echo '{"state_repo_path": "'$HOME'/.disk_magician_backup"}' > ~/.config/disk-mag
 - 🗑️ **Temporary & Cache Purge**: Safely removes stale git clones, debug logs, and build/package manager caches older than a configurable threshold.
 - 🧰 **Large Cleanup Sweep**: `clean-all` can preview or apply large tmp, Docker, Ollama, and Xcode cleanup with explicit gates for destructive paths.
 - 📦 **Automated Snapshot Backups**: Self-configures a local and remote backup repository (`disk_backup`) and registers launchd/cron schedules to push snapshot JSON updates every 30 minutes.
-- 🛡️ **Optional Quota-Bounded Scratch Volume**: Partition and provision a dedicated, quota-bounded Scratch volume (`/Volumes/diskm-scratch` on macOS APFS, `~/Scratch` on Linux ext4) via `diskm setup --scratch [--quota-gb 200]`. Isolates disposable build artifacts, test scratch, and evidence with automatic trimming (70% → 50%) while protecting a 64 MiB emergency ballast and 24-hour recency.
+- 🛡️ **Optional Quota-Bounded Scratch Volume**: Partition and provision a dedicated, quota-bounded Scratch volume (`/Volumes/diskm-scratch` on macOS APFS, `~/Scratch` on Linux ext4) via `diskm setup --scratch [--quota-gb 200]`. Isolates disposable build artifacts, test scratch, and evidence with automatic trimming (70% → 50%) while protecting a 64 MiB emergency ballast and the shared 48-hour content-recency default.
 
 ---
 
@@ -192,7 +192,7 @@ Automates the manual "find dormant worktrees, triage each one, delete only
 the provably safe ones" pass proven live on 2026-07-16 (51 candidates
 triaged, 42 safe deletions, ~13 GB freed, zero data loss, zero
 force-pushes). For every worktree under the monitored project roots whose
-last activity is older than `--min-age` days (default 7), it checks
+last content activity is older than the shared 48-hour default (or a larger explicit `--min-age`), it checks
 uncommitted diff size, pushes any unpushed commits to the real branch
 (falling back to a timestamped `backup/<branch>-<date>` ref on a
 non-fast-forward push — never `--force`), and looks up existing PR
@@ -204,14 +204,14 @@ coverage, then deletes only worktrees with zero unique local content via
 shared with `cleanup_worktrees.sh` and `cleanup_worktree_venvs.sh`. It fails
 closed (unmeasurable → age 0 → preserved), and it deliberately ignores both
 `stat <wt>/.git` and `stat <wt>`, which measure worktree creation rather than
-use. See the "Worktree 7-day rule" section of `CLAUDE.md`.
+use. See the "Disposable content uses a 48-hour age floor" section of `CLAUDE.md`.
 
 Read-only/dry-run by default; nothing is pushed or deleted without
 `--execute`, which is itself gated behind `WORKTREE_APPROVED=1`:
 
 ```bash
 ./scripts/worktree_hygiene.sh                                       # dry-run preview
-WORKTREE_APPROVED=1 ./scripts/worktree_hygiene.sh --execute --min-age 7  # apply
+WORKTREE_APPROVED=1 ./scripts/worktree_hygiene.sh --execute --min-age 2  # apply at the 48h floor
 ```
 
 This is the "safe quick-win" lane's worktree-cleanup component in the
@@ -220,6 +220,8 @@ three-lane default diagnostic (`jleechan-rvqz`).
 ---
 
 ## Regrowth Prevention Series (PRs 1–4)
+
+This section preserves the original rollout measurements and installation context. Cleanup age defaults below reflect the 48-hour disposable-content standard adopted on 2026-11-13.
 
 Four PRs land together to prevent the disk-fill recurrence pattern that
 caused this series to be written (95% → 91% used, 47 GiB → 89 GiB free
@@ -241,9 +243,9 @@ on each runner:
 1. `docker system prune -f` — always runs; removes dangling images,
    containers, networks. Safe; this is the build's own intermediate
    artifacts.
-2. `docker builder prune -f --filter "until=24h"` — runs only when
+2. `docker builder prune -f --filter "until=48h"` — runs only when
    the builder cache exceeds the configured threshold (default
-   **2048 MB**). The 24h filter preserves the most recent warm window.
+   **2048 MB**). The 48h filter preserves the recent warm window.
 
 **Install on a self-hosted Actions runner:**
 ```bash
@@ -341,15 +343,12 @@ auto-cleanup paths (cleanup_llm_inspector, cleanup_agent_artifacts,
 cleanup_dev_caches) did not touch `~/.claude/supervisor/`.
 
 **Fix.** `scripts/cleanup_supervisor_logs.sh` deletes rotated logs
-older than **7 days** and explicitly preserves the active log
+older than the shared **48-hour default** and explicitly preserves the active log
 (`cmux-codex-launchd.log`), the active stderr, and the
 `cmux-codex-launchd-state.json` state file. Wired into
 `disk_audit.sh` so `./disk_magician.sh clean` runs it on every pass.
 
-**Expected savings:** ~1.95 GB per machine (39 × 50 MB) on a host
-that has been running 19+ days without this script. New regrowth
-blocked: the 7-day window keeps total log floor to ~7 × 50 MB =
-350 MB indefinitely.
+**Historical measurement:** 91 × 50 MB = 4.55 GB of rotated logs was observed over 19 days on 2026-06-13. At about three rotations per day, the current 48-hour default retains roughly six recent rotations (~300 MB); actual size depends on rotation rate.
 
 ### Section F — node_modules / venv Duplication Across Worktrees (Documentation Only)
 

@@ -56,8 +56,11 @@ with open({repr(str(log_file))}, "a") as f:
 """
             proc = subprocess.Popen([sys.executable, "-c", py_writer_code])
             try:
-                time.sleep(0.1)
-                self.assertIsNone(proc.poll(), "Writer process should be running")
+                deadline = time.monotonic() + 5.0
+                while log_file.stat().st_size <= len(initial_data):
+                    self.assertIsNone(proc.poll(), "Writer process should be running")
+                    self.assertLess(time.monotonic(), deadline, "Writer did not start appending")
+                    time.sleep(0.01)
 
                 # Execute watchdog with threshold 1MB
                 res = subprocess.run(
@@ -70,7 +73,13 @@ with open({repr(str(log_file))}, "a") as f:
                 # Process should still be alive
                 self.assertIsNone(proc.poll(), "Writer process should remain alive after copytruncate")
 
-                time.sleep(0.1)
+                # Observe the post-truncation write instead of assuming the
+                # child gets scheduled within a fixed 100 ms window.
+                deadline = time.monotonic() + 5.0
+                while "append line" not in log_file.read_text():
+                    self.assertIsNone(proc.poll(), "Writer exited before its post-truncation append")
+                    self.assertLess(time.monotonic(), deadline, "Writer did not append after truncation")
+                    time.sleep(0.01)
             finally:
                 proc.terminate()
                 proc.wait(timeout=2)

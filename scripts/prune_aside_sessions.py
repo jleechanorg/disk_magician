@@ -13,21 +13,19 @@ Defaults to dry-run (pass --clean or --apply to execute).
 """
 
 import argparse
-import datetime
 import hashlib
 import json
 import os
-import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-DEFAULT_MAX_AGE_DAYS = 7
+DEFAULT_MAX_AGE_DAYS = 2
 DEFAULT_MIN_DEDUP_SIZE = 1024  # 1 KB
-DATE_PREFIX_REGEX = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:_.*)?$")
 
 
 def format_size(bytes_val: int) -> str:
@@ -41,17 +39,59 @@ def format_size(bytes_val: int) -> str:
 
 
 def get_dir_size(dir_path: Path) -> int:
-    """Return total bytes of all files in dir_path."""
-    total = 0
+    """Return unique apparent bytes from the shared metadata walker.
+
+    A Git or unreadable boundary has unknown size; do not replace that unknown
+    with zero or follow links to report their targets.
+    """
+    lib = Path(__file__).resolve().parent / "lib" / "scratch_budget.sh"
+    command = ["bash", "-c", 'source "$1"; scratch_budget_measure_files "$2" 100 --nul',
+               "_", str(lib), str(dir_path)]
     try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    total += (Path(root) / f).stat().st_size
-                except OSError:
-                    continue
-    except OSError:
-        pass
+        result = subprocess.run(command, capture_output=True, timeout=300, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"size measurement unavailable for {dir_path}: {exc}") from exc
+    fields = result.stdout.split(b"\0")
+    if not fields or fields[0] != b"diskm-measure-leaves-v1":
+        raise OSError(f"size measurement protocol missing for {dir_path}")
+    fields = fields[1:]
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 6:
+        raise OSError(f"size measurement record incomplete for {dir_path}")
+    total = 0
+    incomplete = result.returncode != 0
+    incomplete_reason = result.stderr.decode(errors="replace")[:512]
+    print(f"measurement_method=inode-deduplicated-file-summed-apparent threshold_mib=100 path={dir_path}", file=sys.stderr)
+    for offset in range(0, len(fields), 6):
+        size, files, newest, flag, path, apparent = fields[offset:offset + 6]
+        decoded_path = os.fsdecode(path)
+        if flag in (b"G", b"E"):
+            incomplete = True
+            label = flag.decode("ascii")
+            print(f"detail:{label} bytes=0 files=0 newest=0 size_method=unmeasured size_known=false age_known=false threshold_mib=100 {decoded_path}", file=sys.stderr)
+            incomplete_reason = incomplete_reason or f"opaque/unmeasured at {decoded_path}"
+            continue
+        if flag not in (b"A", b"F", b"L"):
+            incomplete = True
+            incomplete_reason = f"unknown measurement flag {flag!r} at {decoded_path}"
+            continue
+        try:
+            unique_bytes = int(size)
+            apparent_bytes = int(apparent)
+            total += unique_bytes
+        except ValueError as exc:
+            incomplete = True
+            incomplete_reason = f"invalid measured bytes at {decoded_path}: {exc}"
+            continue
+        print(f"detail:{flag.decode('ascii')} bytes={unique_bytes} files={files.decode('ascii')} newest={newest.decode('ascii')} size_method=inode-deduplicated-file-summed-apparent threshold_mib=100 apparent_bytes={apparent_bytes} unique_bytes={unique_bytes} {decoded_path}", file=sys.stderr)
+    if incomplete:
+        rc = result.returncode or 1
+        print(f"measurement_status=incomplete rc={rc} path={dir_path}", file=sys.stderr)
+        if incomplete_reason:
+            print(f"measurement_error={incomplete_reason}", file=sys.stderr)
+        raise OSError(f"size measurement incomplete for {dir_path}: {incomplete_reason}")
+    print(f"measurement_status=complete rc=0 path={dir_path}", file=sys.stderr)
     return total
 
 
@@ -75,51 +115,48 @@ def quarantine_remove(path: Path, *extra: str) -> Tuple[bool, str]:
     return result.startswith("removed:"), result
 
 
-def get_dir_max_mtime(dir_path: Path) -> float:
-    """Return the most recent mtime of any file inside dir_path, or dir mtime."""
-    max_mtime = 0.0
+def c14_verdict(path: Path) -> str:
+    """Read-only C14 verdict (`remove` or `kept:<why>`) matching what quarantine_remove applies."""
+    lib = Path(__file__).resolve().parent / "lib" / "artifact_verdict.sh"
+    cmd = ["bash", "-c", 'source "$1"; inv="$(mktemp)" || exit 1; artifact_removal_verdict "$2" --inventory-out "$inv" --kind ephemeral; rm -f "$inv"',
+           "_", str(lib), str(path)]
     try:
-        max_mtime = dir_path.stat().st_mtime
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                              env={"DM_ACTUATOR": "prune_aside_sessions.py", **os.environ})
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"kept:check-failed ({exc})"
+    lines = [line for line in proc.stdout.strip().splitlines() if line]
+    return lines[-1] if lines else "kept:check-failed"
+
+
+def get_dir_max_mtime(dir_path: Path) -> float:
+    """Return the newest regular-file mtime; unknown for opaque or unreadable trees."""
+    newest = 0.0
+    def failed(error: OSError) -> None:
+        raise error
+    try:
+        for root, dirs, files in os.walk(dir_path, onerror=failed, followlinks=False):
+            if any((Path(root) / name).is_symlink() for name in dirs):
+                return 0.0
+            for name in files:
+                path = Path(root) / name
+                item = path.lstat()
+                if stat.S_ISLNK(item.st_mode):
+                    return 0.0
+                if stat.S_ISREG(item.st_mode):
+                    newest = max(newest, item.st_mtime)
     except OSError:
         return 0.0
-
-    try:
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                try:
-                    mt = (Path(root) / f).stat().st_mtime
-                    if mt > max_mtime:
-                        max_mtime = mt
-                except OSError:
-                    continue
-    except OSError:
-        pass
-    return max_mtime
+    return newest
 
 
 def parse_session_age_days(session_dir: Path, ref_time: Optional[float] = None) -> Tuple[float, str]:
-    """Determine session age in days and the method used ('date_prefix' or 'mtime')."""
+    """Measure from session content, not a date-named directory or directory mtime."""
     now = ref_time if ref_time is not None else time.time()
-    name = session_dir.name
-    m = DATE_PREFIX_REGEX.match(name)
-    if m:
-        date_str = m.group(1)
-        try:
-            dt = datetime.datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
-            session_epoch = dt.timestamp()
-            age_days = (now - session_epoch) / 86400.0
-            if age_days >= 0:
-                return age_days, "date_prefix"
-        except (ValueError, OverflowError):
-            pass
-
-    # Fallback to mtime
-    max_mtime = get_dir_max_mtime(session_dir)
-    if max_mtime <= 0.0:
+    newest = get_dir_max_mtime(session_dir)
+    if newest <= 0.0:
         return 0.0, "unknown"
-    age_days = max(0.0, (now - max_mtime) / 86400.0)
-    return age_days, "mtime"
-
+    return max(0.0, (now - newest) / 86400.0), "mtime"
 
 def get_open_session_paths(container: Path, lsof_bin: Optional[str] = None) -> Tuple[bool, Set[Path]]:
     """Query open file descriptors under a sessions container using a single batch lsof call.
@@ -285,6 +322,7 @@ class AsideSessionPruner:
             "sessions_scanned": 0,
             "sessions_retained_recent": 0,
             "sessions_retained_in_use": 0,
+            "sessions_retained_unmeasured": 0,
             "sessions_pruned": 0,
             "bytes_pruned": 0,
             "assets_scanned": 0,
@@ -443,6 +481,13 @@ class AsideSessionPruner:
                     continue
 
                 self.stats["sessions_scanned"] += 1
+                try:
+                    size = get_dir_size(entry)
+                except OSError as exc:
+                    self.stats["sessions_retained_unmeasured"] += 1
+                    if self.verbose:
+                        print(f"Retaining session with incomplete size measurement: {entry}: {exc}", file=sys.stderr)
+                    continue
                 age_days, method = parse_session_age_days(entry, self.ref_time)
 
                 # Signal A: Age check
@@ -476,12 +521,16 @@ class AsideSessionPruner:
                         print(f"Safety guard: path rejected for deletion: {entry}")
                     continue
 
-                size = get_dir_size(entry)
                 stale_candidates.append((entry, container, age_days, size))
 
         # Execute Session Pruning
         for session_dir, container, age_days, size in stale_candidates:
             if self.dry_run:
+                verdict = c14_verdict(session_dir)
+                if verdict != "remove":
+                    print(f"[DRY-RUN] Would keep stale session (C14 {verdict}): {session_dir}", file=sys.stderr)
+                    retained_dirs.append(session_dir)
+                    continue
                 self.stats["sessions_pruned"] += 1
                 self.stats["bytes_pruned"] += size
                 print(f"[DRY-RUN] Would prune stale session: {session_dir} ({format_size(size)}, {age_days:.1f} days old)")
@@ -596,6 +645,7 @@ def main() -> int:
         print(f"Sessions Scanned:          {stats['sessions_scanned']}")
         print(f"Recent Sessions Retained:  {stats['sessions_retained_recent']}")
         print(f"In-Use Sessions Retained:  {stats['sessions_retained_in_use']}")
+        print(f"Unmeasured Sessions Kept:  {stats['sessions_retained_unmeasured']}")
         print(f"Stale Sessions Pruned:     {stats['sessions_pruned']}")
         print(f"Space Freed (Pruned):      {format_size(stats['bytes_pruned'])}")
         if args.dedup_assets:
@@ -606,7 +656,7 @@ def main() -> int:
         prefix = "Would Reclaim" if not args.clean else "Total Reclaimed"
         print(f"{prefix}:             {format_size(total_freed)}")
 
-    return 0
+    return 1 if stats["sessions_retained_unmeasured"] else 0
 
 
 if __name__ == "__main__":

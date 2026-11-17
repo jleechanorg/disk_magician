@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/safety_lib.sh"
 
 ROOT="$HOME/Library/CloudStorage/Dropbox/conversation-backups"
-MIN_AGE_HOURS=24
+MIN_AGE_HOURS=48
 LIMIT=0
 CLEAN=false
 PRUNE_UNUPLOADED_DUPS=false

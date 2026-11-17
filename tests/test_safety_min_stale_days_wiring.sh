@@ -7,10 +7,9 @@
 #   - scripts/cleanup_claude_state.sh
 #
 # Invariants tested:
-#   1. Clamping to configured floor: when safety.local.json specifies min_stale_days > 7,
-#      --min-age / default clamps up to that floor.
-#   2. Hard floor enforcement: when safety.local.json specifies min_stale_days < 7 (or 0),
-#      the hard floor remains 7 and cannot be lowered.
+#   1. Higher configured min_stale_days still raises applicable cleanup floors.
+#   2. Worktree recency floors use 48 h by default; the legacy safety_min_stale_days
+#      floor remains 7 d for worktree_hygiene's separate policy.
 #   3. Explicit higher age preservation: when --min-age is specified higher than the floor,
 #      the higher value is respected.
 
@@ -85,22 +84,22 @@ echo "=== Suite 1: cleanup_worktrees.sh ==="
 # Case 1: min_stale_days=14, --min-age 0 -> clamped to 14d
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_14" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" --min-age 0 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=14 clamps --min-age 0 to 14d" "(others: 14d)" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=14 clamps --min-age 0 to 14d" "Worktree content floor: 14d" "$out"
 
 # Case 2: min_stale_days=14, no --min-age flag -> defaults to 14d
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_14" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=14 defaults to 14d" "(others: 14d)" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=14 defaults to 14d" "Worktree content floor: 14d" "$out"
 
 # Case 3: min_stale_days=14, --min-age 21 -> preserves 21d
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_14" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" --min-age 21 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=14 respects higher --min-age 21d" "(others: 21d)" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=14 respects higher --min-age 21d" "Worktree content floor: 21d" "$out"
 
-# Case 4: min_stale_days=3, --min-age 0 -> hard floor 7d enforced
+# Case 4: min_stale_days=3 cannot lower the common 48h worktree floor.
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_3" \
   bash "$REPO_ROOT/scripts/cleanup_worktrees.sh" --dry-run --repos "$TEST_REPO" --min-age 0 2>&1)
-assert_contains "cleanup_worktrees.sh: min_stale_days=3 clamps up to hard floor 3d" "(others: 3d)" "$out"
+assert_contains "cleanup_worktrees.sh: min_stale_days=3 cannot lower the floor below 48h" "Worktree content floor: 48h" "$out"
 
 
 echo "=== Suite 2: cleanup_worktree_venvs.sh ==="
@@ -119,10 +118,10 @@ out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_14" \
   bash "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" --dry-run --roots "$TEST_REPO" --min-age 21 2>&1)
 assert_contains "cleanup_worktree_venvs.sh: min_stale_days=14 respects higher --min-age 21 days" "Min age:    21 days" "$out"
 
-# Case 4: min_stale_days=3, --min-age 0 -> hard floor 7 days enforced
+# Case 4: min_stale_days=3 cannot lower the worktree-specific 48h floor.
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_3" \
   bash "$REPO_ROOT/scripts/cleanup_worktree_venvs.sh" --dry-run --roots "$TEST_REPO" --min-age 0 2>&1)
-assert_contains "cleanup_worktree_venvs.sh: min_stale_days=3 clamps up to hard floor 7 days" "Min age:    7 days" "$out"
+assert_contains "cleanup_worktree_venvs.sh: min_stale_days=3 leaves the 48h floor" "Min age:    48 hours" "$out"
 
 
 backdate_tree() {
@@ -187,11 +186,11 @@ out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_14" \
   bash "$REPO_ROOT/scripts/cleanup_claude_state.sh" --root "$FAKE_STATE" --dry-run --min-age 21 2>&1)
 assert_contains "cleanup_claude_state.sh: min_stale_days=14 respects higher --min-age 21d" "min-age=21d" "$out"
 
-# Case 4: min_stale_days=3, --min-age 0 -> hard floor 7d enforced
+# Case 4: min_stale_days=3 cannot lower the worktree-specific 48h floor.
 out=$(HOME="$FAKE_HOME" DISK_MAGICIAN_SAFETY_FILE="$SAFETY_3" \
   DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$FAKE_STATE" \
   bash "$REPO_ROOT/scripts/cleanup_claude_state.sh" --root "$FAKE_STATE" --dry-run --min-age 0 2>&1)
-assert_contains "cleanup_claude_state.sh: min_stale_days=3 clamps up to hard floor 7d" "min-age=7d" "$out"
+assert_contains "cleanup_claude_state.sh: min_stale_days=3 leaves the 48h floor" "min-age=48h" "$out"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

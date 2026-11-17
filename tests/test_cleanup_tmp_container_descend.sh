@@ -154,6 +154,7 @@ run_sweep() {
 mkchild() { mkdir -p "$1"; head -c 20000 /dev/zero > "$1/payload.bin"; }
 archived() { /usr/bin/find "$AR" -mindepth 3 -maxdepth 3 -name "$1" 2>/dev/null | head -n1; }
 
+if [[ "${DISK_MAGICIAN_TMP_TEST_FILTER:-}" != t22 ]]; then
 echo "Test 1: active container -> idle child evaluated and kept (no declared-ephemeral row); fresh child and container kept"
 make_env t1
 mkdir -p "$PT/agent-scratch"
@@ -274,16 +275,16 @@ assert_exists "t9 idle sources in unknown active workspace kept" "$PT/build/sour
 assert_exists "t9 fresh logs in unknown active workspace kept" "$PT/build/logs"
 assert_contains "t9 unknown workspace skipped as one active unit" "Skipping recently active dir" "$OUT"
 
-echo "Test 10: clean pushed worktree 25h old remains protected by seven-day floor"
+echo "Test 10: clean pushed worktree 47h old remains protected by 48h floor"
 make_env t10
 mkdir -p "$PT/agent-scratch"
 make_clean_pushed_worktree "$TMP_ROOT/t10-main" "$PT/agent-scratch/old-wt" t10wt
-set_age_hours "$PT/agent-scratch/old-wt" 25
+set_age_hours "$PT/agent-scratch/old-wt" 47
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t10 --clean
-assert_exists "t10 25h-old clean pushed worktree kept" "$PT/agent-scratch/old-wt"
-assert_contains "t10 seven-day worktree floor reported" \
-  "recently active nested repository/worktree (<7d)" "$OUT"
+assert_exists "t10 47h-old clean pushed worktree kept" "$PT/agent-scratch/old-wt"
+assert_contains "t10 48h worktree floor reported" \
+  "recently active nested repository/worktree (<48h)" "$OUT"
 
 echo "Test 11: unmeasurable clean pushed worktree fails closed"
 make_env t11
@@ -300,9 +301,9 @@ chmod +x "$BIN/find"
 run_sweep t11 --clean FAIL_RECENCY_ROOT="$PT/agent-scratch/old-wt"
 assert_exists "t11 unmeasurable clean pushed worktree kept" "$PT/agent-scratch/old-wt"
 assert_contains "t11 fail-closed recency protection reported" \
-  "recently active nested repository/worktree (<7d)" "$OUT"
+  "recently active nested repository/worktree (<48h)" "$OUT"
 
-echo "Test 12: clean pushed linked worktree older than seven days reaches the archive gate but stays unproven"
+echo "Test 12: clean pushed linked worktree older than 48 hours reaches the archive gate but stays unproven"
 make_env t12
 mkdir -p "$PT/agent-scratch"
 make_clean_pushed_worktree "$TMP_ROOT/t12-main" "$PT/agent-scratch/old-wt" t12wt
@@ -371,16 +372,16 @@ assert_exists "t15 child containing unpushed nested repository kept" "$PT/agent-
 assert_contains "t15 nested unpushed-work protection reported" \
   "nested repository unsaved work" "$OUT"
 
-echo "Test 16: recently active clean nested worktree honors the seven-day floor"
+echo "Test 16: recently active clean nested worktree honors the 48h floor"
 make_env t16
 mkdir -p "$PT/agent-scratch/runtime/run-id"
 make_clean_pushed_worktree "$TMP_ROOT/t16-main" "$PT/agent-scratch/runtime/run-id/repo" t16wt
-set_age_hours "$PT/agent-scratch/runtime" 25
+set_age_hours "$PT/agent-scratch/runtime" 47
 mkchild "$PT/agent-scratch/fresh-child"
 run_sweep t16 --clean
-assert_exists "t16 child containing 25h-old clean nested worktree kept" "$PT/agent-scratch/runtime"
+assert_exists "t16 child containing 47h-old clean nested worktree kept" "$PT/agent-scratch/runtime"
 assert_contains "t16 nested worktree recency protection reported" \
-  "recently active nested repository/worktree (<7d)" "$OUT"
+  "recently active nested repository/worktree (<48h)" "$OUT"
 
 echo "Test 17: old clean pushed nested worktree reaches the archive gate but stays unproven"
 make_env t17
@@ -485,5 +486,62 @@ assert_contains "t21 container was not archived as a unit" "Dirs archived: 0" "$
 
 
 echo
+fi
+echo "Test 22: a fresh sibling does not shelter a stale typed build unit beneath a large /tmp parent"
+# Explicitly register build as a tmp root so its direct pr_ units use the
+# existing E2 row. The two 60 MiB units cross the parent threshold.
+make_env t22
+PT="$TMP_ROOT/t22-tmp"
+mkdir -p "$PT/project/build/pr_stale-unit" "$PT/project/build/pr_fresh-unit"
+head -c $((60 * 1024 * 1024)) /dev/urandom >"$PT/project/build/pr_stale-unit/payload.bin"
+head -c $((60 * 1024 * 1024)) /dev/urandom >"$PT/project/build/pr_fresh-unit/payload.bin"
+set_age_hours "$PT/project/build/pr_stale-unit" 72
+run_sweep t22 --dry-run DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=project DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT/project/build"
+printf '%s\n' "$OUT"
+assert_exists "t22 dry-run leaves stale eligible unit untouched" "$PT/project/build/pr_stale-unit"
+assert_exists "t22 fresh sibling remains untouched" "$PT/project/build/pr_fresh-unit"
+assert_contains "t22 stale typed unit reaches its own C14 decision" \
+  "DRY RUN: would archive: $PT/project/build/pr_stale-unit" "$OUT"
+assert_contains "t22 fresh sibling is preserved by its own recency check" \
+  "Skipping recently active dir" "$OUT"
+run_sweep t22 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=project DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT/project/build"
+printf '%s\n' "$OUT"
+assert_missing "t22 clean archives stale typed unit" "$PT/project/build/pr_stale-unit"
+assert_exists "t22 clean preserves fresh typed sibling" "$PT/project/build/pr_fresh-unit"
+assert_exists "t22 archived stale unit retains recoverable bytes" "$(archived pr_stale-unit)/payload.bin"
+
+echo "Test 23: a stale C14-eligible file-only parent is still archived as a whole unit"
+make_env t23
+PT="$TMP_ROOT/t23-tmp"
+mkdir -p "$PT/pr_file-only"
+head -c $((120 * 1024 * 1024)) /dev/urandom >"$PT/pr_file-only/payload.bin"
+set_age_hours "$PT/pr_file-only" 72
+run_sweep t23 --clean DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
+printf '%s\n' "$OUT"
+assert_missing "t23 stale file-only parent is archived" "$PT/pr_file-only"
+assert_exists "t23 archived file-only parent retains its payload" "$(/usr/bin/find "$AR" -type d -name pr_file-only -print -quit)/payload.bin"
+assert_contains "t23 file-only parent is counted as archived" "Dirs archived: 1" "$OUT"
+
+echo "Test 24: a nested foreign filesystem is skipped before its own file measurement"
+make_env t24
+PT="$TMP_ROOT/t24-tmp"
+mkdir -p "$PT/project/nested-mount"
+truncate -s $((120 * 1024 * 1024)) "$PT/project/nested-mount/payload.bin"
+set_age_hours "$PT/project/nested-mount" 72
+cat > "$TMP_ROOT/t24.mountinfo" <<MOUNTINFO
+1 0 0:1 / $PT/project/nested-mount rw - tmpfs tmpfs rw
+MOUNTINFO
+run_sweep t24 --clean DISK_MAGICIAN_SCRATCH_CONTAINER_ROOTS=project \
+  DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TEST_MOUNTINFO="$TMP_ROOT/t24.mountinfo"
+printf '%s\n' "$OUT"
+assert_exists "t24 simulated mount content is preserved" "$PT/project/nested-mount/payload.bin"
+assert_contains "t24 containing candidate is rejected for nested mount" \
+  "Skipping mountpoint or foreign filesystem: $PT/project" "$OUT"
+if grep -qF "measurement_method=file-summed-apparent threshold_mib=100 flags=A:directory,F:file,L:link,E:unfinished path=$PT/project" <<<"$OUT"; then
+  fail "t24 containing candidate was measured before its mount guard"
+else
+  pass "t24 containing candidate is skipped before measurement"
+fi
+
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]

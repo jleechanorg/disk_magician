@@ -63,6 +63,7 @@ cp "$REPO_ROOT/scripts/job_receipt.py" "$MOCK_BIN/job_receipt.py"
 chmod +x "$MOCK_BIN/job_receipt.py"
 mkdir -p "$MOCK_BIN/lib"
 cp "$REPO_ROOT/scripts/lib/actuator_receipt.sh" "$MOCK_BIN/lib/actuator_receipt.sh"
+cp "$REPO_ROOT/scripts/safety_lib.sh" "$MOCK_BIN/safety_lib.sh"
 sed "s|\"/private/tmp\"|\"$TMP_ROOT/private/tmp\"|g" "$SOURCE_SCRIPT" > "$MOCK_BIN/pressure_sweep.sh"
 chmod +x "$MOCK_BIN/pressure_sweep.sh"
 SCRIPT="$MOCK_BIN/pressure_sweep.sh"
@@ -395,6 +396,22 @@ env -i \
   /bin/bash "$SCRIPT"
 INVOCATIONS="$(cat "$INVOCATION_LOG")"
 assert_contains "custom scratch budget passed through" "large --budget-gb 5 --budget-floor-minutes 90" "$INVOCATIONS"
+
+echo "Test 13a: configured budget defaults to the shared 48h content floor"
+: > "$INVOCATION_LOG"
+: > "$LOG_FILE"
+rm -rf "$STATE_DIR/pressure_sweep.lock"
+env -i \
+  HOME="$TMP_ROOT/home" \
+  PATH="/usr/bin:/bin" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_DIR" \
+  DISK_MAGICIAN_PRESSURE_LOG="$LOG_FILE" \
+  DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=8 \
+  DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB=5 \
+  INVOCATION_LOG="$INVOCATION_LOG" \
+  /bin/bash "$SCRIPT"
+INVOCATIONS="$(cat "$INVOCATION_LOG")"
+assert_contains "budget default floor is 2880 minutes" "large --budget-gb 5 --budget-floor-minutes 2880" "$INVOCATIONS"
 
 echo "Test 12: triggered clean path invokes cleanup_code_sign_clones.sh with CODE_SIGN_CLONES_APPROVED=1"
 : > "$INVOCATION_LOG"

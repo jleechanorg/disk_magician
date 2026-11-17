@@ -205,7 +205,7 @@ class TestValidateLedger(unittest.TestCase):
             hd.validate_ledger(led, label="positive-clone-adjustment")
 
     def test_negative_clone_adjustment_is_in_exact_display_equation(self):
-        led = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 2 * GIB_KB}])
+        led = ledger(1 * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": 2 * GIB_KB}])
         led["accounting_equation"]["clone_shared_adjustment_kb"] = -1 * GIB_KB
         led["accounting_equation"]["sub_granularity_tail_kb"] = 0
         led["accounting_equation"]["displayed_balanced"] = True
@@ -213,11 +213,12 @@ class TestValidateLedger(unittest.TestCase):
         hd.validate_ledger(led, label="negative-clone-adjustment")
         hd.validate_full_attribution_ledger(led, label="negative-clone-adjustment")
 
-    def test_attested_partial_system_boundary_ledger_is_full_attribution(self):
+    def test_attested_partial_system_boundary_ledger_is_not_full_attribution(self):
         led = attested_partial_ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
 
         hd.validate_ledger(led, label="attested-partial")
-        hd.validate_full_attribution_ledger(led, label="attested-partial")
+        with self.assertRaises(hd.LedgerError):
+            hd.validate_full_attribution_ledger(led, label="attested-partial")
 
     def test_granted_ledger_requires_exact_user_fda_evidence(self):
         mutations = {
@@ -477,11 +478,11 @@ class TestCLIIntegration(unittest.TestCase):
         # test exercises ordering/wiring, not the ceiling edge case (that's
         # test_fail_closed_on_oversize_bucket_refuses_diff below, and the
         # >=5 GiB kind="file" exemption is covered in TestValidateLedger).
-        base = ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}])
+        base = ledger(4 * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": 4 * GIB_KB}])
         _write_ledger_commit(self.repo, base, "base")
         target = ledger(8 * GIB_KB, 0, [
-            {"path": "/a", "measured_kb": 4 * GIB_KB},
-            {"path": "/fixture_growth", "measured_kb": 4 * GIB_KB},
+            {"kind": "file", "path": "/a", "measured_kb": 4 * GIB_KB},
+            {"kind": "file", "path": "/fixture_growth", "measured_kb": 4 * GIB_KB},
         ])
         _write_ledger_commit(self.repo, target, "target")
         result = self._run_cli()
@@ -490,7 +491,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertIn("/fixture_growth", lines[0])
         self.assertEqual(lines[-1], "residual delta: +0.00 GiB")
 
-    def test_cli_accepts_attested_partial_system_boundary_ledgers(self):
+    def test_cli_rejects_attested_partial_system_boundary_ledgers(self):
         base = attested_partial_ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
         _write_ledger_commit(self.repo, base, "base")
         target = attested_partial_ledger(2 * GIB_KB, 0, [
@@ -501,18 +502,18 @@ class TestCLIIntegration(unittest.TestCase):
 
         result = self._run_cli()
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("+1.00 GiB  /growth", result.stdout)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("unfinished metadata boundary", result.stderr)
 
     def test_default_state_repo_matches_snapshot_config_resolver(self):
         configured_repo = self.tmp / "configured-state"
         configured_repo.mkdir()
         _git(configured_repo, "init", "-q", "-b", "main")
-        base = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        base = ledger(1 * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": 1 * GIB_KB}])
         _write_ledger_commit(configured_repo, base, "base")
         target = ledger(2 * GIB_KB, 0, [
-            {"path": "/a", "measured_kb": 1 * GIB_KB},
-            {"path": "/growth", "measured_kb": 1 * GIB_KB},
+            {"kind": "file", "path": "/a", "measured_kb": 1 * GIB_KB},
+            {"kind": "file", "path": "/growth", "measured_kb": 1 * GIB_KB},
         ])
         _write_ledger_commit(configured_repo, target, "target")
 
@@ -529,11 +530,11 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertIn("+1.00 GiB  /growth", result.stdout)
 
     def test_explicit_ref_diffs_against_head(self):
-        first = ledger(1 * GIB_KB, 0, [{"path": "/a", "measured_kb": 1 * GIB_KB}])
+        first = ledger(1 * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": 1 * GIB_KB}])
         _write_ledger_commit(self.repo, first, "c1")
-        mid = ledger(2 * GIB_KB, 0, [{"path": "/a", "measured_kb": 2 * GIB_KB}])
+        mid = ledger(2 * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": 2 * GIB_KB}])
         _write_ledger_commit(self.repo, mid, "c2")
-        last = ledger(3 * GIB_KB, 0, [{"path": "/a", "measured_kb": 3 * GIB_KB}])
+        last = ledger(3 * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": 3 * GIB_KB}])
         _write_ledger_commit(self.repo, last, "c3")
         result = self._run_cli("HEAD~2")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -545,17 +546,17 @@ class TestCLIIntegration(unittest.TestCase):
         floor = (now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S%z")
         head = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S%z")
         _write_ledger_commit(
-            self.repo, ledger(4 * GIB_KB, 0, [{"path": "/a", "measured_kb": 4 * GIB_KB}], captured_at=(now - datetime.timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+            self.repo, ledger(4 * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": 4 * GIB_KB}], captured_at=(now - datetime.timedelta(days=4)).strftime("%Y-%m-%dT%H:%M:%SZ")),
             "old", old,
         )
         _write_ledger_commit(
-            self.repo, ledger(2 * GIB_KB, 0, [{"path": "/a", "measured_kb": 2 * GIB_KB}], captured_at=(now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+            self.repo, ledger(2 * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": 2 * GIB_KB}], captured_at=(now - datetime.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")),
             "floor", floor,
         )
         _write_ledger_commit(
             self.repo, ledger(5 * GIB_KB, 0, [
-                {"path": "/a", "measured_kb": 2 * GIB_KB},
-                {"path": "/growth", "measured_kb": 3 * GIB_KB},
+                {"kind": "file", "path": "/a", "measured_kb": 2 * GIB_KB},
+                {"kind": "file", "path": "/growth", "measured_kb": 3 * GIB_KB},
             ], captured_at=now.strftime("%Y-%m-%dT%H:%M:%SZ")), "head", head,
         )
         result = self._run_cli("--days", "3")
@@ -567,7 +568,7 @@ class TestCLIIntegration(unittest.TestCase):
         now = datetime.datetime.now(datetime.timezone.utc)
         for age, used in [(2, 2), (0, 4)]:
             captured = (now - datetime.timedelta(days=age)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            _write_ledger_commit(self.repo, ledger(used * GIB_KB, 0, [{"path": "/a", "measured_kb": used * GIB_KB}], captured_at=captured), "capture")
+            _write_ledger_commit(self.repo, ledger(used * GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": used * GIB_KB}], captured_at=captured), "capture")
         result = self._run_cli("--days", "30")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("samples=2", result.stdout)
@@ -591,7 +592,7 @@ class TestCLIIntegration(unittest.TestCase):
         for captures, status in [([6, 7, 8, 9, 10, 11, 13], "partial"), ([13] * 7, "partial"), ([7, 8, 9, 10, 11, 12, 13], "complete")]:
             with self.subTest(captures=captures):
                 refs = [str(i) for i in range(len(captures))]
-                ledgers = {ref: ledger(GIB_KB, 0, [{"path": "/a", "measured_kb": GIB_KB}], captured_at=f"2026-10-{day:02d}T12:00:00Z") for ref, day in zip(refs, captures)}
+                ledgers = {ref: ledger(GIB_KB, 0, [{"kind": "file", "path": "/a", "measured_kb": GIB_KB}], captured_at=f"2026-10-{day:02d}T12:00:00Z") for ref, day in zip(refs, captures)}
                 with mock.patch.object(hd.datetime, "datetime", FixedDateTime), mock.patch.object(hd.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "\n".join(refs), "")), mock.patch.object(hd, "load_ledger_from_git", side_effect=lambda state, ref: ledgers[ref]):
                     result = hd.describe_capture_window(self.repo, 7)
                 self.assertIn("coverage_status=" + status, result)

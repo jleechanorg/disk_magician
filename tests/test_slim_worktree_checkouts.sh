@@ -33,6 +33,7 @@ mkdir -p "$REPO/docs/user-stories-ui/shots" "$REPO/src" "$ROOTS"
 printf 'x' > "$REPO/src/keep.py"
 head -c 200000 /dev/zero > "$REPO/docs/user-stories-ui/shots/big.png"
 printf '# doc\n' > "$REPO/docs/user-stories-ui/readme.md"
+mkdir -p "$REPO/evidence"; head -c 150000 /dev/zero > "$REPO/evidence/run.bin"
 ( cd "$REPO" && git init -q . && git config user.email t@t && git config user.name t \
   && git config extensions.worktreeConfig true \
   && git add -A && git commit -qm init )
@@ -103,6 +104,71 @@ OUT4=$(APPROVED=1 env -i PATH="$TEST_PATH" HOME="$TMP_ROOT/home" WORKTREE_APPROV
         bash "$TARGET_SCRIPT" --roots "$ROOTS,$AO_PARENT" --clean 2>&1)
 assert_contains "AO-owned counted as skipped" "Skipped (ao-owned):     1" "$OUT4"
 assert_present  "AO worktree keeps its docs" "$AO_WT/docs/user-stories-ui"
+
+echo "== case 7: an already-sparse worktree gains a newly requested exclusion =="
+assert_present "evidence still checked out before" "$OLD/evidence/run.bin"
+OUT5=$(APPROVED=1 run --exclude docs,evidence --clean)
+assert_contains "already-sparse worktree is re-slimmed" "SLIMMED" "$OUT5"
+assert_absent   "new exclusion applied" "$OLD/evidence/run.bin"
+assert_absent   "existing exclusion kept" "$OLD/docs/user-stories-ui"
+assert_present  "non-excluded file survives" "$OLD/src/keep.py"
+SPARSE="$(git -C "$OLD" rev-parse --git-dir)/info/sparse-checkout"
+assert_contains "sparse file keeps docs" "!/docs/" "$(cat "$SPARSE")"
+assert_contains "sparse file adds evidence" "!/evidence/" "$(cat "$SPARSE")"
+[[ "$(grep -c '^!/docs/$' "$SPARSE")" -eq 1 ]] && record_pass "no duplicate docs pattern" || record_fail "no duplicate docs pattern" "$(cat "$SPARSE")"
+OUT6=$(APPROVED=1 run --exclude docs,evidence --clean)
+assert_contains "fully-excluded worktree is skipped next run" "already sparse): 1" "$OUT6"
+assert_present  "dirty worktree still untouched" "$DIRTY/docs/user-stories-ui/readme.md"
+
+echo "== case 8: --min-age-hours enforces >=2h, requires WORKTREE_APPROVED=1, logs override =="
+OUT_LT2=$(APPROVED=1 run --min-age-hours 1 --clean); RC_LT2=$?
+[[ "$RC_LT2" -eq 2 ]] && record_pass "rejects min-age-hours < 2 (rc=2)" || record_fail "rejects min-age-hours < 2" "rc=$RC_LT2"
+assert_contains "rejects min-age-hours < 2 message" "minimum is 2 hours" "$OUT_LT2"
+
+OUT_UNAPPROVED=$(APPROVED=0 run --min-age-hours 2); RC_UNAPPROVED=$?
+[[ "$RC_UNAPPROVED" -eq 1 ]] && record_pass "rejects --min-age-hours without WORKTREE_APPROVED=1" || record_fail "rejects --min-age-hours without WORKTREE_APPROVED=1" "rc=$RC_UNAPPROVED"
+assert_contains "rejects unapproved --min-age-hours message" "WORKTREE_APPROVED=1" "$OUT_UNAPPROVED"
+
+H3_WT=$(mk_wt three-hour-clean)
+H1_WT=$(mk_wt one-hour-clean)
+ts_3h=$(date -v-3H +%Y%m%d%H%M 2>/dev/null || date -d "-3 hours" +%Y%m%d%H%M)
+ts_1h=$(date -v-1H +%Y%m%d%H%M 2>/dev/null || date -d "-1 hours" +%Y%m%d%H%M)
+find "$H3_WT" -path "$H3_WT/.git" -prune -o -exec touch -t "$ts_3h" {} + 2>/dev/null
+find "$H1_WT" -path "$H1_WT/.git" -prune -o -exec touch -t "$ts_1h" {} + 2>/dev/null
+STATE_TMP="$TMP_ROOT/state"
+OUT_H2=$(DISK_MAGICIAN_STATE_DIR="$STATE_TMP" WORKTREE_APPROVED=1 env -i PATH="$TEST_PATH" HOME="$TMP_ROOT/home" \
+  DISK_MAGICIAN_STATE_DIR="$STATE_TMP" WORKTREE_APPROVED=1 bash "$TARGET_SCRIPT" --roots "$ROOTS" --min-age-hours 2 --clean 2>&1)
+assert_contains "3h worktree slimmed with --min-age-hours 2" "SLIMMED" "$OUT_H2"
+assert_absent "3h worktree docs removed" "$H3_WT/docs/user-stories-ui"
+assert_present "1h worktree docs preserved" "$H1_WT/docs/user-stories-ui"
+assert_contains "guard log records hours:2 override" "slim-worktrees: recency override active: hours:2" "$(cat "$STATE_TMP/worktree_guard.log" 2>/dev/null || true)"
+
+echo "== case 9: incomplete lsof evidence fails closed (nothing slimmed) =="
+FAIL_BIN="$TMP_ROOT/failbin"; mkdir -p "$FAIL_BIN"
+printf '#!/bin/sh\necho "lsof: WARNING: partial" >&2\nprintf "p1\\n"\nexit 1\n' > "$FAIL_BIN/lsof"; chmod +x "$FAIL_BIN/lsof"
+LSOF_WT=$(mk_wt lsof-fail-clean)
+find "$LSOF_WT" -path "$LSOF_WT/.git" -prune -o -exec touch -t "$(date -v-10d +%Y%m%d%H%M 2>/dev/null || date -d '-10 days' +%Y%m%d%H%M)" {} + 2>/dev/null
+OUT_LSOF=$(WORKTREE_APPROVED=1 env -i PATH="$FAIL_BIN:$TEST_PATH" HOME="$TMP_ROOT/home" WORKTREE_APPROVED=1 \
+  DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state-lsof" bash "$TARGET_SCRIPT" --roots "$ROOTS" --clean 2>&1)
+assert_contains "slim refuses on incomplete lsof" "lsof output incomplete" "$OUT_LSOF"
+assert_present "worktree docs untouched when lsof incomplete" "$LSOF_WT/docs/user-stories-ui"
+
+echo "== case 10: configured per-repo exclusion (roadmap telemetry) is unioned in (yc7g) =="
+RM_REPO="$TMP_ROOT/roadmap"; RM_ROOTS="$TMP_ROOT/rm_roots"
+mkdir -p "$RM_REPO/dashboards/prw/telemetry" "$RM_REPO/notes" "$RM_ROOTS"
+head -c 200000 /dev/zero > "$RM_REPO/dashboards/prw/telemetry/big.jsonl"
+printf 'n' > "$RM_REPO/notes/keep.md"
+( cd "$RM_REPO" && git init -q . && git config user.email t@t && git config user.name t \
+  && git config extensions.worktreeConfig true && git add -A && git commit -qm init )
+RM_WT="$RM_ROOTS/old"
+git -C "$RM_REPO" worktree add -q --detach "$RM_WT" >/dev/null 2>&1
+age_wt "$RM_WT"
+OUT_RM=$(env -i PATH="$TEST_PATH" HOME="$TMP_ROOT/home" WORKTREE_APPROVED=1 \
+          bash "$TARGET_SCRIPT" --roots "$RM_ROOTS" --exclude docs --clean 2>&1)
+assert_contains "roadmap worktree slimmed" "SLIMMED" "$OUT_RM"
+assert_absent  "configured telemetry path excluded" "$RM_WT/dashboards/prw/telemetry/big.jsonl"
+assert_present "other roadmap file kept" "$RM_WT/notes/keep.md"
+assert_present "non-roadmap worktree keeps evidence" "$OLD/src/keep.py"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

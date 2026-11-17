@@ -23,8 +23,11 @@ FAIL=0
 # Keep every sourced helper at the corresponding revision. In particular, never
 # replace worktree_recency.sh with a stub that drops worktree_is_recently_active.
 mkdir -p "$TMP_ROOT/baseline" "$TMP_ROOT/batch_baseline" "$TMP_ROOT/branch" "$TMP_ROOT/unstubbed"
-git -C "$REPO_ROOT" archive "$BASE_SHA" scripts | tar -x -C "$TMP_ROOT/baseline"
-git -C "$REPO_ROOT" archive 2f35dfcd063f1c24f418b013ec9668547bccafff scripts | tar -x -C "$TMP_ROOT/batch_baseline"
+# Keep producer status separate; tar may stop after the valid archive trailer.
+"$REAL_GIT" -C "$REPO_ROOT" archive --output="$TMP_ROOT/baseline-scripts.tar" "$BASE_SHA" scripts
+tar -xf "$TMP_ROOT/baseline-scripts.tar" -C "$TMP_ROOT/baseline"
+"$REAL_GIT" -C "$REPO_ROOT" archive --output="$TMP_ROOT/batch-baseline-scripts.tar" 2f35dfcd063f1c24f418b013ec9668547bccafff scripts
+tar -xf "$TMP_ROOT/batch-baseline-scripts.tar" -C "$TMP_ROOT/batch_baseline"
 cp -R "$REPO_ROOT/scripts" "$TMP_ROOT/branch/"
 cp -R "$REPO_ROOT/scripts" "$TMP_ROOT/unstubbed/"
 # resolve_config falls back to the template beside the scripts directory.
@@ -55,6 +58,16 @@ worktree_is_recently_active() {
     rc="$(awk -F '\t' -v p="$1" '$1 == p { print $3; exit }' "$AGE_MAP")"
     [[ "$rc" == 0 && "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 0
     (( value < $2 ))
+}
+# 48 h floor (operator decision 2026-11-12): the script asks the minutes flavour. Fold it
+# onto the same day-valued fixture so the call-count assertions stay comparable.
+worktree_is_recently_active_minutes() {
+    printf '%s\t%s\t%s\n' "$1" "$(( $2 / 1440 ))" "${3:-}" >> "$PREDICATE_COUNTER"
+    local value rc
+    value="$(awk -F '\t' -v p="$1" '$1 == p { print $2; found=1; exit } END { if (!found) exit 1 }' "$AGE_MAP")" || return 0
+    rc="$(awk -F '\t' -v p="$1" '$1 == p { print $3; exit }' "$AGE_MAP")"
+    [[ "$rc" == 0 && "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 0
+    (( value * 1440 < $2 ))
 }
 SH
 
@@ -241,8 +254,8 @@ run_cleanup() {
 mixed_fixture() {
   init_fixture "$1"
   add_wt wt-young "$WT/wt-young" 2
-  add_wt wt-merged4 "$WT/wt-merged4" 4
-  expect_eligible "$WT/wt-merged4"
+  add_wt wt-merged8 "$WT/wt-merged8" 8
+  expect_eligible "$WT/wt-merged8"
   add_wt wt-old "$WT/wt spaced old" 10
   expect_eligible "$WT/wt spaced old"
   add_wt wt-dirty "$WT/wt-dirty" 10
@@ -406,7 +419,7 @@ for filename in sys.argv[1:]:
         for line in source:
             line = re.sub(r' [|] age=\S+ size=\S+', '', line)
             if '/antigravity/worktrees/project/old ' in line or '/ao/data/worktrees/wt-auto ' in line: continue
-            if line.startswith(('Antigravity:', 'Repo-local:', 'Reclaimable:')): continue
+            if line.startswith(('Antigravity:', 'Repo-local:', 'Reclaimable:', 'Merged clean worktree floor:', 'Worktree content floor:')): continue
             line = re.sub(r' [(](?:age=[^)]*|< [0-9]+ days)[)]', '', line)
             target.write(line)
 PY_NORMALIZE
@@ -446,8 +459,8 @@ case_t9() {
   init_fixture t9
   add_wt wt-old "$WT/wt-old" 10
   expect_eligible "$WT/wt-old"
-  add_wt wt-merged4 "$WT/wt-merged4" 4
-  expect_eligible "$WT/wt-merged4"
+  add_wt wt-merged8 "$WT/wt-merged8" 8
+  expect_eligible "$WT/wt-merged8"
   AUTO="$F/ao/data/worktrees/wt-auto"
   add_wt wt-auto "$AUTO" 10
   "$REAL_GIT" -C "$REPO" worktree lock "$AUTO"
@@ -486,7 +499,7 @@ case_t9() {
   "$REAL_GIT" -C "$AG/old" push -q origin 'HEAD:refs/heads/orphan-old'
   write_released_lease "$AG/old"
   mark_stale "$WT/wt-old"
-  mark_stale "$WT/wt-merged4"
+  mark_stale "$WT/wt-merged8"
   mark_stale "$AG/old"
   cut -f 1 "$F/ages.tsv" > "$F/before.paths"
   run_cleanup branch "$F/out" constant --clean
@@ -596,8 +609,8 @@ batch_equivalent() {
   run_cleanup branch "$F/branch.out"
   # The amendment intentionally removes exact age labels from PRESERVE rows.
   # Keep every other byte in the batch baseline comparison unchanged.
-  sed -E 's/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/baseline.out" > "$F/baseline.batch-normalized"
-  sed -E 's/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/branch.out" > "$F/branch.batch-normalized"
+  sed -E '/^(Merged clean worktree floor:|Worktree content floor:)/d; s/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/baseline.out" > "$F/baseline.batch-normalized"
+  sed -E '/^(Merged clean worktree floor:|Worktree content floor:)/d; s/ \| age=[^ ]+ size=/ | age=LABEL size=/' "$F/branch.out" > "$F/branch.batch-normalized"
   require diff -u "$F/baseline.batch-normalized" "$F/branch.batch-normalized"
 }
 

@@ -199,6 +199,7 @@ cp -p "$ROOT/scripts/job_receipt.py" "$FIX/scripts/job_receipt.py"
 cp -p "$ROOT/scripts/c14_probe.py" "$FIX/scripts/c14_probe.py"
 mkdir -p "$FIX/scripts/lib"
 cp -p "$ROOT/scripts/lib/actuator_receipt.sh" "$FIX/scripts/lib/actuator_receipt.sh"
+cp -p "$ROOT/scripts/safety_lib.sh" "$FIX/scripts/safety_lib.sh"
 
 MAIN_HOME="$TMP/main-home"; PRES_HOME="$TMP/pres-home"; mkdir -p "$MAIN_HOME" "$PRES_HOME"
 

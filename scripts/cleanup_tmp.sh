@@ -30,16 +30,17 @@ CONFIG_FILE="$REPO_ROOT/config.json"
 [[ -f "$CONFIG_FILE" ]] || CONFIG_FILE="$REPO_ROOT/config.json.template"
 
 # Default thresholds (minutes unless noted)
-GIT_CLONE_MIN=240
-AGENT_PROMPT_MIN=240
-CLI_VALIDATION_MIN=60
-WORKTREE_POINTER_MIN=30
+CONTENT_RECENCY_DEFAULT_MINUTES="$(safety_disposable_recency_floor_minutes)"
+GIT_CLONE_MIN="$CONTENT_RECENCY_DEFAULT_MINUTES"
+AGENT_PROMPT_MIN="$CONTENT_RECENCY_DEFAULT_MINUTES"
+CLI_VALIDATION_MIN="$CONTENT_RECENCY_DEFAULT_MINUTES"
+WORKTREE_POINTER_MIN="$CONTENT_RECENCY_DEFAULT_MINUTES"
 WORKTREE_POINTER_MIN_KB=51200
 # --large branch safety (hours): a top-level /private/tmp dir with any file
 # mtime within this window is considered "active use" and is skipped
 # regardless of size or protected-root status.
-LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-24}"
-AGED_TMP_ACTIVE_HOURS="${AGED_TMP_ACTIVE_HOURS:-72}"
+LARGE_TMP_ACTIVE_HOURS="${LARGE_TMP_ACTIVE_HOURS:-48}"
+AGED_TMP_ACTIVE_HOURS="${AGED_TMP_ACTIVE_HOURS:-48}"
 # --large branch: how long an archived dir sits under
 # /private/tmp/_disk_magician_archive/<ts>/ before a later --large run may
 # permanently rm -rf it and actually reclaim the space.
@@ -73,13 +74,11 @@ LARGE_TMP_ARCHIVE_MAX_HOURS="${LARGE_TMP_ARCHIVE_MAX_HOURS:-168}"
 ARCHIVE_ROOT="${DISK_MAGICIAN_ARCHIVE_ROOT:-${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-/private/tmp}/_disk_magician_archive}"
 # Same env var and default as cleanup_worktrees.sh / cleanup_worktree_venvs.sh
 # / worktree_hygiene.sh, for the orphaned /tmp worktree-pointer guard below --
-# this was a bare hardcoded 14 that neither tracked the repo's 7-day floor
-# change nor honored the override the sibling scripts respect (found in
-# /advice review of PR #55).
-WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
-# Hard floor: 7 days, may only be raised, never lowered (CLAUDE.md
+# this guard uses the shared 48-hour content floor and still accepts higher values.
+WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-2}"
+# Hard floor: 48 hours, may only be raised, never lowered (CLAUDE.md
 # invariant). Missed in the sibling scripts' clamp sweep (found in /advice
-# re-review of PR #55) -- WORKTREE_MIN_AGE_DAYS=0 would otherwise let this
+# old 7-day checks allowed an age below the current 48-hour floor. --
 # script's orphaned-worktree-pointer guard qualify every pointer for removal.
 # Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
 # zero numeral like "08" as octal (invalid digit -> arithmetic error), which
@@ -88,30 +87,52 @@ WORKTREE_MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-7}"
 if [[ "$WORKTREE_MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
   WORKTREE_MIN_AGE_DAYS=$((10#$WORKTREE_MIN_AGE_DAYS))
 else
-  WORKTREE_MIN_AGE_DAYS=7
+  WORKTREE_MIN_AGE_DAYS=2
 fi
-[[ "$WORKTREE_MIN_AGE_DAYS" -lt 7 ]] && WORKTREE_MIN_AGE_DAYS=7
+[[ "$WORKTREE_MIN_AGE_DAYS" -lt 2 ]] && WORKTREE_MIN_AGE_DAYS=2
+WORKTREE_MIN_AGE_MINUTES=$((WORKTREE_MIN_AGE_DAYS * 1440))
+WORKTREE_MIN_AGE_LABEL="$(worktree_floor_label "$WORKTREE_MIN_AGE_MINUTES")"
 
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS LARGE_TMP_ARCHIVE_MAX_HOURS AGED_TMP_ACTIVE_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "240 240 60 30 51200 24 24 168 72"
+  read -r GIT_CLONE_MIN AGENT_PROMPT_MIN CLI_VALIDATION_MIN WORKTREE_POINTER_MIN WORKTREE_POINTER_MIN_KB LARGE_TMP_ACTIVE_HOURS LARGE_TMP_ARCHIVE_RETENTION_HOURS LARGE_TMP_ARCHIVE_MAX_HOURS AGED_TMP_ACTIVE_HOURS <<<"$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || echo "2880 2880 2880 2880 51200 48 24 168 48"
 import json, os, sys
 data = json.load(open(sys.argv[1]))
 t = data.get("cleanup_thresholds", {})
-print(f"{t.get('git_clone_minutes', 240)} {t.get('agent_prompt_minutes', 240)} {t.get('cli_validation_minutes', 60)} {t.get('worktree_pointer_minutes', 30)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_MAX_HOURS', t.get('large_tmp_archive_max_hours', 168))} {os.environ.get('AGED_TMP_ACTIVE_HOURS', t.get('aged_tmp_active_hours', 72))}")
+print(f"{t.get('git_clone_minutes', 2880)} {t.get('agent_prompt_minutes', 2880)} {t.get('cli_validation_minutes', 2880)} {t.get('worktree_pointer_minutes', 2880)} {t.get('worktree_pointer_min_kb', 51200)} {os.environ.get('LARGE_TMP_ACTIVE_HOURS', t.get('large_tmp_active_hours', 48))} {os.environ.get('LARGE_TMP_ARCHIVE_RETENTION_HOURS', t.get('large_tmp_archive_retention_hours', 24))} {os.environ.get('LARGE_TMP_ARCHIVE_MAX_HOURS', t.get('large_tmp_archive_max_hours', 168))} {os.environ.get('AGED_TMP_ACTIVE_HOURS', t.get('aged_tmp_active_hours', 48))}")
 PY
 )"
 fi
-if [[ ! "$AGED_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]]; then AGED_TMP_ACTIVE_HOURS=72; fi
+if [[ ! "$AGED_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]]; then AGED_TMP_ACTIVE_HOURS=48; fi
 AGED_TMP_ACTIVE_HOURS=$((10#${AGED_TMP_ACTIVE_HOURS}))
-(( AGED_TMP_ACTIVE_HOURS < 72 )) && AGED_TMP_ACTIVE_HOURS=72
+(( AGED_TMP_ACTIVE_HOURS < 48 )) && AGED_TMP_ACTIVE_HOURS=48
 # The hourly aged mode broadens size eligibility, not existing safety policy.
 # Preserve higher legacy activity and archive-recovery overrides after config/env
 # resolution. Persist the effective recovery floor in each aged archive receipt.
 if [[ "$LARGE_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]] && (( 10#$LARGE_TMP_ACTIVE_HOURS > AGED_TMP_ACTIVE_HOURS )); then
   AGED_TMP_ACTIVE_HOURS=$((10#$LARGE_TMP_ACTIVE_HOURS))
 fi
+# Emergency floor (operator decision 2026-11-12, `diskm emergency`): DISK_MAGICIAN_AGE_FLOOR_MINUTES
+# (>= 120) lowers the large/aged activity floors to that many hours (rounded up) for this run.
+# Archive recovery retention keeps its own floor below; the C14 verdict's 1 h idle veto still runs.
+# Machine config can raise disposable ages, but legacy lower values follow 48h.
+GIT_CLONE_MIN="$(safety_disposable_recency_minimum_minutes "$GIT_CLONE_MIN")"
+AGENT_PROMPT_MIN="$(safety_disposable_recency_minimum_minutes "$AGENT_PROMPT_MIN")"
+CLI_VALIDATION_MIN="$(safety_disposable_recency_minimum_minutes "$CLI_VALIDATION_MIN")"
+WORKTREE_POINTER_MIN="$(safety_disposable_recency_minimum_minutes "$WORKTREE_POINTER_MIN")"
+LARGE_TMP_ACTIVE_HOURS=$(( $(safety_disposable_recency_minimum_minutes "$((LARGE_TMP_ACTIVE_HOURS * 60))") / 60 ))
+AGED_TMP_ACTIVE_HOURS=$(( $(safety_disposable_recency_minimum_minutes "$((AGED_TMP_ACTIVE_HOURS * 60))") / 60 ))
+# Machine config can raise disposable ages, but legacy lower values follow 48h.
+
+EMERGENCY_TMP_HOURS=""
+if [[ "${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-}" =~ ^[1-9][0-9]{2,4}$ ]] && (( DISK_MAGICIAN_AGE_FLOOR_MINUTES >= 120 )); then
+  EMERGENCY_TMP_HOURS=$(( (DISK_MAGICIAN_AGE_FLOOR_MINUTES + 59) / 60 ))
+fi
 AGED_TMP_ARCHIVE_RETENTION_HOURS="$AGED_TMP_ACTIVE_HOURS"
+if [[ -n "$EMERGENCY_TMP_HOURS" ]]; then
+  (( EMERGENCY_TMP_HOURS < AGED_TMP_ACTIVE_HOURS )) && AGED_TMP_ACTIVE_HOURS="$EMERGENCY_TMP_HOURS"
+  [[ "$LARGE_TMP_ACTIVE_HOURS" =~ ^[0-9]+$ ]] && (( EMERGENCY_TMP_HOURS < 10#$LARGE_TMP_ACTIVE_HOURS )) && LARGE_TMP_ACTIVE_HOURS="$EMERGENCY_TMP_HOURS"
+fi
 if [[ "$LARGE_TMP_ARCHIVE_RETENTION_HOURS" =~ ^[0-9]+$ ]] && (( 10#$LARGE_TMP_ARCHIVE_RETENTION_HOURS > AGED_TMP_ARCHIVE_RETENTION_HOURS )); then
   AGED_TMP_ARCHIVE_RETENTION_HOURS=$((10#$LARGE_TMP_ARCHIVE_RETENTION_HOURS))
 fi
@@ -178,8 +199,8 @@ LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
 # pressure_sweep.sh and launchd jobs enable it without a CLI edit.
 BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
 # Hard floor (minutes): never evict anything younger than this, regardless
-# of budget pressure. Default 2h; clamped to a 1h minimum in scratch_budget.sh.
-BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
+# of budget pressure. Default 48h; explicit operator floors retain the 1h minimum.
+BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-$(safety_disposable_recency_floor_minutes)}"
 # The lock helper re-execs this script with its original arguments, including
 # governor flags, so preserve the complete argv before stripping those flags.
 SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
@@ -210,7 +231,7 @@ Options:
                DISK_MAGICIAN_SCRATCH_BUDGET_GB).
   --budget-floor-minutes N
                Never evict anything younger than N minutes under budget
-               mode (default 120, hard minimum 60; env
+               mode (default 2880, hard minimum 60; env
                DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES).
   -h, --help   Show this help
 EOF
@@ -325,6 +346,7 @@ dry_prefix() { [[ "$DRY_RUN" == true ]] && echo "DRY RUN: " || echo ""; }
 CANDIDATE_REMOVED_COUNT=0
 CANDIDATE_DEFERRED_COUNT=0
 CANDIDATE_INTERRUPTED_COUNT=0
+CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=false
 cleanup_tmp_count_candidate_result() {
   case "$1" in
     removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;
@@ -361,7 +383,7 @@ cleanup_tmp_finish_receipt() {
   if [[ "$sig" != 0 || "$rc" == 124 || "$rc" == 137 ]]; then
     outcome=timeout
     reason="interrupted; signal=${sig}; exit=${rc}"
-    CANDIDATE_INTERRUPTED_COUNT=$(( CANDIDATE_INTERRUPTED_COUNT + 1 ))
+    [[ "$CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED" == true ]] || CANDIDATE_INTERRUPTED_COUNT=$(( CANDIDATE_INTERRUPTED_COUNT + 1 ))
   elif (( rc != 0 )); then
     outcome=error
     reason="cleanup_tmp exited ${rc}"
@@ -395,6 +417,12 @@ cleanup_tmp_finish_receipt() {
 cleanup_tmp_exit_trap() {
   local rc=$? sig="${1:-0}"
   trap - EXIT HUP INT TERM
+  # Candidate probes continue safely after an incomplete unit so later
+  # candidates can still be classified. Preserve that deadline in the final
+  # actuator status after the scan has had a chance to finish.
+  if (( rc == 0 )) && [[ "$CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED" == true && -z "${ACT_CURSOR:-}" ]]; then
+    rc=124
+  fi
   cleanup_tmp_finish_receipt "$rc" "$sig" || { [[ "$rc" != 0 ]] || rc=1; }
   if [[ "$sig" != 0 ]]; then
     [[ -n "${dylib_candidate_file:-}" ]] && rm -f "$dylib_candidate_file"
@@ -441,7 +469,15 @@ resolve_timeout_bin() {
   done
 }
 
+# Budget sizing counts APFS private bytes (clone-shared blocks are not freed by a
+# delete); DISK_MAGICIAN_SIZE_METHOD=du or a non-macOS host keeps plain du.
+SIZE_CMD=(du -sk -x)
+if [[ "$(uname -s)" == Darwin && "${DISK_MAGICIAN_SIZE_METHOD:-}" != du && -f "$SCRIPT_DIR/private_size_kb.py" ]]; then
+  SIZE_CMD=(python3 "$SCRIPT_DIR/private_size_kb.py")
+fi
+
 path_size_kb() {
+  scratch_budget_report_measurement "$1" || return $?
   # Bead disk_magician-lsl: `du -sk` can emit zero, one, or (under a TOCTOU
   # race / BSD-du edge case on a live, churning TMPDIR) multiple lines.
   # Take the first numeric field of the LAST line; default to 0 when there
@@ -460,7 +496,7 @@ path_size_kb() {
   local tbin out rc=0 total
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
   if [[ -n "$tbin" ]]; then
-    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" du -sk -x "$1" 2>/dev/null)" || rc=$?
+    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" "${SIZE_CMD[@]}" "$1" 2>/dev/null)" || rc=$?
     if (( rc == 124 || rc == 137 )); then
       log "du exceeded ${PROBE_TIMEOUT_SEC}s, size unknown (preserving): $1"
       echo -1
@@ -473,7 +509,7 @@ path_size_kb() {
     fi
   else
     warn_unbounded_probes_once
-    out="$(du -sk -x "$1" 2>/dev/null)" || rc=$?
+    out="$("${SIZE_CMD[@]}" "$1" 2>/dev/null)" || rc=$?
   fi
   total="$(awk '$1 ~ /^[0-9]+$/ {f=$1; n=1} END{if (n) print f}' <<<"$out")"
   if [[ -z "$total" ]] && (( rc != 0 )); then
@@ -495,7 +531,7 @@ remove_path() {
   local kb result
   REMOVE_PATH_KB=0
   REMOVE_PATH_COMPLETED=false
-  kb=$(path_size_kb "$path")
+  kb=$(path_size_kb "$path") || exit $?
   if (( kb < 0 )); then
     log "Preserving (size unknown, not removing): $path"
     return 0
@@ -574,7 +610,7 @@ scan_protected_root_children() {
       log "Skipping recently active protected-root child (mtime/ctime within ${protected_child_active_hours}h): $child"
       continue
     fi
-    kb=$(path_size_kb "$child")
+    kb=$(path_size_kb "$child") || exit $?
     if [[ "$kb" -lt 0 ]]; then
       log "Skipping protected-root child (size unknown): $child"
       continue
@@ -1095,7 +1131,7 @@ PY
 
 purge_archive_entry() {
   local d="$1" mins="$2" retention_hours="${3:-$LARGE_TMP_ARCHIVE_RETENTION_HOURS}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" max_hours="${5:-$LARGE_TMP_ARCHIVE_MAX_HOURS}"
-  local kb entry_mtime age_hours result size_unknown=false now_epoch recovery_info recovery_hours archived_at recovery_age activity_hours aged_recovery=false
+  local kb entry_mtime age_hours result size_rc=0 size_unknown=false now_epoch recovery_info recovery_hours archived_at recovery_age activity_hours aged_recovery=false
   now_epoch="$(date +%s)"
   # Aged-mode archives carry a recovery window in the existing C14 origin
   # receipt. Honor it in every purge mode, even when source mtime predates the
@@ -1128,7 +1164,22 @@ PY
   fi
   # Size first because du can be slow. All safety probes follow it, with the
   # open-file check last immediately before the destructive operation.
-  kb=$(path_size_kb "$d")
+  kb=$(path_size_kb "$d") || size_rc=$?
+  if (( size_rc != 0 )); then
+    if (( size_rc == 124 || size_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
+      if ! act_unit_fits 0; then
+        result="$(scratch_budget_quarantine_remove "$d")"
+        cleanup_tmp_count_candidate_result "$result"
+        log "C14 $result: $d"
+        return 0
+      fi
+      log "measurement_status=incomplete rc=$size_rc path=$d; fail-closed and preserving this archive"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+      return 0
+    fi
+    exit "$size_rc"
+  fi
   size_unknown=false
   (( kb < 0 )) && { size_unknown=true; kb=0; }
   # Hard cap (bead jleechan-mtow): past max_hours the
@@ -1322,7 +1373,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
       continue
     fi
     files_completed=0
-    local_kb=$(path_size_kb "$f")
+    local_kb=$(path_size_kb "$f") || exit $?
     if (( local_kb < 0 )); then
       log "Skipping (size unknown): $f"
       continue
@@ -1439,8 +1490,8 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
 
     # Worktree safety rule floor (same WORKTREE_MIN_AGE_DAYS as the other
     # worktree-cleanup scripts)
-    if worktree_is_recently_active "$subdir" "$WORKTREE_MIN_AGE_DAYS"; then
-      log "Skipping recently active worktree pointer (<${WORKTREE_MIN_AGE_DAYS}d): $subdir"
+    if worktree_is_recently_active_minutes "$subdir" "$WORKTREE_MIN_AGE_MINUTES"; then
+      log "Skipping recently active worktree pointer (<${WORKTREE_MIN_AGE_LABEL}): $subdir"
       continue
     fi
 
@@ -1451,7 +1502,7 @@ for tmp_dir in "${TMP_DIRS[@]}"; do
     fi
 
     # Size filter
-    kb=$(path_size_kb "$subdir")
+    kb=$(path_size_kb "$subdir") || exit $?
     if (( kb < 0 )); then
       log "Skipping (size unknown): $subdir"
       continue
@@ -1583,9 +1634,9 @@ container_child_has_protected_repository() {
 
   while IFS= read -r -d '' marker; do
     repo="${marker%/.git}"
-    if worktree_is_recently_active "$repo" "$WORKTREE_MIN_AGE_DAYS"; then
+    if worktree_is_recently_active_minutes "$repo" "$WORKTREE_MIN_AGE_MINUTES"; then
       rm -f "$marker_file"
-      log "Skipping container child with recently active nested repository/worktree (<${WORKTREE_MIN_AGE_DAYS}d): $repo (child: $child)"
+      log "Skipping container child with recently active nested repository/worktree (<${WORKTREE_MIN_AGE_LABEL}): $repo (child: $child)"
       return 0
     fi
     if worktree_has_unsaved_work "$repo"; then
@@ -1602,13 +1653,27 @@ container_child_has_protected_repository() {
 # large_consider_entry <dir> <depth> — --large gates for one candidate: depth 0
 # is a top-level tmp entry, depth 1 a child of a descended container.
 large_consider_entry() {
-  local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0
+  local d="$1" depth="$2" min_kb="${3:-$LARGE_TMP_MIN_KB}" active_hours="${4:-$LARGE_TMP_ACTIVE_HOURS}" aged_mode="${5:-false}" base kb archive_rc=0 report_rc=0
   local scratch_container=false
   base="$(basename "$d")"
 
   if is_different_filesystem "$d" "${PRIVATE_TMP_ROOT:-}"; then
     log "Skipping mountpoint or foreign filesystem: $d"
     cleanup_tmp_count_candidate_result "kept:mountpoint"
+    return 0
+  fi
+
+  scratch_budget_report_measurement "$d" || report_rc=$?
+  if (( report_rc != 0 )); then
+    log "measurement_status=incomplete rc=$report_rc path=$d; fail-closed and preserving this unit"
+    if (( report_rc == 124 || report_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
+      log "deferred:deadline-before-unit $d"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+    else
+      log "Activity/size measurement failed; fail-closed, treating as active: $d"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+    fi
     return 0
   fi
 
@@ -1689,12 +1754,57 @@ large_consider_entry() {
     done < <(/usr/bin/find "$d" -xdev -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
     return 0
   fi
+  # Split measured large parents before per-unit recency; retain repository
+  # lifecycle units and the existing typed paths for files and links.
+  local plan plan_rc=0 marker _bytes _files _newest kind leaf _apparent descended=false
+  plan="$(mktemp "${TMPDIR:-/tmp}/cleanup-tmp-leaves.XXXXXX")" || return 1
+  scratch_budget_measure_files "$d" 100 --nul >"$plan" || plan_rc=$?
+  if (( plan_rc != 0 )); then
+    rm -f -- "$plan"
+    if (( plan_rc == 124 || plan_rc == 137 )); then
+      CANDIDATE_MEASUREMENT_DEADLINE_EXPIRED=true
+      log "measurement_status=incomplete rc=$plan_rc path=$d; fail-closed and deferring this unit"
+      cleanup_tmp_count_candidate_result deferred:deadline-before-unit
+    else
+      log "measurement_status=incomplete rc=$plan_rc path=$d; fail-closed, treating as active"
+      cleanup_tmp_count_candidate_result deferred:measurement-incomplete
+    fi
+    return 0
+  fi
+  IFS= read -r -d '' marker <"$plan" || marker=""
+  if [[ "$marker" != diskm-measure-leaves-v1 ]]; then
+    rm -f -- "$plan"
+    log "ERROR: invalid measurement frame; preserving $d"
+    return 1
+  fi
+  if ! _scratch_budget_contains_git "$d"; then
+    {
+      IFS= read -r -d '' marker
+      while IFS= read -r -d '' _bytes && IFS= read -r -d '' _files &&
+        IFS= read -r -d '' _newest && IFS= read -r -d '' kind &&
+        IFS= read -r -d '' leaf && IFS= read -r -d '' _apparent; do
+        [[ "$leaf" == "$d" ]] && continue
+        if [[ "$kind" == A && -d "$leaf" && ! -L "$leaf" ]] &&
+          python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$d" "$leaf"; then
+          descended=true
+          large_consider_entry "$leaf" "$((depth + 1))" "$min_kb" "$active_hours" "$aged_mode" || {
+            plan_rc=$?
+            break
+          }
+        fi
+      done
+    } <"$plan"
+  fi
+  rm -f -- "$plan"
+  (( plan_rc == 0 )) || return "$plan_rc"
+  [[ "$descended" == true ]] && return 0
+
   if has_recent_activity "$d" "$active_hours" "$aged_mode"; then
     log "Skipping recently active dir (mtime/ctime within ${active_hours}h): $d"
     return 0
   fi
 
-  kb=$(path_size_kb "$d")
+  kb=$(path_size_kb "$d") || exit $?
   if [[ "$kb" -lt 0 ]]; then
     log "Skipping large-dir candidate (size unknown): $d"
     return 0
@@ -1770,13 +1880,13 @@ if [[ "$INCLUDE_AGED" == true && -n "$PRIVATE_TMP_ROOT" ]]; then
       continue
     fi
     [[ -f "$f" && ! -L "$f" ]] || continue
-    aged_file_kb=$(path_size_kb "$f")
+    aged_file_kb=$(path_size_kb "$f") || exit $?
     if (( aged_file_kb < 0 )); then
       log "Skipping aged agent prompt (size unknown): $f"
       continue
     fi
     if [[ "$DRY_RUN" == true ]]; then
-      result="$(artifact_removal_verdict "$f" --kind ephemeral)"
+      result="$(artifact_removal_verdict "$f" --kind ephemeral --no-rescue-push)"
       if [[ "$result" == remove ]]; then
         log "DRY RUN: would remove C14 agent prompt (>${AGED_TMP_ACTIVE_HOURS}h): $f (${aged_file_kb} KB)"
       else
@@ -1806,8 +1916,8 @@ else
 fi
 
 # Size-budget mode (bead disk_magician-d45): evicts oldest-first,
-# independent of the 24h/4h age gates above, so 0-24h scratch growth is no
-# longer structurally invisible to every sweeper. Runs last so the normal
+# independent of the 48h content floor above, so explicit budget callers can
+# still select a lower floor. Runs last after normal age-based passes. Runs last so the normal
 # age-based passes above get first crack at reclaiming space cheaply.
 BUDGET_DIRS_DELETED=0
 BUDGET_FILES_DELETED=0

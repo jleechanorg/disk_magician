@@ -20,10 +20,20 @@ DISPATCH = {
     "install-sweepers": "install_launchd_sweepers.sh",
     "cleanup-claude-state": "cleanup_claude_state.sh",
     "codex-vacuum": "cleanup_codex_db.sh",
+    "cleanup-xcode": "cleanup_xcode.sh",
+    "cleanup_xcode": "cleanup_xcode.sh",
 }
 
 
 class ReliabilityDispatchTests(unittest.TestCase):
+    def test_cleanup_xcode_is_in_public_help(self):
+        result = subprocess.run(
+            ["/bin/bash", str(ROOT / "disk_magician.sh"), "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cleanup-xcode", result.stdout)
+
     def test_install_sweepers_help_is_read_only_for_root_and_package_dispatchers(self):
         with tempfile.TemporaryDirectory() as package_directory:
             package = Path(package_directory) / "disk_magician"
@@ -158,7 +168,7 @@ class ReliabilityDispatchTests(unittest.TestCase):
     def test_scoped_templates_use_packaged_dispatch_without_argument_changes(self):
         templates = {
             "com.jleechanorg.disk-magician-frontier-nightly":
-                ["frontier-nightly", "--granularity-gib", "5", "--wall-clock-cap", "43200", "--output-default"],
+                ["frontier-nightly", "--granularity-gib", "0.09765625", "--wall-clock-cap", "43200", "--output-default"],
             "com.jleechanorg.disk-magician-pressure-sweep": ["pressure-sweep"],
             "com.jleechanorg.disk-magician-drilldown": ["residual-drilldown"],
             "com.jleechanorg.disk-magician-tmp-scratch": ["tmp-scratch-sweep", "--clean"],

@@ -31,23 +31,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=scripts/lib/actuator_receipt.sh
+source "$SCRIPT_DIR/safety_lib.sh"
 source "$SCRIPT_DIR/lib/actuator_receipt.sh"
 RECEIPT_HELPER="$SCRIPT_DIR/job_receipt.py"
 
 THRESHOLD_GB="${DISK_MAGICIAN_PRESSURE_THRESHOLD_GB:-40}"
 # Size-budget scratch eviction (bead disk_magician-d45): passed through to
 # cleanup_tmp.sh's --budget-gb so a pressure sweep reclaims young-but-stale
-# (0-24h) scratch that the 4h/24h age-only gates above structurally cannot
-# see. Default 0 (disabled): unlike --large (archive, reversible within its
-# retention window), budget mode does an immediate, permanent `rm -rf` on
-# every scratch root (/private/tmp, /tmp, DARWIN_USER_TEMP_DIR) once past a
-# 2h-minimum floor -- a materially more aggressive default than anything
-# else this script runs unattended. Same opt-in-gate pattern this repo
+# scratch roots missed by the age-only passes. Default 0 (disabled): unlike
+# --large (archive, reversible within its retention window), budget mode does
+# an immediate, permanent `rm -rf` on each eligible root after the shared
+# 48h floor (explicit operator override retains the 60m minimum). This remains
+# opt-in, like the other more aggressive maintenance paths. Same gate pattern this repo
 # already uses for LARGE_TMP_APPROVED / WORKTREE_APPROVED: an operator (or
 # the launchd plist) sets DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB
 # explicitly to activate it.
 SCRATCH_BUDGET_GB="${DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_GB:-0}"
-SCRATCH_BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
+SCRATCH_BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_PRESSURE_SCRATCH_BUDGET_FLOOR_MINUTES:-$(safety_disposable_recency_floor_minutes)}"
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 LOCK_DIR="$STATE_DIR/pressure_sweep.lock"
 LOCK_TTL_SEC=3600

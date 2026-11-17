@@ -120,21 +120,21 @@ mkdir -p "$TMP_FIXTURE"
 VALID_CLONE="$TMP_FIXTURE/valid_clone"
 mkdir -p "$VALID_CLONE/.git"
 touch "$VALID_CLONE/file.txt"
-# Backdate mtime beyond GIT_CLONE_MIN (240m = 4h)
-python3 -c 'import os,time; t=time.time()-18000; os.utime("'"$VALID_CLONE"'", (t,t)); os.utime("'"$VALID_CLONE/.git"'", (t,t))'
+# Backdate clone metadata beyond the shared 48h floor (49h)
+python3 -c 'import os,time; t=time.time()-176400; os.utime("'"$VALID_CLONE"'", (t,t)); os.utime("'"$VALID_CLONE/.git"'", (t,t))'
 
 # Create simulated leaked mountpoint clone (should be skipped)
 LEAKED_CLONE="$TMP_FIXTURE/mac-evidence-baseline-mount"
 mkdir -p "$LEAKED_CLONE/.git"
 touch "$LEAKED_CLONE/file.txt"
-python3 -c 'import os,time; t=time.time()-18000; os.utime("'"$LEAKED_CLONE"'", (t,t)); os.utime("'"$LEAKED_CLONE/.git"'", (t,t))'
+python3 -c 'import os,time; t=time.time()-176400; os.utime("'"$LEAKED_CLONE"'", (t,t)); os.utime("'"$LEAKED_CLONE/.git"'", (t,t))'
 
 # Create nested container with leaked submount
 NESTED_CONTAINER="$TMP_FIXTURE/worldarchitect.ai"
 NESTED_SUBMOUNT="$NESTED_CONTAINER/verify_10801"
 mkdir -p "$NESTED_CONTAINER/.git" "$NESTED_SUBMOUNT"
 touch "$NESTED_SUBMOUNT/file.txt"
-python3 -c 'import os,time; t=time.time()-18000; os.utime("'"$NESTED_CONTAINER"'", (t,t)); os.utime("'"$NESTED_CONTAINER/.git"'", (t,t))'
+python3 -c 'import os,time; t=time.time()-176400; os.utime("'"$NESTED_CONTAINER"'", (t,t)); os.utime("'"$NESTED_CONTAINER/.git"'", (t,t))'
 
 # Register leaked mountpoints in mountinfo
 FIXTURE_MOUNTINFO="$TEST_ROOT/cleanup_mountinfo"
@@ -156,7 +156,6 @@ env -i HOME="$HOME_MOCK" PATH="$PATH" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMP_FIXTURE" \
   DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMP_FIXTURE" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$TEST_ROOT/archive" \
-  GIT_CLONE_MIN=60 \
   bash "$REPO_ROOT/scripts/cleanup_tmp.sh" --dry-run > "$OUT_LOG" 2>&1
 CLEANUP_RC=$?
 set -e

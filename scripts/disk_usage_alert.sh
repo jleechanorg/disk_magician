@@ -10,6 +10,10 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 fi
 
 THRESHOLD_GB=20
+# Scratch volume headroom floor. Alerts while there is still time to act, rather
+# than only at the volume-level 90%/100% alarms. 0 disables an arm.
+SCRATCH_FLOOR_GB="${DISK_MAGICIAN_SCRATCH_FLOOR_GB:-10}"
+SCRATCH_FLOOR_PCT="${DISK_MAGICIAN_SCRATCH_FLOOR_PCT:-10}"
 SILENCE_FILE="$HOME/.disk_magician_alert.silenced"
 
 # ────────── Coverage-streak escalation (reuses SILENCE_FILE above; no new
@@ -169,6 +173,7 @@ if [[ $# -gt 0 ]]; then
         echo "Ledger freshness: $("$SCRIPT_DIR/check_ledger_freshness.sh" 2>&1 || true)"
       fi
       echo "Threshold: ${THRESHOLD_GB} GB"
+      echo "Scratch floor: ${SCRATCH_FLOOR_GB} GiB free / ${SCRATCH_FLOOR_PCT}% free (0 disables an arm)"
       echo "Silenced: $(is_silenced && echo 'YES' || echo 'NO')"
       IFS=$'\t' read -r status_streak status_coverage_pct status_reasons <<< "$(update_coverage_streak)"
       echo "Coverage streak: ${status_streak} (effective_pct=${status_coverage_pct}, escalate at ${STREAK_ESCALATE_AT}; reasons: ${status_reasons})"
@@ -267,13 +272,55 @@ if [[ "$volume_configured" == true ]]; then
     volume_alarms='["volume_measurement_unavailable:scratch"]'
   fi
 fi
+
+# ────────── Scratch volume headroom floor ──────────
+# The volume-level alarms above fire at >=90% (volume_high) and 100%
+# (volume_full), i.e. only once the Scratch volume is nearly or already
+# full. A volume that hits 100% breaks every build running on it, which is
+# exactly what happened on jeff-ubuntu 2026-11-12 (115 MB free, live
+# builds writing). Warn on remaining HEADROOM instead, so the floor is
+# crossed while there is still time to act.
+#
+# DISK_MAGICIAN_SCRATCH_FLOOR_GB: absolute free-space floor in GiB.
+# DISK_MAGICIAN_SCRATCH_FLOOR_PCT: percentage of quota that must stay free.
+# Both are independent; whichever trips first alerts. 0 disables that arm.
+scratch_floor_alert=false
+scratch_floor_detail=""
+
+# Resolve the registered Scratch mount through the canonical CLI. A missing
+# CLI or an unregistered volume is NOT a failure here: this arm is additive
+# and must never make an otherwise-healthy host look broken.
+if command -v "$DISKM" >/dev/null 2>&1 && [[ "$SCRATCH_FLOOR_GB" =~ ^[0-9]+$ || "$SCRATCH_FLOOR_PCT" =~ ^[0-9]+$ ]]; then
+  scratch_path="$("$DISKM" volume path scratch 2>/dev/null || true)"
+  if [[ -n "$scratch_path" && -d "$scratch_path" ]]; then
+    read -r scratch_avail_kb scratch_total_kb <<< "$(df -kP "$scratch_path" 2>/dev/null | awk 'NR==2{print $4, $2}')"
+    if [[ "$scratch_avail_kb" =~ ^[0-9]+$ && "$scratch_total_kb" =~ ^[0-9]+$ && "$scratch_total_kb" -gt 0 ]]; then
+      scratch_avail_gb=$(( scratch_avail_kb / 1024 / 1024 ))
+      scratch_free_pct=$(( scratch_avail_kb * 100 / scratch_total_kb ))
+      if [[ "$SCRATCH_FLOOR_GB" =~ ^[0-9]+$ ]] && (( SCRATCH_FLOOR_GB > 0 )) && (( scratch_avail_gb < SCRATCH_FLOOR_GB )); then
+        scratch_floor_alert=true
+        scratch_floor_detail="${scratch_avail_gb} GiB free < ${SCRATCH_FLOOR_GB} GiB floor"
+      fi
+      if [[ "$SCRATCH_FLOOR_PCT" =~ ^[0-9]+$ ]] && (( SCRATCH_FLOOR_PCT > 0 )) && (( scratch_free_pct < SCRATCH_FLOOR_PCT )); then
+        scratch_floor_alert=true
+        scratch_floor_detail="${scratch_floor_detail:+${scratch_floor_detail}; }${scratch_free_pct}% free < ${SCRATCH_FLOOR_PCT}% floor (${scratch_path})"
+      fi
+    fi
+  fi
+fi
+
 volume_alert=false
 [[ "$volume_alarms" != "[]" ]] && volume_alert=true
 
-if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true || "$swap_alert" == true || "$volume_alert" == true ]]; then
+if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == true || "$swap_alert" == true || "$volume_alert" == true || "$scratch_floor_alert" == true ]]; then
   if is_silenced; then
     echo "Disk space/coverage alert silenced (Free space: ${free_gb} GB, ${used_pct}% capacity; coverage streak: ${coverage_streak}; step events 24h: ${step_count})."
   else
+    if [[ "$scratch_floor_alert" == true ]]; then
+      echo "🚨 WARNING: Scratch volume headroom low — ${scratch_floor_detail}." >&2
+      echo "Act before it fills: a full Scratch volume breaks live builds on it." >&2
+      echo "Run './disk_magician.sh scratch-prune --clean --budget-pct 50' or check for a live producer first." >&2
+    fi
     if [[ "$space_alert" == true ]]; then
       echo "🚨 WARNING: Low Disk Space! Only ${free_gb} GB free (${used_pct}% capacity)." >&2
       echo "Run './disk_magician.sh clean' to reclaim space." >&2

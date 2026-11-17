@@ -10,6 +10,8 @@
 # unconditionally — the original behavior for the worktree / cache dirs).
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/worktree_recency.sh
@@ -194,6 +196,7 @@ for target in "${TARGETS[@]}"; do
   expanded=$(expand_path "$target")
   gate_days="${TARGETS_MTIME_GATE_DAYS[$target_index]}"
   if [[ -d "$expanded" ]]; then
+    scratch_budget_report_measurement "$expanded" || exit $?
     EXISTED_BEFORE[$target_index]=1
     mtime_epoch=$(mtime_epoch_of "$expanded")
     now_epoch=$(date '+%s')
@@ -247,6 +250,7 @@ for target in "${TARGETS[@]}"; do
   gate_days="${TARGETS_MTIME_GATE_DAYS[$target_index]}"
   result="${GATE_RESULT[$target_index]:-missing}"
   if [[ -d "$expanded" ]]; then
+    scratch_budget_report_measurement "$expanded" || exit $?
     if [[ "$result" == "skipped-recent" ]]; then
       echo "  $(size_of "$expanded")  $target  (kept — gate-skipped)"
     elif [[ "$result" == "safety-skip" ]]; then

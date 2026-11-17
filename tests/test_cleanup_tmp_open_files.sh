@@ -192,9 +192,10 @@ if [[ "${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p1234"
   echo "fcwd"
-  echo "n/"
+  echo "n/home/jleechan"
   exit 0
 fi
+if [[ "$*" == *"+D"* && "$*" != *"+w"* ]]; then exit 1; fi
 for arg in "$@"; do
   if [[ "$arg" == *"+D"* || "$arg" == "+D" ]]; then
     echo "ERROR: +D is forbidden: $*" >&2
@@ -231,6 +232,7 @@ run_capture "$T1_OUT" env -i HOME="$TMP_ROOT/t1-home" \
   DISK_MAGICIAN_LSOF_BIN="$T1_BIN/lsof" \
   DISK_MAGICIAN_TEST_UNRELATED_MOUNT="$T1_BIN" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T1_ARCHIVE" \
+  DISK_MAGICIAN_AGE_FLOOR_MINUTES=10000000 \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T1_PRIVATE_TMP" \
@@ -241,7 +243,7 @@ T1_OUT_CONTENT=$(cat "$T1_OUT")
 assert_rc "Test 1: exits 0" 0 "$T1_RC"
 assert_not_contains "Test 1: fake lsof did not reject +D" "+D is forbidden" "$T1_OUT_CONTENT"
 assert_not_contains "Test 1: fake lsof did not reject unexpected flags" "unexpected flags" "$T1_OUT_CONTENT"
-assert_contains "Test 1: closed-file probe reaches C14" "C14 kept:unproven-content" "$T1_OUT_CONTENT"
+assert_contains "Test 1: closed-file probe reaches C14" "C14 kept:archive-identity" "$T1_OUT_CONTENT"
 assert_not_contains "Test 1: unrelated mount warning does not fail closed" "Open-file check failed" "$T1_OUT_CONTENT"
 assert_exists "Test 1: legacy archive is preserved without C14 proof" "$T1_ARCHIVE/20200101T000000Z/quarantined_app"
 
@@ -350,9 +352,10 @@ cat > "$T2_BIN/lsof" <<EOF
 if [[ "\$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p1234"
   echo "fcwd"
-  echo "n/"
+  echo "n/home/jleechan"
   exit 0
 fi
+if [[ "$*" == *"+D"* && "$*" != *"+w"* ]]; then exit 1; fi
 if [[ "\$*" == "-n -P -F n" ]]; then
   exit 0
 fi
@@ -464,9 +467,10 @@ if [[ "\${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "\$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p1234"
   echo "fcwd"
-  echo "n/"
+  echo "n/home/jleechan"
   exit 0
 fi
+if [[ "$*" == *"+D"* && "$*" != *"+w"* ]]; then exit 1; fi
 for arg in "\$@"; do
   if [[ "\$arg" == *"+D"* || "\$arg" == "+D" ]]; then
     echo "ERROR: +D is forbidden: \$*" >&2
@@ -489,6 +493,7 @@ run_capture "$T4_OUT" env -i HOME="$TMP_ROOT/t4-home" \
   PATH="$T4_BIN:/usr/bin:/bin" \
   LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T4_ARCHIVE" \
+  DISK_MAGICIAN_AGE_FLOOR_MINUTES=10000000 \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T4_PRIVATE_TMP" \
@@ -500,7 +505,7 @@ assert_rc "Test 4a: exits 0" 0 "$T4_RC"
 assert_exists "Test 4a: prefix-collision candidate is not protected by the open-file check" "$T4_ARCHIVE/20200101T000000Z/app"
 assert_not_contains "Test 4a: prefix collision did not count as an open file" "Skipping in-use aged archive" "$T4_OUT_CONTENT"
 assert_not_contains "Test 4a: C14 open-file probe did not match the collision" "C14 kept:open-file" "$T4_OUT_CONTENT"
-assert_contains "Test 4a: candidate reaches C14 provenance (unproven receipt)" "C14 kept:unproven-content" "$T4_OUT_CONTENT"
+assert_contains "Test 4a: candidate reaches C14 origin-identity check" "C14 kept:archive-identity" "$T4_OUT_CONTENT"
 # 4b: Exact directory match protects candidate
 mkdir -p "$T4_ARCHIVE/20200102T000000Z/app"
 touch "$T4_ARCHIVE/20200102T000000Z/app/payload.bin"
@@ -926,9 +931,10 @@ if [[ "${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p901"
   echo "fcwd"
-  echo "n/"
+  echo "n/home/jleechan"
   exit 0
 fi
+if [[ "$*" == *"+D"* && "$*" != *"+w"* ]]; then exit 1; fi
 echo "p901"
 echo "fcwd"
 echo "n"
@@ -944,14 +950,15 @@ run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
   DISK_MAGICIAN_LSOF_BIN="$T9_BIN/lsof" \
   DISK_MAGICIAN_TIMEOUT_BIN="$T9_BIN/timeout" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T9_ARCHIVE" \
+  DISK_MAGICIAN_AGE_FLOOR_MINUTES=10000000 \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T9_PRIVATE_TMP" \
   DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T9_TMP" \
   bash "$SOURCE_SCRIPT" --clean
 assert_rc "Test 9a (empty n with non-empty path): exits 0" 0 $?
-assert_exists "Test 9a: closed stream reaches C14 provenance keep" "$T9_ARCHIVE/20200101T000000Z/app"
-assert_contains "Test 9a: valid stream is not rejected as malformed" "C14 kept:unproven-content" "$(cat "$T9_OUT")"
+assert_exists "Test 9a: closed stream reaches C14 origin-identity check" "$T9_ARCHIVE/20200101T000000Z/app"
+assert_contains "Test 9a: valid stream reaches the C14 identity gate" "C14 kept:archive-identity" "$(cat "$T9_OUT")"
 # 9b: p-only stream is rejected as malformed -> fails closed, candidate preserved
 reset_t9_archive
 cat > "$T9_BIN/lsof" <<'EOF'
@@ -1032,9 +1039,10 @@ if [[ "${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p907"
   echo "fcwd"
-  echo "n/"
+  echo "n/home/jleechan"
   exit 0
 fi
+if [[ "$*" == *"+D"* && "$*" != *"+w"* ]]; then exit 1; fi
 echo "p907"
 echo "ffp."
 echo "tREG"
@@ -1048,14 +1056,15 @@ run_capture "$T9_OUT" env -i HOME="$TMP_ROOT/t9-home" \
   DISK_MAGICIAN_LSOF_BIN="$T9_BIN/lsof" \
   DISK_MAGICIAN_TIMEOUT_BIN="$T9_BIN/timeout" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T9_ARCHIVE" \
+  DISK_MAGICIAN_AGE_FLOOR_MINUTES=10000000 \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T9_PRIVATE_TMP" \
   DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T9_TMP" \
   bash "$SOURCE_SCRIPT" --clean
 assert_rc "Test 9e (ffp. descriptor): exits 0" 0 $?
-assert_exists "Test 9e: closed ffp descriptor reaches C14 provenance keep" "$T9_ARCHIVE/20200101T000000Z/app"
-assert_contains "Test 9e: valid ffp descriptor is not rejected as malformed" "C14 kept:unproven-content" "$(cat "$T9_OUT")"
+assert_exists "Test 9e: closed ffp descriptor reaches the C14 identity gate" "$T9_ARCHIVE/20200101T000000Z/app"
+assert_contains "Test 9e: valid ffp descriptor reaches the C14 identity gate" "C14 kept:archive-identity" "$(cat "$T9_OUT")"
 assert_not_contains "Test 9e: does not log malformed output" "Open-file check produced malformed output" "$(cat "$T9_OUT")"
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 10: Candidate containing control characters/newlines fails closed before lsof
@@ -1155,9 +1164,10 @@ if [[ "${1:-}" == "-w" ]]; then exit 1; fi
 if [[ "$*" == "-n -P -d cwd -Fpn" ]]; then
   echo "p1102"
   echo "fcwd"
-  echo "n/"
+  echo "n/home/jleechan"
   exit 0
 fi
+if [[ "$*" == *"+D"* && "$*" != *"+w"* ]]; then exit 1; fi
 echo "p1102"
 echo "fcwd"
 echo "n/"
@@ -1172,14 +1182,15 @@ run_capture "$T11_OUT" env -i HOME="$TMP_ROOT/t11-home" \
   DISK_MAGICIAN_LSOF_BIN="$T11_BIN/lsof" \
   DISK_MAGICIAN_TIMEOUT_BIN="$T11_BIN/timeout" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T11_ARCHIVE" \
+  DISK_MAGICIAN_AGE_FLOOR_MINUTES=10000000 \
   DISK_MAGICIAN_TEST_CONTEXT=1 \
   DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T11_PRIVATE_TMP" \
   DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T11_TMP" \
   bash "$SOURCE_SCRIPT" --clean
 assert_rc "Test 11b (ancestor n/ nonmatch): exits 0" 0 $?
-assert_exists "Test 11b: ancestor does not look open; C14 still requires proof" "$T11_ARCHIVE/20200101T000000Z/app"
-assert_contains "Test 11b: valid root record reaches C14 provenance keep" "C14 kept:unproven-content" "$(cat "$T11_OUT")"
+assert_exists "Test 11b: ancestor does not look open; C14 still requires an archive identity receipt" "$T11_ARCHIVE/20200101T000000Z/app"
+assert_contains "Test 11b: valid root record reaches the C14 identity gate" "C14 kept:archive-identity" "$(cat "$T11_OUT")"
 # 11c: Unknown path format (e.g. relative path) fails closed
 reset_t11_archive
 cat > "$T11_BIN/lsof" <<'EOF'

@@ -8,6 +8,8 @@
 # Defaults to DRY-RUN; pass --clean to delete (requires CODE_SIGN_CLONES_APPROVED=1).
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 # shellcheck source=scripts/safety_lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/safety_lib.sh"
 # shellcheck source=scripts/lib/quarantine.sh
@@ -20,7 +22,7 @@ MIN_KB="${CODE_SIGN_CLONE_MIN_KB:-102400}"
 # judged individually (no longer shielded by a mapped sibling under the same
 # parent), so require a minimum age before a candidate is even eligible —
 # guards against deleting a clone mid-extraction/mid-launch.
-MIN_AGE_SEC="${CODE_SIGN_CLONE_MIN_AGE_SEC:-600}"
+MIN_AGE_SEC="${CODE_SIGN_CLONE_MIN_AGE_SEC:-172800}"
 # One bounded liveness pass replaces one `lsof +D` per candidate. Per-dir
 # probes cost seconds each and, on real trees, exceeded any sane per-dir
 # budget — every timeout fail-closed to ACTIVE and preserved reclaimable
@@ -70,7 +72,11 @@ path_size_kb() {
 }
 
 path_identity() {
-  stat -f '%d:%i:%u' "$1" 2>/dev/null || stat -c '%d:%i:%u' "$1" 2>/dev/null
+  if [[ "$(uname -s)" == Darwin ]]; then
+    stat -f '%d:%i:%u' "$1" 2>/dev/null
+  else
+    stat -c '%d:%i:%u' "$1" 2>/dev/null
+  fi
 }
 
 path_mtime() {
@@ -80,7 +86,11 @@ path_mtime() {
 }
 
 path_mtime_epoch() {
-  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null
+  if [[ "$(uname -s)" == Darwin ]]; then
+    stat -f '%m' "$1" 2>/dev/null
+  else
+    stat -c '%Y' "$1" 2>/dev/null
+  fi
 }
 
 # pid_alive <pid>: rc 0 when the process still exists. `ps -p` sees other
@@ -349,6 +359,7 @@ for i in "${!CANDIDATES[@]}"; do
   d="${CANDIDATES[$i]}"
   frozen_identity="${CANDIDATE_IDENTITIES[$i]}"
   frozen_parent_identity="${CANDIDATE_PARENT_IDENTITIES[$i]}"
+  scratch_budget_report_measurement "$d" || exit $?
   kb=$(path_size_kb "$d")
   if [[ "$kb" -lt "$MIN_KB" ]]; then
     continue

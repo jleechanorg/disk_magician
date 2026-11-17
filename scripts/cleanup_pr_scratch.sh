@@ -84,7 +84,7 @@ CLI_TMP_DIRS=()
 CLI_PATTERNS=()
 # Size-budget mode (bead disk_magician-d45): 0 disables.
 BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
-BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-120}"
+BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-$(safety_disposable_recency_floor_minutes)}"
 
 usage() {
   cat <<EOF
@@ -104,7 +104,7 @@ Options:
                       env DISK_MAGICIAN_SCRATCH_BUDGET_GB).
   --budget-floor-minutes <N>
                       Never evict anything younger than N minutes under
-                      budget mode (default 120, hard minimum 60; env
+                      budget mode (default 48h, hard minimum 60m for explicit overrides; env
                       DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES).
   -h, --help          Show this help message.
 EOF
@@ -281,14 +281,22 @@ find_cmd() {
   fi
 }
 
+# Budget sizing counts APFS private bytes (clone-shared blocks are not freed by a
+# delete); DISK_MAGICIAN_SIZE_METHOD=du or a non-macOS host keeps plain du.
+SIZE_CMD=(du -sk)
+if [[ "$(uname -s)" == Darwin && "${DISK_MAGICIAN_SIZE_METHOD:-}" != du && -f "$SCRIPT_DIR/private_size_kb.py" ]]; then
+  SIZE_CMD=(python3 "$SCRIPT_DIR/private_size_kb.py")
+fi
+
 path_size_kb() {
+  scratch_budget_report_measurement "$1" || exit $?
   # Bead disk_magician-lsl: same fragility as cleanup_tmp.sh's twin --
   # `du -sk` can emit zero, one, or multiple lines under a TOCTOU race /
   # BSD-du edge case. Take the first numeric field of the LAST line;
   # default to 0 when there is no line at all. `du`'s own exit status is
   # neutralized with `|| true` so a `du` failure never aborts the caller
   # under `set -eo pipefail`.
-  { du -sk "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
+  { "${SIZE_CMD[@]}" "$1" 2>/dev/null || true; } | awk '$1 ~ /^[0-9]+$/ {f=$1} END{print f+0}'
 }
 
 is_protected_root() {
@@ -470,8 +478,19 @@ fi
 # just validated; rc 0 on removed:*. Unlike c14_remove it keeps the verdict, so
 # the caller can report the specific reason instead of a generic failure.
 pr_scratch_remove() {
-  local verdict
-  verdict="$(DM_DELETION_LOGGED=1 quarantine_remove "$1" --kind ephemeral 2>/dev/null)" || verdict="kept:check-failed"
+  local verdict floor_minutes default_floor
+  default_floor="$(safety_disposable_recency_floor_minutes)"
+  floor_minutes=$((MIN_AGE_HOURS * 60))
+  (( floor_minutes < 120 )) && floor_minutes=120
+  if (( floor_minutes < default_floor )); then
+    # The operator-selected age already passed this cleaner's content/use
+    # gates. Carry that explicit floor into both C14's idle veto and age proof;
+    # scheduled/default calls continue to use the shared 48h floor.
+    verdict="$(DISK_MAGICIAN_AGE_FLOOR_MINUTES="$floor_minutes" DM_DELETION_LOGGED=1 \
+      quarantine_remove "$1" --kind ephemeral --min-idle-minutes "$floor_minutes" 2>/dev/null)" || verdict="kept:check-failed"
+  else
+    verdict="$(DM_DELETION_LOGGED=1 quarantine_remove "$1" --kind ephemeral 2>/dev/null)" || verdict="kept:check-failed"
+  fi
   PR_SCRATCH_LAST_VERDICT="${verdict:-kept:check-failed}"
   [[ "$PR_SCRATCH_LAST_VERDICT" == removed:* ]]
 }
@@ -508,6 +527,8 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         continue
       fi
 
+      scratch_budget_report_measurement "$item" || exit $?
+
       if is_protected_root "$base" || is_protected_tmp_path "$item"; then
         log "Skipping protected root (in PROTECTED_TMP_ROOTS): $item"
         continue
@@ -539,7 +560,7 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
         fi
       fi
 
-      kb=$(path_size_kb "$item")
+      kb=$(path_size_kb "$item") || exit $?
       if [[ "$DRY_RUN" == true ]]; then
         log "DRY RUN: would remove: $item  (${kb} KB)"
         if [[ -d "$item" ]]; then

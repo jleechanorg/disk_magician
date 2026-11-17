@@ -111,7 +111,7 @@ PYQUARANTINEDIR
     fi
     admit_confirm_created
     if ! declare -F lease_write >/dev/null 2>&1 || ! lease_write "$path" "$repo" "" scratch-new --kind "$kind" \
-        --producer scratch-new ${src:+--source "$src"} "${lease_owner_args[@]}" >/dev/null 2>&1; then
+        --producer scratch-new ${src:+--source "$src"} "${lease_owner_args[@]}" --bounded-registry-lock-wait >/dev/null 2>&1; then
         echo "scratch-new: lease write failed: $path${LEASE_REGISTRATION_FAILURE:+ ($LEASE_REGISTRATION_FAILURE)}" >&2
         return 1
     fi

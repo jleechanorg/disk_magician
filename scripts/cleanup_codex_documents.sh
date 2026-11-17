@@ -5,7 +5,7 @@
 #
 # A task dir is removed only when ALL hold; every unknown keeps it (fail closed):
 #   - not a symlink, and not matched by safety.local.json (safety_gate)
-#   - newest content older than the 7-day floor (worktree_is_recently_active)
+#   - newest content older than the shared 48h task-scratch floor
 #   - no live process cwd/open file inside (machine-wide lsof snapshot)
 #   - every nested git repo/worktree is clean, has no ignored secrets or
 #     non-rebuildable ignored data, and has no commit missing from a
@@ -183,9 +183,10 @@ if [[ ! -d "$ROOT_LOGICAL" ]]; then
 fi
 ROOT="$(cd "$ROOT_LOGICAL" && pwd -P)"
 
-MIN_DAYS="$(safety_min_stale_days)"
-[[ "$MIN_DAYS" =~ ^[0-9]+$ ]] || MIN_DAYS=7
-(( MIN_DAYS >= 7 )) || MIN_DAYS=7
+MIN_AGE_MINUTES="$(safety_disposable_recency_floor_minutes)"
+LEGACY_MIN_DAYS="$(safety_min_stale_days)"
+if (( LEGACY_MIN_DAYS > 7 && LEGACY_MIN_DAYS * 1440 > MIN_AGE_MINUTES )); then MIN_AGE_MINUTES=$((LEGACY_MIN_DAYS * 1440)); fi
+MIN_DAYS=$((MIN_AGE_MINUTES / 1440))
 
 # QUARANTINE_KIND is empty by default: codex task scratch must prove positive
 # provenance. A caller that has declared its row (spec §7.2 E1-E7) may set it.
@@ -479,7 +480,7 @@ _process_task() {
   if [[ -L "$task" ]]; then keep symlink "$task"; return; fi
   reason="$(safety_gate "$task")" && rc=0 || rc=$?
   if (( rc != 0 )); then keep "safety: $reason" "$task"; return; fi
-  rc=0; worktree_is_recently_active "$task" "$MIN_DAYS" || rc=$?
+  rc=0; worktree_is_recently_active_minutes "$task" "$MIN_AGE_MINUTES" || rc=$?
   if (( rc != 1 )); then keep "recent-or-unmeasurable(<${MIN_DAYS}d)" "$task"; return; fi
   if [[ -n "$LIVE_BLOCKED" ]]; then keep "$LIVE_BLOCKED" "$task"; return; fi
   if path_is_live "$task"; then keep live-process "$task"; return; fi
@@ -535,7 +536,7 @@ _process_task() {
     snapshot_live_paths
     if [[ -n "$LIVE_BLOCKED" ]]; then keep "$LIVE_BLOCKED" "$task"; return; fi
     if path_is_live "$task"; then keep live-process-recheck "$task"; return; fi
-    rc=0; worktree_is_recently_active "$task" "$MIN_DAYS" || rc=$?
+    rc=0; worktree_is_recently_active_minutes "$task" "$MIN_AGE_MINUTES" || rc=$?
     if (( rc != 1 )); then keep "recent-recheck" "$task"; return; fi
     check_repos "$task"
     if [[ -n "$REPO_REASON" ]]; then keep "recheck:$REPO_REASON" "$task"; return; fi

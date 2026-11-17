@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import tempfile
 import time
@@ -22,6 +23,7 @@ CALLERS = {
     "task-scratch": (ROOT / "scripts/cleanup_task_scratch.sh", None, "task_scratch_run"),
     "cleanup-worktrees": (ROOT / "scripts/cleanup_worktrees.sh", "process_repo_local_worktrees", "_process_repo_local_worktrees"),
     "cleanup-codex-documents": (ROOT / "scripts/cleanup_codex_documents.sh", "process_task", "_process_task"),
+    "scratch-prune-verdict": (ROOT / "scripts/cleanup_scratch_top_level.sh", "verdict_and_maybe_remove", "_verdict_and_maybe_remove"),
 }
 
 
@@ -41,6 +43,65 @@ def outer_call(path: Path, public: Optional[str], inner: str) -> str:
 
 
 class OuterCallerInterruptionTest(unittest.TestCase):
+    def test_scratch_prune_public_scope_survives_gnu_timeout_term_then_releases(self):
+        scratch = os.environ.get("CLAUDE_CODE_TMPDIR") or os.environ.get("DISKM_SCRATCH") or os.environ.get("RUNNER_TEMP")
+        self.assertTrue(scratch and Path(scratch).is_dir(), "configured Scratch directory required")
+        path, public, inner = CALLERS["scratch-prune-verdict"]
+        with tempfile.TemporaryDirectory(prefix="lease-prune-timeout-", dir=scratch) as tmp:
+            work = Path(tmp)
+            state = work / "state"
+            state.mkdir()
+            ready, go = work / "ready", work / "go"
+            call = outer_call(path, public, inner)
+            script = work / "case.sh"
+            script.write_text(
+                'set -euo pipefail\n'
+                f'source "{LIBRARY}"\n'
+                + call.split("\n")[0] + "\n"
+                + f'{inner}() {{\n'
+                '  lease_registry_mutation_lock_enter || return 1\n'
+                '  : > "$READY"\n'
+                '  while [[ ! -e "$GO" ]]; do sleep .02; done\n'
+                '}\n'
+                + public + '\n'
+            )
+            env = {**os.environ, "DISK_MAGICIAN_STATE_DIR": str(state), "READY": str(ready),
+                   "GO": str(go), "BASH_ENV": ""}
+            timeout_bin = shutil.which("timeout") or shutil.which("gtimeout")
+            self.assertTrue(timeout_bin, "GNU timeout (timeout or gtimeout) is required for the scheduler contract")
+            proc = subprocess.Popen(
+                [timeout_bin, "--signal=TERM", "--kill-after=2s", "1s", "bash", str(script)],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and proc.poll() is None:
+                    self.assertLess(time.monotonic(), deadline, "scratch-prune scope did not acquire lock")
+                    time.sleep(.01)
+                self.assertTrue(ready.exists(), "timeout ended before lock acquisition")
+                lock = state / "worktree_leases/.owner-mutation.reuse-lock"
+                time.sleep(1.1)  # GNU timeout has sent TERM; protected child work is still in flight.
+                self.assertIsNone(proc.poll(), "timeout unexpectedly escalated before its two-second grace")
+                self.assertTrue(lock.is_dir(), "registry lock must remain held until the protected work returns")
+                self.assertEqual({p.name for p in lock.iterdir()}, {"pid", "acquired_at"})
+                holder = int((lock / "pid").read_text())
+                os.kill(holder, 0)
+                contender = ["bash", "-c", 'source "$1"; lease_write "$2" --kind scratch',
+                             "bash", str(LIBRARY), str(work / "other")]
+                busy = subprocess.run(contender, env=env, capture_output=True, text=True, timeout=4)
+                self.assertNotEqual(busy.returncode, 0, "contender crossed the timeout-protected critical section")
+                go.touch()
+                out, err = proc.communicate(timeout=5)
+                self.assertEqual(proc.returncode, 124, (out, err))
+                self.assertFalse(lock.exists(), "catchable TERM path left a populated dead registry lock")
+                acquired = subprocess.run(contender, env=env, capture_output=True, text=True, timeout=4)
+                self.assertEqual(acquired.returncode, 0, acquired.stderr)
+            finally:
+                go.touch()
+                if proc.poll() is None:
+                    proc.kill()  # SIGKILL is intentionally uncatchable; only test cleanup uses it.
+                    proc.communicate(timeout=3)
+
     def test_quarantine_subshell_records_live_holder_after_parent_kill(self):
         scratch = os.environ.get("CLAUDE_CODE_TMPDIR") or os.environ.get("DISKM_SCRATCH") or os.environ.get("RUNNER_TEMP")
         self.assertTrue(scratch and Path(scratch).is_dir(), "configured Scratch directory required")

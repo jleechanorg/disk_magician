@@ -35,7 +35,7 @@ if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 [[ -z "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]] || { echo "--deadline-at requires --cursor" >&2; exit 2; }
 
 DRY_RUN=true
-MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-3}"
+MIN_AGE_DAYS="${WORKTREE_MIN_AGE_DAYS:-}"
 REPO_LOCAL_REPOS=()
 MANUAL_DISCARD=false
 MANUAL_INCLUDE_LIVE=false
@@ -48,24 +48,68 @@ MANUAL_BASE_STATUS=""
 MANUAL_SNAPSHOT_HEAD=""
 MANUAL_SNAPSHOT_STATUS=""
 MANUAL_RECOVERY_REF=""
+GOVERN_RUN_ID=""
+GOVERN_FREE_BEFORE=""
+GOVERN_RECEIPT_CLOSED=0
+CW_REGISTRY_LOCK_HELD=0
+CW_CURRENT_INV=""
 # Cache allocation is optional: disk-pressure failures retain the existing
 # per-row lookup and lsof fail-closed behavior rather than aborting the run.
 RUN_TMP="$(mktemp -d)" || RUN_TMP=""
-if [[ -n "$RUN_TMP" && -d "$RUN_TMP" ]]; then
-    trap 'rm -rf "$RUN_TMP"' EXIT
-fi
+govern_temp_cleanup() {
+    if [[ -n "${CW_CURRENT_INV:-}" ]]; then
+        rm -f "$CW_CURRENT_INV" 2>/dev/null || true
+        CW_CURRENT_INV=""
+    fi
+    [[ -n "${RUN_TMP:-}" && -d "$RUN_TMP" ]] || return 0
+    python3 -c 'import os,shutil,sys; p=sys.argv[1]; p and os.path.isabs(p) and p != "/" and shutil.rmtree(p, ignore_errors=True)' "$RUN_TMP" 2>/dev/null || true
+}
+govern_receipt_finish() {
+    [[ -n "${GOVERN_RUN_ID:-}" && "${GOVERN_RECEIPT_CLOSED:-0}" == 0 ]] || return 0
+    GOVERN_RECEIPT_CLOSED=1
+    python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
+      --outcome "${GOVERN_OUTCOME:-error}" --reason "${GOVERN_REASON:-early_exit}" \
+      --candidates "{\"removed_count\":${GOVERN_REMOVED:-0},\"deferred_count\":${ACT_DEFERRED_COUNT:-0},\"interrupted_count\":${ACT_INTERRUPTED_COUNT:-0}}" \
+      --postcondition "{\"df_delta_bytes\":null,\"freed_bytes\":null,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":null}" >/dev/null 2>&1 || true
+}
+cleanup_worktrees_release_leases() {
+    if [[ "${CW_REGISTRY_LOCK_HELD:-0}" == 1 ]]; then
+        CW_REGISTRY_LOCK_HELD=0
+        lease_registry_mutation_lock_exit || true
+    fi
+    _lease_scope_cleanup 2>/dev/null || true
+}
+cleanup_worktrees_exit_trap() {
+    local rc="$1" sig="${2:-0}"
+    trap - EXIT INT TERM
+    if (( sig != 0 )); then
+        rc=$((128 + sig))
+        if [[ -z "${GOVERN_OUTCOME:-}" ]]; then
+            GOVERN_OUTCOME="timeout"
+            GOVERN_REASON="interrupted; signal=${sig}; exit=${rc}"
+        fi
+        ACT_INTERRUPTED_COUNT=$(( ${ACT_INTERRUPTED_COUNT:-0} + 1 ))
+    fi
+    cleanup_worktrees_release_leases
+    govern_receipt_finish
+    govern_temp_cleanup
+    exit "$rc"
+}
+trap 'cleanup_worktrees_exit_trap $? 0' EXIT
+trap 'cleanup_worktrees_exit_trap $? 2' INT
+trap 'cleanup_worktrees_exit_trap $? 15' TERM
 
 usage() {
   cat <<'EOF'
 Usage: cleanup_worktrees.sh [--clean] [--dry-run] [--min-age N] [--days N] [--repos p1,p2,...] [--discard-local-state [--include-live] --targets-file FILE] [-h|--help]
 
-Safely prunes stale linked git worktrees (default: >=3 days old, merged or pristine).
+Safely prunes stale linked git worktrees (default: >=48 hours idle, merged or pristine).
 
 Options:
   --clean       Actually remove eligible worktrees (default: dry-run).
                 Requires WORKTREE_APPROVED=1 in the environment.
   --dry-run     Print actions without touching disk (default).
-  --min-age N   Minimum worktree age in days for repo-local removal (default: 3).
+  --min-age N   Minimum worktree age in days for repo-local removal (default: 2 days / 48h).
   --days N      Alias for --min-age N.
   --repos LIST  Comma-separated main repo paths (default: CLAUDE_WORKTREE_REPOS or
                 $HOME/projects/worldarchitect.ai).
@@ -83,7 +127,7 @@ Options:
 Environment:
   WORKTREE_APPROVED=1      Required for --clean deletions.
   CLAUDE_WORKTREE_REPOS    Comma-separated repo paths.
-  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: 3).
+  WORKTREE_MIN_AGE_DAYS    Default for --min-age when flag omitted (default: unset = 48h floor).
 EOF
 }
 
@@ -144,39 +188,13 @@ if [[ ${#REPO_LOCAL_REPOS[@]} -eq 0 ]]; then
     fi
 fi
 
-# Staleness floor: safety_worktree_floor_days (default and minimum 3 days; the
-# configured worktree_min_stale_days may only RAISE it).
-staleness_floor=$(safety_worktree_floor_days 2>/dev/null || echo 3)
-if [[ "$staleness_floor" =~ ^[0-9]+$ ]]; then
-  staleness_floor=$((10#$staleness_floor))
-else
-  staleness_floor=3
-fi
-[[ "$staleness_floor" -lt 3 ]] && staleness_floor=3
-
-# Hard floor: staleness_floor days, may only be raised (env, CLI, or config), never
-# lowered (CLAUDE.md invariant). Without this clamp, WORKTREE_MIN_AGE_DAYS=0
-# or --min-age 0 would delete every dormant worktree regardless of age.
-# Normalize via 10# BEFORE clamping: bash's `-lt`/`(( ))` parse a leading-
-# zero numeral like "08" as octal (invalid digit -> arithmetic error), which
-# would otherwise propagate as a fail-open crash into every downstream
-# comparison, not just this clamp (found live by both /advice reviewers).
-if [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
-  MIN_AGE_DAYS=$((10#$MIN_AGE_DAYS))
-else
-  MIN_AGE_DAYS="$staleness_floor"
-fi
-[[ "$MIN_AGE_DAYS" -lt "$staleness_floor" ]] && MIN_AGE_DAYS="$staleness_floor"
-
-# Bead plf: merged + clean worktrees use this floor instead; clamped to [3,7].
-MERGED_MIN_DAYS="${DISK_MAGICIAN_MERGED_WORKTREE_MIN_DAYS:-3}"
-if [[ "$MERGED_MIN_DAYS" =~ ^[0-9]+$ ]]; then
-  MERGED_MIN_DAYS=$((10#$MERGED_MIN_DAYS))
-else
-  MERGED_MIN_DAYS=7
-fi
-[[ "$MERGED_MIN_DAYS" -lt 3 ]] && MERGED_MIN_DAYS=3
-[[ "$MERGED_MIN_DAYS" -gt 7 ]] && MERGED_MIN_DAYS=7
+# Staleness floor in minutes: safety_worktree_floor_minutes (default and minimum 2880 =
+# 48 h, operator decision 2026-11-12; the configured worktree_min_stale_* keys may only
+# RAISE it). --min-age/--days/WORKTREE_MIN_AGE_DAYS may only raise it too: without the
+# clamp, --min-age 0 would delete every dormant worktree regardless of age.
+# worktree_floor_resolve_minutes normalizes via 10# (leading-zero numerals are octal).
+MIN_AGE_MIN=$(worktree_floor_resolve_minutes "$(safety_worktree_floor_minutes 2>/dev/null || echo 2880)" "$MIN_AGE_DAYS")
+MIN_AGE_DAYS=$(( MIN_AGE_MIN / 1440 ))   # display/legacy day figure (floor of days)
 
 # Idle-floor override (operator decision 2026-10-22): DISK_MAGICIAN_WORKTREE_FLOOR_HOURS=N
 # (N>=12) lowers the non-AO recency floor to N hours. Lower or malformed values keep the
@@ -245,7 +263,7 @@ else
         fi
     fi
 fi
-echo "Merged clean worktree floor: ${MERGED_MIN_DAYS}d (others: ${MIN_AGE_DAYS}d)"
+echo "Worktree content floor: $(worktree_floor_label "$MIN_AGE_MIN")"
 if [[ "$MANUAL_DISCARD" == true ]]; then
     echo "MANUAL DISCARD MODE: exact targets only; local changes and ignored data may be lost; 12h newest-content cutoff; live/AO/locked/safety gates remain active."
     if [[ "$MANUAL_INCLUDE_LIVE" == true ]]; then
@@ -285,23 +303,10 @@ if [[ -n "$ACT_CURSOR" ]]; then
     GOVERN_FREE_BEFORE="$(df -kP "$HOME" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%.0f\n", $4*1024}')"
     GOVERN_RUN_ID="$(python3 "$SCRIPT_DIR/job_receipt.py" begin --job cleanup_worktrees --trigger govern)" || exit 3
 fi
-# A begun govern receipt must always reach a terminal state, including an early
-# checkpoint/cursor error (exit 3) that bypasses the normal finish block below.
-# Reuse the same job_receipt machinery rather than a second framework.
-GOVERN_RECEIPT_CLOSED=0
-govern_receipt_finish() {
-    [[ -n "$GOVERN_RUN_ID" && "$GOVERN_RECEIPT_CLOSED" == 0 ]] || return 0
-    GOVERN_RECEIPT_CLOSED=1
-    python3 "$SCRIPT_DIR/job_receipt.py" finish --job cleanup_worktrees --run-id "$GOVERN_RUN_ID" \
-      --outcome "${GOVERN_OUTCOME:-error}" --reason "${GOVERN_REASON:-early_exit}" \
-      --candidates "{\"removed_count\":${GOVERN_REMOVED:-0},\"deferred_count\":$ACT_DEFERRED_COUNT,\"interrupted_count\":$ACT_INTERRUPTED_COUNT}" \
-      --postcondition "{\"df_delta_bytes\":null,\"freed_bytes\":null,\"free_bytes_before\":${GOVERN_FREE_BEFORE:-null},\"free_bytes_after\":null}" >/dev/null 2>&1 || true
-}
-govern_temp_cleanup() { [[ -z "$RUN_TMP" ]] || rm -rf "$RUN_TMP"; }
-trap 'govern_receipt_finish; govern_temp_cleanup' EXIT
 
 act_candidate_begin() {
     local path="$1" index items_before
+    [[ -z "${_lease_scope_signals:-}" ]] || return 130
     [[ -n "$ACT_CURSOR" ]] || return 0
     index="$(printf '%s' "$ACT_CURSOR_ITEMS" | python3 -c '
 import json,sys
@@ -335,8 +340,11 @@ print(json.dumps(items,separators=(",",":")))
     fi
     ACT_CURRENT_INDEX="$index"
     if [[ -n "${DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK:-}" ]]; then
-        "$DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK" "$path"
+        "$DISK_MAGICIAN_TEST_CLEANUP_CANDIDATE_HOOK" "$path" || {
+            [[ -z "${_lease_scope_signals:-}" ]] || return 130
+        }
     fi
+    [[ -z "${_lease_scope_signals:-}" ]] || return 130
     return 0
 }
 
@@ -446,18 +454,14 @@ classify_repo_local_worktree() {
         return 0
     fi
 
-    local min_age=$MIN_AGE_DAYS now recently_active=false
-    # AO-managed sessions keep the 7-day inactivity bar; the 3-day floor is for
-    # human-created worktrees.
-    if [[ "$wt_path" == *"ao/data/worktrees/"* && "$min_age" -lt 7 ]]; then
-        min_age=7
-    fi
+    local min_age=$MIN_AGE_MIN now recently_active=false
+    # AO worktrees use the same 48h content floor; their ownership gates remain below.
     now="$(date +%s)"
     if [[ -n "$FLOOR_HOURS" && "$wt_path" != *"ao/data/worktrees/"* ]]; then
         if worktree_is_recently_active_minutes "$wt_path" $(( FLOOR_HOURS * 60 )) "$now"; then
             recently_active=true
         fi
-    elif worktree_is_recently_active "$wt_path" "$min_age" "$now"; then
+    elif worktree_is_recently_active_minutes "$wt_path" "$min_age" "$now"; then
         recently_active=true
     fi
 
@@ -472,16 +476,6 @@ classify_repo_local_worktree() {
     fi
 
     if [[ "$recently_active" == true ]]; then
-        # Bead plf: a merged, fully clean, non-AO worktree may go at
-        # MERGED_MIN_DAYS. Any failed or unknown condition stays "young".
-        if (( min_age == 7 )) \
-            && ! worktree_is_recently_active "$wt_path" "$MERGED_MIN_DAYS" "$now" \
-            && [[ "$wt_path" != *"ao/data/worktrees/"* && -z "$(std_root_skip_reason "$wt_path" "$real_wt")" ]] \
-            && [[ -z "$(classify_content_and_merge "$repo" "$wt_path" "$head_sha" "$branch")" ]] \
-            && ! has_hidden_state "$wt_path" \
-            && ! has_ignored_user_data "$wt_path"; then
-            return 0
-        fi
         echo "young"
         return 0
     fi
@@ -735,8 +729,8 @@ process_antigravity_orphan() {
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
-    if worktree_is_recently_active "$abs_subdir" "$MIN_AGE_DAYS"; then
-        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (< ${MIN_AGE_DAYS} days)"
+    if worktree_is_recently_active_minutes "$abs_subdir" "$MIN_AGE_MIN"; then
+        ledger_line "antigravity" "PRESERVE" "$abs_subdir" "young" " (< $(l=$(worktree_floor_label "$MIN_AGE_MIN"); echo "${l/%d/ days}"))"
         ANTIGRAVITY_KEPT=$(( ANTIGRAVITY_KEPT + 1 ))
         return 0
     fi
@@ -1008,6 +1002,10 @@ _process_repo_local_worktrees() {
     local wt_path="" head_sha="" branch="" locked=0 prunable=0
     flush_block() {
         [[ -n "$wt_path" ]] || return 0
+        if [[ -n "${_lease_scope_signals:-}" ]]; then
+            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+            return 130
+        fi
 
         local abs_path
         abs_path=$(expand_path "$wt_path")
@@ -1085,7 +1083,11 @@ _process_repo_local_worktrees() {
                 return 0
             fi
         else
-            reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")"
+            reason="$(classify_repo_local_worktree "$repo_abs" "$abs_path" "$head_sha" "$locked" "$prunable" "$branch")" || reason="check-failed"
+        fi
+        if [[ -n "${_lease_scope_signals:-}" ]]; then
+            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+            return 130
         fi
         size_fmt='-'
         age_label='-'
@@ -1186,12 +1188,21 @@ _process_repo_local_worktrees() {
                 # that receipt. No fresh inventory may reauthorize removal.
                 local cw_c14_inv cw_c14_verdict cw_removed=0 cw_lock_tries=600 cw_lock_ok=0
                 cw_c14_inv="$(mktemp "${TMPDIR:-/tmp}/cw-c14-inv.XXXXXX")"
+                CW_CURRENT_INV="$cw_c14_inv"
                 if [[ -n "$cw_c14_inv" ]]; then
                     while (( cw_lock_tries-- > 0 )); do
-                        if lease_registry_mutation_lock_enter; then cw_lock_ok=1; break; fi
+                        [[ -z "${_lease_scope_signals:-}" ]] || break
+                        if lease_registry_mutation_lock_enter; then cw_lock_ok=1; CW_REGISTRY_LOCK_HELD=1; break; fi
+                        [[ -z "${_lease_scope_signals:-}" ]] || break
                         sleep 0.1 2>/dev/null || sleep 1
                     done
                     if (( cw_lock_ok == 0 )); then
+                        if [[ -n "${_lease_scope_signals:-}" ]]; then
+                            rm -f "$cw_c14_inv"
+                            CW_CURRENT_INV=""
+                            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                            return 130
+                        fi
                         cw_c14_verdict=kept:lease-busy
                     else
                     # T3 context: this is the sanctioned cleanup_worktrees.sh
@@ -1199,11 +1210,10 @@ _process_repo_local_worktrees() {
                     # candidate's own owner-null lease (never an
                     # ancestor/descendant), after all other C14 checks and the
                     # recency/policy/remote proof above.
-                    if [[ -n "$ACT_DEADLINE_AT" ]]; then
-                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv" --deadline-at "$ACT_DEADLINE_AT")"
-                    else
-                        cw_c14_verdict="$(artifact_removal_verdict "$abs_path" --t3-owner-null --inventory-out "$cw_c14_inv")"
-                    fi
+                    local -a cw_c14_args=(--t3-owner-null --inventory-out "$cw_c14_inv")
+                    [[ -n "$FLOOR_HOURS" ]] && cw_c14_args+=(--min-idle-minutes "$((FLOOR_HOURS * 60))")
+                    [[ -n "$ACT_DEADLINE_AT" ]] && cw_c14_args+=(--deadline-at "$ACT_DEADLINE_AT")
+                    cw_c14_verdict="$(artifact_removal_verdict "$abs_path" "${cw_c14_args[@]}")"
                     if [[ "$cw_c14_verdict" == remove ]]; then
                         WRH_REASON="$wrh_reason"
                         if [[ -n "$ACT_DEADLINE_AT" ]]; then
@@ -1213,15 +1223,22 @@ _process_repo_local_worktrees() {
                         fi
                     fi
                     WRH_REASON=""
+                    CW_REGISTRY_LOCK_HELD=0
                     lease_registry_mutation_lock_exit || true
                     fi
                     if [[ "$cw_removed" == 1 ]]; then
                         rm -f "$cw_c14_inv"
+                        CW_CURRENT_INV=""
                         ledger_line "repo-local" "DELETE" "$abs_path" "" "$extra"
                         TOTAL_RECLAIMED_KB=$(( TOTAL_RECLAIMED_KB + size_kb_val ))
                         REPO_LOCAL_ELIGIBLE=$(( REPO_LOCAL_ELIGIBLE + 1 ))
                     else
                         rm -f "$cw_c14_inv"
+                        CW_CURRENT_INV=""
+                        if [[ -n "${_lease_scope_signals:-}" ]]; then
+                            wt_path=""; head_sha=""; branch=""; locked=0; prunable=0
+                            return 130
+                        fi
                         # A deferred verdict is a completed visit for this pass
                         # (the candidate stays put and the cursor advances via
                         # act_candidate_done); a failed quarantine is kept.
@@ -1241,7 +1258,7 @@ _process_repo_local_worktrees() {
     }
 
     while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$ACT_STOP" == 0 ]] || break
+        [[ "$ACT_STOP" == 0 && -z "${_lease_scope_signals:-}" ]] || break
         if [[ -z "$line" ]]; then
             flush_block || return $?
             continue
@@ -1268,7 +1285,9 @@ _process_repo_local_worktrees() {
                 ;;
         esac
     done <<<"$porcelain"
-    if [[ "$ACT_STOP" == 0 ]]; then
+    if [[ -n "${_lease_scope_signals:-}" ]]; then
+        return 130
+    elif [[ "$ACT_STOP" == 0 ]]; then
         flush_block || return $?
     else
         # A cooperative deadline stop is a normal partial pass, not an error.

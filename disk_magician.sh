@@ -19,12 +19,14 @@ Commands:
   status        Report fleet, accounting, job outcomes, and deployed identity (--json).
   growth-top10  Report attributable growth with explicit partial/unknown values (--json).
   measure         Measure one monitored key now, sharded, with a generous timeout (diskm measure KEY [--timeout S]).
+  measure-files   Itemise a path by apparent file size to the fixed 100 MiB floor (diskm measure-files PATH [--deadline-at T]).
   reclaim-ledger  Read the published report (--read-existing), or regenerate (--stdout to preview).
   correlate-swings  Attribute df swings in snapshot history to non-file signals (--json).
   audit         Analyze current snapshot, show regressions, and recommend cleanups.
   report        Generate interactive HTML Treemap & canonical diskm cleanup report (--html, --output, --json).
   frontier      Run the full-disk frontier scanner and optionally persist its state.
   frontier-nightly Run the existing scheduled frontier wrapper.
+  scan-48h      Read-only single-pass every-file 48h scanner with per-dir latest_file rollup.
   install-root-frontier-runner Install the immutable root-owned frontier runner.
   install-cwd-scanner Install the passwordless root cwd scanner for Linux live-cwd gates (run via sudo).
   install-sweepers Install and validate the launchd sweeper set.
@@ -59,24 +61,33 @@ Commands:
   prune-aside-sessions   Prune stale Aside browser sessions and deduplicate static assets.
   cleanup-colima         Prune Docker images and in-VM fstrim sparse datadisk
                          (use --native-docker for the verified Linux daemon).
-  cleanup-worktrees      Safely prune stale linked worktrees >=7d (alias: prune-worktrees).
-  cleanup-worktree-venvs Strip Python venvs from dormant worktrees >=7d.
+  cleanup-xcode          Clean rebuildable Xcode and Simulator caches.
+  cleanup-worktrees      Safely prune stale linked worktrees >=48h idle (alias: prune-worktrees).
+  cleanup-worktree-venvs Strip Python venvs from worktrees idle >=48h.
   cleanup-codex-documents Remove old, clean, pushed ~/Documents/Codex/<date>/<task> scratch (dry-run; --clean to act).
-  cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from dormant worktrees >=3d.
+  cleanup-worktree-deps  Strip node_modules/target/.mypy_cache from worktrees idle >=48h.
   slim-worktrees Suggest (dry-run) or apply sparse-checkout exclusions (default docs/)
                 on dormant worktrees to shrink each checkout without touching history.
   worktree-restore-verify Fetch pinned backups, verify full restore, and write a receipt.
   worktree-hygiene       Audit and triage worktrees across multi-repo workspaces.
   cleanup-dev-caches     Clean compiler, npm, cargo, and test caches.
+  cleanup-agent-artifacts Clean stale agent logs and caches.
+  cleanup-xcode          Clean eligible Xcode build artifacts.
+  cleanup-sessions       Clean eligible stale agent sessions.
+  cleanup-downloads-evidence Clean expired evidence downloads.
+  cleanup-code-sign-clones Clean inactive code-sign clones.
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
   scratch-prune          Reclaim C14-recognized Scratch artifacts behind lease/live-cwd/open-file
                          gates (--clean needs operator approval or internal safe automatic mode).
+  emergency              One-off emergency reclaim of tmp + Scratch under one lock hold; one 48h pass by default.
+                         Lower ages require an explicit --max-age-hours override (minimum 2h).
+                         Flags: --target-gb N --max-age-hours H --dry-run --include-worktrees.
   cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.
   cleanup-antigravity-brain Prune old Antigravity brain dirs, idle worktrees, .backup leftovers.
   cleanup-claude-state   Run the guarded Claude state maintenance helper.
   cleanup-codex-db       Maintain Codex SQLite databases (aliases: vacuum-codex-db, codex-vacuum).
   cleanup-uv-cache       Prune disk-magician's own orphaned uv-cache build artifacts.
-  cleanup-supervisor-logs Prune rotated cmux-codex-launchd logs older than 7d (dry-run; --clean to act).
+  cleanup-supervisor-logs Prune rotated cmux-codex-launchd logs older than 48h (dry-run; --clean to act).
   cleanup-dark-factory   Prune stale dark-factory releases, runs, and df-* AO session homes.
   cleanup-ao             Retire AO owners and workspaces (explicit approval required).
   cleanup-code-sign-clones Clean stale macOS app code_sign_clone bundles.
@@ -97,6 +108,8 @@ Commands:
                          Quarantine an exact stale empty lock or dead-PID partial lock past TTL; never deletes it.
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
   quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
+  quarantine verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]
+                         Read-only C14 eligibility check; never removes the path.
   worktree-quarantine {restore <id>|reconcile} Restore or reconcile quarantined git worktrees.
   quarantine-reconcile   Finish deferred C14 quarantine removals (--dry-run|--clean).
   worktree-remove-hook   Claude WorktreeRemove hook; removes only clean, pushed worktrees.
@@ -193,7 +206,8 @@ run_setup() {
         shift
         ;;
       *)
-        shift
+        echo "Error: unknown setup option: $1" >&2
+        return 2
         ;;
     esac
   done
@@ -438,6 +452,9 @@ case "$CMD" in
   frontier-nightly)
     exec bash "$SCRIPT_DIR/scripts/disk_frontier_scan.sh" "$@"
     ;;
+  scan_48h|scan-48h)
+    exec python3 "$SCRIPT_DIR/scripts/scan_48h_every_file.py" "$@"
+    ;;
   install-root-frontier-runner|install_root_frontier_runner)
     exec bash "$SCRIPT_DIR/scripts/install_root_frontier_runner.sh" "$@"
     ;;
@@ -568,6 +585,9 @@ case "$CMD" in
   cleanup_colima|cleanup-colima)
     "$SCRIPT_DIR/scripts/cleanup_colima.sh" "$@"
     ;;
+  cleanup_xcode|cleanup-xcode)
+    "$SCRIPT_DIR/scripts/cleanup_xcode.sh" "$@"
+    ;;
   cleanup_worktrees|cleanup-worktrees|prune_worktrees|prune-worktrees)
     "$SCRIPT_DIR/scripts/cleanup_worktrees.sh" "$@"
     ;;
@@ -586,6 +606,18 @@ case "$CMD" in
   worktree_hygiene|worktree-hygiene)
     "$SCRIPT_DIR/scripts/worktree_hygiene.sh" "$@"
     ;;
+  cleanup_agent_artifacts|cleanup-agent-artifacts)
+    "$SCRIPT_DIR/scripts/cleanup_agent_artifacts.sh" "$@"
+    ;;
+  cleanup_xcode|cleanup-xcode)
+    "$SCRIPT_DIR/scripts/cleanup_xcode.sh" "$@"
+    ;;
+  cleanup_sessions|cleanup-sessions)
+    "$SCRIPT_DIR/scripts/cleanup_sessions.sh" "$@"
+    ;;
+  cleanup_downloads_evidence|cleanup-downloads-evidence)
+    "$SCRIPT_DIR/scripts/cleanup_downloads_evidence.sh" "$@"
+    ;;
   cleanup_dev_caches|cleanup-dev-caches)
     "$SCRIPT_DIR/scripts/cleanup_dev_caches.sh" "$@"
     ;;
@@ -594,6 +626,12 @@ case "$CMD" in
     ;;
   scratch_prune|scratch-prune)
     "$SCRIPT_DIR/scripts/cleanup_scratch_top_level.sh" "$@"
+    ;;
+  emergency)
+    "$SCRIPT_DIR/scripts/emergency_reclaim.sh" "$@"
+    ;;
+  measure_files|measure-files)
+    "$SCRIPT_DIR/scripts/measure_files.sh" "$@"
     ;;
   cleanup_apfs_snapshots|cleanup-apfs-snapshots)
     "$SCRIPT_DIR/scripts/cleanup_apfs_snapshots.sh" "$@"
@@ -676,7 +714,32 @@ case "$CMD" in
     case "$subcommand" in
       restore) [[ $# -eq 1 ]] || { echo "Usage: diskm quarantine restore <id>" >&2; exit 2; }; exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" restore "$1" ;;
       reconcile) exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" reconcile "$@" ;;
-      *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]}" >&2; exit 2 ;;
+      verdict)
+        qv_usage() { echo "Usage: diskm quarantine verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]" >&2; exit 2; }
+        [[ $# -ge 1 && "${1:-}" != --* ]] || qv_usage
+        verdict_path="$1"; shift
+        verdict_kind_seen=0; verdict_deadline_seen=0; verdict_args_seen=0
+        verdict_args=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --kind)
+              [[ $# -ge 2 && "$verdict_kind_seen" -eq 0 && ( "$2" == rebuildable || "$2" == ephemeral ) ]] || qv_usage
+              verdict_args+=(--kind "$2"); verdict_kind_seen=1; verdict_args_seen=1; shift 2 ;;
+            --deadline-at)
+              [[ $# -ge 2 && "$verdict_deadline_seen" -eq 0 ]] || qv_usage
+              python3 -c 'import math,sys; x=float(sys.argv[1]); sys.exit(0 if math.isfinite(x) and x >= 0 else 1)' "$2" >/dev/null 2>&1 || qv_usage
+              verdict_args+=(--deadline-at "$2"); verdict_deadline_seen=1; verdict_args_seen=1; shift 2 ;;
+            *) qv_usage ;;
+          esac
+        done
+        source "$SCRIPT_DIR/scripts/lib/artifact_verdict.sh"
+        if [[ "$verdict_args_seen" == 1 ]]; then
+          DISK_MAGICIAN_C14_LEDGER= DISK_MAGICIAN_C14_PROOF_OUT= artifact_removal_verdict "$verdict_path" "${verdict_args[@]}" --no-rescue-push
+        else
+          DISK_MAGICIAN_C14_LEDGER= DISK_MAGICIAN_C14_PROOF_OUT= artifact_removal_verdict "$verdict_path" --no-rescue-push
+        fi
+        ;;
+      *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]|verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]}" >&2; exit 2 ;;
     esac
     ;;
   worktree_quarantine|worktree-quarantine)

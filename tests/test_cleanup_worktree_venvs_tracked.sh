@@ -63,15 +63,25 @@ ROOTS_DIR="$TMP_ROOT/roots"
 mkdir -p "$STATE_DIR" "$ROOTS_DIR"
 
 echo "=== a venv whose files are tracked by git is never stripped ==="
-mk_real_wt() {  # <name> <tracked:yes|no> -> prints worktree path
+mk_real_wt() {  # <name> <tracked:yes|no> -> prints a pushed, C14-valid worktree path
   local base="$TMP_ROOT/$1-base" wt="$ROOTS_DIR/$1"
+  local origin="$TMP_ROOT/$1-origin.git" branch="$1-branch"
+  git init -q --bare -b main "$origin"
   git init -q -b main "$base"
   : > "$base/README.md"
-  if [[ "$2" == yes ]]; then mkdir "$base/.venv"; : > "$base/.venv/pyvenv.cfg"; fi
+  if [[ "$2" == yes ]]; then
+    mkdir "$base/.venv"
+    : > "$base/.venv/pyvenv.cfg"
+  else
+    printf '.venv/\n' > "$base/.gitignore"
+  fi
   git -C "$base" -c user.name=t -c user.email=t@t add -A
   git -C "$base" -c user.name=t -c user.email=t@t commit -qm init
-  git -C "$base" -c user.name=t -c user.email=t@t worktree add -q -b "$1-branch" "$wt"
+  git -C "$base" remote add origin "$origin"
+  git -C "$base" push -q -u origin main
+  git -C "$base" -c user.name=t -c user.email=t@t worktree add -q -b "$branch" "$wt"
   [[ "$2" == yes ]] || { mkdir "$wt/.venv"; : > "$wt/.venv/pyvenv.cfg"; }
+  git -C "$wt" push -q -u origin "$branch"
   find "$wt" -path "$wt/.git" -prune -o -type f -print | while read -r f; do age_path_days_ago "$f" 30; done
   age_path_days_ago "$wt/.git" 30
   printf '%s' "$wt"

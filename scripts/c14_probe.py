@@ -1010,7 +1010,12 @@ _SRC_EXTS = {"js", "mjs", "cjs", "jsx", "ts", "tsx", "py", "pyi", "c", "cc", "cp
 _CODE_EXTS = _SRC_EXTS | {"sh", "bash", "zsh", "md", "rst", "html", "htm", "css", "svg"}
 _NATIVE = (".h", ".hpp", ".pyc", ".so", ".a", ".dylib")
 
-_CA_BUNDLES = ("cacert.pem", "ca-bundle.pem", "ca-certificates.pem")
+# Public CA trust stores shipped by vendored tooling. `roots.pem` is grpc's bundle
+# (venv/lib/python*/site-packages/grpc/_cython/_credentials/roots.pem); omitting it
+# made every grpc-bearing venv unremovable as "secret-like" (ja: 52 GB blocked on
+# jeff-ubuntu 2026-11-13). These names are still only exempt under _DEP_DIRS, so a
+# deploy.pem / corp roots.pem outside a dependency dir stays secret-like.
+_CA_BUNDLES = ("cacert.pem", "ca-bundle.pem", "ca-certificates.pem", "roots.pem")
 
 def _never(n):
     return n.startswith((".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")) or n.endswith((".pem", ".key", ".p12", ".pfx")) or n in (".npmrc", ".netrc")
@@ -1020,6 +1025,31 @@ def _public_ca_bundle(n):
     Never private key material: only these exact well-known public CA filenames qualify, so a
     deploy.pem or any *.key/.p12/.pfx stays secret-like wherever it lives."""
     return n in _CA_BUNDLES
+
+# Google API *discovery documents*: public OAuth-scope/schema metadata published by
+# googleapiclient, shipped inside every venv that installs google-api-python-client.
+# Names like iamcredentials.v1.json match SECRET_RE only because the service is
+# called "...credentials"; the files contain scope descriptions, never key material
+# (verified: grep -ciE 'private_key|BEGIN .*PRIVATE|client_secret"' -> 0).
+# Matched narrowly: a discovery_cache/documents/ parent AND a <service>.<version>.json
+# basename, so creds.json / credentials.json / any *credentials* key file outside
+# that path stays secret-like.
+_DISCOVERY_DOC_RE = re.compile(r"^[a-z][a-z0-9]*\.[v0-9][a-z0-9]*\.json$")
+
+def _google_discovery_doc(parts, n):
+    """True only for public service metadata in googleapiclient discovery JSON."""
+    if len(parts) < 3:
+        return False
+    components = {c.lower() for c in parts[:-3]}
+    if "googleapiclient" not in components:
+        return False
+    if parts[-2].lower() != "documents" or parts[-3].lower() != "discovery_cache":
+        return False
+    if not _DISCOVERY_DOC_RE.fullmatch(n):
+        return False
+    if n.split(".", 1)[0] in _SECRET_EXACT:
+        return False
+    return bool(_DEP_DIRS & components)
 
 def exempt_name(path):
     """Single owner of the secret-name exemption (relative path; used by every secret gate).
@@ -1036,6 +1066,8 @@ def exempt_name(path):
         # under node_modules/venv/site-packages.
         return bool(_DEP_DIRS & {c.lower() for c in parts[:-1]}) and _public_ca_bundle(n)
     if not SECRET_RE.fullmatch(parts[-1]):
+        return True
+    if _google_discovery_doc(parts, n):
         return True
     # Source code is not secret material — but only when the secret word is part of a
     # longer identifier. A stem that IS the secret word (credentials.py, secrets.rb,
@@ -1070,17 +1102,37 @@ def _xcode_device_support_generated(q):
     """Extracted device system symbols inside an iOS DeviceSupport root."""
     return q.lower().startswith("symbols/")
 
+_PW_WEBKIT_ROOT = re.compile(r"webkit-\d+")
+_PW_FRAMEWORK_HEADER = re.compile(r"[^/]+\.framework/Versions/[^/]+/(?:Private)?Headers/[^/]+\.h", re.I)
+
+def _playwright_webkit_generated(root, q):
+    """Apple framework headers vendored in a Playwright WebKit build (WebCore's
+    StoredCredentialsPolicy.h, FetchRequestCredentials.h, ...). Only inside a root named
+    webkit-<n> that carries Playwright's INSTALLATION_COMPLETE marker; caller checks the marker."""
+    n = q.rsplit("/", 1)[-1].lower()
+    return bool(_PW_WEBKIT_ROOT.fullmatch(root)) and bool(_PW_FRAMEWORK_HEADER.fullmatch(q)) \
+        and n[:-2] not in _SECRET_EXACT and not n.startswith("secrets")
+
 def secrets(inv_file, kind=""):
     try:
         kind = os.environ.get("C14_SECRET_KIND") or kind
         entries = json.load(open(inv_file, encoding="utf-8"))
-        paths = (e.get("name", "") if e["path"] == "." else e["path"] for e in entries)
+        # Only regular files can carry secret bytes. The inventory also records
+        # `type: "dir"` rows, and a credential-named DIRECTORY cannot be exempted
+        # by a filename rule: grpc's `_credentials/` matched SECRET_RE and made
+        # every grpc-bearing venv read as secret-like even after roots.pem and
+        # the discovery documents were exempt (bead disk_magician-9ywq).
+        paths = (e.get("name", "") if e["path"] == "." else e["path"]
+                 for e in entries if e.get("type") != "dir")
         if kind == "xcode-derived-data":
             # Generated names such as NativeRequestCredentials.o are not secrets; anything
             # else in the root (a .env, secrets.json, *.p12) still is.
             paths = (q for q in paths if not _xcode_generated(q))
         elif kind == "xcode-device-support":
             paths = (q for q in paths if not _xcode_device_support_generated(q))
+        root = next((e.get("name", "") for e in entries if e["path"] == "."), "")
+        if any(e["path"] == "INSTALLATION_COMPLETE" and e.get("type") != "dir" for e in entries):
+            paths = (q for q in paths if not _playwright_webkit_generated(root, q))
         print("yes" if any(SECRET_RE.fullmatch(q.rsplit("/", 1)[-1]) and not exempt_name(q) for q in paths) else "no")
     except Exception:
         print("kept:check-failed")
@@ -1225,6 +1277,11 @@ def open_file(root, deadline=None):
 
 if __name__ == "__main__":
     a = sys.argv[1:]
+
+    def _probe_timeout(*_):
+        raise TimeoutError("c14 probe timed out")
+    signal.signal(signal.SIGALRM, _probe_timeout)  # a blocked read/open must fail closed, not hang
+    signal.alarm(int(os.environ.get("C14_PROBE_TIMEOUT", "1800")))
     if a and a[0] == "any-secret":
         sys.exit(any_secret(a[1:]))
     try:

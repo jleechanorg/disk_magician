@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -89,9 +90,11 @@ class TestRunShellTestsParallel(unittest.TestCase):
             self.assertLess(wall_s, serial_sum_s)
 
     def test_isolated_tmpdir_per_test(self) -> None:
-        """Each concurrent test gets a distinct TMPDIR under /tmp/dm-ci-shard-* and it is cleaned up afterward."""
+        """Concurrent tests get distinct TMPDIRs under the caller's temp root and clean them up."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            scratch_root = tmp_dir / "scratch-root"
+            scratch_root.mkdir()
             record_dir = tmp_dir / "records"
             record_dir.mkdir()
             scripts = []
@@ -112,6 +115,8 @@ class TestRunShellTestsParallel(unittest.TestCase):
                     )
                 )
 
+            env = os.environ.copy()
+            env["TMPDIR"] = str(scratch_root)
             proc = subprocess.run(
                 [
                     sys.executable,
@@ -125,6 +130,7 @@ class TestRunShellTestsParallel(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
+                env=env,
             )
             self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
 
@@ -134,8 +140,51 @@ class TestRunShellTestsParallel(unittest.TestCase):
             ]
             self.assertEqual(len(set(observed_tmpdirs)), 3, msg=f"TMPDIRs collided: {observed_tmpdirs}")
             for d in observed_tmpdirs:
-                self.assertIn("/tmp/dm-ci-shard-", d)
-                self.assertFalse(Path(d).exists(), msg=f"Per-test TMPDIR was not cleaned up: {d}")
+                per_test_tmp = Path(d)
+                self.assertEqual(per_test_tmp.parent.parent, scratch_root.resolve())
+                self.assertTrue(per_test_tmp.parent.name.startswith("dm-ci-shard-"))
+                self.assertFalse(per_test_tmp.exists(), msg=f"Per-test TMPDIR was not cleaned up: {d}")
+
+    def test_single_job_uses_caller_tmpdir(self) -> None:
+        """A single public CLI job keeps its shard under a caller-provided Scratch root."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            scratch_root = tmp_dir / "scratch-root"
+            scratch_root.mkdir()
+            scratch_alias = tmp_dir / "scratch-alias"
+            scratch_alias.symlink_to(scratch_root, target_is_directory=True)
+            record = tmp_dir / "child-tmpdir.txt"
+            script = self._write_script(
+                tmp_dir,
+                "test_report_tmpdir.sh",
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                echo "$TMPDIR" > "{record}"
+                """,
+            )
+            env = os.environ.copy()
+            env["TMPDIR"] = str(scratch_alias)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER_PATH),
+                    "--jobs",
+                    "1",
+                    "--repo-root",
+                    str(tmp_dir),
+                    str(script),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+            child_tmpdir = Path(record.read_text(encoding="utf-8").strip())
+            self.assertEqual(child_tmpdir.parent.parent, scratch_root.resolve())
+            self.assertTrue(child_tmpdir.parent.name.startswith("dm-ci-shard-"))
+            self.assertFalse(child_tmpdir.exists(), msg=f"Per-test TMPDIR was not cleaned up: {child_tmpdir}")
 
     def test_failing_and_timed_out_scripts_exit_nonzero_and_name_script(self) -> None:
         """A failing script or timed-out script exits non-zero and names the failed script."""

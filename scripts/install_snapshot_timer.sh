@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Staging/install helper behind `diskm setup --snapshot-timer`.
+# Staging/install helper run directly: install_snapshot_timer.sh [--stage-dir DIR | --install | --dry-run].
 # Reconciles the existing names only. Never enables, starts or reloads a unit.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

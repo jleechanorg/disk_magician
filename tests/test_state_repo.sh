@@ -7,6 +7,8 @@ SR="$REPO_ROOT/scripts/state_repo.sh"
 TMP_ROOT=$(mktemp -d -t state_repo_test.XXXXXX)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 PASS=0; FAIL=0
+# Sandboxed HOME hides ~/.local/bin/gitleaks; forward the host's real binary.
+[[ -z "${DISK_MAGICIAN_GITLEAKS_BIN:-}" ]] && DISK_MAGICIAN_GITLEAKS_BIN="$(command -v gitleaks || true)"
 ok()  { echo "  PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL+1)); }
 run_sr() { # run_sr <home> <fake_bin_or_-> <args...>
@@ -19,6 +21,7 @@ run_sr() { # run_sr <home> <fake_bin_or_-> <args...>
   env -i HOME="$home" PATH="$path" \
     ${DISK_MAGICIAN_ASSUME_YES:+DISK_MAGICIAN_ASSUME_YES=$DISK_MAGICIAN_ASSUME_YES} \
     ${DISK_MAGICIAN_ASSUME_NO:+DISK_MAGICIAN_ASSUME_NO=$DISK_MAGICIAN_ASSUME_NO} \
+    ${DISK_MAGICIAN_GITLEAKS_BIN:+DISK_MAGICIAN_GITLEAKS_BIN=$DISK_MAGICIAN_GITLEAKS_BIN} \
     bash "$SR" "$@"
 }
 
@@ -249,6 +252,46 @@ run_sr "$HVIS2" - init >/dev/null 2>&1
 run_sr "$HVIS2" - remote "$BAREVIS2" >/dev/null 2>&1
 OUTVIS2=$(run_sr "$HVIS2" - push 2>&1); RCVIS2=$?
 [[ $RCVIS2 -eq 0 ]] && ok "non-github push not blocked by visibility guard" || bad "non-github push" "rc=$RCVIS2: $OUTVIS2"
+
+# Secret-scan scoping (bead disk_magician-2cpy): generated evidence/ledger JSON is
+# excluded from the pre-push scan, every other path is still scanned, and the
+# scan is time-bounded and fails closed.
+mk_scan_repo() { # mk_scan_repo <name> -> sets H, SD, BARE
+  H="$TMP_ROOT/$1"; mkdir -p "$H"
+  BARE="$TMP_ROOT/$1.git"; git init -q --bare --initial-branch=main "$BARE"
+  run_sr "$H" - init >/dev/null 2>&1
+  SD="$H/.local/state/disk-magician"
+  run_sr "$H" - remote "$BARE" >/dev/null 2>&1
+}
+sr_commit() { git -C "$1" add -A && git -C "$1" -c user.name=t -c user.email=t@t commit -qm "$2"; }
+FAKE_SECRET="ghp_$(printf 'aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5' | head -c 36)"
+
+echo "Test 15: secret in a non-generated file still blocks the push"
+mk_scan_repo h15
+printf 'token = %s\n' "$FAKE_SECRET" > "$SD/notes.txt"
+sr_commit "$SD" "plant secret"
+OUT15=$(run_sr "$H" - push 2>&1); RC15=$?
+[[ $RC15 -ne 0 ]] && ok "planted secret blocks push" || bad "planted secret" "rc=0: $OUT15"
+[[ -z "$(git -C "$BARE" rev-list --all 2>/dev/null)" ]] && ok "nothing reached the remote" || bad "remote clean" "commits pushed"
+
+echo "Test 16: generated evidence/ledger JSON is excluded from the secret scan"
+mk_scan_repo h16
+mkdir -p "$SD/evidence" "$SD/ledger"
+printf '{"blob":"%s"}\n' "$FAKE_SECRET" > "$SD/evidence/frontier-20261117.json"
+printf '{"blob":"%s"}\n' "$FAKE_SECRET" > "$SD/ledger/topdown-5g.partial.json"
+sr_commit "$SD" "generated json"
+OUT16=$(run_sr "$H" - push 2>&1); RC16=$?
+[[ $RC16 -eq 0 ]] && ok "generated JSON does not trip the scan" || bad "generated JSON excluded" "rc=$RC16: $OUT16"
+
+echo "Test 17: scan timeout fails closed (no push, clear message, nonzero)"
+mk_scan_repo h17
+SLOW17="$TMP_ROOT/slow-gitleaks"; printf '#!/usr/bin/env bash\nsleep 30\n' > "$SLOW17"; chmod +x "$SLOW17"
+T0=$SECONDS
+OUT17=$(env -i HOME="$H" PATH="/usr/bin:/bin" DISK_MAGICIAN_GITLEAKS_BIN="$SLOW17" DISK_MAGICIAN_GITLEAKS_TIMEOUT=1 bash "$SR" push 2>&1); RC17=$?
+[[ $RC17 -ne 0 ]] && ok "timed-out scan exits nonzero" || bad "timeout rc" "rc=0: $OUT17"
+echo "$OUT17" | grep -q "timed out" && ok "timeout message is clear" || bad "timeout message" "$OUT17"
+[[ $((SECONDS-T0)) -lt 20 ]] && ok "scan bounded by timeout" || bad "bounded" "took $((SECONDS-T0))s"
+[[ -z "$(git -C "$BARE" rev-list --all 2>/dev/null)" ]] && ok "nothing pushed after timeout" || bad "remote clean after timeout" "commits pushed"
 
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

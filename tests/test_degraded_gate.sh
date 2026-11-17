@@ -59,6 +59,7 @@ drive() {  # drive <stub-body> <label>
   mkdir -p "$tree/scripts/lib"
   cp "$REPO_ROOT/scripts/disk_audit.sh" "$tree/scripts/"
   cp "$REPO_ROOT/scripts/lib/degraded_gate.sh" "$tree/scripts/lib/"
+  cp "$REPO_ROOT/scripts/safety_lib.sh" "$tree/scripts/safety_lib.sh"
   printf '%s\n' "$body" > "$tree/scripts/cleanup_dev_caches.sh"
   chmod +x "$tree/scripts/cleanup_dev_caches.sh"
   ( cd "$tree/scripts" && timeout 180 bash disk_audit.sh clean --no-history --skip-directory-breakdown ) \

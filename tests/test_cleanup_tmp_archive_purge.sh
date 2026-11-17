@@ -149,10 +149,10 @@ set_old_mtime() {
 }
 
 make_c14_archive_entry() {
-  local source="$1" entry="$2" retention="$3" archived_at actual_retention inv
+  local source="$1" entry="$2" retention="$3" private_tmp="${4:-$T1_PRIVATE_TMP}" tmp_root="${5:-$T1_TMP}" archived_at actual_retention inv
   mkdir -p "$source" "${entry%/*}"
   printf 'expired scratch fixture\n' >"$source/payload.bin"
-  actual_retention="$(DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T1_PRIVATE_TMP" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T1_TMP" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2"' _ "$REPO_ROOT" "$source")"
+  actual_retention="$(DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$private_tmp" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$tmp_root" bash -c 'source "$1/scripts/lib/artifact_verdict.sh"; c14_ephemeral_retention "$2"' _ "$REPO_ROOT" "$source")"
   [[ "$actual_retention" == "$retention" ]] || { echo "unexpected E2 retention for $source: $actual_retention" >&2; return 1; }
   archived_at="$(python3 -c 'import sys,time; print(int(time.time())-int(sys.argv[1])*3600)' "$(( retention / 60 + 25 ))")"
   python3 "$REPO_ROOT/scripts/c14_probe.py" archive-receipt "$source" "$entry.c14-origin.json" "$archived_at" "$retention" >/dev/null
@@ -208,8 +208,11 @@ T2_PRIVATE_TMP="$TMP_ROOT/t2-private-tmp"
 T2_TMP="$TMP_ROOT/t2-tmp"
 T2_ARCHIVE="$TMP_ROOT/t2-archive"
 T2_BIN="$TMP_ROOT/t2-bin"
-mkdir -p "$T2_PRIVATE_TMP" "$T2_TMP" "$T2_ARCHIVE/20200101T000000Z/quarantined_app"
-touch "$T2_PRIVATE_TMP" "$T2_TMP" "$T2_ARCHIVE/20200101T000000Z/quarantined_app/payload.bin"
+mkdir -p "$T2_PRIVATE_TMP" "$T2_TMP"
+T2_PRIVATE_TMP="$(cd "$T2_PRIVATE_TMP" && pwd -P)"
+T2_TMP="$(cd "$T2_TMP" && pwd -P)"
+T2_ENTRY="$T2_ARCHIVE/20200101T000000Z/cli_validation_gemini_dry"
+make_c14_archive_entry "$T2_TMP/cli_validation_gemini_dry" "$T2_ENTRY" 60 "$T2_PRIVATE_TMP" "$T2_TMP"
 set_old_mtime "$T2_ARCHIVE/20200101T000000Z"
 make_find_shim "$T2_BIN" "$T2_PRIVATE_TMP" "$T2_TMP"
 
@@ -230,7 +233,8 @@ else
 fi
 T2_OUT_CONTENT=$(cat "$T2_OUT")
 assert_rc "Test 2: exits 0" 0 "$T2_RC"
-assert_contains "Test 2: logs DRY RUN preview" "DRY RUN: would purge aged archive" "$T2_OUT_CONTENT"
+assert_contains "Test 2: logs DRY RUN preview for receipted archive" "DRY RUN: would purge aged archive" "$T2_OUT_CONTENT"
+assert_exists "Test 2: receipted archive payload is preserved" "$T2_ENTRY/payload.bin"
 assert_exists "Test 2: archive directory is preserved" "$T2_ARCHIVE/20200101T000000Z"
 
 echo "Test 3: Active-use marker (.in-use) preserves under-cap archive in standard run"
@@ -353,7 +357,7 @@ else
 fi
 T6_OUT_CONTENT=$(cat "$T6_OUT")
 assert_rc "Test 6: exits 0" 0 "$T6_RC"
-assert_contains "Test 6: reports C14 keep for dylib" "Preserving OpenCode dylib (C14 kept:unproven-content)" "$T6_OUT_CONTENT"
+assert_contains "Test 6: reports C14 protected keep for dylib" "Preserving OpenCode dylib (C14 kept:protected)" "$T6_OUT_CONTENT"
 assert_exists "Test 6: unproven dylib remains" "$T6_USER_TMP/.opencode.libopentui.dylib"
 
 echo "Test 7: receipt collision preserves metadata not created by this call"

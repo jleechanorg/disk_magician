@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # scratch_budget.sh — size-budget eviction engine for agent/PR scratch roots.
 #
-# Bead disk_magician-d45 (age-only sweepers never touch 0-24h scratch, which
-# is where ~15 GiB/day of growth lives) + dcz (reviewed lsof-recheck
+# Bead disk_magician-d45 (age-only sweepers use the shared 48h content floor)
+# + dcz (reviewed lsof-recheck
 # requirement). When a scratch root's matched candidates exceed a size
 # budget, evict the oldest ones (by real content mtime, never a directory-
 # mtime proxy — see scripts/lib/worktree_recency.sh's header for why that
@@ -403,7 +403,9 @@ scratch_budget_content_mtime() {
         | awk '$1+0>m{m=$1+0} END{if (m>0) print m}'
     )" || scan_rc=$?
   fi
-  if [[ "$scan_rc" == 124 || "$scan_rc" == 137 ]]; then
+  # Any scan failure (timeout, unreadable subtree) makes the partial maximum
+  # untrustworthy: report unmeasurable instead of a possibly stale epoch.
+  if (( scan_rc != 0 )); then
     echo ""
     return 0
   fi
@@ -445,12 +447,11 @@ scratch_budget_evict_root() {
     return 0
   fi
   if ! [[ "$floor_minutes" =~ ^[0-9]+$ ]]; then
-    floor_minutes=120
+    floor_minutes="$(safety_disposable_recency_floor_minutes)"
   fi
-  # Hard floor (bead disk_magician-d45 spec): 2h default, 1h minimum,
-  # never lower — mirrors the WORKTREE_MIN_AGE_DAYS clamp-up pattern in
-  # cleanup_tmp.sh (may only be raised by config, never lowered below the
-  # safety floor).
+  # Shared 48h default for disposable content; retain the existing 1h minimum
+  # for an explicit operator-selected budget floor. The caller passes the
+  # effective value through to C14 as well.
   (( floor_minutes < 60 )) && floor_minutes=60
 
   local snapshot_file candidates_file
@@ -581,265 +582,178 @@ scratch_budget_evict_root() {
 }
 
 # scratch_budget_artifact_children <dir> [max_depth]
-# Print artifact-shaped descendant directories of <dir>, one per line, deepest
-# useful unit first-encountered order. Purpose: a directory's "newest content"
-# is an AGGREGATE, so one freshly-written child shelters every stale sibling in
-# the tree -- measured 2026-11-03 on Scratch: worldai_frontend/build held 23.7
-# GiB of 39-41 h old Android build dirs, yet the whole 35 GiB read as 0 h old
-# because a single sibling had been written minutes earlier. Callers must be able
-# to evaluate each child on its own age, so this enumerates them.
-# Refuses to descend into symlinks or into any directory containing .git (a
-# working tree is never a build artifact), and is depth-bounded.
+# Emit NUL-delimited artifact children. NUL framing preserves arbitrary POSIX
+# path bytes other than NUL and is safe for callers under Bash 3.2.
 scratch_budget_artifact_children() {
-  local dir="$1" max_depth="${2:-3}"
+  local dir="$1" max_depth="${2:-3}" deadline="${ACT_DEADLINE_AT:-}" script_dir
   [[ -d "$dir" && ! -L "$dir" ]] || return 1
   [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=3
-  # A .git marker can be a directory, a file, or a dangling link. Check the
-  # root before walking, then prune every marked directory in this one bounded
-  # walk so a shallower Git ancestor cannot be bypassed by a later depth pass.
-  [[ -e "$dir/.git" || -L "$dir/.git" ]] && return 0
-  (( max_depth > 0 )) || return 0
-  # One Python stdlib walker avoids a shell process for every visited directory.
-  # It checks the actuator deadline before each directory expansion and returns
-  # 124 when expansion is deferred; callers must report that explicitly rather
-  # than treating an incomplete list as "no eligible entries".
-  local deadline="${ACT_DEADLINE_AT:-}"
-  python3 - "$dir" "$max_depth" "$deadline" <<'PY'
-import fnmatch
-import os
-import sys
-import time
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 "$script_dir/scratch_budget_artifact_children.py" single "$dir" "$max_depth" "$deadline"
+}
 
-root, max_depth, deadline = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-try:
-    deadline_value = float(deadline) if deadline else None
-except ValueError:
-    raise SystemExit(1)
-
-def expired():
-    return deadline_value is not None and time.monotonic() >= deadline_value
-
-def has_git_marker(path):
-    try:
-        os.lstat(os.path.join(path, ".git"))
-    except FileNotFoundError:
-        return False
-    return True
-
-def is_artifact_name(name):
-    return name in {
-        "build", "dist", "out", "target", "coverage", "artifacts", "gradle",
-        ".gradle", "android-sdk", "avd", ".next", ".cache", ".turbo",
-        ".parcel-cache", "__pycache__", "DerivedData", "Pods",
-    } or fnmatch.fnmatchcase(name, "isolated-*")
-
-def walk(path, depth):
-    if expired():
-        raise TimeoutError
-    try:
-        with os.scandir(path) as entries:
-            for entry in entries:
-                if expired():
-                    raise TimeoutError
-                try:
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                    child = entry.path
-                    # Match find's -exec marker check followed by -prune: the
-                    # marked directory itself is not emitted and is never
-                    # descended into.
-                    if has_git_marker(child):
-                        continue
-                    # find's `! -name '.*' -print0` filters hidden output
-                    # basenames, while still traversing hidden parents.
-                    if not entry.name.startswith(".") and is_artifact_name(entry.name):
-                        print(child, flush=True)
-                    if depth < max_depth:
-                        walk(child, depth + 1)
-                except OSError:
-                    raise
-    except OSError:
-        raise
-
-try:
-    walk(root, 1)
-except TimeoutError:
-    raise SystemExit(124)
-except (OSError, ValueError):
-    raise SystemExit(1)
-PY
+# scratch_budget_artifact_children_batch <max_depth> < NUL-delimited paths
+# Emits an all-or-nothing versioned NUL protocol: marker, pair count, then
+# candidate/child pairs. A deadline or unreadable path returns nonzero with no
+# partial stdout, so callers must never treat failure as an empty result.
+scratch_budget_artifact_children_batch() {
+  local max_depth="${1:-3}" mode="${2:-batch}" script_dir
+  [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=3
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 "$script_dir/scratch_budget_artifact_children.py" "$mode" "$max_depth" "${ACT_DEADLINE_AT:-}"
 }
 
 # scratch_budget_measure_files <path> [threshold_mib]
-# Measurement counterpart to scratch_budget_artifact_children. Reporting used to
-# print ONE `du` total per candidate, which hides exactly what the per-child age
-# rule above exists to expose: measured 2026-11-03, a 35 GiB Scratch build root
-# whose 23.7 GiB of stale Android build dirs never appeared in any report line.
-# This walks <path> with a stopping rule instead:
-#   - a directory whose total apparent file size is BELOW <threshold_mib>
-#     (default 100) is reported as ONE aggregated row;
-#   - at or above it the directory is descended, so the caller sees which child
-#     holds the bytes. A row at or above the threshold is NEVER aggregated --
-#     that would hide the same detail a `du` total hides.
-# Output is one row per line, tab-separated, depth-first in sorted path order:
-#   <bytes>\t<files>\t<newest_epoch>\t<flag>\t<path>
-#     A  aggregated directory (total below the threshold)
-#     F  single file, measured on its own
-#     L  symlink, never followed (bytes = the link itself, not its target)
-#     G  opaque Git boundary; zero fields mean unmeasured, not empty or old
-#     E  unreadable: the subtree could not be measured
-# <bytes> is APPARENT size (stat), never block usage, so the threshold is exact
-# at the boundary and a sparse file counts its full length. Symlinks are never
-# followed. Size is the only aggregation stop; Git boundaries remain opaque.
-# Returns 0 when every subtree was measured, 1 for measurement errors,
-# 124 when the shared deadline expires, and 2 on usage error. Nonzero means
-# callers must not read partial rows as a complete total.
-_DM_MF_ERR="" _DM_MF_LIST="" _DM_MF_WORK="" _DM_MF_SEQ=0
-_DM_MF_RC=0 _DM_MF_DIALECT=""
-_DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
-
-# One batched find|stat pass per subtree (same idiom as
-# scratch_budget_content_mtime --strict: one process fan-out, not one stat fork
-# per file). Sets the _DM_MF_BYTES/_DM_MF_FILES/_DM_MF_NEWEST globals; returns
-# 1 when find could not read some part of the subtree.
-_dm_mf_subtree() {
-  local dir="$1" out agg rc
-  _DM_MF_BYTES=0 _DM_MF_FILES=0 _DM_MF_NEWEST=0
-  if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
-    if out="$(act_run_bounded find "$dir" -xdev \( -type d -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune -exec printf 'G\n' \; \) -o \( \( -type f -o -type l \) -exec stat -f '%z %m' {} + \) 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
-  else
-    if out="$(act_run_bounded find "$dir" -xdev \( -type d -exec sh -c 'test -e "$1/.git" || test -L "$1/.git"' _ {} \; -prune -exec printf 'G\n' \; \) -o \( \( -type f -o -type l \) -exec stat -c '%s %Y' {} + \) 2>"$_DM_MF_ERR")"; then rc=0; else rc=$?; fi
-  fi
-  (( rc == 0 )) || return "$rc"
-  # A G marker makes this subtree non-aggregatable, so the walker descends
-  # to emit the opaque boundary and ordinary siblings without scanning Git.
-  # A filename containing a newline cannot disturb this: stat prints one line
-  # per file and the name is never printed, so the line count is the file count.
-  agg="$(printf '%s\n' "$out" | awk '
-    NF == 0 { next }
-    NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
-      bytes += $1; files += 1; if ($2 + 0 > newest) newest = $2 + 0; next
-    }
-    { exit 3 }
-    END { printf "%d %d %d\n", bytes, files, newest }')" || return 1
-  read -r _DM_MF_BYTES _DM_MF_FILES _DM_MF_NEWEST <<<"$agg"
-  return 0
-}
-
-# _dm_mf_list <dir> — write the NUL-separated, sorted direct children of <dir>
-# to a per-call file (recursion must never share one list path: a child level
-# would clobber the parent's enumeration mid-read). Sets $_DM_MF_LIST. Returns 1
-# when the directory could not be listed.
-_dm_mf_list() {
-  _DM_MF_LIST="$_DM_MF_WORK/list.$(( ++_DM_MF_SEQ ))"
-  act_run_bounded find "$1" -xdev -mindepth 1 -maxdepth 1 -print0 2>"$_DM_MF_ERR" >"$_DM_MF_LIST" || return $?
-  act_run_bounded sort -z -o "$_DM_MF_LIST" "$_DM_MF_LIST" || return $?
-  return 0
-}
-
-_dm_mf_report_err() {
-  local msg
-  msg="$(head -n 3 "$_DM_MF_ERR" 2>/dev/null | tr '\n' ' ')"
-  printf 'scratch_budget_measure_files: unreadable: %s: %s\n' "${1}" "${msg:-measurement failed}" >&2
-  _DM_MF_RC=1
-}
-
-# _dm_mf_stat <path> — lstat size and mtime of <path> (never its target).
-_dm_mf_stat() {
-  if [[ "$_DM_MF_DIALECT" == Darwin ]]; then
-    act_run_bounded stat -f '%z %m' "$1" 2>/dev/null
-  else
-    act_run_bounded stat -c '%s %Y' "$1" 2>/dev/null
-  fi
-}
-
-_dm_mf_emit_leaf() {
-  local path="$1" flag="$2" out rc=0
-  out="$(_dm_mf_stat "$path")" || rc=$?
-  if [[ ! "$out" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
-    printf '0\t0\t0\tE\t%s\n' "$path"
-    _dm_mf_report_err "$path"
-    if (( rc == 124 )); then _DM_MF_RC=124; fi
-    return 0
-  fi
-  printf '%s\t1\t%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$flag" "$path"
-}
-
-_dm_mf_walk() {
-  local dir="$1" threshold_bytes="$2"
-  local bytes files newest child rc
-  if [[ -e "$dir/.git" || -L "$dir/.git" ]]; then
-    printf '0\t0\t0\tG\t%s\n' "$dir"
-    return 0
-  fi
-  if _dm_mf_subtree "$dir"; then
-    bytes=$_DM_MF_BYTES files=$_DM_MF_FILES newest=$_DM_MF_NEWEST
-    if (( bytes < threshold_bytes )); then
-      printf '%s\t%s\t%s\tA\t%s\n' "$bytes" "$files" "$newest" "$dir"
-      return 0
-    fi
-  else
-    rc=$?
-    if (( rc == 124 )); then
-      printf '0\t0\t0\tE\t%s\n' "$dir"
-      _dm_mf_report_err "$dir"
-      _DM_MF_RC=124
-      return 0
-    fi
-  fi
-  # At or above the threshold: descend so the caller sees where the bytes are.
-  # An unmeasurable subtree is descended too (it cannot be aggregated), which
-  # reports the failure at the path that could not be read instead of claiming
-  # an aggregate for it.
-  if _dm_mf_list "$dir"; then
-    :
-  else
-    rc=$?
-    printf '0\t0\t0\tE\t%s\n' "$dir"
-    _dm_mf_report_err "$dir"
-    if (( rc == 124 )); then _DM_MF_RC=124; fi
-    return 0
-  fi
-  while IFS= read -r -d '' child; do
-    if [[ -L "$child" ]]; then
-      _dm_mf_emit_leaf "$child" L
-    elif [[ -d "$child" ]]; then
-      _dm_mf_walk "$child" "$threshold_bytes"
-    else
-      _dm_mf_emit_leaf "$child" F
-    fi
-    if (( _DM_MF_RC == 124 )); then return 0; fi
-  done <"$_DM_MF_LIST"
-  return 0
-}
-
+# Read-only metadata traversal, independent of cleanup eligibility. Git roots
+# are opaque G boundaries; non-Git trees descend to measured files. Symlinks
+# are indivisible link leaves and never followed. Hardlinks count once per run.
+# TSV: unique inode bytes, file paths, newest epoch, A/F/L/E, path. NUL adds apparent bytes.
+# A requires strictly less than the ceiling (maximum 100 MiB). E is incomplete.
+# Returns 0 complete, 1 metadata/identity failure, 124 deadline, 2 usage error.
 scratch_budget_measure_files() {
-  local path="${1:-}" threshold_mib="${2:-100}" work rc
-  if [[ -z "$path" ]]; then
-    echo 'scratch_budget_measure_files: usage: scratch_budget_measure_files <path> [threshold_mib]' >&2
-    return 2
-  fi
+  local path="${1:-}" threshold_mib="${2:-100}" output_format="${3:-tsv}" rc=0
+  [[ -n "$path" ]] || return 2
+  if [[ "$output_format" =~ ^[0-9]+$ ]]; then output_format=tsv; fi
+  [[ "$output_format" == tsv || "$output_format" == --nul ]] || return 2
   [[ "$threshold_mib" =~ ^[0-9]+$ ]] || threshold_mib=100
-  _DM_MF_RC=0
-  if [[ "$(uname -s)" == Darwin ]]; then _DM_MF_DIALECT=Darwin; else _DM_MF_DIALECT=GNU; fi
-  _DM_MF_ERR="" _DM_MF_LIST=""
-  if [[ ! -e "$path" && ! -L "$path" ]]; then
-    printf '0\t0\t0\tE\t%s\n' "$path"
-    printf 'scratch_budget_measure_files: unreadable: %s: no such file\n' "$path" >&2
-    return 1
+  if (( threshold_mib < 1 || threshold_mib > 100 )); then threshold_mib=100; fi
+  if [[ "$output_format" == --nul ]]; then printf 'diskm-measure-leaves-v1\0'; fi
+  act_run_bounded python3 - "$path" "$threshold_mib" "${ACT_DEADLINE_AT:-}" "$output_format" <<'PY' || rc=$?
+import os
+import stat
+import sys
+import time
+
+root, threshold, deadline, output_format = sys.argv[1:]
+if output_format not in ('tsv', '--nul'):
+    sys.exit(2)
+# A trailing slash makes lstat follow a link on POSIX. Strip only slashes;
+# realpath/normpath would change ancestor-link semantics.
+root = root.rstrip(os.sep) or os.sep
+def emit_row(row):
+    if output_format == '--nul':
+        for value in row:
+            sys.stdout.buffer.write(os.fsencode(str(value)) + b'\0')
+    else:
+        print('%d\t%d\t%d\t%s\t%s' % tuple(row[:5]))
+ceiling = int(threshold) * 1024 * 1024
+deadline = float(deadline) if deadline else None
+nodes = {}
+seen = set()
+failed = False
+stack = [(root, False)]
+
+
+def check_deadline():
+    if deadline and time.monotonic() >= deadline:
+        raise TimeoutError('measurement deadline')
+
+
+try:
+    while stack:
+        check_deadline()
+        path, finishing = stack.pop()
+        if finishing:
+            node = nodes[path]
+            try:
+                current = os.lstat(path)
+                if (current.st_dev, current.st_ino, current.st_mtime_ns) != node['identity']:
+                    raise OSError('directory identity changed during measurement')
+            except OSError:
+                node['error'] = True
+                failed = True
+            children = [nodes[p] for p in node['children']]
+            node['bytes'] = sum(n['bytes'] for n in children)
+            node['apparent_bytes'] = sum(n['apparent_bytes'] for n in children)
+            node['files'] = sum(n['files'] for n in children)
+            node['newest'] = max((n['newest'] for n in children), default=0)
+            node['error'] |= any(n['error'] for n in children)
+            # Opaque Git roots remain visible through small non-Git ancestors;
+            # otherwise their unknown bytes disappear inside an aggregate row.
+            node['opaque'] = any(n['flag'] == 'G' or n['opaque'] for n in children)
+            # Link leaves remain visible even below the aggregation ceiling.
+            node['links'] = any(n['links'] for n in children)
+            continue
+        node = nodes[path] = dict(bytes=0, apparent_bytes=0, files=0, newest=0, flag='E',
+                                  children=[], error=False, links=False, opaque=False)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISDIR(st.st_mode):
+                try:
+                    os.lstat(os.path.join(path, '.git'))
+                except FileNotFoundError:
+                    pass
+                else:
+                    node['flag'] = 'G'
+                    continue
+                node['flag'] = 'A'
+                node['identity'] = (st.st_dev, st.st_ino, st.st_mtime_ns)
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        check_deadline()
+                        node['children'].append(entry.path)
+                node['children'].sort()
+                stack.append((path, True))
+                stack.extend((child, False) for child in reversed(node['children']))
+            else:
+                node['flag'] = 'L' if stat.S_ISLNK(st.st_mode) else 'F'
+                node['links'] = node['flag'] == 'L'
+                identity = (st.st_dev, st.st_ino)
+                # Count shared inode bytes once, but retain each path's own
+                # mtime so a later hardlink row cannot appear to be age zero.
+                node['apparent_bytes'] = st.st_size
+                node['newest'] = max(0, int(st.st_mtime))
+                node['files'] = 1
+                if identity not in seen:
+                    seen.add(identity)
+                    node['bytes'] = st.st_size
+        except OSError as exc:
+            node['error'] = True
+            node['flag'] = 'E'
+            failed = True
+            print('scratch_budget_measure_files: unreadable: %s: %s' % (path, exc), file=sys.stderr)
+
+    stack = [root]
+    while stack:
+        check_deadline()
+        path = stack.pop()
+        node = nodes[path]
+        if node['flag'] == 'A' and (node['apparent_bytes'] >= ceiling or node['error'] or node['links'] or node['opaque']):
+            stack.extend(reversed(node['children']))
+            if node['error'] and not node['children']:
+                emit_row((0, 0, 0, 'E', path, 0))
+            elif node['error'] and node.get('identity'):
+                # Preserve explicit unfinished coverage even when readable
+                # siblings exist; successful child rows remain only partial.
+                emit_row((0, 0, 0, 'E', path, 0))
+            continue
+        emit_row((node['bytes'], node['files'], node['newest'], node['flag'], path, node['apparent_bytes']))
+except TimeoutError:
+    sys.exit(124)
+sys.exit(1 if failed else 0)
+PY
+  if (( rc == 124 )); then
+    if [[ "$output_format" == --nul ]]; then printf '%s\0%s\0%s\0%s\0%s\0%s\0' 0 0 0 E "$path" 0
+    else printf '0\t0\t0\tE\t%s\n' "$path"; fi
   fi
-  if [[ -L "$path" ]]; then
-    _dm_mf_emit_leaf "$path" L
-    return $_DM_MF_RC
+  if (( rc != 0 )); then
+    printf 'scratch_budget_measure_files: unreadable or deadline: %s rc=%s\n' "$path" "$rc" >&2
   fi
-  if [[ ! -d "$path" ]]; then
-    _dm_mf_emit_leaf "$path" F
-    return $_DM_MF_RC
+  return "$rc"
+}
+
+# A reporting adapter for consumers which must keep stdout numeric or framed.
+# Capture the status: partial rows must never be described as a complete total.
+scratch_budget_report_measurement() {
+  local rc=0 threshold_mib="${2:-100}"
+  [[ "$threshold_mib" =~ ^[0-9]+$ ]] || threshold_mib=100
+  if (( threshold_mib < 1 || threshold_mib > 100 )); then threshold_mib=100; fi
+  printf 'measurement_method=file-summed-apparent threshold_mib=%s flags=A:directory,F:file,L:link,E:unfinished path=%s\n' "$threshold_mib" "$1" >&2
+  scratch_budget_measure_files "$1" "$threshold_mib" >&2 || rc=$?
+  if (( rc == 0 )); then
+    printf 'measurement_status=complete rc=0 path=%s\n' "$1" >&2
+  else
+    printf 'measurement_status=incomplete rc=%s path=%s\n' "$rc" "$1" >&2
   fi
-  work="$(mktemp -d "${TMPDIR:-/tmp}/dm-mf.XXXXXX")" || return 2
-  _DM_MF_WORK="$work" _DM_MF_ERR="$work/err" _DM_MF_LIST="" _DM_MF_SEQ=0
-  _dm_mf_walk "$path" "$(( threshold_mib * 1024 * 1024 ))"
-  rc=$_DM_MF_RC
-  rm -rf "$work"
-  return $rc
+  return "$rc"
 }

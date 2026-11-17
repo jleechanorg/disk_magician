@@ -19,6 +19,8 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 # shellcheck source=scripts/lib/actuator_receipt.sh
 source "$SCRIPT_DIR/lib/actuator_receipt.sh"
 
+# shellcheck source=scripts/safety_lib.sh
+source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=scripts/lib/docker_probe.sh
 if [[ -f "$SCRIPT_DIR/lib/docker_probe.sh" ]]; then
   source "$SCRIPT_DIR/lib/docker_probe.sh"
@@ -32,6 +34,7 @@ TRIM_ONLY=false
 NATIVE_DOCKER=false
 TRIM_GB="${DISK_MAGICIAN_COLIMA_TRIM_GB:-8}"
 TRIM_TIMEOUT_SEC="${DISK_MAGICIAN_COLIMA_TRIM_TIMEOUT:-300}"
+DOCKER_RECENCY_FILTER="until=$(( $(safety_disposable_recency_floor_minutes) / 60 ))h"
 ACTUATOR_REMOVED_COUNT=0
 
 usage() {
@@ -119,11 +122,11 @@ run_cmd() {
 }
 
 run_builder_prune() {
-  [[ "$DRY_RUN" == true ]] && { log "[dry-run] docker builder prune -af --reserved-space 5g"; return 0; }
+  [[ "$DRY_RUN" == true ]] && { log "[dry-run] docker builder prune -af --filter $DOCKER_RECENCY_FILTER --reserved-space 5g"; return 0; }
   local output rc=0 line
-  if output="$(docker builder prune -af --reserved-space 5g 2>&1)"; then :
+  if output="$(docker builder prune -af --filter "$DOCKER_RECENCY_FILTER" --reserved-space 5g 2>&1)"; then :
   else
-    if output="$(docker builder prune -af --keep-storage 5g 2>&1)"; then rc=0; else rc=$?; fi
+    if output="$(docker builder prune -af --filter "$DOCKER_RECENCY_FILTER" --keep-storage 5g 2>&1)"; then rc=0; else rc=$?; fi
   fi
   while IFS= read -r line; do [[ -z "$line" ]] || log "$line"; done <<< "$output"
   if [[ "$rc" == 0 ]]; then record_docker_prune_output "$output"; else
@@ -618,10 +621,10 @@ log "=== builder prune (cap 5g reserved) ==="
 run_builder_prune
 
 log "=== image prune (unused) ==="
-run_cmd docker image prune -af
+run_cmd docker image prune -af --filter "$DOCKER_RECENCY_FILTER"
 
 log "=== system prune (dangling containers/networks) ==="
-run_cmd docker system prune -f
+run_cmd docker system prune -f --filter "$DOCKER_RECENCY_FILTER"
 
 prune_orphaned_volumes() {
   local vol_list vol ps_out refs

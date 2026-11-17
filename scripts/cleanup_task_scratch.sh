@@ -4,6 +4,9 @@
 # Defaults to DRY-RUN (--dry-run); pass --clean (or --apply) to execute removals.
 set -euo pipefail
 
+# Shared measurement is independent of lifecycle deletion eligibility.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
+
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
 
@@ -32,7 +35,8 @@ source "$SCRIPT_DIR/lib/quarantine.sh"
 source "$SCRIPT_DIR/worktree_remove_hook.sh"
 
 DRY_RUN=true
-TASK_SCRATCH_MIN_AGE_HOURS="${DISK_MAGICIAN_TASK_SCRATCH_MIN_AGE_HOURS:-12}"
+TASK_SCRATCH_DEFAULT_AGE_HOURS=$(( $(safety_disposable_recency_floor_minutes) / 60 ))
+TASK_SCRATCH_MIN_AGE_HOURS="${DISK_MAGICIAN_TASK_SCRATCH_MIN_AGE_HOURS:-$TASK_SCRATCH_DEFAULT_AGE_HOURS}"
 TASK_SCRATCH_ROOTS_RAW="${DISK_MAGICIAN_TASK_SCRATCH_ROOTS:-$HOME/projects:$HOME/projects_other}"
 STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 MANIFEST_FILE="$STATE_DIR/task_scratch_cleanup_manifest.txt"
@@ -51,7 +55,7 @@ Candidates:
 
 Safety Gates (fail-closed):
   - Skips paths protected by safety_gate (safety.local.json).
-  - Skips containers with any entry modified within --min-age-hours (default: 12h).
+  - Skips containers with any entry modified within --min-age-hours (default: 48h).
   - Skips containers with open file handles (_av_open_file / lsof +D) or live cwd.
   - Skips containers containing secret-like files (_av_secret_like).
   - Inspects nested git worktrees and clones: preserves the container if any
@@ -63,7 +67,7 @@ Safety Gates (fail-closed):
 Options:
   --clean, --apply       Execute removals (default: dry-run preview).
   --dry-run              Preview candidates without modifying disk or manifest.
-  --min-age-hours <N>    Minimum container quiet age in hours (default: 12;
+  --min-age-hours <N>    Minimum container quiet age in hours (default: 48;
                          env DISK_MAGICIAN_TASK_SCRATCH_MIN_AGE_HOURS).
   --roots <DIR[:DIR...]> Colon-separated scan roots (default:
                          \$HOME/projects:\$HOME/projects_other;
@@ -467,6 +471,11 @@ for root in ${CANONICAL_ROOTS[@]+"${CANONICAL_ROOTS[@]}"}; do
     # Skip symlinks or non-directories
     if [[ -L "$dir" || ! -d "$dir" ]]; then
       continue
+    fi
+
+    # Measurement includes protected source; deletion gates remain below.
+    if matches_task_scratch_pattern "$base"; then
+      scratch_budget_report_measurement "$dir" || exit $?
     fi
 
     # Candidate must NOT itself be a git repo or linked worktree

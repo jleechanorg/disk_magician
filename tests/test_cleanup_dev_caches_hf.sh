@@ -2,7 +2,7 @@
 # Hugging Face cache handling in cleanup_dev_caches.sh.
 #
 # ~/.cache/huggingface and ~/.cache/hy3dgen are model caches: large, rebuildable by
-# re-download, but a running job may be mid-download. So a root touched within 24h must
+# re-download, but a running job may be mid-download. So a root touched within 48h must
 # be preserved wholesale, an unmeasurable scan must preserve (fail closed), and a bare
 # invocation must delete nothing.
 set -uo pipefail
@@ -28,9 +28,9 @@ touch -d '4 days ago' "$T/home/.cache/huggingface/stored_tokens/notes.txt" 2>/de
   || touch -t "$(date -d '4 days ago' +%Y%m%d%H%M 2>/dev/null || echo 202601010000)" "$T/home/.cache/huggingface/stored_tokens/notes.txt"
 
 out="$(run)"
-[[ "$out" == *"huggingface cache: [dry-run] would delete contents"* ]] \
-  && ok "old huggingface cache is reported in dry-run" \
-  || bad "old huggingface cache not reported in dry-run"
+[[ "$out" == *"huggingface cache idle unit: [dry-run] would delete $T/home/.cache/huggingface/hub/models--old"* ]] \
+  && ok "old huggingface model unit is reported in dry-run" \
+  || bad "old huggingface model unit not reported in dry-run"
 [[ -f "$T/home/.cache/huggingface/hub/models--old/snapshots/blob" ]] \
   && ok "dry-run deleted nothing" || bad "dry-run deleted a file"
 [[ -f "$T/home/.cache/huggingface/stored_tokens/notes.txt" ]] \
