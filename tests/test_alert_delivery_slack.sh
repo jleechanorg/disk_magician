@@ -241,6 +241,93 @@ else
   pass "operator silence marker not created by this suite"
 fi
 
+# ── 11. A curl-level failure must not abort the script ─────────────────────
+# Regression: on the curl-failure path the handler read an undeclared variable,
+# so under set -u the script died with "response: unbound variable" BEFORE
+# printing the disk warning. Exit 1 then looked like the normal fired-alert code
+# and hid the crash. Assert the warning still prints and the diagnostic names it.
+cat > "$BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl: (7) Failed to connect\n' >&2
+exit 7
+EOF
+chmod +x "$BIN/curl"
+LOG11="$TMP/curl-11.log"; ERR11="$TMP/err-11.txt"; OUT11="$TMP/out-11.txt"
+res="$(RUN_ERR="$ERR11" run_alert "$LOG11" "${FIRING_ENV[@]}" \
+  DISK_MAGICIAN_ALERT_SLACK_WEBHOOK='https://hooks.slack.com/services/T00/B00/fake')"
+! grep -q 'unbound variable' "$ERR11" \
+  && pass "curl failure does not trigger an unbound-variable abort" \
+  || fail "curl failure aborted the script: $(grep 'unbound variable' "$ERR11" | head -1)"
+grep -q 'slack delivery FAILED' "$ERR11" \
+  && pass "curl failure is reported as a delivery failure with detail" \
+  || fail "curl failure produced no delivery-failure diagnostic"
+
+# ── 12. A 200 with a rejection body must not be reported as delivered ──────
+# Slack's webhook answers the literal body "ok" on acceptance; a 200 carrying
+# an error string is a rejection. An empty 200 must also fail closed.
+make_curl() { # make_curl <status> <body>
+  cat > "$BIN/curl" <<EOF
+#!/usr/bin/env bash
+out=""; prev=""
+for a in "\$@"; do case "\$prev" in -o) out="\$a";; esac; prev="\$a"; done
+printf '%s' '$2' > "\$out"
+printf '%s' '$1'
+EOF
+  chmod +x "$BIN/curl"
+}
+for case in "200|ok" "200|invalid_payload" "200|"; do
+  status="${case%%|*}"; body="${case#*|}"
+  make_curl "$status" "$body"
+  LOGX="$TMP/curl-ack-$status-${body:-empty}.log"; ERRX="$TMP/err-ack-$status-${body:-empty}.txt"
+  RUN_ERR="$ERRX" run_alert "$LOGX" "${FIRING_ENV[@]}" \
+    DISK_MAGICIAN_ALERT_SLACK_WEBHOOK='https://hooks.slack.com/services/T00/B00/fake' >/dev/null
+  if [[ "$body" == "ok" ]]; then
+    ! grep -q 'NOT acknowledged\|FAILED' "$ERRX" \
+      && pass "HTTP 200 with body 'ok' is accepted" \
+      || fail "an acknowledged 200 was reported as a problem"
+  else
+    grep -q 'NOT acknowledged' "$ERRX" \
+      && pass "HTTP 200 with body '${body:-empty}' is NOT reported as delivered" \
+      || fail "a 200 with body '${body:-empty}' was silently accepted"
+  fi
+done
+
+# ── 13. Email must fail closed when no timer is available ──────────────────
+# Without a 'timeout' binary the MTA call was unbounded, so a wedged relay
+# could block the alert job forever. Simulate a PATH with no timeout.
+# A fixed PATH with no timer: /usr/bin and /bin only. Verify the premise
+# instead of assuming it, so the test cannot silently stop testing anything.
+NO_TIMEOUT_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+if PATH="$NO_TIMEOUT_PATH" command -v timeout >/dev/null 2>&1; then
+  echo "SKIP: a 'timeout' binary exists on the fixed path; cannot test the no-timer case"
+else
+  ERR13="$TMP/err-13.txt"
+  env PATH="$NO_TIMEOUT_PATH" FAKE_CURL_LOG="$TMP/curl-13.log" \
+    HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
+    DISK_MAGICIAN_DISKM_BIN="$BIN/disk-magician" \
+    DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
+    DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
+    DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
+    bash "$ALERT" >/dev/null 2>"$ERR13" || true
+fi
+grep -q 'no .timeout. command' "$ERR13" \
+  && pass "email fails closed with a diagnostic when no timer is available" \
+  || fail "email did not fail closed without a timer"
+
+# ── 14. --status reports configuration without leaking destinations ─────────
+OUT14="$(DISK_MAGICIAN_ALERT_SLACK_WEBHOOK='https://hooks.slack.com/services/SECRETXYZ' \
+  DISK_MAGICIAN_ALERT_EMAIL_TO='secret@example.com' \
+  bash "$ALERT" --status 2>/dev/null)"
+grep -q 'Slack delivery configured: YES' <<<"$OUT14" \
+  && pass "--status reports Slack delivery as configured" \
+  || fail "--status omits Slack delivery state"
+grep -q 'Email delivery configured: YES' <<<"$OUT14" \
+  && pass "--status reports email delivery as configured" \
+  || fail "--status omits email delivery state"
+! grep -q 'SECRETXYZ\|secret@example.com' <<<"$OUT14" \
+  && pass "--status never echoes destination values" \
+  || fail "--status leaked a destination value"
+
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   echo "ALL PASS"

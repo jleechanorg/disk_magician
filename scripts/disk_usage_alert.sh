@@ -68,32 +68,41 @@ print(json.dumps({"text": "*diskm alert on %s*\n%s" % (os.environ["HOST"], os.en
     echo "slack delivery skipped: could not build a JSON payload" >&2
     return 0
   fi
-  local body_file http_code
-  body_file="$(mktemp "${TMPDIR:-/tmp}/diskm-slack-XXXXXX")" || body_file=/dev/null
-  # Separate the HTTP status from the body so acceptance is decided on both.
-  # curl exits 0 for any HTTP response, including 4xx/5xx, so exit status alone
-  # cannot tell "delivered" from "rejected"; and a webhook can answer 200 with an
-  # error body. Accept only 2xx plus a body that is empty or starts with "ok".
+  local body_file="" http_code="" response="" curl_err=""
+  # -o/-w split status from body. curl exits 0 for any HTTP response including
+  # 4xx/5xx, so completion alone proves nothing; and a webhook can answer 200
+  # with a rejection body. Accept only 2xx with the exact incoming-webhook "ok".
+  body_file="$(mktemp "${TMPDIR:-/tmp}/diskm-slack-XXXXXX")" || body_file=""
+  if [[ -z "$body_file" ]]; then
+    echo "slack delivery skipped: could not create a temp file for the response" >&2
+    return 0
+  fi
   if http_code="$(curl -sS -m "$DELIVERY_TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
       -X POST -H 'Content-type: application/json' \
       --data-binary "$payload" \
       "$SLACK_WEBHOOK" 2>&1)"; then
     response="$(cat "$body_file" 2>/dev/null || true)"
-    rm -f "$body_file"
     case "$http_code" in
       2[0-9][0-9])
-        if [[ -n "$response" && "${response:0:2}" != "ok" ]]; then
-          echo "slack delivery NOT acknowledged (HTTP $http_code): $response" >&2
+        # Slack's incoming webhook answers the literal body "ok" on acceptance.
+        # An empty body, or 200 carrying an error string, is a rejection we must
+        # not report as delivered.
+        if [[ "$response" != "ok" ]]; then
+          echo "slack delivery NOT acknowledged (HTTP $http_code): ${response:-empty body}" >&2
         fi
+        ;;
+      "000"|"")
+        echo "slack delivery FAILED: no usable HTTP status from curl: ${response:-no detail}" >&2
         ;;
       *)
         echo "slack delivery FAILED (HTTP $http_code): ${response:-no body}" >&2
         ;;
     esac
-    return 0
+  else
+    curl_err="$http_code"
+    echo "slack delivery FAILED: curl could not reach the webhook: ${curl_err:-no detail}" >&2
   fi
-  rm -f "$body_file"
-  echo "slack delivery FAILED: $response" >&2
+  [[ -n "$body_file" ]] && rm -f "$body_file"
   return 0
 }
 
@@ -125,8 +134,15 @@ deliver_alert_email() { # deliver_alert_email <message> <host>
     printf '%s\n' "$message"
     printf '\n-- \ndisk_magician disk_usage_alert.sh\n'
   } > "$mail_file"
+  # Fail closed on an unbounded send: without a timer the MTA can block the
+  # alert job indefinitely (and an alert that never finishes is not an alert).
   local timeout_cmd=()
-  command -v timeout >/dev/null 2>&1 && timeout_cmd=(timeout "$EMAIL_TIMEOUT_SEC")
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd=(timeout "$EMAIL_TIMEOUT_SEC")
+  else
+    echo "email delivery skipped: no 'timeout' command to bound the MTA call" >&2
+    return 0
+  fi
   # Capture the status inside the conditional: set -e would otherwise exit the
   # script with the MTA's code before the best-effort handler can run.
   local rc=0
@@ -303,6 +319,10 @@ if [[ $# -gt 0 ]]; then
       fi
       echo "Threshold: ${THRESHOLD_GB} GB"
       echo "Scratch floor: ${SCRATCH_FLOOR_GB} GiB free / ${SCRATCH_FLOOR_PCT}% free (0 disables an arm)"
+      # Report configured-ness as booleans only: never echo a webhook URL or an
+      # address into logs, terminals, or pasted support output.
+      echo "Slack delivery configured: $([[ -n "$SLACK_WEBHOOK" ]] && echo 'YES' || echo 'NO')"
+      echo "Email delivery configured: $([[ -n "$EMAIL_TO" ]] && echo 'YES' || echo 'NO')"
       echo "Silenced: $(is_silenced && echo 'YES' || echo 'NO')"
       IFS=$'\t' read -r status_streak status_coverage_pct status_reasons <<< "$(update_coverage_streak)"
       echo "Coverage streak: ${status_streak} (effective_pct=${status_coverage_pct}, escalate at ${STREAK_ESCALATE_AT}; reasons: ${status_reasons})"
