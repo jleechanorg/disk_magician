@@ -126,8 +126,12 @@ run_alert() { # run_alert <curl-log> [VAR=value...] [--script-flag...]; echoes "
       *)   flags+=("$arg") ;;
     esac
   done
+  # Bash 3.2 (macOS) treats "${arr[@]}" as unbound when the array is empty
+  # under set -u, and the aggregate runner sets that. Seed a no-op so both
+  # arrays are always safe to expand, and keep the expansions guarded.
   local rc
-  env FAKE_CURL_LOG="$logfile" "${envvars[@]}" bash "$ALERT" "${flags[@]}" >/dev/null 2>${RUN_ERR:-/dev/null}
+  env FAKE_CURL_LOG="$logfile" ${envvars[@]+"${envvars[@]}"} \
+    bash "$ALERT" ${flags[@]+"${flags[@]}"} >/dev/null 2>${RUN_ERR:-/dev/null}
   rc=$?
   echo "rc=$rc"
 }
