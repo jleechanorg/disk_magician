@@ -284,6 +284,40 @@ else
 fi
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 
+echo "== 26. /dot repro: a FAILING or EMPTY gate must never authorize deletion =="
+g26="$TMP/g26"; mkdir -p "$g26/state" "$g26/fx"
+export DISK_MAGICIAN_STATE_DIR="$g26/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+sim_fixture_device "$g26/fx" "abcabcab-1111-2222-3333-444444444444" "wai-shared-gate" "Shutdown" 999
+# Simulate a fully eligible device (current-generation receipt past the floor) so
+# ONLY the gate can stop the delete.
+cp -R "$g26/fx/abcabcab-1111-2222-3333-444444444444" "$g26/fx/keepref" 2>/dev/null || true
+gen_dir="$g26/state/gen"; mkdir -p "$gen_dir"
+printf '1\n' >"$gen_dir/abcabcab-1111-2222-3333-444444444444"
+mkdir -p "$g26/state/receipts"
+old_ts="$(date -u -v-72H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"action": "release", "udid": "%s", "lease_generation": 1, "token_fingerprint": "x", "released_at": "%s"}\n' \
+  "abcabcab-1111-2222-3333-444444444444" "$old_ts" >"$g26/state/receipts/sim_release_receipts.jsonl"
+
+# Case A: gate present but returns 42 with NO output (dot's exact fixture)
+artifact_removal_verdict() { return 42; }
+export -f artifact_removal_verdict 2>/dev/null || true
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$g26/fx" sim_prune --clean 2>&1)"
+[[ -d "$g26/fx/abcabcab-1111-2222-3333-444444444444" ]] && ok "failing gate (42, no output) blocked the deletion" || bad "failing gate still authorized a deletion"
+printf '%s' "$out" | grep -q 'keep:verdict-error' && ok "prune reported the gate error by name" || bad "gate error not reported"
+unset -f artifact_removal_verdict 2>/dev/null || true
+
+# Case B: gate present, exits 0, but returns an EMPTY verdict
+artifact_removal_verdict() { return 0; }
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$g26/fx" sim_prune --clean 2>&1)"
+[[ -d "$g26/fx/abcabcab-1111-2222-3333-444444444444" ]] && ok "empty verdict blocked the deletion" || bad "empty verdict authorized a deletion"
+unset -f artifact_removal_verdict 2>/dev/null || true
+
+# Case C: gate returns an explicit non-remove verdict
+artifact_removal_verdict() { printf 'kept:secret-like\n'; return 0; }
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$g26/fx" sim_prune --clean 2>&1)"
+[[ -d "$g26/fx/abcabcab-1111-2222-3333-444444444444" ]] && ok "explicit keep verdict blocked the deletion" || bad "keep verdict authorized a deletion"
+unset -f artifact_removal_verdict 2>/dev/null || true
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

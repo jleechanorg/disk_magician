@@ -403,16 +403,37 @@ sim_prune() {
         kept=$((kept+1)); continue
       fi
 
-      # Route through the shared removal verdict when this tree provides it, so
-      # the simulator path cannot bypass secret/repo/liveness gates (review P0).
-      if declare -F artifact_removal_verdict >/dev/null 2>&1; then
-        local verdict
-        verdict="$(artifact_removal_verdict "$target" 2>/dev/null | tail -1)"
-        if [[ -n "$verdict" && "$verdict" != remove* ]]; then
-          rmdir "$plock" 2>/dev/null || true
-          echo "keep:verdict-$verdict $name"
-          kept=$((kept+1)); continue
+      # The shared removal verdict is MANDATORY, not best-effort: a deletion may
+      # only proceed when the gate is present, exits 0, and returns an explicit
+      # `remove` verdict. A missing gate, a non-zero exit, or empty/unknown output
+      # all fail closed (review P0: a gate returning 42 with no output still
+      # authorized a deletion because stderr was masked and empty fell through).
+      if ! declare -F artifact_removal_verdict >/dev/null 2>&1; then
+        local _lib; _lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/artifact_verdict.sh"
+        if [[ -f "$_lib" ]]; then
+          # shellcheck source=/dev/null
+          source "$_lib" >/dev/null 2>&1 || true
         fi
+      fi
+      if ! declare -F artifact_removal_verdict >/dev/null 2>&1; then
+        rmdir "$plock" 2>/dev/null || true
+        echo "keep:verdict-unavailable $name"
+        kept=$((kept+1)); continue
+      fi
+      local verdict raw vrc=0
+      # No pipeline: `| tail -1` would report tail's status and keep masking the
+      # gate's own exit code (review P0).
+      raw="$(artifact_removal_verdict "$target" 2>&1)" || vrc=$?
+      verdict="$(printf '%s\n' "$raw" | tail -1)"
+      if [[ "$vrc" -ne 0 ]]; then
+        rmdir "$plock" 2>/dev/null || true
+        echo "keep:verdict-error-$vrc $name"
+        kept=$((kept+1)); continue
+      fi
+      if [[ "$verdict" != remove ]]; then
+        rmdir "$plock" 2>/dev/null || true
+        echo "keep:verdict-${verdict:-empty} $name"
+        kept=$((kept+1)); continue
       fi
 
       if declare -F deletion_log >/dev/null 2>&1; then deletion_log "$target" "sim-prune"; fi
