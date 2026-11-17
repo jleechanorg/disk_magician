@@ -47,6 +47,8 @@ mkdir -p "$leases/.owner-mutation.reuse-lock"
 printf '%s\n' "$holder" > "$leases/.owner-mutation.reuse-lock/pid"
 date +%s > "$leases/.owner-mutation.reuse-lock/acquired_at"
 out="$(run_lease_write live)"
+[[ -d "$leases/.owner-mutation.reuse-lock" ]] && ok "diagnostics never remove a live holder's lock" || \
+  bad "diagnostics never remove a live holder's lock"
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 check "live holder: the write fails" "write=failed" "$out"
@@ -56,9 +58,10 @@ check "live holder: diagnostic reports a live holder" "holder_alive=true" "$out"
 [[ "$out" =~ ttl_remaining_s=[0-9]+ ]] && ok "live holder: diagnostic reports a numeric recovery window" || \
   bad "live holder: diagnostic reports a numeric recovery window" "$out"
 
-# 3. Crashed holder inside the 3600 s gate: liveness and the window are reported,
-#    and the lock is NOT removed by the diagnostic. The pid must be a real,
-#    exited pid: ps rejects out-of-range ids and the probe fails closed.
+# 3. Crashed holder with complete metadata inside the old 3600 s gate: the dead
+#    owner is reaped on contact (bead mc38), so the write succeeds without a
+#    busy diagnostic. The pid must be a real, exited pid: ps rejects out-of-range
+#    ids and the probe fails closed.
 sleep 30 &
 crashed=$!
 kill "$crashed" 2>/dev/null
@@ -68,13 +71,9 @@ mkdir -p "$leases/.owner-mutation.reuse-lock"
 printf '%s\n' "$crashed" > "$leases/.owner-mutation.reuse-lock/pid"
 date +%s > "$leases/.owner-mutation.reuse-lock/acquired_at"
 out="$(run_lease_write crashed)"
-check "crashed holder: diagnostic reports a dead holder" "holder_alive=false" "$out"
-remaining="$(sed -n 's/.*ttl_remaining_s=\([0-9-]*\).*/\1/p' <<<"$out")"
-[[ "$remaining" =~ ^[0-9]+$ ]] && (( remaining > 3500 && remaining <= 3600 )) && \
-  ok "crashed holder: recovery window is reported as the remaining gate ($remaining s)" || \
-  bad "crashed holder: recovery window is reported as the remaining gate" "remaining=$remaining"
-[[ -d "$leases/.owner-mutation.reuse-lock" ]] && ok "diagnostics never remove the held lock" || \
-  bad "diagnostics never remove the held lock"
+check "crashed holder: dead owner's lock is reaped and the write succeeds" "write=ok" "$out"
+[[ "$out" != *registry-lock-busy* ]] && ok "crashed holder: no busy diagnostic after reaping" || \
+  bad "crashed holder: no busy diagnostic after reaping" "$out"
 
 # 4. Both user-facing callers interpolate the diagnostic.
 for caller in worktree_new.sh scratch_new.sh; do

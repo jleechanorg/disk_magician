@@ -862,16 +862,14 @@ _lease_lock_scope release probe'''
     (home / 'writer-go').touch()
     finish('sigkill', home, p, -signal.SIGKILL)
     assert Path(env['LEASE_TEST_LEASE']).is_file()
-    contender(home, env)
     for lock in locks(home):
         lease = str(lock)[:-len('.reuse-lock')]
-        for age, expected in ((3590, 1), (3610, 0)):
-            (lock / 'acquired_at').write_text(str(int(time.time()) - age) + '\n')
-            result = subprocess.run(['bash', '-c', 'source "$1"; [[ "$LEASE_REUSE_LOCK_TTL_SEC" == 3600 ]]; lease_reuse_lock_recover "$2"',
-                                     'bash', str(library), lease], env=env, text=True, capture_output=True, timeout=5)
-            assert result.returncode == expected, (age, result.stdout, result.stderr)
+        (lock / 'acquired_at').write_text(str(int(time.time()) - 60) + '\n')
+        result = subprocess.run(['bash', '-c', 'source "$1"; [[ "$LEASE_REUSE_LOCK_TTL_SEC" == 3600 ]]; lease_reuse_lock_recover "$2"',
+                                 'bash', str(library), lease], env=env, text=True, capture_output=True, timeout=5)
+        assert result.returncode == 0, (result.stdout, result.stderr)
     assert not locks(home)
-    print('PASS: SIGKILL retains full lock shape and existing dead-PID 3600-second recovery')
+    print('PASS: SIGKILL retains full lock shape and immediate dead-owner recovery regardless of stamp age')
     print('Critical-section artifacts: ' + str(temp))
 
 

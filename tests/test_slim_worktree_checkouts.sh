@@ -143,6 +143,16 @@ assert_absent "3h worktree docs removed" "$H3_WT/docs/user-stories-ui"
 assert_present "1h worktree docs preserved" "$H1_WT/docs/user-stories-ui"
 assert_contains "guard log records hours:2 override" "slim-worktrees: recency override active: hours:2" "$(cat "$STATE_TMP/worktree_guard.log" 2>/dev/null || true)"
 
+echo "== case 9: incomplete lsof evidence fails closed (nothing slimmed) =="
+FAIL_BIN="$TMP_ROOT/failbin"; mkdir -p "$FAIL_BIN"
+printf '#!/bin/sh\necho "lsof: WARNING: partial" >&2\nprintf "p1\\n"\nexit 1\n' > "$FAIL_BIN/lsof"; chmod +x "$FAIL_BIN/lsof"
+LSOF_WT=$(mk_wt lsof-fail-clean)
+find "$LSOF_WT" -path "$LSOF_WT/.git" -prune -o -exec touch -t "$(date -v-10d +%Y%m%d%H%M 2>/dev/null || date -d '-10 days' +%Y%m%d%H%M)" {} + 2>/dev/null
+OUT_LSOF=$(WORKTREE_APPROVED=1 env -i PATH="$FAIL_BIN:$TEST_PATH" HOME="$TMP_ROOT/home" WORKTREE_APPROVED=1 \
+  DISK_MAGICIAN_STATE_DIR="$TMP_ROOT/state-lsof" bash "$TARGET_SCRIPT" --roots "$ROOTS" --clean 2>&1)
+assert_contains "slim refuses on incomplete lsof" "lsof output incomplete" "$OUT_LSOF"
+assert_present "worktree docs untouched when lsof incomplete" "$LSOF_WT/docs/user-stories-ui"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
