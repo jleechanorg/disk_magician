@@ -8,6 +8,8 @@
 #
 # Run: bash tests/test_cleanup_tmp_pressure_budget.sh
 set -euo pipefail
+# These tests drive sizes through a stubbed du; keep the du sizer (PR k1yf adds a private-size default on macOS).
+export DISK_MAGICIAN_SIZE_METHOD=du
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_SCRIPT="$REPO_ROOT/scripts/cleanup_tmp.sh"
@@ -77,7 +79,7 @@ mk_fixture() {
 run_tmp() {  # <private_tmp> [VAR=val ...] — sets RC and OUT
   local root="$1"; shift
   set +e
-  OUT="$(env -i HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
+  OUT="$(env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
     LARGE_TMP_APPROVED=1 LARGE_TMP_MIN_KB=1 LARGE_TMP_ACTIVE_HOURS=4 \
     DISK_MAGICIAN_LSOF_BIN="$BIN/lsof" DISK_MAGICIAN_TIMEOUT_BIN="$BIN/timeout" \
     DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/archive" DISK_MAGICIAN_TEST_CONTEXT=1 \
@@ -146,7 +148,7 @@ for d in a_slow claude_big_1 claude_big_2 claude_big_3; do mkdir -p "$R5/$d"; he
 /usr/bin/find "$R5/claude_big_3" -exec touch -t 202201010000 {} +
 mk_fixture "$TMP_ROOT/p5"
 set +e
-OUT="$(env -i HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
+OUT="$(env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
   DISK_MAGICIAN_LSOF_BIN="$BIN/lsof" DISK_MAGICIAN_TIMEOUT_BIN="$BIN/timeout" \
   DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/archive" DISK_MAGICIAN_TEST_CONTEXT=1 \
@@ -183,7 +185,7 @@ exec "\$@"
 EOF
 chmod +x "$BIN/lsof_timeout"
 set +e
-OUT="$(env -i HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" DISK_MAGICIAN_LSOF_BIN="$BIN/lsof" \
+OUT="$(env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" DISK_MAGICIAN_LSOF_BIN="$BIN/lsof" \
   DISK_MAGICIAN_TIMEOUT_BIN="$BIN/timeout" DISK_MAGICIAN_PROBE_TIMEOUT_BIN="$BIN/lsof_timeout" \
   DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/archive" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMP_ROOT/p5" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$R5" \
@@ -218,7 +220,7 @@ check "message reports the wait" 'grep -q "after waiting" <<<"$(cat "$TMP_ROOT/w
 budget_run() {  # <root> [VAR=val ...] — budget run over <root>; sets RC and OUT
   local root="$1"; shift
   set +e
-  OUT="$(env -i HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
+  OUT="$(env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/home" PATH="$BIN:/usr/bin:/bin" \
     DISK_MAGICIAN_LSOF_BIN="$BIN/lsof" DISK_MAGICIAN_TIMEOUT_BIN="$BIN/timeout" \
     DISK_MAGICIAN_ARCHIVE_ROOT="$TMP_ROOT/archive" DISK_MAGICIAN_TEST_CONTEXT=1 \
     DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMP_ROOT/p5" \

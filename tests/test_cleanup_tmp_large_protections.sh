@@ -29,6 +29,8 @@
 #
 # Run: bash tests/test_cleanup_tmp_large_protections.sh
 set -euo pipefail
+# These tests drive sizes through a stubbed du; keep the du sizer (PR k1yf adds a private-size default on macOS).
+export DISK_MAGICIAN_SIZE_METHOD=du
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -290,7 +292,7 @@ if git -C "$REPO_ROOT" show "$PRE_FIX_SHA:scripts/cleanup_tmp.sh" > "$RED_SCRIPT
     set_old_mtime "$RED_PRIVATE_TMP/worldarchitect.ai"
 
     RED_OUT="$TMP_ROOT/red.out"
-    if run_capture "$RED_OUT" env -i HOME="$TMP_ROOT/red-home" \
+    if run_capture "$RED_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/red-home" \
       PATH="$RED_BIN:/usr/bin:/bin" \
       LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
       bash "$RED_SCRIPT" --clean --large; then
@@ -319,7 +321,7 @@ make_large_dir "$G1_PRIVATE_TMP/fresh_scratch_dir"
 # Deliberately do NOT backdate — mtime is "now", inside the 48h window.
 
 G1_OUT="$TMP_ROOT/g1.out"
-if run_capture "$G1_OUT" env -i HOME="$TMP_ROOT/g1-home" \
+if run_capture "$G1_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g1-home" \
   PATH="$G1_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G1_ARCHIVE" \
@@ -350,7 +352,7 @@ touch "$G2_PRIVATE_TMP/marked_in_use_dir/.in-use"
 set_old_mtime "$G2_PRIVATE_TMP/marked_in_use_dir"
 
 G2_OUT="$TMP_ROOT/g2.out"
-if run_capture "$G2_OUT" env -i HOME="$TMP_ROOT/g2-home" \
+if run_capture "$G2_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g2-home" \
   PATH="$G2_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G2_ARCHIVE" \
@@ -381,7 +383,7 @@ mkdir -p "$G3_PRIVATE_TMP/worldarchitect.ai/.git"
 set_old_mtime "$G3_PRIVATE_TMP/worldarchitect.ai"
 
 G3_OUT="$TMP_ROOT/g3.out"
-if run_capture "$G3_OUT" env -i HOME="$TMP_ROOT/g3-home" \
+if run_capture "$G3_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g3-home" \
   PATH="$G3_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G3_ARCHIVE" \
@@ -412,7 +414,7 @@ make_large_dir "$G3B_PRIVATE_TMP/my_custom_root"
 set_old_mtime "$G3B_PRIVATE_TMP/my_custom_root"
 
 G3B_OUT="$TMP_ROOT/g3b.out"
-if run_capture "$G3B_OUT" env -i HOME="$TMP_ROOT/g3b-home" \
+if run_capture "$G3B_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g3b-home" \
   PATH="$G3B_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G3B_ARCHIVE" \
@@ -447,7 +449,7 @@ set_old_mtime "$G3C_PRIVATE_TMP/unreadable_tree"
 chmod 000 "$G3C_PRIVATE_TMP/unreadable_tree/blocked"
 
 G3C_OUT="$TMP_ROOT/g3c.out"
-if run_capture "$G3C_OUT" env -i HOME="$TMP_ROOT/g3c-home" \
+if run_capture "$G3C_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g3c-home" \
   PATH="$G3C_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DU_FIXED_PATH="$G3C_PRIVATE_TMP/unreadable_tree" \
@@ -481,7 +483,7 @@ make_large_dir "$G3D_PRIVATE_TMP/env_active_window"
 set_old_mtime "$G3D_PRIVATE_TMP/env_active_window"
 
 G3D_OUT="$TMP_ROOT/g3d.out"
-if run_capture "$G3D_OUT" env -i HOME="$TMP_ROOT/g3d-home" \
+if run_capture "$G3D_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g3d-home" \
   PATH="$G3D_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ACTIVE_HOURS=87600 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G3D_ARCHIVE" \
@@ -522,7 +524,7 @@ G4_DU_LOG="$TMP_ROOT/g4-du.log"
 : > "$G4_DU_LOG"
 
 G4_OUT="$TMP_ROOT/g4.out"
-if run_capture "$G4_OUT" env -i HOME="$TMP_ROOT/g4-home" \
+if run_capture "$G4_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g4-home" \
   PATH="$G4_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DU_LOG="$G4_DU_LOG" \
@@ -603,7 +605,7 @@ exec "$REAL_PYTHON3" "\$@"
 EOF
 chmod +x "$G4B_BIN/python3"
 G4B_OUT="$TMP_ROOT/g4b.out"
-if run_capture "$G4B_OUT" env -i HOME="$TMP_ROOT/g4b-home" \
+if run_capture "$G4B_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g4b-home" \
   PATH="$G4B_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G4B_ARCHIVE" \
@@ -641,7 +643,7 @@ make_find_shim "$G5_BIN" "$G5_PRIVATE_TMP" "$G5_TMP"
 make_c14_archive_entry "$G5_TMP/cli_validation_gemini_g5" "$G5_ENTRY" 60 "$G5_PRIVATE_TMP" "$G5_TMP"
 
 G5_OUT="$TMP_ROOT/g5.out"
-if run_capture "$G5_OUT" env -i HOME="$TMP_ROOT/g5-home" \
+if run_capture "$G5_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g5-home" \
   PATH="$G5_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
@@ -680,7 +682,7 @@ mkdir -p "$G5G_ENTRY" && printf 'replacement\n' >"$G5G_ENTRY/payload.bin"
 set_old_mtime "$G5G_ENTRY"
 
 G5G_OUT="$TMP_ROOT/g5g.out"
-if run_capture "$G5G_OUT" env -i HOME="$TMP_ROOT/g5g-home" \
+if run_capture "$G5G_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g5g-home" \
   PATH="$G5G_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
@@ -711,7 +713,7 @@ set_old_mtime "$G5B_ARCHIVE/20200101T000000Z"
 make_find_shim "$G5B_BIN" "$G5B_PRIVATE_TMP" "$G5B_TMP"
 
 G5B_OUT="$TMP_ROOT/g5b.out"
-if run_capture "$G5B_OUT" env -i HOME="$TMP_ROOT/g5b-home" \
+if run_capture "$G5B_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g5b-home" \
   PATH="$G5B_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5B_ARCHIVE" \
@@ -747,7 +749,7 @@ for _ in 1 2 3 4 5; do
 done
 
 G5C_OUT="$TMP_ROOT/g5c.out"
-if run_capture "$G5C_OUT" env -i HOME="$TMP_ROOT/g5c-home" \
+if run_capture "$G5C_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g5c-home" \
   PATH="$G5C_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5C_ARCHIVE" \
@@ -780,7 +782,7 @@ set_old_mtime "$G5D_ARCHIVE/20200101T000000Z"
 make_find_shim "$G5D_BIN" "$G5D_PRIVATE_TMP" "$G5D_TMP"
 
 G5D_OUT="$TMP_ROOT/g5d.out"
-run_capture "$G5D_OUT" env -i HOME="$TMP_ROOT/g5d-home" \
+run_capture "$G5D_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g5d-home" \
   PATH="$G5D_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5D_ARCHIVE" \
@@ -809,7 +811,7 @@ touch "$G5E_ENTRY/payload.bin"
 make_find_shim "$G5E_BIN" "$G5E_PRIVATE_TMP" "$G5E_TMP"
 
 G5E_OUT="$TMP_ROOT/g5e.out"
-run_capture "$G5E_OUT" env -i HOME="$TMP_ROOT/g5e-home" \
+run_capture "$G5E_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g5e-home" \
   PATH="$G5E_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G5E_ARCHIVE" \
@@ -840,7 +842,7 @@ make_find_shim "$G5F_BIN" "$G5F_PRIVATE_TMP" "$G5F_TMP"
 make_du_probe "$G5F_BIN"
 
 G5F_OUT="$TMP_ROOT/g5f.out"
-if run_capture "$G5F_OUT" env -i HOME="$TMP_ROOT/g5f-home" \
+if run_capture "$G5F_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g5f-home" \
   PATH="$G5F_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DU_OPEN_ON_PATH="$G5F_STAMP/already_archived_dir" DU_OPEN_PATH="$G5F_PAYLOAD" \
@@ -881,7 +883,7 @@ make_find_shim "$G6_BIN" "$G6_PRIVATE_TMP" "$G6_TMP"
 make_lsof_failure_shim "$G6_BIN/lsof-fail"
 
 G6_OUT="$TMP_ROOT/g6.out"
-if run_capture "$G6_OUT" env -i HOME="$TMP_ROOT/g6-home" \
+if run_capture "$G6_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g6-home" \
   PATH="$G6_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_LSOF_BIN="$G6_BIN/lsof-fail" \
@@ -916,7 +918,7 @@ set_old_mtime "$G7_ARCHIVE/20200101T000000Z"
 make_find_shim "$G7_BIN" "$G7_PRIVATE_TMP" "$G7_TMP"
 
 G7_OUT="$TMP_ROOT/g7.out"
-if run_capture "$G7_OUT" env -i HOME="$TMP_ROOT/g7-home" \
+if run_capture "$G7_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g7-home" \
   PATH="$G7_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
   LARGE_TMP_ARCHIVE_MAX_HOURS=48 \
@@ -953,7 +955,7 @@ G7B_STAMP="$(date -v-4H '+%Y%m%d%H%M' 2>/dev/null || date '+%Y%m%d%H%M')"
 make_find_shim "$G7B_BIN" "$G7B_PRIVATE_TMP" "$G7B_TMP"
 
 G7B_OUT="$TMP_ROOT/g7b.out"
-if run_capture "$G7B_OUT" env -i HOME="$TMP_ROOT/g7b-home" \
+if run_capture "$G7B_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g7b-home" \
   PATH="$G7B_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
   LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
@@ -986,7 +988,7 @@ make_large_dir "$G8A_PRIVATE_TMP/worktree_stale_dir"
 set_old_mtime "$G8A_PRIVATE_TMP/worktree_stale_dir"
 
 G8A_OUT="$TMP_ROOT/g8a.out"
-if run_capture "$G8A_OUT" env -i HOME="$TMP_ROOT/g8a-home" \
+if run_capture "$G8A_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g8a-home" \
   PATH="$G8A_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G8A_ARCHIVE" \
@@ -1022,7 +1024,7 @@ make_large_dir "$G8B_PRIVATE_TMP/worktree_stale_dir"
 set_old_mtime "$G8B_PRIVATE_TMP/worktree_stale_dir"
 
 G8B_OUT="$TMP_ROOT/g8b.out"
-if run_capture "$G8B_OUT" env -i HOME="$TMP_ROOT/g8b-home" \
+if run_capture "$G8B_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g8b-home" \
   PATH="$G8B_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 TMP_WORKTREES_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G8B_ARCHIVE" \
@@ -1068,7 +1070,7 @@ make_find_shim "$G9A_BIN" "$G9A_PRIVATE_TMP" "$G9A_TMP"
 make_c14_archive_entry "$G9A_TMP/cli_validation_gemini_g9a" "$G9A_ENTRY" 60 "$G9A_PRIVATE_TMP" "$G9A_TMP"
 
 G9A_OUT="$TMP_ROOT/g9a.out"
-if run_capture "$G9A_OUT" env -i HOME="$TMP_ROOT/g9a-home" \
+if run_capture "$G9A_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g9a-home" \
   PATH="$G9A_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G9A_ARCHIVE" \
@@ -1101,7 +1103,7 @@ set_old_mtime "$G9B_ARCHIVE/20200101T000000Z"
 make_find_shim "$G9B_BIN" "$G9B_PRIVATE_TMP" "$G9B_TMP"
 
 G9B_OUT="$TMP_ROOT/g9b.out"
-if run_capture "$G9B_OUT" env -i HOME="$TMP_ROOT/g9b-home" \
+if run_capture "$G9B_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g9b-home" \
   PATH="$G9B_BIN:/usr/sbin:/usr/bin:/bin" \
   LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 \
   LARGE_TMP_ARCHIVE_MAX_HOURS=48 \
@@ -1134,7 +1136,7 @@ set_old_mtime "$G9C_ARCHIVE/20200101T000000Z"
 make_find_shim "$G9C_BIN" "$G9C_PRIVATE_TMP" "$G9C_TMP"
 
 G9C_OUT="$TMP_ROOT/g9c.out"
-if run_capture "$G9C_OUT" env -i HOME="$TMP_ROOT/g9c-home" \
+if run_capture "$G9C_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g9c-home" \
   PATH="$G9C_BIN:/usr/bin:/bin" \
   LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G9C_ARCHIVE" \
@@ -1167,7 +1169,7 @@ set_old_mtime "$G10_PRIVATE_TMP/worldarchitect.ai"
 touch -t "$(ago_stamp 2160)" "$G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child/payload.bin"
 touch -t "$(ago_stamp 2160)" "$G10_PRIVATE_TMP/worldarchitect.ai/recent_protected_child"
 G10_OUT="$TMP_ROOT/g10.out"
-if run_capture "$G10_OUT" env -i HOME="$TMP_ROOT/g10-home" \
+if run_capture "$G10_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g10-home" \
   PATH="$G10_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_ACTIVE_HOURS=24 PROTECTED_ROOT_CHILD_MIN_AGE_HOURS=48 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G10_ARCHIVE" \
@@ -1225,7 +1227,7 @@ set_old_mtime "$G11_PRIVATE_TMP/pr_dir_mtime_only"
 touch -t "$(ago_stamp 120)" "$G11_PRIVATE_TMP/pr_dir_mtime_only"
 
 G11_OUT="$TMP_ROOT/g11.out"
-if run_capture "$G11_OUT" env -i HOME="$TMP_ROOT/g11-home" \
+if run_capture "$G11_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g11-home" \
   PATH="$G11_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G11_ARCHIVE" \
@@ -1266,7 +1268,7 @@ set_old_mtime "$G12_PRIVATE_TMP/recent_content"
 printf 'fresh\n' > "$G12_PRIVATE_TMP/recent_content/written_now.txt"
 
 G12_OUT="$TMP_ROOT/g12.out"
-if run_capture "$G12_OUT" env -i HOME="$TMP_ROOT/g12-home" \
+if run_capture "$G12_OUT" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/g12-home" \
   PATH="$G12_BIN:/usr/bin:/bin" \
   LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$G12_ARCHIVE" \
@@ -1312,7 +1314,7 @@ run_ctime_case() {
   # looking stale by mtime everywhere, including the top-level entry).
   touch -t 202001010000 "$pt/pr_moved_in"
   out="$TMP_ROOT/$id.out"
-  if run_capture "$out" env -i HOME="$TMP_ROOT/$id-home" \
+  if run_capture "$out" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/$id-home" \
     PATH="$bin:/usr/bin:/bin" \
     LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
     DISK_MAGICIAN_TEST_CTIME_SIGNAL=1 \
@@ -1348,7 +1350,7 @@ run_root_grace_case() {
   set_old_mtime "$pt/pr_root_grace"
   touch -t "$(ago_stamp "$ago")" "$pt/pr_root_grace"
   out="$TMP_ROOT/$id.out"
-  if run_capture "$out" env -i HOME="$TMP_ROOT/$id-home" \
+  if run_capture "$out" env -i DISK_MAGICIAN_SIZE_METHOD=du HOME="$TMP_ROOT/$id-home" \
     PATH="$bin:/usr/bin:/bin" \
     LARGE_TMP_MIN_KB=1 LARGE_TMP_APPROVED=1 \
     DISK_MAGICIAN_ARCHIVE_ROOT="$ar" \
@@ -1427,7 +1429,7 @@ mkdir -p "$G18_ROOT"
 touch -t 202001010000 "$G18_ROOT"
 g18_probe() {
   # g18_probe <env-assign...>: prints active|stale
-  env -i PATH=/usr/bin:/bin "$@" bash -c '
+  env -i DISK_MAGICIAN_SIZE_METHOD=du PATH=/usr/bin:/bin "$@" bash -c '
     set -u
     log() { :; }; resolve_timeout_bin() { echo ""; }; warn_unbounded_probes_once() { :; }
     PROBE_TIMEOUT_SEC=10
