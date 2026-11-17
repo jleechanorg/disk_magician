@@ -53,6 +53,20 @@ sim_device_root() {
   fi
 }
 
+# simctl_delete_device <udid> — remove through CoreSimulator so its inventory and
+# on-disk state remain consistent. Fixture runs require an explicitly supplied
+# fake transport; they can never fall through to the host's real xcrun.
+simctl_delete_device() {
+  local udid="$1"
+  if [[ -n "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]]; then
+    [[ -n "${DISK_MAGICIAN_SIM_FIXTURE_XCRUN:-}" && -x "$DISK_MAGICIAN_SIM_FIXTURE_XCRUN" ]] || return 127
+    "$DISK_MAGICIAN_SIM_FIXTURE_XCRUN" simctl delete "$udid"
+    return $?
+  fi
+  command -v xcrun >/dev/null 2>&1 || return 127
+  xcrun simctl delete "$udid"
+}
+
 # sim_fixture_device <root> <udid> <name> <state> <age_hours|-1> [runtime-key]
 # Test-only helper; never called in production paths.
 sim_fixture_device() {
@@ -551,21 +565,21 @@ sim_prune() {
       fi
       kept=$((kept+1)); continue
     fi
-    echo "remove:candidate $name"
-    if [[ "$dry" == false ]]; then
-      local root target
-      root="$(sim_device_root)"
-      [[ -n "$root" && "$root" == /* && -d "$root" ]] || { echo "sim prune: unsafe device root, refusing" >&2; return 1; }
-      target="${root%/}/${udid}"
-      case "$target" in
-        "$root"|""|"/") echo "sim prune: refusing unsafe target '$target'" >&2; return 1 ;;
-      esac
+    local root target plock="" lock_held=0
+    root="$(sim_device_root)"
+    [[ -n "$root" && "$root" == /* && -d "$root" ]] || { echo "sim prune: unsafe device root, refusing" >&2; return 1; }
+    target="${root%/}/${udid}"
+    case "$target" in
+      "$root"|""|"/") echo "sim prune: refusing unsafe target '$target'" >&2; return 1 ;;
+    esac
 
+    if [[ "$dry" == false ]]; then
       # Exclusion: take the same per-UDID lock release uses, so a release or a
       # new lease cannot interleave with this delete (review P0).
-      local plock; plock="$(sim_release_lock_path "$udid")"
+      plock="$(sim_release_lock_path "$udid")"
       mkdir -p "$(dirname "$plock")" 2>/dev/null || true
       sim_lock_take "$plock" 0 || { echo "keep:exclusion-busy $name"; kept=$((kept+1)); continue; }
+      lock_held=1
 
       # FINAL positive re-check, under the lock. This must re-verify the RECEIPT
       # and the 48 h floor too, not just state and lease: a lease/release cycle
@@ -587,46 +601,71 @@ sim_prune() {
         echo "keep:receipt-stale-under-lock $name"
         kept=$((kept+1)); continue
       fi
+    fi
 
-      # The shared removal verdict is MANDATORY, not best-effort: a deletion may
-      # only proceed when the gate is present, exits 0, and returns an explicit
-      # `remove` verdict. A missing gate, a non-zero exit, or empty/unknown output
-      # all fail closed (review P0: a gate returning 42 with no output still
-      # authorized a deletion because stderr was masked and empty fell through).
-      if ! declare -F artifact_removal_verdict >/dev/null 2>&1; then
-        local _lib; _lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/artifact_verdict.sh"
-        if [[ -f "$_lib" ]]; then
-          # shellcheck source=/dev/null
-          source "$_lib" >/dev/null 2>&1 || true
-        fi
+    # The shared removal verdict is mandatory in dry-run and clean modes alike.
+    # It independently validates the simulator receipt/state proof, then runs
+    # every common C14 veto (leases, cwd/open files, secrets, content recency,
+    # identity and other preservation checks) before reporting eligibility.
+    if ! declare -F artifact_removal_verdict >/dev/null 2>&1; then
+      local _lib; _lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/artifact_verdict.sh"
+      if [[ -f "$_lib" ]]; then
+        # shellcheck source=/dev/null
+        source "$_lib" >/dev/null 2>&1 || true
       fi
-      if ! declare -F artifact_removal_verdict >/dev/null 2>&1; then
-        sim_lock_drop "$plock"
-        echo "keep:verdict-unavailable $name"
-        kept=$((kept+1)); continue
-      fi
-      # Separate streams: merging stderr into stdout let a diagnostic line win the
-      # "last line" and override the real verdict (review P0). Only the COMPLETE
-      # stdout is considered, and it must be exactly `remove`.
-      local verdict raw vrc=0
-      raw="$(artifact_removal_verdict "$target" 2>/dev/null)" || vrc=$?
-      verdict="$(printf '%s' "$raw" | tr -d '[:space:]')"
-      if [[ "$vrc" -ne 0 ]]; then
-        sim_lock_drop "$plock"
-        echo "keep:verdict-error-$vrc $name"
-        kept=$((kept+1)); continue
-      fi
-      if [[ "$verdict" != remove ]]; then
-        sim_lock_drop "$plock"
-        echo "keep:verdict-${verdict:-empty} $name"
-        kept=$((kept+1)); continue
-      fi
+    fi
+    if ! declare -F artifact_removal_verdict >/dev/null 2>&1; then
+      (( lock_held == 0 )) || sim_lock_drop "$plock"
+      echo "keep:verdict-unavailable $name"
+      kept=$((kept+1)); continue
+    fi
+    # Separate streams: only complete stdout may authorize removal.
+    local verdict raw vrc=0
+    raw="$(artifact_removal_verdict "$target" --kind simulator-device 2>/dev/null)" || vrc=$?
+    verdict="$(printf '%s' "$raw" | tr -d '[:space:]')"
+    if [[ "$vrc" -ne 0 ]]; then
+      (( lock_held == 0 )) || sim_lock_drop "$plock"
+      echo "keep:verdict-error-$vrc $name"
+      kept=$((kept+1)); continue
+    fi
+    if [[ "$verdict" != remove ]]; then
+      (( lock_held == 0 )) || sim_lock_drop "$plock"
+      echo "keep:verdict-${verdict:-empty} $name"
+      kept=$((kept+1)); continue
+    fi
 
-      # deletion_log <script> <action> <kb> <path>; -1 when the size is unknown.
-      local kb; kb="$(du -sk "$target" 2>/dev/null | cut -f1)"
+    if [[ "$dry" == true ]]; then
+      echo "remove:eligible $name"
+    else
+      echo "remove:candidate $name"
+    fi
+    if [[ "$dry" == false ]]; then
+      # Measure before the canonical transport removes it, then verify inventory
+      # no longer reports the UDID. Never rm the device-store directory directly:
+      # simctl owns inventory consistency and a failed delete remains fail-closed.
+      local kb delete_rc=0 after
+      kb="$(du -sk "$target" 2>/dev/null | cut -f1)"
       [[ "$kb" =~ ^[0-9]+$ ]] || kb=-1
+      simctl_delete_device "$udid" >/dev/null 2>&1 || delete_rc=$?
+      if [[ "$delete_rc" -ne 0 ]]; then
+        sim_lock_drop "$plock"
+        echo "keep:delete-failed-$delete_rc $name"
+        kept=$((kept+1)); continue
+      fi
+      # Record the successful transport before the independent inventory check:
+      # if that verification fails, the deletion still happened and must be logged.
       if declare -F deletion_log >/dev/null 2>&1; then deletion_log "sim_lifecycle.sh" "sim-prune" "$kb" "$target"; fi
-      rm -rf "${target:?}" 2>/dev/null && removed=$((removed+1))
+      if ! after="$(sim_snapshot)"; then
+        sim_lock_drop "$plock"
+        echo "keep:delete-inventory-unavailable $name"
+        kept=$((kept+1)); continue
+      fi
+      if printf '%s\n' "$after" | awk -F'\t' -v u="$udid" '$1==u {found=1} END{exit !found}'; then
+        sim_lock_drop "$plock"
+        echo "keep:delete-not-confirmed $name"
+        kept=$((kept+1)); continue
+      fi
+      removed=$((removed+1))
       sim_lock_drop "$plock"
     fi
   done < <(printf '%s\n' "$snap")

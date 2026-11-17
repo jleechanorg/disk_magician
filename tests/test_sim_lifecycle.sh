@@ -9,6 +9,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODULE="$SCRIPT_DIR/scripts/sim_lifecycle.sh"
+ORIGINAL_HOME="$HOME"
 
 PASS=0
 FAIL=0
@@ -22,6 +23,7 @@ source "$MODULE"
 
 TMP="${TMPDIR:-/tmp}/sim-lifecycle-test.$$"
 mkdir -p "$TMP"
+export DISK_MAGICIAN_DELETION_LOG="$TMP/deletions.log"
 trap 'rm -rf "${TMP:?}"' EXIT
 
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"
@@ -686,6 +688,13 @@ export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 
 echo "== 50. prune calls deletion_log with the 4-argument contract =="
 r50="$TMP/r50"; mkdir -p "$r50/state/gen" "$r50/state/receipts" "$r50/fx"
+mkdir -p "$r50/fakebin"
+cat >"$r50/fakebin/xcrun" <<'FAKE'
+#!/bin/bash
+[[ "$1 $2" == "simctl delete" ]] || exit 75
+/bin/rm -rf -- "$DISK_MAGICIAN_SIM_FIXTURE_ROOT/$3"
+FAKE
+chmod +x "$r50/fakebin/xcrun"
 export DISK_MAGICIAN_STATE_DIR="$r50/state"
 sim_fixture_device "$r50/fx" "50505050-1111-2222-3333-444444444444" "wai-shared-d" "Shutdown" 999
 printf '1\n' >"$r50/state/gen/50505050-1111-2222-3333-444444444444"
@@ -693,7 +702,7 @@ old50="$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v
 printf '{"action": "release", "udid": "50505050-1111-2222-3333-444444444444", "lease_generation": 1, "token_fingerprint": "x", "released_at": "%s"}\n' "$old50" >"$r50/state/receipts/sim_release_receipts.jsonl"
 artifact_removal_verdict() { printf 'remove\n'; }
 deletion_log() { local sc="$1" ac="$2" kb="$3" pa="$4"; printf '%s|%s|%s|%s\n' "$sc" "$ac" "$kb" "$pa" >>"$TMP/dl50"; }   # real signature; set -u kills a short call
-out50="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r50/fx" sim_prune --clean 2>&1)"
+out50="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r50/fx" DISK_MAGICIAN_SIM_FIXTURE_XCRUN="$r50/fakebin/xcrun" sim_prune --clean 2>&1)"
 unset -f artifact_removal_verdict deletion_log
 [[ ! -d "$r50/fx/50505050-1111-2222-3333-444444444444" ]] && ok "prune completed under set -u" || bad "prune did not remove the released device: $out50"
 grep -qE '^[^|]+\|sim-prune\|(-1|[0-9]+)\|.*/50505050-' "$TMP/dl50" 2>/dev/null && ok "deletion_log got script, action, kb, path" || bad "deletion_log called with the wrong arguments: $(cat "$TMP/dl50" 2>/dev/null)"
@@ -744,6 +753,205 @@ printf '%s\n' "$dead53" >"$r53/state/lock/53535353-1111-2222-3333-444444444444.r
 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r53/fx" sim_lease --wait-seconds 0 2>/dev/null | grep -q lease_token \
   && ok "lease proceeds past a dead holder's leftover lock" || bad "device wedged by a dead holder's lock"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 54. simulator release proof passes through the real shared C14 verdict =="
+r54="$TMP/r54"; mkdir -p "$r54/state/gen" "$r54/state/receipts" "$r54/home/.config/disk-magician" "$r54/fx"
+export HOME="$r54/home"
+printf '{}\n' >"$HOME/.config/disk-magician/config.json"
+export DISK_MAGICIAN_CONFIG="$HOME/.config/disk-magician/config.json"
+export DISK_MAGICIAN_STATE_DIR="$r54/state"
+unset DISK_MAGICIAN_C14_LEDGER C14_INVENTORY_FILE C14_INVENTORY_OUT
+u54="54545454-1111-2222-3333-444444444444"
+sim_fixture_device "$r54/fx" "$u54" "wai-shared-c14" "Shutdown" 72
+old_touch54="$(date -u -v-72H +%Y%m%d%H%M.%S 2>/dev/null || date -u -d '72 hours ago' +%Y%m%d%H%M.%S)"
+find "$r54/fx/$u54" -exec touch -h -t "$old_touch54" {} + 2>/dev/null
+printf '1\n' >"$r54/state/gen/$u54"
+old54="$(date -u -v-72H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"action":"release","udid":"%s","lease_generation":1,"released_at":"%s"}\n' "$u54" "$old54" >"$r54/state/receipts/sim_release_receipts.jsonl"
+mkdir -p "$r54/fakebin"
+cat >"$r54/fakebin/xcrun" <<'FAKE'
+#!/bin/bash
+if [[ "$1 $2" == "simctl delete" && -n "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]]; then
+  [[ -z "${DISK_MAGICIAN_SIM_FIXTURE_DELETE_FAIL:-}" ]] || exit 75
+  /bin/rm -rf -- "$DISK_MAGICIAN_SIM_FIXTURE_ROOT/$3"
+  exit 0
+fi
+exit 75
+FAKE
+chmod +x "$r54/fakebin/xcrun"
+export SIM_TEST_UDID="$u54"
+export DISK_MAGICIAN_SIM_FIXTURE_XCRUN="$r54/fakebin/xcrun"
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r54/fx" sim_prune --dry-run 2>&1)"
+printf '%s' "$out" | grep -q '^remove:eligible wai-shared-c14' && ok "dry-run reports shared-C14-qualified eligibility" || bad "dry-run did not distinguish C14 eligibility from nomination: ${out//$'\n'/; }"
+[[ -d "$r54/fx/$u54" ]] && ok "dry-run left the eligible device and inventory unchanged" || bad "dry-run removed the fixture device"
+out="$(PATH="$r54/fakebin:$PATH" DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r54/fx" sim_prune --clean 2>&1)"; rc54=$?
+[[ "$rc54" -eq 0 && ! -e "$r54/fx/$u54" ]] && ok "old current-generation release receipt passed real C14 and simctl delete removed the fixture device" || bad "eligible simulator was not removed through shared C14 (rc=$rc54, output=${out//$'\n'/; })"
+printf '%s' "$out" | grep -q 'candidates_removed=1' && ok "prune inventory reflects successful simulator deletion" || bad "prune did not report one successful deletion"
+if printf '%s\n' "$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r54/fx" sim_snapshot)" | awk -F'\t' -v u="$u54" '$1==u {found=1} END{exit found}'; then
+  ok "fresh fixture inventory no longer contains the deleted UDID"
+else
+  bad "deleted UDID remained in fresh fixture inventory"
+fi
+
+# A failed simctl transport keeps the device and reports a failure; it never
+# falls back to deleting the directory itself.
+u54f="54545454-2222-3333-4444-555555555555"
+sim_fixture_device "$r54/fx" "$u54f" "wai-shared-c14-fail" "Shutdown" 72
+find "$r54/fx/$u54f" -exec touch -h -t "$old_touch54" {} + 2>/dev/null
+printf '1\n' >"$r54/state/gen/$u54f"
+printf '{"action":"release","udid":"%s","lease_generation":1,"released_at":"%s"}\n' "$u54f" "$old54" >>"$r54/state/receipts/sim_release_receipts.jsonl"
+export SIM_TEST_UDID="$u54f"
+out="$(DISK_MAGICIAN_SIM_FIXTURE_DELETE_FAIL=1 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r54/fx" sim_prune --clean 2>&1)"; rc54f=$?
+[[ "$rc54f" -eq 0 && -d "$r54/fx/$u54f" ]] && ok "simctl delete failure preserved the device directory" || bad "simctl delete failure removed the fixture device"
+printf '%s' "$out" | grep -q 'keep:delete-failed' && ok "simctl delete failure is reported" || bad "simctl delete failure had no keep verdict"
+[[ "$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r54/fx" sim_snapshot | awk -F'\t' -v u="$u54f" '$1==u {print $3}')" == Shutdown ]] && ok "failed delete left the device in fresh inventory" || bad "failed delete did not retain inventory row"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_CONFIG SIM_TEST_UDID DISK_MAGICIAN_SIM_FIXTURE_XCRUN; export HOME="$ORIGINAL_HOME"
+
+echo "== 55. production simulator path uses fake xcrun transport and confirms inventory =="
+r55="$TMP/r55"; mkdir -p "$r55/home/Library/Developer/CoreSimulator/Devices" "$r55/home/.config/disk-magician" "$r55/state/gen" "$r55/state/receipts" "$r55/fakebin"
+u55="55555555-1111-2222-3333-444444444444"
+printf '{}\n' >"$r55/home/.config/disk-magician/config.json"
+printf '{"devices":{"rt":[{"udid":"%s","name":"wai-shared-production","state":"Shutdown"}]}}\n' "$u55" >"$r55/home/devices.json"
+mkdir -p "$r55/home/Library/Developer/CoreSimulator/Devices/$u55"
+old_touch55="$(date -u -v-72H +%Y%m%d%H%M.%S 2>/dev/null || date -u -d '72 hours ago' +%Y%m%d%H%M.%S)"
+touch -h -t "$old_touch55" "$r55/home/Library/Developer/CoreSimulator/Devices" "$r55/home/Library/Developer/CoreSimulator/Devices/$u55" 2>/dev/null
+old55="$(date -u -v-72H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf '1\n' >"$r55/state/gen/$u55"
+printf '{"action":"release","udid":"%s","lease_generation":1,"released_at":"%s"}\n' "$u55" "$old55" >"$r55/state/receipts/sim_release_receipts.jsonl"
+cat >"$r55/fakebin/xcrun" <<'FAKE'
+#!/bin/bash
+if [[ "$*" == "simctl list devices --json" ]]; then
+  [[ -z "${SIM_TEST_FAIL_LIST:-}" ]] || exit 75
+  if [[ "${SIM_TEST_FAIL_AFTER_DELETE:-}" == 1 ]] && python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if not any(d["devices"].values()) else 1)' "$HOME/devices.json"; then exit 75; fi
+  if [[ "${SIM_TEST_DUPLICATE_UDID:-}" == 1 ]]; then
+    python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));r=next(x for v in d["devices"].values() for x in v);r=dict(r,state="Booted");d["devices"]["duplicate-runtime"]=[r];json.dump(d,sys.stdout)' "$HOME/devices.json"
+    exit $?
+  fi
+  cat "$HOME/devices.json"; exit $?
+fi
+if [[ "$1 $2" == "simctl delete" ]]; then
+  python3 -c 'import json,sys; p,u=sys.argv[1:]; d=json.load(open(p)); d["devices"]={k:[x for x in v if x.get("udid")!=u] for k,v in d["devices"].items()}; json.dump(d,open(p,"w"))' "$HOME/devices.json" "$3" || exit 75
+  /bin/rm -rf -- "$HOME/Library/Developer/CoreSimulator/Devices/$3"
+  exit $?
+fi
+exit 75
+FAKE
+chmod +x "$r55/fakebin/xcrun"
+out="$(HOME="$r55/home" PATH="$r55/fakebin:$PATH" DISK_MAGICIAN_STATE_DIR="$r55/state" DISK_MAGICIAN_CONFIG="$r55/home/.config/disk-magician/config.json" sim_prune --clean 2>&1)"; rc55=$?
+[[ "$rc55" -eq 0 && ! -e "$r55/home/Library/Developer/CoreSimulator/Devices/$u55" ]] && ok "production path deleted through fake xcrun, with no fixture mode" || bad "production transport removal failed (rc=$rc55, output=${out//$'\n'/; })"
+[[ "$(HOME="$r55/home" PATH="$r55/fakebin:$PATH" DISK_MAGICIAN_STATE_DIR="$r55/state" sim_snapshot)" == "" ]] && ok "fresh production inventory confirms UDID absence" || bad "production inventory still contains the deleted UDID"
+awk -F'\t' -v u="$u55" '$2=="sim_lifecycle.sh" && $3=="sim-prune" && index($5,u) {found=1} END{exit !found}' "$DISK_MAGICIAN_DELETION_LOG" && ok "successful production delete was recorded" || bad "successful production delete was not logged"
+
+# A duplicate UDID in distinct inventory rows is unknown even if one row is
+# Shutdown; the shared proof requires exactly one row and that row to be Shutdown.
+u55d="55555555-aaaa-bbbb-cccc-dddddddddddd"
+printf '{"devices":{"rt":[{"udid":"%s","name":"wai-shared-duplicate","state":"Shutdown"}]}}\n' "$u55d" >"$r55/home/devices.json"
+mkdir -p "$r55/home/Library/Developer/CoreSimulator/Devices/$u55d"
+touch -h -t "$old_touch55" "$r55/home/Library/Developer/CoreSimulator/Devices/$u55d" 2>/dev/null
+printf '1\n' >"$r55/state/gen/$u55d"
+printf '{"action":"release","udid":"%s","lease_generation":1,"released_at":"%s"}\n' "$u55d" "$old55" >>"$r55/state/receipts/sim_release_receipts.jsonl"
+# Load the actual shared gate in this shell; a preceding sim_prune loads it only
+# in its own command-substitution subshell.
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/scripts/lib/artifact_verdict.sh"
+out="$(HOME="$r55/home" PATH="$r55/fakebin:$PATH" SIM_TEST_DUPLICATE_UDID=1 DISK_MAGICIAN_STATE_DIR="$r55/state" DISK_MAGICIAN_CONFIG="$r55/home/.config/disk-magician/config.json" artifact_removal_verdict "$r55/home/Library/Developer/CoreSimulator/Devices/$u55d" --kind simulator-device 2>/dev/null)"
+[[ "$out" == kept:simulator-proof ]] && ok "duplicate UDID inventory row blocked the shared simulator proof" || bad "duplicate inventory rows produced ${out:-empty}"
+
+# An unavailable inventory before the operation preserves the device; a failure
+# after successful simctl deletion is reported as uncertain but still logs the
+# completed transport before the postcondition check.
+u55i="55555555-2222-3333-4444-555555555555"
+printf '{"devices":{"rt":[{"udid":"%s","name":"wai-shared-before-failure","state":"Shutdown"}]}}\n' "$u55i" >"$r55/home/devices.json"
+mkdir -p "$r55/home/Library/Developer/CoreSimulator/Devices/$u55i"
+printf '1\n' >"$r55/state/gen/$u55i"
+printf '{"action":"release","udid":"%s","lease_generation":1,"released_at":"%s"}\n' "$u55i" "$old55" >>"$r55/state/receipts/sim_release_receipts.jsonl"
+out="$(HOME="$r55/home" PATH="$r55/fakebin:$PATH" SIM_TEST_FAIL_LIST=1 DISK_MAGICIAN_STATE_DIR="$r55/state" DISK_MAGICIAN_CONFIG="$r55/home/.config/disk-magician/config.json" sim_prune --clean 2>&1)"; rc55i=$?
+[[ "$rc55i" -eq 24 && -d "$r55/home/Library/Developer/CoreSimulator/Devices/$u55i" ]] && ok "pre-delete inventory failure preserved the production device" || bad "pre-delete inventory failure did not preserve the device"
+u55p="55555555-3333-4444-5555-666666666666"
+printf '{"devices":{"rt":[{"udid":"%s","name":"wai-shared-after-failure","state":"Shutdown"}]}}\n' "$u55p" >"$r55/home/devices.json"
+mkdir -p "$r55/home/Library/Developer/CoreSimulator/Devices/$u55p"
+touch -h -t "$old_touch55" "$r55/home/Library/Developer/CoreSimulator/Devices/$u55p" 2>/dev/null
+printf '1\n' >"$r55/state/gen/$u55p"
+printf '{"action":"release","udid":"%s","lease_generation":1,"released_at":"%s"}\n' "$u55p" "$old55" >>"$r55/state/receipts/sim_release_receipts.jsonl"
+out="$(HOME="$r55/home" PATH="$r55/fakebin:$PATH" SIM_TEST_FAIL_AFTER_DELETE=1 DISK_MAGICIAN_STATE_DIR="$r55/state" DISK_MAGICIAN_CONFIG="$r55/home/.config/disk-magician/config.json" sim_prune --clean 2>&1)"; rc55p=$?
+[[ "$rc55p" -eq 0 && ! -e "$r55/home/Library/Developer/CoreSimulator/Devices/$u55p" ]] && ok "post-delete inventory failure did not undo or hide the successful delete" || bad "post-delete inventory failure outcome incorrect"
+printf '%s' "$out" | grep -q 'keep:delete-inventory-unavailable' && ok "post-delete inventory failure was reported as uncertain" || bad "post-delete inventory failure was not reported"
+printf '%s' "$out" | grep -q 'candidates_removed=0' && ok "uncertain postcondition was not counted as verified removal" || bad "uncertain postcondition counted as verified removal"
+awk -F'\t' -v u="$u55p" '$2=="sim_lifecycle.sh" && $3=="sim-prune" && index($5,u) {found=1} END{exit !found}' "$DISK_MAGICIAN_DELETION_LOG" && ok "successful delete was logged before failed inventory confirmation" || bad "delete was not logged before failed inventory confirmation"
+export HOME="$ORIGINAL_HOME"
+
+echo "== 56. real shared C14 preserves unproven and vetoed simulator devices =="
+export HOME="$r54/home" DISK_MAGICIAN_CONFIG="$r54/home/.config/disk-magician/config.json" DISK_MAGICIAN_STATE_DIR="$r54/state"
+# Exercise the production shared API directly; sim_prune cases 54-55 cover its
+# CLI integration and simulator transport.
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/scripts/lib/artifact_verdict.sh"
+sim_c14_old="$(date -u -v-72H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+sim_c14_touch="$(date -u -v-72H +%Y%m%d%H%M.%S 2>/dev/null || date -u -d '72 hours ago' +%Y%m%d%H%M.%S)"
+sim_c14_add() {
+  local id="$1" state="$2" generation="$3" receipt_generation="$4" receipt_time="$5" target="$r54/fx/$1"
+  sim_fixture_device "$r54/fx" "$id" "wai-shared-c14-$id" "$state" 72
+  find "$target" -exec touch -h -t "$sim_c14_touch" {} + 2>/dev/null
+  mkdir -p "$r54/state/gen" "$r54/state/receipts"
+  [[ "$generation" == "-" ]] || printf '%s\n' "$generation" >"$r54/state/gen/$id"
+  [[ "$receipt_generation" == "-" ]] || printf '{"action":"release","udid":"%s","lease_generation":%s,"released_at":"%s"}\n' "$id" "$receipt_generation" "$receipt_time" >>"$r54/state/receipts/sim_release_receipts.jsonl"
+}
+sim_c14_kept() {
+  local label="$1" id="$2" out
+  out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r54/fx" artifact_removal_verdict "$r54/fx/$id" --kind simulator-device 2>/dev/null)"
+  [[ "$out" == kept:* || "$out" == deferred:* ]] && ok "$label ($out)" || bad "$label unexpectedly returned ${out:-empty}"
+}
+u56m="56565656-1111-2222-3333-444444444444"
+sim_c14_add "$u56m" Shutdown 1 - "$sim_c14_old"
+sim_c14_kept "missing receipt preserved" "$u56m"
+u56s="56565656-2222-3333-4444-555555555555"
+sim_c14_add "$u56s" Shutdown 2 1 "$sim_c14_old"
+sim_c14_kept "stale-generation receipt preserved" "$u56s"
+u56z="56565656-2222-3333-4444-aaaaaaaaaaaa"
+sim_c14_add "$u56z" Shutdown 0 0 "$sim_c14_old"
+sim_c14_kept "zero generation receipt preserved" "$u56z"
+u56y="56565656-3333-4444-5555-666666666666"
+sim_c14_young="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+sim_c14_add "$u56y" Shutdown 1 1 "$sim_c14_young"
+sim_c14_kept "young receipt preserved" "$u56y"
+u56b="56565656-4444-5555-6666-777777777777"
+sim_c14_add "$u56b" Booted 1 1 "$sim_c14_old"
+sim_c14_kept "Booted device preserved" "$u56b"
+u56l="56565656-5555-6666-7777-888888888888"
+sim_c14_add "$u56l" Shutdown 1 1 "$sim_c14_old"
+mkdir -p "$r54/state/sim_leases/$u56l"
+printf '1\n' >"$r54/state/sim_leases/$u56l/generation"
+printf 'owner\n' >"$r54/state/sim_leases/$u56l/owner"
+printf '%064d\n' 1 >"$r54/state/sim_leases/$u56l/token_fingerprint"
+sim_c14_kept "complete simulator lease preserved" "$u56l"
+u56x="56565656-6666-7777-8888-999999999999"
+sim_c14_add "$u56x" Shutdown 1 1 "$sim_c14_old"
+mkdir -p "$r54/state/sim_leases/$u56x"
+printf 'incomplete\n' >"$r54/state/sim_leases/$u56x/owner"
+sim_c14_kept "unknown simulator lease preserved" "$u56x"
+u56p="56565656-7777-8888-9999-aaaaaaaaaaaa"
+sim_c14_add "$u56p" Shutdown 1 1 "$sim_c14_old"
+printf 'private\n' >"$r54/fx/$u56p/private.pem"
+sim_c14_kept "secret-like simulator content preserved" "$u56p"
+u56r="56565656-8888-9999-aaaa-bbbbbbbbbbbb"
+sim_c14_add "$u56r" Shutdown 1 1 "$sim_c14_old"
+touch "$r54/fx/$u56r/payload.bin"
+sim_c14_kept "recent simulator content preserved" "$u56r"
+u56a="56565656-9999-aaaa-bbbb-cccccccccccc"
+sim_c14_add "$u56a" Shutdown 1 1 "$sim_c14_old"
+active_lease="$(lease_path_for "$r54/fx/$u56a")"
+mkdir -p "${active_lease%/*}"
+active_start="$(_lease_ps_lstart_epoch "$$")"
+printf '{"path":"%s","owner":{"pid":%s,"start_epoch":%s,"comm":"bash"}}\n' "$r54/fx/$u56a" "$$" "$active_start" >"$active_lease"
+sim_c14_kept "active shared C14 lease preserved" "$u56a"
+u56u="56565656-aaaa-bbbb-cccc-dddddddddddd"
+sim_c14_add "$u56u" Shutdown 1 1 "$sim_c14_old"
+unknown_lease="$(lease_path_for "$r54/fx/$u56u")"
+mkdir -p "${unknown_lease%/*}"
+printf '{"path":"%s","owner":{"pid":"unknown"}}\n' "$r54/fx/$u56u" >"$unknown_lease"
+sim_c14_kept "unknown shared C14 lease preserved" "$u56u"
+unset DISK_MAGICIAN_SIM_FIXTURE_ROOT
+export HOME="$ORIGINAL_HOME" DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_CONFIG
 
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
