@@ -153,6 +153,23 @@ OUT_LSOF=$(WORKTREE_APPROVED=1 env -i PATH="$FAIL_BIN:$TEST_PATH" HOME="$TMP_ROO
 assert_contains "slim refuses on incomplete lsof" "lsof output incomplete" "$OUT_LSOF"
 assert_present "worktree docs untouched when lsof incomplete" "$LSOF_WT/docs/user-stories-ui"
 
+echo "== case 10: configured per-repo exclusion (roadmap telemetry) is unioned in (yc7g) =="
+RM_REPO="$TMP_ROOT/roadmap"; RM_ROOTS="$TMP_ROOT/rm_roots"
+mkdir -p "$RM_REPO/dashboards/prw/telemetry" "$RM_REPO/notes" "$RM_ROOTS"
+head -c 200000 /dev/zero > "$RM_REPO/dashboards/prw/telemetry/big.jsonl"
+printf 'n' > "$RM_REPO/notes/keep.md"
+( cd "$RM_REPO" && git init -q . && git config user.email t@t && git config user.name t \
+  && git config extensions.worktreeConfig true && git add -A && git commit -qm init )
+RM_WT="$RM_ROOTS/old"
+git -C "$RM_REPO" worktree add -q --detach "$RM_WT" >/dev/null 2>&1
+age_wt "$RM_WT"
+OUT_RM=$(env -i PATH="$TEST_PATH" HOME="$TMP_ROOT/home" WORKTREE_APPROVED=1 \
+          bash "$TARGET_SCRIPT" --roots "$RM_ROOTS" --exclude docs --clean 2>&1)
+assert_contains "roadmap worktree slimmed" "SLIMMED" "$OUT_RM"
+assert_absent  "configured telemetry path excluded" "$RM_WT/dashboards/prw/telemetry/big.jsonl"
+assert_present "other roadmap file kept" "$RM_WT/notes/keep.md"
+assert_present "non-roadmap worktree keeps evidence" "$OLD/src/keep.py"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
