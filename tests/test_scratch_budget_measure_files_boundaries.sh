@@ -40,7 +40,7 @@ REAL_PYTHON="$(command -v python3)"
 export REAL_PYTHON
 cat >"$T/bin/python3" <<'SH'
 #!/usr/bin/env bash
-[[ "${1:-}" != "-" ]] || sleep 1
+case "${1:-}" in *diskm_measure.py) sleep 1 ;; esac
 exec "$REAL_PYTHON" "$@"
 SH
 chmod +x "$T/bin/python3"
