@@ -115,6 +115,20 @@ def quarantine_remove(path: Path, *extra: str) -> Tuple[bool, str]:
     return result.startswith("removed:"), result
 
 
+def c14_verdict(path: Path) -> str:
+    """Read-only C14 verdict (`remove` or `kept:<why>`) matching what quarantine_remove applies."""
+    lib = Path(__file__).resolve().parent / "lib" / "artifact_verdict.sh"
+    cmd = ["bash", "-c", 'source "$1"; inv="$(mktemp)" || exit 1; artifact_removal_verdict "$2" --inventory-out "$inv" --kind ephemeral; rm -f "$inv"',
+           "_", str(lib), str(path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                              env={"DM_ACTUATOR": "prune_aside_sessions.py", **os.environ})
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"kept:check-failed ({exc})"
+    lines = [line for line in proc.stdout.strip().splitlines() if line]
+    return lines[-1] if lines else "kept:check-failed"
+
+
 def get_dir_max_mtime(dir_path: Path) -> float:
     """Return the newest regular-file mtime; unknown for opaque or unreadable trees."""
     newest = 0.0
@@ -512,6 +526,11 @@ class AsideSessionPruner:
         # Execute Session Pruning
         for session_dir, container, age_days, size in stale_candidates:
             if self.dry_run:
+                verdict = c14_verdict(session_dir)
+                if verdict != "remove":
+                    print(f"[DRY-RUN] Would keep stale session (C14 {verdict}): {session_dir}", file=sys.stderr)
+                    retained_dirs.append(session_dir)
+                    continue
                 self.stats["sessions_pruned"] += 1
                 self.stats["bytes_pruned"] += size
                 print(f"[DRY-RUN] Would prune stale session: {session_dir} ({format_size(size)}, {age_days:.1f} days old)")

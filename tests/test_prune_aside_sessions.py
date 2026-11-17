@@ -197,6 +197,33 @@ exit 0
         self.assertTrue(old_session.exists())
         self.assertTrue(recent_session.exists())
 
+    def test_dry_run_does_not_count_c14_kept_session(self):
+        """Dry-run applies the C14 verdict: a session clean would keep is not reclaimable."""
+        old_session = self._create_mock_session(
+            self.u0_sessions,
+            "2026-08-01_old_session",
+            {"messages.jsonl": "old data", "secret.pem": "key"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
+        )
+        kwargs = dict(aside_dir=self.aside_dir, max_age_days=14,
+                      lsof_bin=str(self._create_mock_lsof_script()), ref_time=self.ref_time)
+        dry = AsideSessionPruner(dry_run=True, **kwargs).run()
+        clean = AsideSessionPruner(dry_run=False, **kwargs).run()
+        self.assertEqual(clean["sessions_pruned"], 0)
+        self.assertEqual(dry["sessions_pruned"], 0)
+        self.assertEqual(dry["bytes_pruned"], 0)
+        self.assertTrue(old_session.exists())
+
+    def test_dry_run_counts_session_when_c14_removes(self):
+        old_session = self._create_mock_session(
+            self.u0_sessions, "2026-08-01_old_session", {"messages.jsonl": "old data"},
+            mtime_epoch=self.ref_time - (30 * self.day_secs),
+        )
+        dry = AsideSessionPruner(aside_dir=self.aside_dir, max_age_days=14, dry_run=True,
+                                 lsof_bin=str(self._create_mock_lsof_script()), ref_time=self.ref_time).run()
+        self.assertEqual(dry["sessions_pruned"], 1)
+        self.assertTrue(old_session.exists())
+
     def test_clean_prunes_stale_and_preserves_recent(self):
         """Clean mode actually deletes sessions older than max_age_days and keeps recent ones."""
         old_session = self._create_mock_session(
