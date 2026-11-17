@@ -451,7 +451,7 @@ check 'renamex_np missing: untouched, no sidecar' bash -c '[[ -f "$1/report.md" 
 
 # Oversized serialized intent fails before quarantine directory or index mutation.
 prepare_inputs
-python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x[0]["unknown_preserved"]="x"*(32*1024*1024); json.dump(x,open(sys.argv[1],"w"))' "$INV"
+python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); x[0]["unknown_preserved"]="x"*(256*1024*1024+1); json.dump(x,open(sys.argv[1],"w"))' "$INV"
 OUT="$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING")"
 check 'oversized intent: kept:intent-too-large' [ "$OUT" = kept:intent-too-large ]
 check 'oversized intent: artifact remains, no quarantine dir or index entry' bash -c '[[ -f "$1/report.md" && ! -e "$2" && -z "$(find "$3/quarantine-index" -name "*.json" -print -quit 2>/dev/null)" ]]' _ "$A" "$Q" "$DISK_MAGICIAN_STATE_DIR"

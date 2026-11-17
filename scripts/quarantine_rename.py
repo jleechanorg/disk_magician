@@ -4,7 +4,7 @@ import ctypes, errno, fcntl, hashlib, json, math, os, re, secrets, stat, subproc
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
-MAX_INTENT_BYTES = 32 * 1024 * 1024
+MAX_INTENT_BYTES = 256 * 1024 * 1024
 # Each symbol takes its own exclusive flag: macOS renameatx_np(RENAME_EXCL=0x4),
 # Linux renameat2(RENAME_NOREPLACE=0x1). Passing 4 to renameat2 would request
 # RENAME_WHITEOUT, which is not an exclusive rename.
