@@ -318,6 +318,35 @@ out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$g26/fx" sim_prune --clean 2>&1)"
 [[ -d "$g26/fx/abcabcab-1111-2222-3333-444444444444" ]] && ok "explicit keep verdict blocked the deletion" || bad "keep verdict authorized a deletion"
 unset -f artifact_removal_verdict 2>/dev/null || true
 
+echo "== 27. /dot repro: a timed-out acquire must not steal a foreign lock =="
+l27="$TMP/l27"; mkdir -p "$l27/state/lock" "$l27/fx"
+export DISK_MAGICIAN_STATE_DIR="$l27/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+sim_fixture_device "$l27/fx" "acacacac-1111-2222-3333-444444444444" "wai-shared-lk" "Shutdown" 5
+# Pre-hold the per-UDID lock as if another process owned it.
+mkdir -p "$l27/state/lock/acacacac-1111-2222-3333-444444444444.release-lock"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$l27/fx" sim_lease --wait-seconds 0 >"$TMP/l27out" 2>&1
+if grep -q 'lease_token' "$TMP/l27out"; then
+    bad "timed-out acquire still leased the device (lock steal)"
+else
+    ok "timed-out acquire refused instead of stealing the lock"
+fi
+[[ -d "$l27/state/lock/acacacac-1111-2222-3333-444444444444.release-lock" ]] && ok "foreign lock left intact" || bad "foreign lock was removed by a losing acquirer"
+
+echo "== 28. /dot repro: a SECOND recovery preserves the orphan exclusion =="
+l28="$TMP/l28"; mkdir -p "$l28/state/sim_reservations/o-1" "$l28/fx"
+sim_fixture_device "$l28/fx" "adadadad-1111-2222-3333-444444444444" "wai-shared-o2" "Shutdown" 5
+printf 'status=reserving\nreason=t\npid=999999\nname=wai-shared-o2\n' >"$l28/state/sim_reservations/o-1/meta"
+export DISK_MAGICIAN_STATE_DIR="$l28/state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$l28/state/sim_reservations"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$l28/fx" sim_recover_reservations >/dev/null 2>&1
+# Second recovery must NOT delete the orphan exclusion.
+out28="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$l28/fx" sim_recover_reservations 2>&1)"
+[[ -d "$l28/state/sim_reservations/o-1" ]] && ok "orphan exclusion survived a second recovery" || bad "second recovery deleted the orphan exclusion"
+printf '%s' "$out28" | grep -q 'recover:orphan-exclusion-retained' && ok "second recovery reported retention" || bad "no retention verdict on second recovery"
+out28b="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$l28/fx" sim_lease --wait-seconds 0 2>&1)"
+printf '%s' "$out28b" | grep -q 'lease_token' && bad "device became leaseable after second recovery" || ok "device still not leaseable after second recovery"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

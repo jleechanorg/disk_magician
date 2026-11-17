@@ -216,11 +216,22 @@ sim_lease() {
       # that a caller had just leased (review P0, reproduced by /dot).
       local alock; alock="$(sim_release_lock_path "$udid")"
       mkdir -p "$(dirname "$alock")" 2>/dev/null || true
-      local aw=0
-      until mkdir "$alock" 2>/dev/null; do
-        sleep 0.1; aw=$((aw+1))
-        (( aw < 50 )) || break
-      done
+      local aw=0 alock_held=false
+      # alock_held reflects OUR successful mkdir only. Checking `[[ -d $alock ]]`
+      # was wrong: a foreign holder's directory also satisfies it, so a losing
+      # acquirer proceeded and then rmdir'd the other process's lock (review P0).
+      if mkdir "$alock" 2>/dev/null; then
+        alock_held=true
+      else
+        while (( aw < 50 )); do
+          sleep 0.1; aw=$((aw+1))
+          if mkdir "$alock" 2>/dev/null; then alock_held=true; break; fi
+        done
+      fi
+      if [[ "$alock_held" != true ]]; then
+        echo "sim lease: acquire lock busy for $udid; skipping" >&2
+        continue
+      fi
       if ! mkdir "$d" 2>/dev/null; then
         rmdir "$alock" 2>/dev/null || true
         continue
@@ -507,6 +518,14 @@ sim_recover_reservations() {
   local rf udid r
   for r in "$rdir_override"/*; do
     [[ -d "$r" && ! -L "$r" ]] || continue
+    # An existing ORPHAN record is a durable exclusion, not a live reservation:
+    # preserve it verbatim on every later run. Previously a second recovery fell
+    # through to "reservation-cleared" and deleted it, re-opening the device to
+    # lease (review P0).
+    if grep -qx 'status=orphan' "$r/meta" 2>/dev/null; then
+      echo "recover:orphan-exclusion-retained $(basename "$r")" >&2
+      continue
+    fi
     # Ownership: never reap a reservation whose creating process is alive.
     local owner_pid
     owner_pid="$(sed -n 's/^pid=//p' "$r/meta" 2>/dev/null | head -1)"
