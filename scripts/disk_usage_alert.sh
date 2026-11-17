@@ -26,21 +26,125 @@ STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 STREAK_FILE="$STATE_DIR/coverage_streak.json"
 STREAK_ESCALATE_AT=6
 LEDGER_STALE_HOURS="${DISK_MAGICIAN_LEDGER_STALE_HOURS:-48}"
+DRY_RUN=0
+DELIVERY_TIMEOUT_SEC="${DISK_MAGICIAN_ALERT_DELIVERY_TIMEOUT_SEC:-10}"
+SLACK_WEBHOOK="${DISK_MAGICIAN_ALERT_SLACK_WEBHOOK:-}"
+EMAIL_TO="${DISK_MAGICIAN_ALERT_EMAIL_TO:-}"
+EMAIL_TIMEOUT_SEC="${DISK_MAGICIAN_ALERT_EMAIL_TIMEOUT_SEC:-20}"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--silence|--unsilence|--status]
+Usage: $(basename "$0") [--silence|--unsilence|--status|--dry-run]
 
 Options:
   --silence    Silence alerts.
   --unsilence  Re-enable alerts.
   --status     Print current status and configuration.
+  --dry-run    Detect and report, but do not deliver to Slack or email.
+
+Delivery (opt-in, best-effort; a failure never changes the exit contract):
+  DISK_MAGICIAN_ALERT_SLACK_WEBHOOK   Slack incoming-webhook URL.
+  DISK_MAGICIAN_ALERT_EMAIL_TO        Notification email recipient.
 EOF
 }
 
 is_silenced() { [[ -f "$SILENCE_FILE" ]]; }
 set_silenced() { date -u +%Y-%m-%dT%H:%M:%SZ > "$SILENCE_FILE"; echo "Alerts silenced."; }
 unset_silenced() { rm -f "$SILENCE_FILE"; echo "Alerts unsilenced."; }
+
+# Human delivery for a fired alert. Both installed units send stdout to a log
+# file and nowhere else, so a condition can fire indefinitely unseen (measured
+# 2026-11-16: 236 warnings in that file, none delivered). Delivery is opt-in and
+# strictly best-effort: a failure must never change the exit contract, because
+# exit 1 is how callers learn that an alert fired.
+deliver_alert_slack() { # deliver_alert_slack <message> <host>
+  local message="$1" host="$2"
+  local payload response
+  payload="$(MESSAGE="$message" HOST="$host" python3 -c '
+import json, os
+print(json.dumps({"text": "*diskm alert on %s*\n%s" % (os.environ["HOST"], os.environ["MESSAGE"])}))
+' 2>/dev/null)" || payload=""
+  if [[ -z "$payload" ]]; then
+    echo "slack delivery skipped: could not build a JSON payload" >&2
+    return 0
+  fi
+  if response="$(curl -sS -m "$DELIVERY_TIMEOUT_SEC" -X POST \
+      -H 'Content-type: application/json' \
+      --data-binary "$payload" \
+      "$SLACK_WEBHOOK" 2>&1)"; then
+    # Slack answers 200 with "ok"; a webhook can also return 200 plus an error body.
+    if [[ "${response:0:2}" != "ok" && -n "$response" ]]; then
+      echo "slack delivery reported: $response" >&2
+    fi
+    return 0
+  fi
+  echo "slack delivery FAILED: $response" >&2
+  return 0
+}
+
+deliver_alert_email() { # deliver_alert_email <message> <host>
+  local message="$1" host="$2"
+  local mailer="" response
+  if command -v msmtp >/dev/null 2>&1; then
+    mailer="msmtp"
+  elif command -v sendmail >/dev/null 2>&1; then
+    mailer="sendmail"
+  else
+    echo "email delivery skipped: no msmtp or sendmail on PATH" >&2
+    return 0
+  fi
+  local mail_file
+  mail_file="$(mktemp "${TMPDIR:-/tmp}/diskm-alert-XXXXXX")" || return 0
+  {
+    printf 'To: %s\n' "$EMAIL_TO"
+    printf 'Subject: [diskm] alert fired on %s\n' "$host"
+    printf 'Content-Type: text/plain; charset=UTF-8\n'
+    printf '\n'
+    printf '%s\n' "$message"
+    printf '\n-- \ndisk_magician disk_usage_alert.sh\n'
+  } > "$mail_file"
+  local timeout_cmd=()
+  command -v timeout >/dev/null 2>&1 && timeout_cmd=(timeout "$EMAIL_TIMEOUT_SEC")
+  # Capture the status inside the conditional: set -e would otherwise exit the
+  # script with the MTA's code before the best-effort handler can run.
+  local rc=0
+  if [[ "$mailer" == "msmtp" ]]; then
+    response="$("${timeout_cmd[@]}" msmtp -t "$EMAIL_TO" < "$mail_file" 2>&1)" || rc=$?
+  else
+    response="$("${timeout_cmd[@]}" sendmail -t < "$mail_file" 2>&1)" || rc=$?
+  fi
+  rm -f "$mail_file"
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  fi
+  echo "email delivery FAILED via ${mailer}: ${response:-no output}" >&2
+  return 0
+}
+
+deliver_alert() { # deliver_alert <message-text>
+  local message="$1" host
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[dry-run] would deliver alert to Slack and/or email." >&2
+    return 0
+  fi
+  if [[ -z "$SLACK_WEBHOOK" && -z "$EMAIL_TO" ]]; then
+    return 0
+  fi
+  host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+  # One channel failing must not suppress the other, and neither may change the
+  # exit contract.
+  if [[ -n "$SLACK_WEBHOOK" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      deliver_alert_slack "$message" "$host"
+    else
+      echo "slack delivery skipped: curl not available" >&2
+    fi
+  fi
+  if [[ -n "$EMAIL_TO" ]]; then
+    deliver_alert_email "$message" "$host"
+  fi
+  return 0
+}
 
 # Reads the latest snapshot and scores it once (keyed by snapshot timestamp)
 # into a ring of the last 12 runs in coverage_streak.json. Prints
@@ -316,32 +420,40 @@ if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == tr
   if is_silenced; then
     echo "Disk space/coverage alert silenced (Free space: ${free_gb} GB, ${used_pct}% capacity; coverage streak: ${coverage_streak}; step events 24h: ${step_count})."
   else
-    if [[ "$scratch_floor_alert" == true ]]; then
-      echo "🚨 WARNING: Scratch volume headroom low — ${scratch_floor_detail}." >&2
-      echo "Act before it fills: a full Scratch volume breaks live builds on it." >&2
-      echo "Run './disk_magician.sh scratch-prune --clean --budget-pct 50' or check for a live producer first." >&2
-    fi
-    if [[ "$space_alert" == true ]]; then
-      echo "🚨 WARNING: Low Disk Space! Only ${free_gb} GB free (${used_pct}% capacity)." >&2
-      echo "Run './disk_magician.sh clean' to reclaim space." >&2
-      if [[ "$step_count" -gt 0 ]]; then
-        echo "ℹ️  Step-event attribution: ${step_count} rapid swing(s) recorded in last 24h (latest: ${step_dir} ${step_gib} GiB)." >&2
+    # Capture the human-facing alert text so it can also be delivered off-host;
+    # stdout/stderr alone reach only a log file on the installed units.
+    ALERT_TEXT="$(
+      if [[ "$scratch_floor_alert" == true ]]; then
+        echo "🚨 WARNING: Scratch volume headroom low — ${scratch_floor_detail}."
+        echo "Act before it fills: a full Scratch volume breaks live builds on it."
+        echo "Run './disk_magician.sh scratch-prune --clean --budget-pct 50' or check for a live producer first."
       fi
-    fi
-    if [[ "$streak_alert" == true ]]; then
-      echo "🚨 WARNING: Snapshot coverage degraded (fresh_pct=${coverage_pct}; low-run streak ${coverage_streak}): ${coverage_reasons}." >&2
-      echo "Run 'scripts/residual_drilldown.sh' or check ~/.disk_magician_state/config.d/auto-candidates.json for untracked-growth proposals." >&2
-    fi
-    if [[ "$ledger_alert" == true ]]; then
-      echo "🚨 WARNING: Published ledger/topdown-5g.json is stale (${ledger_detail#STALE	})." >&2
-      echo "Run './disk_magician.sh frontier' or wait for frontier-nightly; bucket deltas are unreliable until a complete scan publishes." >&2
-    fi
-    if [[ "$swap_alert" == true ]]; then
-      echo "🚨 WARNING: Swap used: ${swap_used_gb} GiB (>10 GB) — disk space consumed outside the Data volume (vm.swapusage)." >&2
-    fi
-    if [[ "$volume_alert" == true ]]; then
-      python3 -c 'import json,sys; [print("WARNING: volume " + str(a), file=sys.stderr) for a in json.loads(sys.argv[1])]' "$volume_alarms"
-    fi
+      if [[ "$space_alert" == true ]]; then
+        echo "🚨 WARNING: Low Disk Space! Only ${free_gb} GB free (${used_pct}% capacity)."
+        echo "Run './disk_magician.sh clean' to reclaim space."
+        if [[ "$step_count" -gt 0 ]]; then
+          echo "ℹ️  Step-event attribution: ${step_count} rapid swing(s) recorded in last 24h (latest: ${step_dir} ${step_gib} GiB)."
+        fi
+      fi
+      if [[ "$streak_alert" == true ]]; then
+        echo "🚨 WARNING: Snapshot coverage degraded (fresh_pct=${coverage_pct}; low-run streak ${coverage_streak}): ${coverage_reasons}."
+        echo "Run 'scripts/residual_drilldown.sh' or check ~/.disk_magician_state/config.d/auto-candidates.json for untracked-growth proposals."
+      fi
+      if [[ "$ledger_alert" == true ]]; then
+        echo "🚨 WARNING: Published ledger/topdown-5g.json is stale (${ledger_detail#STALE	})."
+        echo "Run './disk_magician.sh frontier' or wait for frontier-nightly; bucket deltas are unreliable until a complete scan publishes."
+      fi
+      if [[ "$swap_alert" == true ]]; then
+        echo "🚨 WARNING: Swap used: ${swap_used_gb} GiB (>10 GB) — disk space consumed outside the Data volume (vm.swapusage)."
+      fi
+      if [[ "$volume_alert" == true ]]; then
+        python3 -c 'import json,sys; [print("WARNING: volume " + str(a)) for a in json.loads(sys.argv[1])]' "$volume_alarms"
+      fi
+    )"
+    # Human channel. Journal/stdout remain as before, so this adds a destination
+    # rather than replacing one.
+    deliver_alert "$ALERT_TEXT"
+    printf '%s\n' "$ALERT_TEXT" >&2
     exit 1
   fi
 else
