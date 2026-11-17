@@ -44,7 +44,7 @@ import errno
 import os
 import sys
 
-if sys.argv and sys.argv[0] == "-" and os.environ.get("TEST_MISSING_AFTER_ENUMERATION"):
+if sys.argv and sys.argv[0].endswith("diskm_measure.py") and os.environ.get("TEST_MISSING_AFTER_ENUMERATION"):
     target = os.environ["TEST_MISSING_AFTER_ENUMERATION"]
     original_lstat = os.lstat
     def lstat(path, *args, **kwargs):
