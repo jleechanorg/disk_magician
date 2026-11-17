@@ -136,20 +136,34 @@ echo '/dev/x 1000000000 100000000 900000000 10% /'
 SH
 cat >"$BIN3/curl" <<'SH'
 #!/usr/bin/env bash
-out=""
-while [[ "$#" -gt 0 ]]; do
-  case "$1" in
-    -o) out="$2"; shift 2 ;;
-    -w) shift 2 ;;
-    *) shift ;;
-  esac
-done
-[[ -n "$out" ]] && printf '%s' '{"ok":true,"channel":"C00000000","ts":"test.1"}' > "$out"
-printf '200'
+printf 'unexpected curl attempt\n' >> "$FAKE_CURL_LOG"
+exit 97
 SH
-chmod +x "$BIN3/df" "$BIN3/curl"
-alert_out="$(HOME="$WORK3/home" PATH="$BIN3:$PATH" SLACK_BOT_TOKEN= HERMES_SLACK_BOT_TOKEN= SLACK_CHANNEL= HERMES_MONITOR_SLACK_TARGET= DISK_MAGICIAN_ALERT_SLACK_CHANNEL= DISK_MAGICIAN_STATE_DIR="$WORK3/alert-state" DISK_MAGICIAN_STATE_REPO="$STATE3" DISK_MAGICIAN_SNAPSHOT_FILE="$WORK3/absent.json" CLAUDE_CODE_TMPDIR="${CLAUDE_CODE_TMPDIR:-$WORK3}" PYTEST_DEBUG_TEMPROOT="${PYTEST_DEBUG_TEMPROOT:-$WORK3}" BASH_ENV=/dev/null bash "$REPO_ROOT/scripts/disk_usage_alert.sh" 2>&1)" && alert_rc=0 || alert_rc=$?
+cat >"$BIN3/msmtp" <<'SH'
+#!/usr/bin/env bash
+printf 'msmtp attempted\n' >> "$FAKE_MAIL_LOG"
+exit 97
+SH
+cat >"$BIN3/sendmail" <<'SH'
+#!/usr/bin/env bash
+printf 'sendmail attempted\n' >> "$FAKE_MAIL_LOG"
+exit 97
+SH
+chmod +x "$BIN3/df" "$BIN3/curl" "$BIN3/msmtp" "$BIN3/sendmail"
+FAKE_BASH_ENV="$WORK3/hostile-bash-env"
+cat > "$FAKE_BASH_ENV" <<'SH'
+export DISK_MAGICIAN_ALERT_EMAIL_TO=alert-test@example.invalid
+export DISK_MAGICIAN_ALERT_SLACK_WEBHOOK=https://hooks.slack.com/services/T00/B00/fake
+export SLACK_BOT_TOKEN=fake-token
+export DISK_MAGICIAN_ALERT_SLACK_CHANNEL=C0BCVG4F560
+SH
+export BASH_ENV="$FAKE_BASH_ENV"
+FAKE_CURL_LOG="$WORK3/curl.log"
+FAKE_MAIL_LOG="$WORK3/mail.log"
+alert_out="$(HOME="$WORK3/home" PATH="$BIN3:$PATH" FAKE_CURL_LOG="$FAKE_CURL_LOG" FAKE_MAIL_LOG="$FAKE_MAIL_LOG" DISK_MAGICIAN_ALERT_EMAIL_TO= DISK_MAGICIAN_ALERT_SLACK_WEBHOOK= SLACK_BOT_TOKEN= HERMES_SLACK_BOT_TOKEN= SLACK_CHANNEL= HERMES_MONITOR_SLACK_TARGET= DISK_MAGICIAN_ALERT_SLACK_CHANNEL= DISK_MAGICIAN_STATE_DIR="$WORK3/alert-state" DISK_MAGICIAN_STATE_REPO="$STATE3" DISK_MAGICIAN_SNAPSHOT_FILE="$WORK3/absent.json" CLAUDE_CODE_TMPDIR="${CLAUDE_CODE_TMPDIR:-$WORK3}" PYTEST_DEBUG_TEMPROOT="${PYTEST_DEBUG_TEMPROOT:-$WORK3}" BASH_ENV=/dev/null bash "$REPO_ROOT/scripts/disk_usage_alert.sh" 2>&1)" && alert_rc=0 || alert_rc=$?
 [[ "$alert_rc" -eq 1 && "$alert_out" == *Published*ledger*stale* ]] && ok "alert escalates stale canonical despite fresh partial" || bad "fresh partial masked canonical publication alert (rc=$alert_rc out=$alert_out)"
+[[ ! -s "$FAKE_CURL_LOG" && ! -s "$FAKE_MAIL_LOG" ]] && ok "alert test blocks and detects all network/email delivery attempts" || bad "unexpected delivery path was attempted"
+unset BASH_ENV
 rm -rf "$WORK3"
 
 # --- Case 4: canonical stale, partial.json structurally invalid -> STALE ---
@@ -441,6 +455,60 @@ out="$(DISK_MAGICIAN_STATE_REPO="$STATE19" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "
   && ok "stale partial does not suppress same-time status reconciliation mismatch" \
   || bad "expected reconciliation mismatch STALE, got rc=$rc out=$out"
 rm -rf "$WORK19"
+
+# --- Case 20: stale partial with empty status metadata cannot claim unpublished ---
+WORK20="$(mktemp -d)"
+git init -q "$WORK20/repo"
+STATE20="$WORK20/repo"
+mkdir -p "$STATE20/ledger"
+CAPTURED20="$(iso_offset_hours -72)"
+write_partial "$STATE20/ledger/topdown-5g.partial.json" "$CAPTURED20" "partial"
+echo '{}' > "$STATE20/ledger/topdown-5g.status.json"
+git -C "$STATE20" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
+git -C "$STATE20" -c user.email=t@test -c user.name=t commit -q -m "partial with empty status"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE20" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_reconciliation_mismatch* ]] \
+  && ok "empty status metadata cannot suppress stale partial-only alert" \
+  || bad "expected stale malformed metadata, got rc=$rc out=$out"
+rm -rf "$WORK20"
+
+# --- Case 21: stale partial with status from another capture cannot claim unpublished ---
+WORK21="$(mktemp -d)"
+git init -q "$WORK21/repo"
+STATE21="$WORK21/repo"
+mkdir -p "$STATE21/ledger"
+CAPTURED21="$(iso_offset_hours -72)"
+write_partial "$STATE21/ledger/topdown-5g.partial.json" "$CAPTURED21" "partial"
+OTHER_CAPTURED21="$(iso_offset_hours -73)"
+echo "{\"captured_at\":\"$OTHER_CAPTURED21\",\"mode\":\"partial\",\"coverage_envelope\":{\"measured_top_level_roots\":5,\"reachable_top_level_roots\":10}}" > "$STATE21/ledger/topdown-5g.status.json"
+git -C "$STATE21" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
+git -C "$STATE21" -c user.email=t@test -c user.name=t commit -q -m "partial with stale status metadata"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE21" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_reconciliation_mismatch* ]] \
+  && ok "status from another capture cannot suppress stale partial-only alert" \
+  || bad "expected stale mismatched metadata, got rc=$rc out=$out"
+rm -rf "$WORK21"
+
+# --- Case 22: git history read failure cannot be mistaken for never published ---
+WORK22="$(mktemp -d)"
+git init -q "$WORK22/repo"
+STATE22="$WORK22/repo"
+mkdir -p "$STATE22/ledger" "$WORK22/bin"
+CAPTURED22="$(iso_offset_hours -72)"
+write_partial "$STATE22/ledger/topdown-5g.partial.json" "$CAPTURED22" "partial"
+echo "{\"status\":\"partial\",\"reason\":\"coverage_incomplete\",\"captured_at\":\"$CAPTURED22\",\"mode\":\"partial\",\"coverage_envelope\":{\"measured_top_level_roots\":5,\"reachable_top_level_roots\":10}}" > "$STATE22/ledger/topdown-5g.status.json"
+git -C "$STATE22" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
+git -C "$STATE22" -c user.email=t@test -c user.name=t commit -q -m "partial only"
+cat > "$WORK22/bin/git" <<'SH'
+#!/usr/bin/env bash
+exit 128
+SH
+chmod +x "$WORK22/bin/git"
+out="$(PATH="$WORK22/bin:$PATH" DISK_MAGICIAN_STATE_REPO="$STATE22" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *history_unavailable* ]] \
+  && ok "git history read failure fails closed rather than proving unpublished" \
+  || bad "expected history failure STALE, got rc=$rc out=$out"
+rm -rf "$WORK22"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

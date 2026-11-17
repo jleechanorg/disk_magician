@@ -58,8 +58,13 @@ fi
 LEDGER_REL="ledger/topdown-5g.json"
 STATUS_PATH="$STATE_DIR/ledger/topdown-5g.status.json"
 
-last_epoch="$(git -C "$STATE_DIR" log -1 --format=%ct -- "$LEDGER_REL" 2>/dev/null || echo 0)"
-[[ -z "$last_epoch" ]] && last_epoch=0
+history_query_ok=1
+if last_epoch="$(git -C "$STATE_DIR" log -1 --format=%ct -- "$LEDGER_REL" 2>/dev/null)"; then
+  [[ -z "$last_epoch" ]] && last_epoch=0
+else
+  last_epoch=0
+  history_query_ok=0
+fi
 last_iso="none"
 if [[ -n "$last_epoch" && "$last_epoch" != "0" ]]; then
   last_iso="$(git -C "$STATE_DIR" log -1 --format=%cI -- "$LEDGER_REL" 2>/dev/null || echo unknown)"
@@ -199,6 +204,12 @@ def check_partial():
             return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "status_reconciliation_mismatch"
 
     if age_hours > stale_hours:
+        if status is not None and (
+            status.get("captured_at") != captured_at
+            or status.get("mode") != safe_get(partial, "mode")
+            or status.get("coverage_envelope") != safe_get(partial, "coverage_envelope")
+        ):
+            return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "status_reconciliation_mismatch"
         return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "partial_stale"
 
     envelope = safe_get(partial, "coverage_envelope")
@@ -230,6 +241,13 @@ fields = [
 print("\x1f".join(fields))
 PY
 )"
+
+if [[ "$history_query_ok" == "0" ]]; then
+  c_valid="no"
+  c_reason="history_unavailable"
+  pub_status="unknown"
+  pub_reason="history_unavailable"
+fi
 
 # FDA/coverage-envelope surfacing (bead disk_magician-ledger-coverage-incomplete-gzvc):
 # a scan incomplete because the scheduled run lacks Full Disk Access reports a bare
@@ -292,7 +310,7 @@ fi
 # Partial scans are not published ledgers. Until a complete canonical ledger
 # has ever been committed, an otherwise-valid partial that simply aged out is
 # expected and should not page forever. Malformed partials still fail closed.
-if [[ "$last_epoch" == "0" && ! -e "$STATE_DIR/ledger/topdown-5g.json" && "$p_reason" == "partial_stale" ]]; then
+if [[ "$history_query_ok" == "1" && "$last_epoch" == "0" && ! -e "$STATE_DIR/ledger/topdown-5g.json" && "$p_reason" == "partial_stale" ]]; then
   printf "OK\tlast_commit=none\tlabel=UNPUBLISHED_PARTIAL\tcanonical_publication=unpublished\tpartial_status=partial_stale%s\n" "$FDA_FIELDS"
   exit 0
 fi
