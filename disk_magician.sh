@@ -206,7 +206,8 @@ run_setup() {
         shift
         ;;
       *)
-        shift
+        echo "Error: unknown setup option: $1" >&2
+        return 2
         ;;
     esac
   done
