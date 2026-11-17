@@ -48,7 +48,7 @@ chmod +x "$BIN/curl"
 # REAL mail from a test run. Allowlisting whole DIRECTORIES is not enough:
 # dirname(df) may be /bin, which admits /bin/msmtp sitting beside it. Link only
 # the individual executables we need into one fresh directory.
-HERMETIC_TOOLS="bash sed grep cat mktemp rm printf dirname hostname python3 df awk head tr date ls wc sleep uname mkdir readlink chmod cp mv touch test true false env sort uniq cut tee"
+HERMETIC_TOOLS="bash sed grep cat mktemp rm printf dirname hostname python3 df awk head tr date ls wc sleep uname mkdir readlink chmod cp mv ln cmp touch test true false env sort uniq cut tee"
 # The email path requires a timer; its absence is a separate, deliberate test case.
 TIMER_REAL="$(command -v timeout 2>/dev/null || true)"
 TOOLBIN="$TMP/toolbin"
