@@ -44,25 +44,44 @@ exit 0
 EOF
 chmod +x "$BIN/curl"
 # Hermetic PATH. The script prefers msmtp over sendmail, so inheriting the host
-# PATH means a developer machine with a configured msmtp would bypass our fake
-# sendmail and could attempt REAL delivery from a test run. Build a controlled
-# PATH containing only the fakes below plus the ordinary tools the script needs.
-HERMETIC_TOOLS="bash sed grep cat mktemp rm printf dirname hostname python3 df awk head tr date ls wc sleep"
-HERMETIC=""
+# PATH means a machine with a configured msmtp could bypass our stubs and send
+# REAL mail from a test run. Allowlisting whole DIRECTORIES is not enough:
+# dirname(df) may be /bin, which admits /bin/msmtp sitting beside it. Link only
+# the individual executables we need into one fresh directory.
+HERMETIC_TOOLS="bash sed grep cat mktemp rm printf dirname hostname python3 df awk head tr date ls wc sleep uname mkdir readlink chmod cp mv touch test true false env sort uniq cut tee"
+# The email path requires a timer; its absence is a separate, deliberate test case.
+TIMER_REAL="$(command -v timeout 2>/dev/null || true)"
+TOOLBIN="$TMP/toolbin"
+mkdir -p "$TOOLBIN"
 missing_tools=""
 for tool in $HERMETIC_TOOLS; do
-  real="$(command -v "$tool" 2>/dev/null)" || { missing_tools="$missing_tools $tool"; continue; }
-  d="$(dirname "$real")"
-  case ":$HERMETIC:" in *":$d:"*) ;; *) HERMETIC="${HERMETIC:+$HERMETIC:}$d" ;; esac
+  real="$(command -v "$tool" 2>/dev/null)" || { missing_tools="${missing_tools:+$missing_tools }$tool"; continue; }
+  ln -sf "$real" "$TOOLBIN/$tool" 2>/dev/null || missing_tools="${missing_tools:+$missing_tools }$tool"
 done
-# Only the directories holding our prerequisites, then our fakes first.
-HERMETIC_PATH="$BIN:$HERMETIC"
+# Keep the timer in its own directory so the no-timer case can omit it by PATH
+# alone while every other tool stays available.
+TIMERBIN="$TMP/timerbin"
+mkdir -p "$TIMERBIN"
+[[ -n "$TIMER_REAL" ]] && ln -sf "$TIMER_REAL" "$TIMERBIN/timeout" 2>/dev/null || true
+HERMETIC_PATH="$BIN:$TIMERBIN:$TOOLBIN"
+NOTIMER_PATH="$BIN:$TOOLBIN"
 export PATH="$HERMETIC_PATH"
-# Prove the premise: neither real mailer may be reachable from here.
+
+# Prove the premise, and ABORT rather than merely flagging it: continuing would
+# run the email fixtures against a real mailer, which is the hazard itself.
 if command -v msmtp >/dev/null 2>&1 || command -v sendmail >/dev/null 2>&1; then
-  echo "FAIL: a host mailer is reachable on the hermetic PATH; this suite could send real mail"
-  FAIL=1
+  echo "FAIL: a host mailer is reachable on the hermetic PATH; aborting before any alert runs"
+  echo "SOME TESTS FAILED"
+  exit 1
 fi
+# Also verify by direct directory listing, so a PATH-resolved miss cannot hide it.
+for sneaky in "$TOOLBIN/msmtp" "$TOOLBIN/sendmail"; do
+  if [[ -e "$sneaky" ]]; then
+    echo "FAIL: $sneaky exists; a mailer is reachable. Aborting."
+    echo "SOME TESTS FAILED"
+    exit 1
+  fi
+done
 
 # ── Fake diskm so only the volume path is exercised ──────────────────────────
 cat > "$BIN/disk-magician" <<'EOF'
@@ -321,65 +340,29 @@ done
 
 # ── 13. Email must fail closed when no timer is available ──────────────────
 # Without a 'timeout' binary the MTA call was unbounded, so a wedged relay could
-# block the alert job forever. Build a controlled PATH that HAS the fake MTA and
-# the tools the script needs but NOT a timer. A fallback PATH like /usr/bin:/bin
-# is wrong twice over: /usr/bin/timeout may exist (making the case untestable and
-# the assertion unreachable), and the fake MTA lives in $BIN so it would vanish.
-NOMTA_BIN="$TMP/bin-no-timer"
-mkdir -p "$NOMTA_BIN"
-NEEDED_TOOLS="bash sed grep cat mktemp rm printf dirname hostname python3 df awk head tr"
-missing=""
-for tool in $NEEDED_TOOLS; do
-  real="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
-  ln -sf "$real" "$NOMTA_BIN/$tool" 2>/dev/null || missing="$missing $tool"
-done
-# The fake MTA must be present so the code reaches the timer check.
-cat > "$NOMTA_BIN/sendmail" <<'EOF'
-#!/usr/bin/env bash
-cat > /dev/null
-exit 0
-EOF
-chmod +x "$NOMTA_BIN/sendmail"
-# The fake diskm must be present too, for the same reason.
-cp "$BIN/disk-magician" "$NOMTA_BIN/disk-magician" 2>/dev/null || true
-chmod +x "$NOMTA_BIN/disk-magician" 2>/dev/null || true
-
-if [[ -n "$missing" ]]; then
-  # Honest skip: say why, and never reference a file that was not created.
-  echo "SKIP: cannot build a complete toolchain for the no-timer case:$missing"
+# block the alert job forever. NOTIMER_PATH has every tool the script needs but
+# no timer. Verify the premise instead of assuming it.
+if PATH="$NOTIMER_PATH" command -v timeout >/dev/null 2>&1; then
+  echo "SKIP: a timer is reachable on NOTIMER_PATH; case cannot be exercised"
 else
-  if PATH="$NOMTA_BIN" command -v timeout >/dev/null 2>&1; then
-    echo "SKIP: a timer leaked into the controlled PATH; case cannot be exercised"
-  else
-    ERR13="$TMP/err-13.txt"
-    env PATH="$NOMTA_BIN" FAKE_CURL_LOG="$TMP/curl-13.log" \
-      HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
-      DISK_MAGICIAN_DISKM_BIN="$NOMTA_BIN/disk-magician" \
-      DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
-      DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
-      DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
-      bash "$ALERT" >/dev/null 2>"$ERR13" || true
-    grep -q 'no .timeout. command' "$ERR13" \
-      && pass "email fails closed with a diagnostic when no timer is available" \
-      || fail "email did not fail closed without a timer"
-    # The no-timer path must not create a mail temp file at all. Count only
-    # files this run could have created: a shared /tmp accumulates unrelated
-    # siblings from other runs, so a global glob proves nothing.
-    before13="$TMP/mail-temps-before13"
-    after13="$TMP/mail-temps-after13"
-    ls "${TMPDIR:-/tmp}"/diskm-alert-* 2>/dev/null | wc -l | tr -d ' ' > "$before13"
-    env PATH="$NOMTA_BIN" FAKE_CURL_LOG="$TMP/curl-13b.log" \
-      HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
-      DISK_MAGICIAN_DISKM_BIN="$NOMTA_BIN/disk-magician" \
-      DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
-      DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
-      DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
-      bash "$ALERT" >/dev/null 2>&1 || true
-    ls "${TMPDIR:-/tmp}"/diskm-alert-* 2>/dev/null | wc -l | tr -d ' ' > "$after13"
-    [[ "$(cat "$after13")" -le "$(cat "$before13")" ]] \
-      && pass "no-timer path creates no mail temp file" \
-      || fail "no-timer path created $(( $(cat "$after13") - $(cat "$before13") )) mail temp file(s)"
-  fi
+  ERR13="$TMP/err-13.txt"
+  before13="$TMP/mail-temps-before13"
+  after13="$TMP/mail-temps-after13"
+  ls "${TMPDIR:-/tmp}"/diskm-alert-* 2>/dev/null | wc -l | tr -d ' ' > "$before13"
+  env PATH="$NOTIMER_PATH" FAKE_CURL_LOG="$TMP/curl-13.log" \
+    HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
+    DISK_MAGICIAN_DISKM_BIN="$BIN/disk-magician" \
+    DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
+    DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
+    DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
+    bash "$ALERT" >/dev/null 2>"$ERR13" || true
+  ls "${TMPDIR:-/tmp}"/diskm-alert-* 2>/dev/null | wc -l | tr -d ' ' > "$after13"
+  grep -q 'no .timeout. command' "$ERR13" \
+    && pass "email fails closed with a diagnostic when no timer is available" \
+    || fail "email did not fail closed without a timer"
+  [[ "$(cat "$after13")" -le "$(cat "$before13")" ]] \
+    && pass "no-timer path creates no mail temp file" \
+    || fail "no-timer path created $(( $(cat "$after13") - $(cat "$before13") )) mail temp file(s)"
 fi
 
 # ── 14. --status reports configuration without leaking destinations ─────────
