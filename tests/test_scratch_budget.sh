@@ -735,6 +735,15 @@ set -e
 [[ $strict_symlink_rc -ne 0 ]] && record_pass "Test25: strict content mtime rejects symlink traversal" || record_fail "Test25: strict content mtime rejects symlink traversal" "rc=$strict_symlink_rc"
 [[ $strict_error_rc -ne 0 ]] && record_pass "Test25: strict content mtime preserves on traversal error" || record_fail "Test25: strict content mtime preserves on traversal error" "rc=$strict_error_rc"
 
+# Non-strict content mtime must not trust a partial scan: a find that printed
+# some mtimes and then failed (unreadable subdir) cannot prove the newest file.
+R26="$TMP_TEST_ROOT/t26"
+mkdir -p "$R26/tree" "$R26/partialbin"
+touch -t 202001010000 "$R26/tree/old-file"
+printf '#!/bin/sh\n/usr/bin/find "$@"\nexit 1\n' >"$R26/partialbin/find"; chmod +x "$R26/partialbin/find"
+partial_out="$(PATH="$R26/partialbin:$PATH" bash -c 'source "'"$REPO_ROOT"'/scripts/lib/scratch_budget.sh"; scratch_budget_content_mtime "'"$R26/tree"'"' 2>/dev/null || true)"
+[[ -z "$partial_out" ]] && record_pass "Test27: partial find failure yields unmeasurable (empty)" || record_fail "Test27: partial find failure yields unmeasurable (empty)" "got [$partial_out]"
+
 test_regression_mac_autoclean_20261105_mtime_deadline
 test_keep_only_cursor
 
