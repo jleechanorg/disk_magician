@@ -135,8 +135,17 @@ sim_next_generation() {
   p="$(sim_generation_path "$udid")"
   mkdir -p "$(dirname "$p")" 2>/dev/null || true
   [[ -f "$p" ]] && prev="$(cat "$p" 2>/dev/null)"
+  # Corruption must NOT reset the counter to 1 (review): a lower generation would
+  # let an old receipt validate again. Fail closed instead.
+  if [[ -f "$p" && ! "$prev" =~ ^[0-9]+$ ]]; then
+    echo "sim: generation counter corrupt at $p; refusing (delete it deliberately to reset)" >&2
+    return 1
+  fi
   [[ "$prev" =~ ^[0-9]+$ ]] || prev=0
-  printf '%s\n' "$(( prev + 1 ))" >"$p"
+  if ! printf '%s\n' "$(( prev + 1 ))" >"$p" 2>/dev/null; then
+    echo "sim: cannot persist generation at $p; refusing" >&2
+    return 1
+  fi
   printf '%s\n' "$(( prev + 1 ))"
 }
 sim_generation()   { cat "$(sim_lease_path "$1")/generation" 2>/dev/null; }
@@ -191,15 +200,25 @@ sim_lease() {
       [[ "$name" == wai-shared-* ]] || continue
       # Never hand out a Booted (in-use) device, and require a positive safe state.
       [[ "$state" == "Shutdown" ]] || continue
-      # Honour the requested runtime when one is named (device names encode it).
+      # Honour the requested runtime. Names are the only runtime signal the
+      # device list exposes, so this is a name match by necessity; the device
+      # type is verified at create time.
       if [[ -n "$runtime" ]]; then
         local rt_slug; rt_slug="$(printf '%s' "$runtime" | tr ' .' '--' | tr 'A-Z' 'a-z')"
         [[ "$name" == *"$runtime"* || "$name" == *"$rt_slug"* ]] || continue
       fi
+      # A device still being registered by `create` is not yet leaseable
+      # (review P0: it became leaseable before create finished registering it).
+      sim_name_reserved "$udid" "$name" && continue
       local d; d="$(sim_lease_path "$udid")"
       if mkdir "$d" 2>/dev/null; then
         local token="lt_$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-        local gen; gen="$(sim_next_generation "$udid")"
+        local gen
+        if ! gen="$(sim_next_generation "$udid")" || [[ -z "$gen" ]]; then
+          rmdir "$d" 2>/dev/null || true
+          echo "sim lease: cannot allocate generation (corrupt/unwritable counter); refusing" >&2
+          return 22
+        fi
         printf '%s\n' "$gen" >"$d/generation"
         printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner"
         printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"
@@ -350,9 +369,39 @@ sim_prune() {
       case "$target" in
         "$root"|""|"/") echo "sim prune: refusing unsafe target '$target'" >&2; return 1 ;;
       esac
-      # logged deletion via the shared helper when available
+
+      # Exclusion: take the same per-UDID lock release uses, so a release or a
+      # new lease cannot interleave with this delete (review P0).
+      local plock; plock="$(sim_release_lock_path "$udid")"
+      mkdir -p "$(dirname "$plock")" 2>/dev/null || true
+      mkdir "$plock" 2>/dev/null || { echo "keep:exclusion-busy $name"; kept=$((kept+1)); continue; }
+
+      # FINAL positive re-check, under the lock: the device must still be
+      # Shutdown and still unleased, re-read live (not from the loop snapshot).
+      local still_state still_leased
+      still_state="$(sim_devices | awk -F'\t' -v u="$udid" '$1==u {print $3}')"
+      still_leased=0; sim_is_leased "$udid" && still_leased=1
+      if [[ "$still_state" != "Shutdown" || "$still_leased" -eq 1 ]]; then
+        rmdir "$plock" 2>/dev/null || true
+        echo "keep:state-changed $name"
+        kept=$((kept+1)); continue
+      fi
+
+      # Route through the shared removal verdict when this tree provides it, so
+      # the simulator path cannot bypass secret/repo/liveness gates (review P0).
+      if declare -F artifact_removal_verdict >/dev/null 2>&1; then
+        local verdict
+        verdict="$(artifact_removal_verdict "$target" 2>/dev/null | tail -1)"
+        if [[ -n "$verdict" && "$verdict" != remove* ]]; then
+          rmdir "$plock" 2>/dev/null || true
+          echo "keep:verdict-$verdict $name"
+          kept=$((kept+1)); continue
+        fi
+      fi
+
       if declare -F deletion_log >/dev/null 2>&1; then deletion_log "$target" "sim-prune"; fi
       rm -rf "${target:?}" 2>/dev/null && removed=$((removed+1))
+      rmdir "$plock" 2>/dev/null || true
     fi
   done < <(sim_devices)
   echo "sim prune: candidates_removed=$removed kept=$kept dry_run=$dry"
@@ -377,6 +426,22 @@ sim_prune() {
 #      leased, so prune skips it, and it is visible in `sim status`.
 # ---------------------------------------------------------------------------
 SIM_POOL_SLOTS="${DISK_MAGICIAN_SIM_POOL_SLOTS:-3}"
+# sim_name_reserved <udid> <name> — true while an unfinished `create` reservation
+# owns this device name or UDID, so lease cannot hand it out mid-registration.
+sim_name_reserved() {
+  local udid="$1" name="$2" rdir rn ru
+  rdir="$(sim_reserve_dir)"
+  [[ -d "$rdir" ]] || return 1
+  for r in "$rdir"/*; do
+    [[ -d "$r" && ! -L "$r" ]] || continue
+    rn="$(cat "$r/name" 2>/dev/null)"
+    ru="$(cat "$r/udid" 2>/dev/null)"
+    [[ -n "$udid" && "$ru" == "$udid" ]] && return 0
+    [[ -n "$name" && "$rn" == "$name" ]] && return 0
+  done
+  return 1
+}
+
 sim_reserve_dir() { printf '%s\n' "${DISK_MAGICIAN_SIM_RESERVE_DIR:-$(sim_state_root)/sim_reservations}"; }
 
 sim_pool_slots() {
@@ -403,7 +468,30 @@ sim_recover_reservations() {
   local rf udid r
   for r in "$rdir_override"/*; do
     [[ -d "$r" && ! -L "$r" ]] || continue
+    # Ownership: never reap a reservation whose creating process is alive.
+    local owner_pid
+    owner_pid="$(sed -n 's/^pid=//p' "$r/meta" 2>/dev/null | head -1)"
+    if [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+      echo "recover:skipped-live-creator $(basename "$r") pid=$owner_pid" >&2
+      continue
+    fi
     udid="$(cat "$r/udid" 2>/dev/null)"
+    # A crash AFTER simctl succeeded but BEFORE the UDID was recorded is not proof
+    # that no device was made: look for the reserved NAME in the live device list.
+    if [[ -z "$udid" ]]; then
+      local rname found
+      # create records name= inside meta (not a separate file)
+      rname="$(sed -n 's/^name=//p' "$r/meta" 2>/dev/null | head -1)"
+      [[ -z "$rname" ]] && rname="$(cat "$r/name" 2>/dev/null)"
+      if [[ -n "$rname" ]]; then
+        found="$(sim_devices | awk -F'\t' -v n="$rname" '$2==n {print $1; exit}')"
+        if [[ -n "$found" ]]; then
+          echo "recover:orphan-device $found ($rname) created but never registered; left inert, needs operator release/adopt" >&2
+          rmdir "$r" 2>/dev/null || rm -rf "${r:?}"
+          continue
+        fi
+      fi
+    fi
     if [[ -n "$udid" ]] && sim_devices | awk -F'\t' -v u="$udid" '$1==u {found=1} END{exit !found}'; then
       echo "recover:created $udid (inert: leased, never prunable without a release receipt)" >&2
     else
@@ -452,11 +540,13 @@ sim_create() {
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   rdir="$(sim_reserve_dir)/${stamp}-$$"
   mkdir "$rdir" 2>/dev/null || { echo "sim create: reservation race lost" >&2; return 21; }
-  printf 'status=reserving\nreason=%s\npid=%s\nruntime=%s\n' "$reason" "$$" "$runtime" >"$rdir/meta"
-
   local device_type="${DISK_MAGICIAN_SIM_DEVICE_TYPE:-iPhone 17 Pro}"
   local rt="${runtime:-iOS 26.5}"
   name="${name:-wai-shared-$(printf '%s' "$rt" | tr ' .' '--' | tr 'A-Z' 'a-z')-$(printf '%s' "$stamp" | tail -c 6)}"
+
+  # name is recorded BEFORE simctl so a crash-after-create-before-register is
+  # detectable by name (review P0).
+  printf 'status=reserving\nreason=%s\npid=%s\nruntime=%s\nname=%s\n' "$reason" "$$" "$runtime" "$name" >"$rdir/meta"
 
   local udid rc=0
   if [[ -n "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]]; then
@@ -483,11 +573,22 @@ sim_create() {
   # Step 2: record the produced UDID, then lease it so it is never unleased.
   printf '%s\n' "$udid" >"$rdir/udid"
   printf 'status=created\n' >>"$rdir/meta"
-  mkdir -p "$(sim_lease_dir)"
+  mkdir -p "$(sim_lease_dir)" || {
+    echo "sim create: cannot create lease dir; refusing (device $udid was created and is NOT leased)" >&2
+    return 24
+  }
   local d; d="$(sim_lease_path "$udid")"
-  mkdir "$d" 2>/dev/null || true
+  # Never overwrite an existing lease directory (review P0).
+  if ! mkdir "$d" 2>/dev/null; then
+    echo "sim create: lease dir already exists for $udid; refusing to overwrite" >&2
+    return 24
+  fi
   local token="lt_$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-  local gen; gen="$(sim_next_generation "$udid")"
+  local gen
+  if ! gen="$(sim_next_generation "$udid")" || [[ -z "$gen" ]]; then
+    echo "sim create: cannot allocate generation; device $udid left unleased, needs operator handling" >&2
+    return 24
+  fi
   printf '%s\n' "$gen" >"$d/generation"
   printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner"
   printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"

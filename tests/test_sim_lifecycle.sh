@@ -86,21 +86,23 @@ export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 
 echo "== 5. prune preserves Booted, leased, young, and unreleased devices =="
 out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_prune --dry-run 2>/dev/null)"
-if printf '%s' "$out" | grep -q 'AAAAAAAA-1111-2222-3333-444444444444'; then
+# prune prints NAMES, so assert on the name; grepping a UDID proved nothing
+# (review finding). wai-shared-booted is the Booted pool device from the fixture.
+if printf '%s' "$out" | grep -qE '^remove:.*wai-shared-booted'; then
     bad "prune proposed removing the Booted device"
 else
-    ok "Booted device excluded"
+    ok "Booted device excluded (asserted by NAME, matching prune output)"
 fi
-if printf '%s' "$out" | grep -q 'BBBBBBBB-1111-2222-3333-444444444444'; then
+if printf '%s' "$out" | grep -qE '^remove:.*task-named-old'; then
     bad "prune proposed removing a device with no release receipt"
 else
-    ok "unreleased task-named device excluded (age is not proof)"
+    ok "unreleased task-named device excluded (age is not proof), asserted by NAME"
 fi
 
 echo "== 6. unmeasurable mtime fails closed =="
 sim_fixture_device "$fixture" "CCCCCCCC-1111-2222-3333-444444444444" "unmeasurable" "Shutdown" -1
 out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_prune --dry-run 2>/dev/null)"
-printf '%s' "$out" | grep -q 'CCCCCCCC-1111-2222-3333-444444444444' && bad "unmeasurable device proposed for removal" || ok "unmeasurable mtime preserved"
+printf '%s' "$out" | grep -q '^keep:mtime-unmeasurable unmeasurable' && ok "unmeasurable mtime preserved (asserted by NAME)" || bad "unmeasurable device not preserved by name"
 
 echo "== 7. release writes exactly one receipt line and is generation-fenced =="
 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_lease --wait-seconds 0 >"$TMP/l7" 2>/dev/null
@@ -203,6 +205,45 @@ wait
 r1="$(cat "$TMP/r1" 2>/dev/null)"; r2="$(cat "$TMP/r2" 2>/dev/null)"
 wins=0; [[ "$r1" == "0" ]] && wins=$((wins+1)); [[ "$r2" == "0" ]] && wins=$((wins+1))
 [[ "$wins" -eq 1 ]] && ok "exactly one of two concurrent releases succeeded" || bad "concurrent release outcome wrong (r1=$r1 r2=$r2: $(cat "$TMP/e17a" "$TMP/e17b" 2>/dev/null | head -2 | tr '\n' ' '))"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 18. generation corruption fails closed instead of resetting to 1 =="
+corrupt_state="$TMP/state18"; corrupt_fx="$TMP/fx18"; mkdir -p "$corrupt_state/gen" "$corrupt_fx"
+printf 'not-a-number\n' >"$corrupt_state/gen/aaddccbb-1111-2222-3333-444444444444"
+export DISK_MAGICIAN_STATE_DIR="$corrupt_state"
+sim_fixture_device "$corrupt_fx" "aaddccbb-1111-2222-3333-444444444444" "wai-shared-ios-26-5-x" "Shutdown" 5
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$corrupt_fx" sim_lease --wait-seconds 0 >/dev/null 2>"$TMP/e18"
+rc18=$?
+[[ "$rc18" -ne 0 ]] && ok "corrupt generation counter refused (no silent reset to 1)" || bad "corrupt generation silently reset"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 19. recovery will not reap a reservation with a live creator =="
+live_state="$TMP/state19"; mkdir -p "$live_state/sim_reservations/live-1"
+printf 'status=reserving\npid=%s\nname=wai-shared-live\n' "$$" >"$live_state/sim_reservations/live-1/meta"
+export DISK_MAGICIAN_STATE_DIR="$live_state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$live_state/sim_reservations"
+out="$(sim_recover_reservations 2>&1)"
+[[ -d "$live_state/sim_reservations/live-1" ]] && ok "live creator's reservation preserved" || bad "recovery reaped a live creator's reservation"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+
+echo "== 20. crash after create-before-register is recovered by NAME, not lost =="
+orph_state="$TMP/state20"; orph_fx="$TMP/fx20"; mkdir -p "$orph_state/sim_reservations/orph-1" "$orph_fx"
+sim_fixture_device "$orph_fx" "bbddccaa-1111-2222-3333-444444444444" "wai-shared-orphan" "Shutdown" 5
+printf 'status=reserving\npid=999999\nname=wai-shared-orphan\n' >"$orph_state/sim_reservations/orph-1/meta"
+export DISK_MAGICIAN_STATE_DIR="$orph_state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$orph_state/sim_reservations"
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$orph_fx" sim_recover_reservations 2>&1)"
+printf '%s' "$out" | grep -q 'recover:orphan-device' && ok "unregistered but created device detected by name (not treated as no-device)" || bad "crash-after-create orphan was misclassified"
+[[ -d "$orph_fx/bbddccaa-1111-2222-3333-444444444444" ]] && ok "orphan device left intact for operator decision" || bad "orphan device was removed by recovery"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+
+echo "== 21. a live lease blocks prune even with a matching receipt =="
+pl_state="$TMP/state21"; pl_fx="$TMP/fx21"; mkdir -p "$pl_state" "$pl_fx"
+export DISK_MAGICIAN_STATE_DIR="$pl_state"
+sim_fixture_device "$pl_fx" "ccddaabb-1111-2222-3333-444444444444" "wai-shared-leased" "Shutdown" 999
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$pl_fx" sim_lease --wait-seconds 0 >/dev/null 2>&1
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$pl_fx" sim_prune --dry-run 2>/dev/null)"
+printf '%s' "$out" | grep -qE '^keep:leased.*wai-shared-leased' && ok "leased device excluded from prune by NAME" || bad "leased device was a prune candidate"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 
 echo ""
