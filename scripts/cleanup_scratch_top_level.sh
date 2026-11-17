@@ -361,7 +361,7 @@ fi
 
 now="$(date +%s)"
 floor_epoch=$(( now - MIN_HOURS * 3600 ))
-scanned=0 kept=0 removable=0 removed=0 planned_kb=0 removed_kb=0 capped=0 busy_streak=0
+scanned=0 kept=0 removable=0 removed=0 planned_kb=0 removed_kb=0 capped=0 busy_streak=0 lease_deferred=0 LEASE_BUSY_STREAK_MAX=3
 DEFERRED_CANDIDATES=0
 MEASUREMENT_INCOMPLETE=0
 data_free_before_bytes="$(data_volume_free_bytes 2>/dev/null || echo unknown)"
@@ -410,7 +410,7 @@ _verdict_and_maybe_remove() {
   # verdict and the rename. The retry budget is short because a busy registry
   # blocks EVERY candidate: the caller aborts the pass on repeated contention
   # instead of paying this wait once per entry.
-  local tries=600
+  local tries="${DISK_MAGICIAN_LEASE_BUSY_TRIES:-600}"
   if [[ "$DRY_RUN" != true ]]; then
     while (( tries-- > 0 )); do
       if lease_registry_mutation_lock_enter; then break; fi
@@ -980,13 +980,11 @@ while IFS= read -r -d '' entry; do
       echo "$outcome $entry (${kb} KB)" ;;
     kept:lease-busy)
       kept=$(( kept + 1 ))
-      busy_streak=$(( busy_streak + 1 ))
+      busy_streak=$(( busy_streak + 1 )); lease_deferred=$(( lease_deferred + 1 ))
       echo "$outcome $entry"
-      if [[ "$SCRATCH_AUTOMATIC" == 1 ]]; then
-        echo "skipped:lease-busy (registry lock held by a producer; rerun when the sweeper finishes)"
-        budget_stop=lease-busy; break
-      fi
-      if (( busy_streak >= 10 )); then
+      # One streak limit for both modes: a short producer hold clears between
+      # entries, a held lock blocks every eviction so the pass stops.
+      if (( busy_streak >= LEASE_BUSY_STREAK_MAX )); then
         echo "skipped:lease-busy (registry lock held by a producer; rerun when the sweeper finishes)"
         budget_stop=lease-busy; break
       fi
@@ -1011,6 +1009,8 @@ fi
 [[ -n "$LRU_LIST" ]] && rm -f "$LRU_LIST"
 
 echo "=== Summary ==="
+# A deferred busy entry means the pass never saw every candidate.
+[[ -z "$budget_stop" ]] && (( lease_deferred > 0 )) && budget_stop=lease-busy
 data_free_after_bytes="$(data_volume_free_bytes 2>/dev/null || echo unknown)"
 if [[ "$data_free_before_bytes" =~ ^[0-9]+$ && "$data_free_after_bytes" =~ ^[0-9]+$ ]]; then
   data_free_delta_bytes=$(( data_free_after_bytes - data_free_before_bytes ))
@@ -1021,6 +1021,7 @@ printf 'scanned=%s kept=%s removable=%s removed=%s eligible_estimate=%s candidat
   "$scanned" "$kept" "$removable" "$removed" "$removable" "$(( planned_kb + removed_kb ))" "$removed_kb" "$DEFERRED_CANDIDATES" \
   "$data_free_before_bytes" "$data_free_after_bytes" "$data_free_delta_bytes"
 echo "keep_count=$kept"
+echo "deferred_lease_busy=$lease_deferred"
 (( capped )) && echo "capped: at least one candidate skipped by --max-gib ${MAX_GIB}"
 if [[ -n "$BUDGET_PCT" ]]; then
   _estimated_after_bytes=$(( budget_used - planned_kb * 1024 ))

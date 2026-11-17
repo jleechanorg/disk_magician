@@ -818,6 +818,11 @@
       "key": "agentsview",
       "path": "~/.agentsview",
       "timeout": 60
+    },
+    {
+      "key": "hermes_cache_scratch",
+      "path": "~/.hermes/cache/scratch",
+      "timeout": 60
     }
   ],
   "monitored_file_globs": [

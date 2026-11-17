@@ -403,7 +403,9 @@ scratch_budget_content_mtime() {
         | awk '$1+0>m{m=$1+0} END{if (m>0) print m}'
     )" || scan_rc=$?
   fi
-  if [[ "$scan_rc" == 124 || "$scan_rc" == 137 ]]; then
+  # Any scan failure (timeout, unreadable subtree) makes the partial maximum
+  # untrustworthy: report unmeasurable instead of a possibly stale epoch.
+  if (( scan_rc != 0 )); then
     echo ""
     return 0
   fi
