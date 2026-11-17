@@ -58,7 +58,19 @@ fi
 LEDGER_REL="ledger/topdown-5g.json"
 STATUS_PATH="$STATE_DIR/ledger/topdown-5g.status.json"
 
-last_epoch="$(git -C "$STATE_DIR" log -1 --format=%ct -- "$LEDGER_REL" 2>/dev/null || echo 0)"
+history_query_ok=1
+if last_epoch="$(git -C "$STATE_DIR" log -1 --format=%ct -- "$LEDGER_REL" 2>/dev/null)"; then
+  [[ -z "$last_epoch" ]] && last_epoch=0
+else
+  last_epoch=0
+  history_query_ok=0
+fi
+history_absence_proven="$history_query_ok"
+if [[ "$history_query_ok" == "1" ]]; then
+  if ! shallow_repo="$(git -C "$STATE_DIR" rev-parse --is-shallow-repository 2>/dev/null)" || [[ "$shallow_repo" != "false" ]]; then
+    history_absence_proven=0
+  fi
+fi
 last_iso="none"
 if [[ -n "$last_epoch" && "$last_epoch" != "0" ]]; then
   last_iso="$(git -C "$STATE_DIR" log -1 --format=%cI -- "$LEDGER_REL" 2>/dev/null || echo unknown)"
@@ -81,10 +93,11 @@ fi
 # Run python validator for canonical capture time and partial ledger.
 # Note: Heredoc body must NOT contain literal single quote / apostrophe
 # characters due to bash 3.2 heredoc-in-subshell parsing bugs.
-IFS=$'\x1f' read -r c_valid c_age_hours p_valid p_age_hours p_captured_at p_mode p_measured p_reachable p_reason <<< "$(python3 - "$STATE_DIR" "$SCRIPT_DIR" "$STALE_HOURS" "${last_epoch:-0}" <<'PY'
+IFS=$'\x1f' read -r c_valid c_age_hours p_valid p_age_hours p_captured_at p_mode p_measured p_reachable p_reason canonical_absent <<< "$(python3 - "$STATE_DIR" "$SCRIPT_DIR" "$STALE_HOURS" "${last_epoch:-0}" <<'PY'
 import datetime, json, os, sys
 
 state_dir, script_dir, stale_hours_str, last_epoch_str = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+PARTIAL_LEDGER_MODES = {"partial", "complete"}
 try:
     stale_hours = float(stale_hours_str)
 except Exception:
@@ -99,6 +112,17 @@ def s(v):
 
 def safe_get(obj, key):
     return obj.get(key) if isinstance(obj, dict) else None
+
+def valid_partial_envelope(value):
+    if not isinstance(value, dict):
+        return False
+    measured = value.get("measured_top_level_roots")
+    reachable = value.get("reachable_top_level_roots")
+    return (
+        type(measured) is int and measured >= 0
+        and type(reachable) is int and reachable >= 0
+        and measured <= reachable
+    )
 
 def check_canonical():
     canon_path = os.path.join(state_dir, "ledger", "topdown-5g.json")
@@ -180,14 +204,20 @@ def check_partial():
     age_hours = (now_dt - ts).total_seconds() / 3600.0
     if ts > now_dt:
         return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "captured_at_in_future"
-    if age_hours > stale_hours:
-        return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "partial_stale"
+    try:
+        os.lstat(status_path)
+        status_present = True
+    except FileNotFoundError:
+        status_present = False
+    except OSError:
+        return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "status_unreadable"
 
     try:
-        with open(status_path) as f:
-            status = json.load(f)
-    except FileNotFoundError:
-        status = None
+        if status_present:
+            with open(status_path) as f:
+                status = json.load(f)
+        else:
+            status = None
     except Exception:
         return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "status_unreadable"
 
@@ -199,6 +229,31 @@ def check_partial():
             or status.get("coverage_envelope") != safe_get(partial, "coverage_envelope")
         ):
             return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "status_reconciliation_mismatch"
+
+    if age_hours > stale_hours:
+        partial_mode = safe_get(partial, "mode")
+        partial_envelope = safe_get(partial, "coverage_envelope")
+        if partial_mode not in PARTIAL_LEDGER_MODES or not valid_partial_envelope(partial_envelope):
+            return False, age_hours, captured_at, partial_mode, None, None, "partial_metadata_malformed"
+        if status_present:
+            if not isinstance(status, dict):
+                return False, age_hours, captured_at, partial_mode, None, None, "status_malformed"
+            status_captured_at = status.get("captured_at")
+            try:
+                datetime.datetime.strptime(status_captured_at, "%Y-%m-%dT%H:%M:%SZ")
+            except (TypeError, ValueError):
+                return False, age_hours, captured_at, partial_mode, None, None, "status_malformed"
+            status_mode = status.get("mode")
+            status_envelope = status.get("coverage_envelope")
+            if status_mode not in PARTIAL_LEDGER_MODES or not valid_partial_envelope(status_envelope):
+                return False, age_hours, captured_at, partial_mode, None, None, "status_malformed"
+            if (
+                status_captured_at != captured_at
+                or status_mode != partial_mode
+                or status_envelope != partial_envelope
+            ):
+                return False, age_hours, captured_at, partial_mode, None, None, "status_reconciliation_mismatch"
+        return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "partial_stale"
 
     envelope = safe_get(partial, "coverage_envelope")
     measured = safe_get(envelope, "measured_top_level_roots")
@@ -215,6 +270,14 @@ try:
 except Exception as exc:
     p_ok, p_age, p_cap, p_m, p_meas, p_reach, p_rsn = False, None, None, None, None, None, "partial_check_error"
 
+try:
+    os.lstat(os.path.join(state_dir, "ledger", "topdown-5g.json"))
+    canonical_absent = "no"
+except FileNotFoundError:
+    canonical_absent = "yes"
+except OSError:
+    canonical_absent = "no"
+
 fields = [
     "yes" if c_ok else "no",
     s(int(c_age) if c_age is not None else ""),
@@ -225,10 +288,18 @@ fields = [
     s(p_meas),
     s(p_reach),
     s(p_rsn if not p_ok else ""),
+    canonical_absent,
 ]
 print("\x1f".join(fields))
 PY
 )"
+
+if [[ "$history_query_ok" == "0" ]]; then
+  c_valid="no"
+  c_reason="history_unavailable"
+  pub_status="unknown"
+  pub_reason="history_unavailable"
+fi
 
 # FDA/coverage-envelope surfacing (bead disk_magician-ledger-coverage-incomplete-gzvc):
 # a scan incomplete because the scheduled run lacks Full Disk Access reports a bare
@@ -285,6 +356,14 @@ if [[ "$p_valid" == "yes" ]]; then
     "${c_age_hours:-NA}" "$last_iso" "$pub_status" "$pub_reason" \
     "${p_age_hours:-0}" "${p_captured_at:-unknown}" "${p_mode:-unknown}" \
     "${p_measured:-?}" "${p_reachable:-?}" "$FDA_FIELDS"
+  exit 0
+fi
+
+# Partial scans are not published ledgers. Until a complete canonical ledger
+# has ever been committed, an otherwise-valid partial that simply aged out is
+# expected and should not page forever. Malformed partials still fail closed.
+if [[ "$history_absence_proven" == "1" && "$canonical_absent" == "yes" && "$last_epoch" == "0" && "$p_reason" == "partial_stale" ]]; then
+  printf "OK\tlast_commit=none\tlabel=UNPUBLISHED_PARTIAL\tcanonical_publication=unpublished\tpartial_status=partial_stale%s\n" "$FDA_FIELDS"
   exit 0
 fi
 
