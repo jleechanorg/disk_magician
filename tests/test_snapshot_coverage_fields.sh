@@ -133,6 +133,12 @@ seed_state claude_root:30000000:30 claude_projects:10000000:30 gone:1000000:30
 O="$WORK/f.json"; run_snap "$O" STUB_SIZES="$SIZES" STUB_TIMEOUT="/.claude/projects,/.claude,/gone"
 check "test_warning_degraded_carry_when_carry_over_24h" "$O" "assert d.get('snapshot_warning') == 'degraded_carry', d.get('snapshot_warning')"
 
+echo "── phantom bytes: tracked total above used space ──"
+rm -f "$STATE/last_good_measurements.json"
+O="$WORK/clamp.json"; run_snap "$O" STUB_SIZES="/projects:150000000,/other:5000000"
+check "test_coverage_pct_clamped_at_100_when_tracked_exceeds_used" "$O" "
+assert d['snapshot_coverage_pct'] <= 100 and d['coverage_effective_pct'] <= 100 and d['coverage_fresh_pct'] <= 100, (d['snapshot_coverage_pct'], d['coverage_effective_pct'])"
+
 echo "── gap / unconfigured split ──"
 seed_state gone:5000000:100
 O="$WORK/g.json"; run_snap "$O" STUB_SIZES="$SIZES" STUB_TIMEOUT="/gone"

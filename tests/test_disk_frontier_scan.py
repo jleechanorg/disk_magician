@@ -1,5 +1,6 @@
 import errno
 import pathlib
+import subprocess
 import sys
 import unittest
 from types import SimpleNamespace
@@ -104,6 +105,20 @@ class TestListChildrenEintrRetry(unittest.TestCase):
         self.assertIsNone(children)
         self.assertEqual(err, f"enumeration_errno_{errno.EINTR}")
         self.assertEqual(mocked_scandir.call_count, 3)
+
+    def test_df_and_diskutil_calls_are_bounded_and_survive_timeout(self):
+        timeout = subprocess.TimeoutExpired(cmd="df", timeout=30)
+        with mock.patch.object(
+            frontier.subprocess, "check_output", side_effect=timeout
+        ) as co:
+            stats = frontier.get_disk_stats("/fixture")
+            warnings = []
+            siblings = frontier.get_sibling_volumes("/fixture", warnings)
+        self.assertEqual(stats, {"total_kb": 0, "used_kb": 0, "free_kb": 0})
+        self.assertEqual(siblings, {})
+        self.assertTrue(co.call_args_list)
+        for call in co.call_args_list:
+            self.assertEqual(call.kwargs.get("timeout"), 30)
 
 
 if __name__ == "__main__":

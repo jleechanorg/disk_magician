@@ -74,16 +74,30 @@ scratch_roots_get_tmp() {
   if [[ -d "$root" ]]; then echo "$root"; fi
 }
 
+# Hermes agent scratch (bead disk_magician-61os): reuses the shared root list so
+# every existing gate (48 h floor, C14 verdict, live-cwd, .in-use) applies.
+scratch_roots_get_agent_cache() {
+  local root="${DISK_MAGICIAN_AGENT_CACHE_SCRATCH_OVERRIDE:-$HOME/.hermes/cache/scratch}"
+  if [[ -d "$root" ]]; then echo "$root"; fi
+}
+
 # scratch_roots_get — one canonical root per line.
 scratch_roots_get() {
   scratch_roots_get_private_tmp
   scratch_roots_get_tmp
   scratch_roots_get_user_tmp
+  scratch_roots_get_agent_cache
 }
 
-# scratch_roots_get_unique — scratch_roots_get, deduplicated (order-preserving).
+# scratch_roots_get_unique — scratch_roots_get, deduplicated on the canonical
+# path (/tmp is a symlink to /private/tmp on macOS), order-preserving; the first
+# spelling of each root is printed. An uncanonicalizable root is its own key.
 scratch_roots_get_unique() {
-  scratch_roots_get | awk '!seen[$0]++'
+  local root canon
+  while IFS= read -r root; do
+    canon="$(cd "$root" 2>/dev/null && pwd -P)" || canon="$root"
+    printf '%s\t%s\n' "$canon" "$root"
+  done < <(scratch_roots_get) | awk -F'\t' '!seen[$1]++ {print $2}'
 }
 
 # Mounted quota volumes are a separate C14 domain, never ordinary tmp roots.

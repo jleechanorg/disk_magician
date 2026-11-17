@@ -1210,7 +1210,9 @@ fi
 coverage_pct=$(awk "BEGIN{
   used = $disk_used_kb
   if (used <= 0) { print 0; exit }
-  printf \"%.1f\", 100 * $tracked_total_kb_deduped / used
+  p = 100 * $tracked_total_kb_deduped / used
+  if (p > 100) p = 100  # clone-shared/phantom bytes must not exceed the disk
+  printf \"%.1f\", p
 }")
 coverage_pct_raw_v1=$(awk "BEGIN{
   used = $disk_used_kb
@@ -1219,7 +1221,7 @@ coverage_pct_raw_v1=$(awk "BEGIN{
 }")
 # fresh + carried + gap + unconfigured partition the used space (see spec section 4).
 coverage_carried_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * $carried_kb_deduped / $disk_used_kb }")
-coverage_effective_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * ($tracked_total_kb_deduped + $carried_kb_deduped) / $disk_used_kb }")
+coverage_effective_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; p = 100 * ($tracked_total_kb_deduped + $carried_kb_deduped) / $disk_used_kb; if (p > 100) p = 100; printf \"%.1f\", p }")
 coverage_gap_pct=$(awk "BEGIN{ if ($disk_used_kb <= 0) {print 0; exit}; printf \"%.1f\", 100 * $gap_kb / $disk_used_kb }")
 coverage_unconfigured_pct=$(awk "BEGIN{ v = 100 - $coverage_effective_pct - $coverage_gap_pct; if (v < 0) v = 0; printf \"%.1f\", v }")
 warning=""

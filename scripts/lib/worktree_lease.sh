@@ -540,7 +540,6 @@ _reuse_lock_is_stale() {
     [[ -z "$stamp" || "$stamp" =~ ^[0-9]+$ ]] || return 1
     now="$(date +%s)" || return 1
     if [[ -n "$pid" && -n "$stamp" ]]; then
-        (( now - stamp > LEASE_REUSE_LOCK_TTL_SEC )) || return 1
         _reuse_lock_dead_pid "$pid" || return 1
         return 0
     fi

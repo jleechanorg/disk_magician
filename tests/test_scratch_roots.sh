@@ -160,6 +160,32 @@ fi
 out="$(bash -c "source '$LIB'; scratch_roots_get_volumes '$TMP_TEST_ROOT/absent.json'")"
 assert_eq_empty "Test9: missing config returns no volume roots" "$out"
 
+# --- Test 10: the Hermes agent-cache scratch dir is a scratch root (bead 61os) ---
+HERMES="$TMP_TEST_ROOT/hermes-cache-scratch"
+mkdir -p "$HERMES"
+out="$(DISK_MAGICIAN_AGENT_CACHE_SCRATCH_OVERRIDE="$HERMES" bash -c "source '$LIB'; scratch_roots_get_unique")"
+canon_hermes="$(cd "$HERMES" && pwd -P)"
+if grep -Fxq "$HERMES" <<<"$out" && grep -Fxq "$PRIV" <<<"$out"; then
+  record_pass "Test10: agent-cache scratch dir included alongside the static roots"
+else
+  record_fail "Test10: agent-cache scratch dir included alongside the static roots" "got: $out"
+fi
+out="$(DISK_MAGICIAN_AGENT_CACHE_SCRATCH_OVERRIDE="$TMP_TEST_ROOT/absent-hermes" bash -c "source '$LIB'; scratch_roots_get_unique")"
+if [[ "$out" != *absent-hermes* ]] && grep -Fxq "$PRIV" <<<"$out"; then
+  record_pass "Test10: missing agent-cache dir skipped, static roots kept"
+else
+  record_fail "Test10: missing agent-cache dir skipped, static roots kept" "got: $out"
+fi
+
+# --- Test 11: a symlinked alias of a root collapses to one canonical root (bead wg06) ---
+ln -s "$PRIV" "$TMP_TEST_ROOT/priv-alias"
+out="$(DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$TMP_TEST_ROOT/priv-alias" bash -c "source '$LIB'; scratch_roots_get_unique" | grep -cE "priv-alias|/private/tmp$" || true)"
+if [[ "$out" == 1 ]]; then
+  record_pass "Test11: /tmp-style symlink alias and real root dedupe to one root"
+else
+  record_fail "Test11: /tmp-style symlink alias and real root dedupe to one root" "occurrences: $out"
+fi
+
 echo ""
 echo "===================================="
 echo "Results: $PASS passed, $FAIL failed"

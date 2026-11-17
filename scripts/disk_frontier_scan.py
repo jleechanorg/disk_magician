@@ -1036,20 +1036,20 @@ def inventory_mountpoint(path):
         except OSError:
             return None
     try:
-        out = subprocess.check_output(["df", "-P", path], text=True)
+        out = subprocess.check_output(["df", "-P", path], text=True, timeout=30)
         lines = out.strip().splitlines()
         if len(lines) >= 2:
             mountpoint = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), lines[-1].split()[-1])
             return os.path.normpath(mountpoint)
-    except (subprocess.CalledProcessError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         pass
     return None
 
 
 def get_disk_stats(root):
     try:
-        out = subprocess.check_output(["df", "-k", root], text=True)
-    except (subprocess.CalledProcessError, OSError):
+        out = subprocess.check_output(["df", "-k", root], text=True, timeout=30)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return {"total_kb": 0, "used_kb": 0, "free_kb": 0}
     lines = out.strip().splitlines()
     if len(lines) < 2:
@@ -1071,23 +1071,25 @@ def get_sibling_volumes(root, warnings, apfs_accounting=None):
     structurally invisible to a Data-rooted walk (VM/Preboot/Update/...)."""
     try:
         raw = subprocess.check_output(
-            ["diskutil", "apfs", "list", "-plist"], stderr=subprocess.DEVNULL
+            ["diskutil", "apfs", "list", "-plist"], stderr=subprocess.DEVNULL,
+            timeout=30,
         )
         data = plistlib.loads(raw)
-    except (subprocess.CalledProcessError, OSError, ValueError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
         warnings.append("sibling_volumes unavailable: diskutil apfs list failed")
         return {}
 
     try:
         root_info = subprocess.check_output(
-            ["diskutil", "info", "-plist", root], stderr=subprocess.DEVNULL
+            ["diskutil", "info", "-plist", root], stderr=subprocess.DEVNULL,
+            timeout=30,
         )
         root_plist = plistlib.loads(root_info)
         root_container_uuid = root_plist.get("APFSContainerUUID") or root_plist.get(
             "ContainerUUID"
         )
         root_container_reference = root_plist.get("APFSContainerReference")
-    except (subprocess.CalledProcessError, OSError, ValueError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
         root_container_uuid = None
         root_container_reference = None
         warnings.append("sibling_volumes: could not resolve root's container identity")

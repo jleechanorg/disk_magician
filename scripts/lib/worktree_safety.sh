@@ -58,5 +58,14 @@ worktree_has_unsaved_work() {
   [[ "$rev_rc" -ne 0 ]] && return 0
   [[ -n "$rev_out" ]] && return 0
 
+  # Other local branches with commits not on any remote, and stashes (shared
+  # across linked worktrees), are also work that deletion would lose.
+  rev_out="$("$git_bin" -C "$wt" log --branches --not --remotes -n 1 --format=%h 2>/dev/null)"; rev_rc=$?
+  [[ "$rev_rc" -ne 0 ]] && return 0
+  [[ -n "$rev_out" ]] && return 0
+  rev_out="$("$git_bin" -C "$wt" stash list 2>/dev/null)"; rev_rc=$?
+  [[ "$rev_rc" -ne 0 ]] && return 0
+  [[ -n "$rev_out" ]] && return 0
+
   return 1
 }
