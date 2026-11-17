@@ -97,6 +97,7 @@ IFS=$'\x1f' read -r c_valid c_age_hours p_valid p_age_hours p_captured_at p_mode
 import datetime, json, os, sys
 
 state_dir, script_dir, stale_hours_str, last_epoch_str = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+PARTIAL_LEDGER_MODES = {"partial", "complete"}
 try:
     stale_hours = float(stale_hours_str)
 except Exception:
@@ -232,7 +233,7 @@ def check_partial():
     if age_hours > stale_hours:
         partial_mode = safe_get(partial, "mode")
         partial_envelope = safe_get(partial, "coverage_envelope")
-        if partial_mode != "partial" or not valid_partial_envelope(partial_envelope):
+        if partial_mode not in PARTIAL_LEDGER_MODES or not valid_partial_envelope(partial_envelope):
             return False, age_hours, captured_at, partial_mode, None, None, "partial_metadata_malformed"
         if status_present:
             if not isinstance(status, dict):
@@ -244,7 +245,7 @@ def check_partial():
                 return False, age_hours, captured_at, partial_mode, None, None, "status_malformed"
             status_mode = status.get("mode")
             status_envelope = status.get("coverage_envelope")
-            if status_mode != "partial" or not valid_partial_envelope(status_envelope):
+            if status_mode not in PARTIAL_LEDGER_MODES or not valid_partial_envelope(status_envelope):
                 return False, age_hours, captured_at, partial_mode, None, None, "status_malformed"
             if (
                 status_captured_at != captured_at

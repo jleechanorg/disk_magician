@@ -511,7 +511,7 @@ out="$(PATH="$WORK22/bin:$PATH" DISK_MAGICIAN_STATE_REPO="$STATE22" DISK_MAGICIA
 rm -rf "$WORK22"
 
 # --- Case 23: stale partial suppression accepts only valid status metadata ---
-for variant in null_status missing_both wrong_types empty_status empty_envelope broken_status_symlink canonical_symlink absent_status fresh_null_status; do
+for variant in null_status missing_both wrong_types empty_status empty_envelope broken_status_symlink canonical_symlink absent_status fresh_null_status complete_mode; do
   WORK23="$(mktemp -d)"
   git init -q "$WORK23/repo"
   STATE23="$WORK23/repo"
@@ -550,6 +550,10 @@ elif variant in ("broken_status_symlink", "canonical_symlink"):
     status_value = status
 elif variant == "fresh_null_status":
     status_value = None
+elif variant == "complete_mode":
+    partial["mode"] = "complete"
+    status["mode"] = "complete"
+    status_value = status
 else:
     status_value = status
 pathlib.Path(partial_path).write_text(json.dumps(partial))
@@ -573,6 +577,10 @@ PY
     [[ "$rc" -eq 0 && "$out" == OK* && "$out" == *label=PARTIAL* ]] \
       && ok "fresh partial with legacy null status keeps its existing compatibility behavior" \
       || bad "expected fresh-partial compatibility, got rc=$rc out=$out"
+  elif [[ "$variant" == "complete_mode" ]]; then
+    [[ "$rc" -eq 0 && "$out" == OK* && "$out" == *canonical_publication=unpublished* ]] \
+      && ok "unpublished partial artifacts with producer mode complete remain non-alerting" \
+      || bad "expected complete-mode unpublished state, got rc=$rc out=$out"
   else
     [[ "$rc" -eq 1 && "$out" == STALE* ]] \
       && ok "rejects stale partial with $variant metadata" \
