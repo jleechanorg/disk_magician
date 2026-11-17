@@ -11,7 +11,7 @@ case "$sub" in
   lease)   sim_lease "$@" ;;
   release) sim_release "$@" ;;
   prune)   sim_prune "$@" ;;
-  create)  echo "sim create: not implemented in this PR; requires --reason plus pool-capacity check (contract: lease contract § Creation flow)" >&2; exit 21 ;;
+  create)  sim_create "$@" ;;
   adopt)   echo "sim adopt: not implemented in this PR; requires explicit owner authorisation (contract § Adopt path)" >&2; exit 22 ;;
   *) echo "usage: diskm sim <status|lease|release|prune|create|adopt>" >&2; exit 2 ;;
 esac

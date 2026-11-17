@@ -293,3 +293,146 @@ sim_prune() {
   echo "sim prune: candidates_removed=$removed kept=$kept dry_run=$dry"
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# sim_create — authorised create-and-register.
+#
+# Contract: ~/roadmap/sq-ios-simulator-lease-contract-2026-11-16.md § Creation
+# flow. Crash-safety is the hard part (review requirement, 2026-11-16):
+#
+#   1. Reserve the slot DURABLY under the pool lock BEFORE invoking simctl.
+#      The reservation is a directory, so mkdir is the single-writer atomic
+#      primitive — a crashed create leaves a recoverable reservation, never a
+#      half-made device invisible to the pool.
+#   2. Record the reservation state (`status=reserving`, then `created` with the
+#      UDID) so recovery can tell "crashed before simctl" from "crashed after".
+#   3. A failed/interrupted create must not leak capacity and must never expose
+#      an unleased device to prune. Because prune requires a release RECEIPT and
+#      a created device holds a live lease from birth, an orphan is inert: it is
+#      leased, so prune skips it, and it is visible in `sim status`.
+# ---------------------------------------------------------------------------
+SIM_POOL_SLOTS="${DISK_MAGICIAN_SIM_POOL_SLOTS:-3}"
+SIM_RESERVE_DIR="${DISK_MAGICIAN_SIM_RESERVE_DIR:-$SIM_STATE_ROOT/sim_reservations}"
+
+sim_pool_slots() {
+  local n="${SIM_POOL_SLOTS:-3}"
+  [[ "$n" =~ ^[1-9][0-9]?$ ]] || n=3
+  printf '%s\n' "$n"
+}
+
+# count pool devices + in-flight reservations (a reservation consumes a slot)
+sim_pool_used() {
+  local devices reservations
+  devices="$(sim_devices | awk -F'\t' '$2 ~ /^wai-shared-/ {n++} END{print n+0}')"
+  reservations="$(find "$SIM_RESERVE_DIR" -maxdepth 1 -type d ! -path "$SIM_RESERVE_DIR" 2>/dev/null | wc -l | tr -d ' ')"
+  printf '%s\n' "$(( ${devices:-0} + ${reservations:-0} ))"
+}
+
+# sim_recover_reservations — finish or clear interrupted creates.
+# A reservation whose simctl never produced a UDID is cleared (capacity
+# reclaimed). One that recorded a UDID is reconciled: if the device exists it is
+# kept as an inert leased device; the reservation itself is released.
+sim_recover_reservations() {
+  local rdir_override="${DISK_MAGICIAN_SIM_RESERVE_DIR:-$SIM_RESERVE_DIR}"
+  [[ -d "$rdir_override" ]] || return 0
+  local rf udid r
+  for r in "$rdir_override"/*; do
+    [[ -d "$r" && ! -L "$r" ]] || continue
+    udid="$(cat "$r/udid" 2>/dev/null)"
+    if [[ -n "$udid" ]] && sim_devices | awk -F'\t' -v u="$udid" '$1==u {found=1} END{exit !found}'; then
+      echo "recover:created $udid (inert: leased, never prunable without a release receipt)" >&2
+    else
+      echo "recover:reservation-cleared $(basename "$r") (no device was produced; capacity reclaimed)" >&2
+    fi
+    rm -rf "${r:?}"
+  done
+  return 0
+}
+
+# sim_create --reason <text> [--runtime R] [--name N] [--json]
+sim_create() {
+  local reason="" runtime="" name="" json=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --reason) reason="${2:-}"; shift 2 ;;
+      --runtime) runtime="${2:-}"; shift 2 ;;
+      --name) name="${2:-}"; shift 2 ;;
+      --json) json=true; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  sim_recover_reservations >/dev/null 2>&1 || true
+
+  # Refuse without a stated reason: creation is an exception, not a default.
+  [[ -n "${reason// /}" ]] || {
+    echo "sim create: --reason is required (a pool slot insuffices only for a stated reason)" >&2
+    return 2
+  }
+  # An available slot must be used instead of creating.
+  if sim_devices | awk -F'\t' '$2 ~ /^wai-shared-/ && $3 != "Booted" {n++} END{exit !(n>0)}'; then
+    echo "sim create: refused — a pool slot is available; use 'diskm sim lease'" >&2
+    return 21
+  fi
+  local slots used
+  slots="$(sim_pool_slots)"; used="$(sim_pool_used)"
+  (( used < slots )) || {
+    echo "sim create: refused — pool cap reached (${used}/${slots}); an env var does not bypass the cap" >&2
+    return 21
+  }
+
+  # Step 1: durable reservation BEFORE touching simctl.
+  mkdir -p "$SIM_RESERVE_DIR" || { echo "sim create: cannot create reservation dir" >&2; return 22; }
+  local stamp rdir
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  rdir="$SIM_RESERVE_DIR/${stamp}-$$"
+  mkdir "$rdir" 2>/dev/null || { echo "sim create: reservation race lost" >&2; return 21; }
+  printf 'status=reserving\nreason=%s\npid=%s\nruntime=%s\n' "$reason" "$$" "$runtime" >"$rdir/meta"
+
+  local device_type="${DISK_MAGICIAN_SIM_DEVICE_TYPE:-iPhone 17 Pro}"
+  local rt="${runtime:-iOS 26.5}"
+  name="${name:-wai-shared-$(printf '%s' "$rt" | tr ' .' '--' | tr 'A-Z' 'a-z')-$(printf '%s' "$stamp" | tail -c 6)}"
+
+  local udid rc=0
+  if [[ -n "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]]; then
+    # Test/fixture mode: NEVER call real simctl. A unit test must not be able to
+    # create a real device on the host (a fixture run did exactly that on
+    # 2026-11-16, creating wai-shared-ios-26-5-11739Z).
+    if [[ -n "${DISK_MAGICIAN_SIM_FIXTURE_CREATE_FAIL:-}" ]]; then
+      rc=1
+      udid=""
+    else
+      udid="$(printf 'FAKE-%s' "$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')")"
+      sim_fixture_device "$DISK_MAGICIAN_SIM_FIXTURE_ROOT" "$udid" "$name" "Shutdown" 0
+    fi
+  else
+    udid="$(xcrun simctl create "$name" "$device_type" "$rt" 2>/dev/null)" || rc=$?
+  fi
+  if [[ "$rc" -ne 0 || -z "$udid" ]]; then
+    # Step 3a: no device produced — release capacity immediately.
+    rm -rf "${rdir:?}"
+    echo "sim create: simctl create failed (rc=$rc); reservation released, no capacity leaked" >&2
+    return 1
+  fi
+
+  # Step 2: record the produced UDID, then lease it so it is never unleased.
+  printf '%s\n' "$udid" >"$rdir/udid"
+  printf 'status=created\n' >>"$rdir/meta"
+  mkdir -p "$SIM_LEASE_DIR"
+  local d; d="$(sim_lease_path "$udid")"
+  mkdir "$d" 2>/dev/null || true
+  local token="lt_$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  printf '1\n' >"$d/generation"; printf '1\n' >"$d/last_generation"
+  printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner"
+  printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"
+  chmod 600 "$d/generation" "$d/last_generation" "$d/owner" "$d/token_fingerprint" 2>/dev/null || true
+  rm -rf "${rdir:?}"
+
+  if [[ "$json" == true ]]; then
+    printf '{"schema_version": 1, "udid": "%s", "name": "%s", "state": "Shutdown", "lease_generation": 1, "lease_token": "%s", "created": true}\n' \
+      "$udid" "$name" "$token"
+  else
+    printf '%s\n' "$udid"
+  fi
+  return 0
+}

@@ -119,6 +119,41 @@ else
     ok "no raw token in receipts"
 fi
 
+echo "== 9. create refuses without --reason =="
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_create >/dev/null 2>"$TMP/e9"
+[[ "$?" -ne 0 ]] && ok "create without --reason refused" || bad "create accepted with no reason"
+
+echo "== 10. create refuses when a free pool slot exists =="
+# Dedicated fixture so state from earlier cases cannot mask the slot check.
+slot_fx="$TMP/slotfx"; mkdir -p "$slot_fx"
+sim_fixture_device "$slot_fx" "FFFFFFFF-1111-2222-3333-444444444444" "wai-shared-ios-26-5-z" "Shutdown" 10
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$slot_fx" sim_create --reason "test" >/dev/null 2>"$TMP/e10"
+rc10=$?
+[[ "$rc10" -eq 21 ]] && ok "create refused because a slot was available (exit 21)" || bad "create ignored an available slot (rc=$rc10: $(head -1 "$TMP/e10"))"
+
+echo "== 11. create refuses at the pool cap =="
+cap_fx="$TMP/capfx"; mkdir -p "$cap_fx"
+for i in 1 2 3; do sim_fixture_device "$cap_fx" "DDDDDDDD-1111-2222-3333-44444444440$i" "wai-shared-ios-26-5-$i" "Booted" 5; done
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$cap_fx" DISK_MAGICIAN_SIM_POOL_SLOTS=3 sim_create --reason "test" 2>&1)"
+[[ "$?" -eq 21 ]] && ok "create refused at pool cap (3/3)" || bad "create exceeded the pool cap"
+
+echo "== 12. interrupted create leaks no capacity (recoverable reservation) =="
+recov_fx="$TMP/recovfx"; mkdir -p "$recov_fx"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$TMP/state/sim_reservations"
+mkdir -p "$DISK_MAGICIAN_SIM_RESERVE_DIR/stale-1"
+printf 'status=reserving\n' >"$DISK_MAGICIAN_SIM_RESERVE_DIR/stale-1/meta"
+before="$(find "$DISK_MAGICIAN_STATE_DIR/sim_reservations" -maxdepth 1 -type d ! -path "$DISK_MAGICIAN_STATE_DIR/sim_reservations" 2>/dev/null | wc -l | tr -d ' ')"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$recov_fx" sim_recover_reservations >/dev/null 2>&1
+after="$(find "$DISK_MAGICIAN_STATE_DIR/sim_reservations" -maxdepth 1 -type d ! -path "$DISK_MAGICIAN_STATE_DIR/sim_reservations" 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$before" -ge 1 && "$after" -eq 0 ]] && ok "orphaned reservation reclaimed its capacity" || bad "orphaned reservation leaked capacity (before=$before after=$after)"
+
+echo "== 13. a reservation that recorded a UDID is reconciled, not silently dropped =="
+mkdir -p "$DISK_MAGICIAN_STATE_DIR/sim_reservations/created-1"
+printf 'status=created\n' >"$DISK_MAGICIAN_STATE_DIR/sim_reservations/created-1/meta"
+printf 'EEEEEEEE-1111-2222-3333-444444444444\n' >"$DISK_MAGICIAN_STATE_DIR/sim_reservations/created-1/udid"
+msg="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$fixture" sim_recover_reservations 2>&1)"
+printf '%s' "$msg" | grep -q 'recover:' && ok "recorded-UDID reservation reconciled with a receipt line" || bad "recorded-UDID reservation produced no recovery line"
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
