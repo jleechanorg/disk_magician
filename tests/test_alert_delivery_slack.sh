@@ -43,7 +43,26 @@ printf 'ok\n'
 exit 0
 EOF
 chmod +x "$BIN/curl"
-export PATH="$BIN:$PATH"
+# Hermetic PATH. The script prefers msmtp over sendmail, so inheriting the host
+# PATH means a developer machine with a configured msmtp would bypass our fake
+# sendmail and could attempt REAL delivery from a test run. Build a controlled
+# PATH containing only the fakes below plus the ordinary tools the script needs.
+HERMETIC_TOOLS="bash sed grep cat mktemp rm printf dirname hostname python3 df awk head tr date ls wc sleep"
+HERMETIC=""
+missing_tools=""
+for tool in $HERMETIC_TOOLS; do
+  real="$(command -v "$tool" 2>/dev/null)" || { missing_tools="$missing_tools $tool"; continue; }
+  d="$(dirname "$real")"
+  case ":$HERMETIC:" in *":$d:"*) ;; *) HERMETIC="${HERMETIC:+$HERMETIC:}$d" ;; esac
+done
+# Only the directories holding our prerequisites, then our fakes first.
+HERMETIC_PATH="$BIN:$HERMETIC"
+export PATH="$HERMETIC_PATH"
+# Prove the premise: neither real mailer may be reachable from here.
+if command -v msmtp >/dev/null 2>&1 || command -v sendmail >/dev/null 2>&1; then
+  echo "FAIL: a host mailer is reachable on the hermetic PATH; this suite could send real mail"
+  FAIL=1
+fi
 
 # ── Fake diskm so only the volume path is exercised ──────────────────────────
 cat > "$BIN/disk-magician" <<'EOF'
@@ -394,7 +413,7 @@ chmod +x "$HARDMTA/sendmail"
 cp "$BIN/disk-magician" "$HARDMTA/disk-magician" 2>/dev/null || true
 chmod +x "$HARDMTA/disk-magician" 2>/dev/null || true
 START15=$(date +%s)
-env PATH="$HARDMTA:$PATH" FAKE_CURL_LOG="$TMP/curl-15.log" \
+env PATH="$HARDMTA:$HERMETIC_PATH" FAKE_CURL_LOG="$TMP/curl-15.log" \
   HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
   DISK_MAGICIAN_DISKM_BIN="$HARDMTA/disk-magician" \
   DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
@@ -425,7 +444,7 @@ chmod +x "$CHAN_BIN/sendmail"
 cp "$BIN/disk-magician" "$CHAN_BIN/disk-magician" 2>/dev/null || true
 chmod +x "$CHAN_BIN/disk-magician" 2>/dev/null || true
 MAIL16="$TMP/mail-16.log"
-env PATH="$CHAN_BIN:$PATH" CHAN_MAIL_LOG="$MAIL16" FAKE_CURL_LOG="$TMP/curl-16.log" \
+env PATH="$CHAN_BIN:$HERMETIC_PATH" CHAN_MAIL_LOG="$MAIL16" FAKE_CURL_LOG="$TMP/curl-16.log" \
   HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
   DISK_MAGICIAN_DISKM_BIN="$CHAN_BIN/disk-magician" \
   DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
@@ -436,6 +455,50 @@ env PATH="$CHAN_BIN:$PATH" CHAN_MAIL_LOG="$MAIL16" FAKE_CURL_LOG="$TMP/curl-16.l
 [[ -s "$MAIL16" ]] \
   && pass "email is still attempted after a Slack delivery failure" \
   || fail "a Slack failure suppressed the email attempt"
+
+# ── 17. The host's own mailer must never be invoked ────────────────────────
+# The script prefers msmtp over sendmail. A developer machine with a configured
+# msmtp would otherwise bypass these fakes and could attempt REAL delivery from
+# a test run. Plant an instrumented msmtp on the inherited PATH, confirm the
+# hermetic PATH cannot see it, and assert it is never called.
+HOSTMAIL="$TMP/host-mta"
+mkdir -p "$HOSTMAIL"
+cat > "$HOSTMAIL/msmtp" <<'EOF'
+#!/usr/bin/env bash
+echo invoked >> "$HOST_MTA_SENTINEL"
+cat > /dev/null
+exit 0
+EOF
+chmod +x "$HOSTMAIL/msmtp"
+SENTINEL="$TMP/host-mta-invoked.log"
+: > "$SENTINEL"
+
+# With the hermetic PATH active, the planted mailer must not be resolvable.
+if PATH="$HERMETIC_PATH" command -v msmtp >/dev/null 2>&1; then
+  fail "the host mailer is reachable on the hermetic PATH"
+else
+  pass "hermetic PATH cannot resolve the host mailer"
+fi
+
+# Our fixtures must provide BOTH mailers so the script's msmtp preference can
+# never reach past us to a host binary. Shadow the planted one by putting $BIN
+# first and adding an msmtp stub alongside the sendmail stub.
+cat > "$BIN/msmtp" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+exit 0
+EOF
+chmod +x "$BIN/msmtp"
+env PATH="$BIN:$HOSTMAIL:$HERMETIC_PATH" HOST_MTA_SENTINEL="$SENTINEL" \
+  FAKE_CURL_LOG="$TMP/curl-17.log" HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
+  DISK_MAGICIAN_DISKM_BIN="$BIN/disk-magician" \
+  DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
+  DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
+  DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
+  bash "$ALERT" >/dev/null 2>&1 || true
+[[ ! -s "$SENTINEL" ]] \
+  && pass "a full run never invokes the host's mailer" \
+  || fail "the host mailer was invoked $(( $(wc -l < "$SENTINEL") )) time(s) from a test run"
 
 echo
 if [[ "$FAIL" -eq 0 ]]; then
