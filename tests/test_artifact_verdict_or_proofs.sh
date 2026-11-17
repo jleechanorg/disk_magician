@@ -192,6 +192,13 @@ target_list="$(printf '%s\n' "$T/s/other" "$T/s/named")"
 export DISK_MAGICIAN_OPERATOR_TARGETS="$target_list"
 assert_eq "$(av "$T/s/named")" remove "operator-target proof still requires48h content inactivity"
 assert_eq "$(proofs)" "age,operator-named" "age and operator target proofs are recorded after48h"
+ln -s "$T/s" "$T/s-link"
+export DISK_MAGICIAN_OPERATOR_TARGETS="$T/s-link/named"
+av "$T/s/named" >/dev/null
+assert_eq "$(proofs)" "age,operator-named" "operator target given via symlinked parent still matches"
+export DISK_MAGICIAN_OPERATOR_TARGETS="$T/nonexistent-parent/named"
+av "$T/s/named" >/dev/null
+assert_eq "$(proofs)" "age" "unresolvable operator target never matches"
 unset DISK_MAGICIAN_OPERATOR_TARGETS
 
 echo "== vetoes keep even when every proof holds =="
