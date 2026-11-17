@@ -182,33 +182,60 @@ sim_devices() {
 
 sim_lease_path()   { printf '%s/%s\n' "$(sim_lease_dir)" "$1"; }
 
-# sim_json k=v ... — one JSON object via a real serializer, so names and owners
-# are escaped. A value "#N" is an integer, "@true" is true, "@null" is null.
+# sim_json k=v ... — one JSON object via a real serializer. Only named internal
+# fields carry types; string fields such as names and tokens are always strings,
+# even when they begin with JSON-looking marker characters.
 sim_json() {
   python3 -I -c '
 import json,sys
 o={"schema_version":1}
 for kv in sys.argv[1:]:
-    k,_,v=kv.partition("=")
-    o[k]=int(v[1:]) if v[:1]=="#" else (True if v=="@true" else (None if v=="@null" else v))
+    k,sep,v=kv.partition("=")
+    if not sep: sys.exit(2)
+    if k=="lease_generation":
+        try: o[k]=int(v)
+        except ValueError: sys.exit(2)
+    elif k=="created":
+        if v not in ("true","false"): sys.exit(2)
+        o[k]=(v=="true")
+    else:
+        o[k]=v
 print(json.dumps(o))' "$@"
 }
 
 # Locks are directories holding the holder pid. A lock is broken ONLY when its
 # recorded pid is provably dead; no pid file or a live pid means unknown/held.
+_sim_pid_is_dead() {
+  local rc=0 out
+  out="$(ps -p "$1" -o pid= 2>&1)" || rc=$?
+  [[ "$rc" -eq 1 && -z "${out//[[:space:]]/}" ]]
+}
+
 sim_lock_break_if_dead() {
-  local dir="$1" p gone
+  local dir="$1" p current gate
   p="$(cat "$dir/pid" 2>/dev/null)"
-  [[ "$p" =~ ^[1-9][0-9]*$ ]] || return 1
-  ps -p "$p" >/dev/null 2>&1 && return 1
-  gone="$dir.dead.${BASHPID:-$$}"
-  mv "$dir" "$gone" 2>/dev/null || return 1
-  if [[ "$(cat "$gone/pid" 2>/dev/null)" == "$p" ]]; then
-    rm -f "$gone/pid"; rmdir "$gone" 2>/dev/null
-    echo "sim: recovered stale lock $dir (holder pid $p is dead)" >&2
-    return 0
+  [[ "$p" =~ ^[1-9][0-9]*$ && ${#p} -le 10 ]] || return 1
+  if [[ ${#p} -eq 10 ]] && (( 10#$p > 2147483647 )); then return 1; fi
+  _sim_pid_is_dead "$p" || return 1
+  # All stale recoverers for this lock use one sibling gate. Do not rename and
+  # restore the target: a new owner can acquire the vacant path during restore.
+  gate="$dir.reclaim_gate"
+  mkdir "$gate" 2>/dev/null || return 1
+  # Revalidate after winning the gate. New takers cannot create $dir until its
+  # current directory is removed; once rmdir succeeds this function never
+  # mutates the target path again.
+  if [[ -d "$dir" && ! -L "$dir" && -f "$dir/pid" && ! -L "$dir/pid" ]]; then
+    current="$(cat "$dir/pid" 2>/dev/null)"
+    if [[ "$current" == "$p" ]] && _sim_pid_is_dead "$current"; then
+      rm -f "$dir/pid" 2>/dev/null
+      if rmdir "$dir" 2>/dev/null; then
+        rmdir "$gate" 2>/dev/null || true
+        echo "sim: recovered stale lock $dir (holder pid $p is dead)" >&2
+        return 0
+      fi
+    fi
   fi
-  mv "$gone" "$dir" 2>/dev/null || true   # raced a new holder: put it back
+  rmdir "$gate" 2>/dev/null || true
   return 1
 }
 # sim_lock_take <dir> [extra-0.1s-retries] — 0 only when WE hold the lock.
@@ -396,7 +423,7 @@ sim_lease() {
             && printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner" \
             && printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"; } 2>/dev/null \
           || [[ "$(sim_lease_state "$udid")" != "complete" ]] \
-          || ! out="$(sim_json "udid=$udid" "name=$name" "state=$state" "lease_generation=#$gen" "lease_token=$token")"; then
+          || ! out="$(sim_json "udid=$udid" "name=$name" "state=$state" "lease_generation=$gen" "lease_token=$token")"; then
           # We created $d under the lock, so we own the partial lease. The
           # generation stays advanced so a stale token can never validate again.
           rm -rf "${d:?}"
@@ -983,7 +1010,7 @@ sim_create() {
   rm -rf "${rdir:?}"
 
   if [[ "$json" == true ]]; then
-    sim_json "udid=$udid" "name=$name" "state=Shutdown" "lease_generation=#$gen" "lease_token=$token" "created=@true"
+    sim_json "udid=$udid" "name=$name" "state=Shutdown" "lease_generation=$gen" "lease_token=$token" "created=true"
   else
     # Print the token as well: a caller that only received the UDID could never
     # release the device it just created (review finding).

@@ -953,6 +953,69 @@ sim_c14_kept "unknown shared C14 lease preserved" "$u56u"
 unset DISK_MAGICIAN_SIM_FIXTURE_ROOT
 export HOME="$ORIGINAL_HOME" DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_CONFIG
 
+echo "== 57. create JSON preserves sentinel-looking names as strings =="
+for sentinel in '#1' '#foo' '@true' '@null'; do
+  r57="$TMP/r57_${sentinel//[^[:alnum:]]/_}"; mkdir -p "$r57/state" "$r57/fx"
+  out="$(DISK_MAGICIAN_STATE_DIR="$r57/state" DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r57/fx" sim_create --reason serializer-test --name "$sentinel" --json 2>"$r57/error")"; rc57=$?
+  if [[ "$rc57" -eq 0 ]] && printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); e=sys.argv[1]; sys.exit(0 if type(d.get("name")) is str and d["name"]==e else 1)' "$sentinel"; then
+    ok "create JSON preserves '$sentinel' as a string"
+  else
+    bad "create JSON did not preserve '$sentinel' as a string (rc=$rc57, output=${out//$'\n'/; })"
+  fi
+done
+
+echo "== 58. concurrent stale-lock recovery retains one owner =="
+r58="$TMP/r58"; mkdir -p "$r58/state/lock" "$r58/fake"
+mkdir "$r58/state/lock/test.lock"; printf '999999\n' >"$r58/state/lock/test.lock/pid"
+cat >"$r58/fake/ps" <<'FAKE'
+#!/bin/bash
+if [[ "$2" != 999999 ]]; then
+  echo "$2"
+  exit 0
+fi
+touch "$RACE_ROOT/ps_$RACE_ROLE"
+while [[ ! -e "$RACE_ROOT/ps_A" || ! -e "$RACE_ROOT/ps_B" ]]; do sleep 0.01; done
+if [[ "$RACE_ROLE" == B ]]; then while [[ ! -e "$RACE_ROOT/A_LOCK" ]]; do sleep 0.01; done; fi
+exit 1
+FAKE
+cat >"$r58/fake/mv" <<'FAKE'
+#!/bin/bash
+if [[ "$RACE_ROLE" == B && ! -e "$RACE_ROOT/B_MOVED" ]]; then
+  /bin/mv "$@" || exit $?
+  touch "$RACE_ROOT/B_MOVED"
+  for _ in {1..500}; do [[ -e "$RACE_ROOT/C_LOCK" ]] && exit 0; sleep 0.01; done
+  exit 1
+fi
+exec /bin/mv "$@"
+FAKE
+chmod +x "$r58/fake/ps" "$r58/fake/mv"
+export RACE_ROOT="$r58" RACE_LOCK="$r58/state/lock/test.lock" RACE_MODULE="$MODULE"
+PATH="$r58/fake:$PATH" RACE_ROLE=A bash -c 'source "$RACE_MODULE"; if sim_lock_take "$RACE_LOCK" 0; then printf "%s\n" "$BASHPID" >"$RACE_ROOT/A_PID"; echo acquired >"$RACE_ROOT/A_RESULT"; touch "$RACE_ROOT/A_LOCK"; while [[ ! -e "$RACE_ROOT/C_DONE" ]]; do sleep 0.01; done; else echo busy >"$RACE_ROOT/A_RESULT"; fi' &
+pid_a=$!
+PATH="$r58/fake:$PATH" RACE_ROLE=B bash -c 'source "$RACE_MODULE"; if sim_lock_take "$RACE_LOCK" 0; then echo acquired >"$RACE_ROOT/B_RESULT"; else echo busy >"$RACE_ROOT/B_RESULT"; fi; touch "$RACE_ROOT/B_DONE"' &
+pid_b=$!
+PATH="$r58/fake:$PATH" RACE_ROLE=C bash -c 'for _ in {1..500}; do [[ -e "$RACE_ROOT/B_MOVED" || -e "$RACE_ROOT/B_DONE" ]] && break; sleep 0.01; done; source "$RACE_MODULE"; if sim_lock_take "$RACE_LOCK" 0; then printf "%s\n" "$BASHPID" >"$RACE_ROOT/C_PID"; echo acquired >"$RACE_ROOT/C_RESULT"; touch "$RACE_ROOT/C_LOCK"; else echo busy >"$RACE_ROOT/C_RESULT"; fi; touch "$RACE_ROOT/C_DONE"' &
+pid_c=$!
+wait "$pid_a"; wait "$pid_b"; wait "$pid_c"
+if [[ "$(cat "$r58/A_RESULT" 2>/dev/null)" == acquired && "$(cat "$r58/B_RESULT" 2>/dev/null)" == busy && \
+      "$(cat "$r58/C_RESULT" 2>/dev/null)" == busy && "$(cat "$RACE_LOCK/pid" 2>/dev/null)" == "$(cat "$r58/A_PID" 2>/dev/null)" && \
+      -z "$(find "$RACE_LOCK" -mindepth 1 -maxdepth 2 -name pid ! -path "$RACE_LOCK/pid" -print -quit 2>/dev/null)" ]]; then
+  ok "stale recovery serialized; active owner remained at lock path"
+else
+  bad "concurrent recoverers displaced or nested a lock owner"
+fi
+mkdir -p "$r58/diagnostic"; printf '999999\n' >"$r58/diagnostic/pid"
+mkdir -p "$r58/errorbin"
+printf '#!/bin/bash\necho "ps: invalid pid" >&2\nexit 1\n' >"$r58/errorbin/ps"; chmod +x "$r58/errorbin/ps"
+if PATH="$r58/errorbin:$PATH" sim_lock_take "$r58/diagnostic" 0 2>/dev/null; then
+  bad "diagnostic ps failure was treated as a proven-dead holder"
+elif [[ -d "$r58/diagnostic" ]]; then
+  ok "diagnostic ps failure preserved an unknown lock"
+else
+  bad "diagnostic ps failure damaged the lock"
+fi
+unset RACE_ROOT RACE_LOCK RACE_MODULE
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
