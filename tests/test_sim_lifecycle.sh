@@ -347,6 +347,34 @@ out28b="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$l28/fx" sim_lease --wait-seconds 0 2>
 printf '%s' "$out28b" | grep -q 'lease_token' && bad "device became leaseable after second recovery" || ok "device still not leaseable after second recovery"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
 
+echo "== 29. /dot repro: a stale receipt across the lock boundary must not authorize =="
+r29="$TMP/r29"; mkdir -p "$r29/state/gen" "$r29/state/receipts" "$r29/fx"
+export DISK_MAGICIAN_STATE_DIR="$r29/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+sim_fixture_device "$r29/fx" "aeaeaeae-1111-2222-3333-444444444444" "wai-shared-gen" "Shutdown" 999
+old_ts="$(date -u -v-72H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+# generation advanced to 2 (a lease/release cycle happened) but the only receipt
+# is for generation 1 -> the device must NOT be removable.
+printf '2\n' >"$r29/state/gen/aeaeaeae-1111-2222-3333-444444444444"
+printf '{"action": "release", "udid": "%s", "lease_generation": 1, "token_fingerprint": "x", "released_at": "%s"}\n' \
+  "aeaeaeae-1111-2222-3333-444444444444" "$old_ts" >"$r29/state/receipts/sim_release_receipts.jsonl"
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r29/fx" sim_prune --clean 2>&1)"
+[[ -d "$r29/fx/aeaeaeae-1111-2222-3333-444444444444" ]] && ok "stale generation-1 receipt did not authorize deletion" || bad "stale receipt authorized deletion"
+printf '%s' "$out" | grep -qE 'keep:no-release-receipt|keep:receipt-stale' && ok "prune named the stale receipt" || bad "no stale-receipt verdict"
+
+echo "== 30. /dot repro: a diagnostic stderr line cannot override the stdout verdict =="
+r30="$TMP/r30"; mkdir -p "$r30/state/gen" "$r30/state/receipts" "$r30/fx"
+export DISK_MAGICIAN_STATE_DIR="$r30/state"
+sim_fixture_device "$r30/fx" "afafafaf-1111-2222-3333-444444444444" "wai-shared-err" "Shutdown" 999
+printf '1\n' >"$r30/state/gen/afafafaf-1111-2222-3333-444444444444"
+old_ts2="$(date -u -v-72H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"action": "release", "udid": "%s", "lease_generation": 1, "token_fingerprint": "x", "released_at": "%s"}\n' \
+  "afafafaf-1111-2222-3333-444444444444" "$old_ts2" >"$r30/state/receipts/sim_release_receipts.jsonl"
+artifact_removal_verdict() { printf 'kept:secret-like\n'; printf 'remove\n' >&2; return 0; }
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r30/fx" sim_prune --clean 2>&1)"
+[[ -d "$r30/fx/afafafaf-1111-2222-3333-444444444444" ]] && ok "stderr 'remove' did not override a stdout keep verdict" || bad "stderr overrode the stdout verdict"
+unset -f artifact_removal_verdict 2>/dev/null || true
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

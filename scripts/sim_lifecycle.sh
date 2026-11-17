@@ -403,14 +403,21 @@ sim_prune() {
       mkdir -p "$(dirname "$plock")" 2>/dev/null || true
       mkdir "$plock" 2>/dev/null || { echo "keep:exclusion-busy $name"; kept=$((kept+1)); continue; }
 
-      # FINAL positive re-check, under the lock: the device must still be
-      # Shutdown and still unleased, re-read live (not from the loop snapshot).
+      # FINAL positive re-check, under the lock. This must re-verify the RECEIPT
+      # and the 48 h floor too, not just state and lease: a lease/release cycle
+      # that advanced the generation while prune was paused would otherwise let
+      # prune act on a stale generation-1 receipt (review P0, reproduced).
       local still_state still_leased
       still_state="$(sim_devices | awk -F'\t' -v u="$udid" '$1==u {print $3}')"
       still_leased=0; sim_is_leased "$udid" && still_leased=1
       if [[ "$still_state" != "Shutdown" || "$still_leased" -eq 1 ]]; then
         rmdir "$plock" 2>/dev/null || true
         echo "keep:state-changed $name"
+        kept=$((kept+1)); continue
+      fi
+      if ! sim_released_and_idle "$udid"; then
+        rmdir "$plock" 2>/dev/null || true
+        echo "keep:receipt-stale-under-lock $name"
         kept=$((kept+1)); continue
       fi
 
@@ -431,11 +438,12 @@ sim_prune() {
         echo "keep:verdict-unavailable $name"
         kept=$((kept+1)); continue
       fi
+      # Separate streams: merging stderr into stdout let a diagnostic line win the
+      # "last line" and override the real verdict (review P0). Only the COMPLETE
+      # stdout is considered, and it must be exactly `remove`.
       local verdict raw vrc=0
-      # No pipeline: `| tail -1` would report tail's status and keep masking the
-      # gate's own exit code (review P0).
-      raw="$(artifact_removal_verdict "$target" 2>&1)" || vrc=$?
-      verdict="$(printf '%s\n' "$raw" | tail -1)"
+      raw="$(artifact_removal_verdict "$target" 2>/dev/null)" || vrc=$?
+      verdict="$(printf '%s' "$raw" | tr -d '[:space:]')"
       if [[ "$vrc" -ne 0 ]]; then
         rmdir "$plock" 2>/dev/null || true
         echo "keep:verdict-error-$vrc $name"
