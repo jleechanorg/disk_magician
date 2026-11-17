@@ -491,6 +491,59 @@ out37="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r37/fx" sim_lease --wait-seconds 0 2>&
 printf '%s' "$out37" | grep -q 'lease_token' && bad "device became leaseable with an incomplete lease" || ok "device still excluded with an incomplete lease"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
 
+echo "== 38. /dot repro: an INDETERMINATE lease must block prune =="
+r38="$TMP/r38"; mkdir -p "$r38/state/gen" "$r38/state/receipts" "$r38/state/sim_leases/dedddddd-1111-2222-3333-444444444444" "$r38/fx"
+export DISK_MAGICIAN_STATE_DIR="$r38/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+sim_fixture_device "$r38/fx" "dedddddd-1111-2222-3333-444444444444" "wai-shared-indet" "Shutdown" 999
+printf '1\n' >"$r38/state/gen/dedddddd-1111-2222-3333-444444444444"
+old_ts3="$(date -u -v-72H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"action": "release", "udid": "%s", "lease_generation": 1, "token_fingerprint": "x", "released_at": "%s"}\n' \
+  "dedddddd-1111-2222-3333-444444444444" "$old_ts3" >"$r38/state/receipts/sim_release_receipts.jsonl"
+# fingerprint present, but NO owner and NO generation -> indeterminate
+printf '%064d\n' 0 >"$r38/state/sim_leases/dedddddd-1111-2222-3333-444444444444/token_fingerprint"
+out38="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r38/fx" sim_prune --clean 2>&1)"
+[[ -d "$r38/fx/dedddddd-1111-2222-3333-444444444444" ]] && ok "incomplete lease blocked deletion" || bad "incomplete lease treated as unleased (deleted)"
+printf '%s' "$out38" | grep -q 'keep:lease-indeterminate' && ok "prune reported lease-indeterminate" || bad "no indeterminate verdict reported"
+
+echo "== 39. /dot repro: create that fails AFTER creating must retain the reservation =="
+r39="$TMP/r39"; mkdir -p "$r39/state" "$r39/fake"
+export DISK_MAGICIAN_STATE_DIR="$r39/state"; unset DISK_MAGICIAN_SIM_FIXTURE_ROOT
+cat >"$r39/fake/xcrun" <<'FAKE'
+#!/bin/bash
+if [[ "$*" == *"list devices --json"* ]]; then
+  printf '{"devices":{"rt":[{"udid":"eaeaeaea-1111-2222-3333-444444444444","name":"made-by-create","state":"Shutdown"}]}}\n'
+  exit 0
+fi
+if [[ "$*" == *"create"* ]]; then printf 'eaeaeaea-1111-2222-3333-444444444444\n'; exit 75; fi
+exit 0
+FAKE
+chmod +x "$r39/fake/xcrun"
+PATH="$r39/fake:$PATH" sim_create --reason "test" --name made-by-create >/dev/null 2>&1
+rc39=$?
+resv="$(find "$r39/state/sim_reservations" -maxdepth 1 -type d ! -path "$r39/state/sim_reservations" 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$rc39" -ne 0 && "$resv" -ge 1 ]] && ok "reservation retained after a create that may have made a device" || bad "reservation released although a device may exist (rc=$rc39 resv=$resv)"
+
+echo "== 40. /dot repro: recovery must not clear a reservation using stale inventory =="
+r40="$TMP/r40"; mkdir -p "$r40/state/sim_reservations/late-1" "$r40/fake"
+printf 'status=reserving\npid=999999\nname=late-device\n' >"$r40/state/sim_reservations/late-1/meta"
+export DISK_MAGICIAN_STATE_DIR="$r40/state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$r40/state/sim_reservations"
+# First call: empty inventory. Second call: the device now exists.
+cat >"$r40/fake/xcrun" <<FAKE
+#!/bin/bash
+C="$r40/count"
+n=0; [ -f "\$C" ] && n="\$(cat "\$C")"
+n=\$((n+1)); printf '%s' "\$n" >"\$C"
+if [[ "\$n" -le 1 ]]; then printf '{"devices":{}}\n'; else
+  printf '{"devices":{"rt":[{"udid":"ebeebebe-1111-2222-3333-444444444444","name":"late-device","state":"Shutdown"}]}}\n'
+fi
+exit 0
+FAKE
+chmod +x "$r40/fake/xcrun"
+PATH="$r40/fake:$PATH" sim_recover_reservations >/dev/null 2>&1
+[[ -d "$r40/state/sim_reservations/late-1" ]] && ok "late-appearing device preserved the reservation" || bad "stale snapshot cleared a reservation for a device that exists"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

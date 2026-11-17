@@ -182,18 +182,26 @@ sim_lease_owner()  { cat "$(sim_lease_path "$1")/owner" 2>/dev/null; }
 # A lease is complete only when the fingerprint is non-empty AND the generation
 # and owner are present. An empty fingerprint file previously counted as a lease,
 # so recovery cleared the exclusion for a device with no real lease (review P0).
-sim_is_leased() {
+sim_lease_state() {
   local d fp gen owner
   d="$(sim_lease_path "$1")"
-  [[ -d "$d" && ! -L "$d" ]] || return 1
+  [[ -e "$d" || -L "$d" ]] || { printf 'absent\n'; return 0; }
+  [[ -d "$d" && ! -L "$d" ]] || { printf 'indeterminate\n'; return 0; }
   fp="$(cat "$d/token_fingerprint" 2>/dev/null)"
   gen="$(cat "$d/generation" 2>/dev/null)"
   owner="$(cat "$d/owner" 2>/dev/null)"
-  [[ -n "$fp" && "$fp" =~ ^[0-9a-f]{64}$ ]] || return 1
-  [[ -n "$gen" && "$gen" =~ ^[0-9]+$ ]] || return 1
-  [[ -n "$owner" ]] || return 1
-  return 0
+  if [[ -n "$fp" && "$fp" =~ ^[0-9a-f]{64}$ && -n "$gen" && "$gen" =~ ^[0-9]+$ && -n "$owner" ]]; then
+    printf 'complete\n'
+  else
+    # A lease dir exists but is not fully written. This is NOT "unleased": whether
+    # a caller holds it is unknown, so every destructive or exclusive decision must
+    # fail closed (review P0: prune deleted a device whose lease had no owner or
+    # generation).
+    printf 'indeterminate\n'
+  fi
 }
+
+sim_is_leased() { [[ "$(sim_lease_state "$1")" == "complete" ]]; }
 
 sim_token_fingerprint() { printf '%s' "$1" | shasum -a 256 2>/dev/null | cut -d' ' -f1; }
 
@@ -439,8 +447,10 @@ sim_prune() {
     [[ -n "$udid" ]] || continue
     # 1. Booted is never a candidate
     if [[ "$state" == "Booted" ]]; then echo "keep:booted $name"; kept=$((kept+1)); continue; fi
-    # 2. a live lease excludes it
-    if sim_is_leased "$udid"; then echo "keep:leased $name"; kept=$((kept+1)); continue; fi
+    # 2. a live lease — or an INDETERMINATE one — excludes it
+    local lstate; lstate="$(sim_lease_state "$udid")"
+    if [[ "$lstate" == "complete" ]]; then echo "keep:leased $name"; kept=$((kept+1)); continue; fi
+    if [[ "$lstate" == "indeterminate" ]]; then echo "keep:lease-indeterminate $name"; kept=$((kept+1)); continue; fi
     # 3. unmeasurable mtime fails closed
     [[ "$newest" =~ ^[0-9]+$ ]] || { echo "keep:mtime-unmeasurable $name"; kept=$((kept+1)); continue; }
     # 4. the only proof: a release receipt for the current generation, past the floor
@@ -470,7 +480,10 @@ sim_prune() {
       # prune act on a stale generation-1 receipt (review P0, reproduced).
       local still_state still_leased
       still_state="$(sim_devices | awk -F'\t' -v u="$udid" '$1==u {print $3}')"
-      still_leased=0; sim_is_leased "$udid" && still_leased=1
+      # ANY lease presence that is not cleanly absent blocks: complete means in
+      # use, indeterminate means we cannot know.
+      still_leased=0
+      [[ "$(sim_lease_state "$udid")" != "absent" ]] && still_leased=1
       if [[ "$still_state" != "Shutdown" || "$still_leased" -eq 1 ]]; then
         rmdir "$plock" 2>/dev/null || true
         echo "keep:state-changed $name"
@@ -606,10 +619,15 @@ sim_recover_reservations() {
       echo "recover:skipped-live-creator $(basename "$r") pid=$owner_pid" >&2
       continue
     fi
-    if [[ "$snap_ok" -ne 1 ]]; then
+    # Re-take the snapshot per reservation. A device can appear between the pass
+    # snapshot and this check, so a stale snapshot would clear the exclusion for a
+    # device that now exists (review P0, reproduced).
+    local snap_fresh
+    if ! snap_fresh="$(sim_snapshot)"; then
       echo "recover:inventory-unavailable $(basename "$r") — reservation preserved, no conclusion drawn" >&2
       continue
     fi
+    snap="$snap_fresh"
     udid="$(cat "$r/udid" 2>/dev/null)"
     # A crash AFTER simctl succeeded but BEFORE the UDID was recorded is not proof
     # that no device was made: look for the reserved NAME in the live device list.
@@ -717,9 +735,24 @@ sim_create() {
     udid="$(xcrun simctl create "$name" "$device_type" "$rt" 2>/dev/null)" || rc=$?
   fi
   if [[ "$rc" -ne 0 || -z "$udid" ]]; then
-    # Step 3a: no device produced — release capacity immediately.
-    rm -rf "${rdir:?}"
-    echo "sim create: simctl create failed (rc=$rc); reservation released, no capacity leaked" >&2
+    # Distinguish "simctl failed and produced nothing" from "a device may exist".
+    # A non-zero exit can still have created the device (review P0: a create that
+    # emitted a UUID then exited 75 had its reservation deleted, and the next
+    # lease handed out the now-unreserved device). Kept unless we can prove the
+    # device is absent.
+    local snap_after present=0
+    if snap_after="$(sim_snapshot 2>/dev/null)"; then
+      printf '%s\n' "$snap_after" | awk -F'\t' -v n="$name" '$2==n {found=1} END{exit !found}' && present=1
+    else
+      present=1   # cannot prove absence -> treat as present
+    fi
+    if [[ "$present" -eq 1 ]]; then
+      printf 'status=pending-reconcile\n' >>"$rdir/meta"
+      echo "sim create: simctl create reported failure (rc=$rc) but a device may exist; reservation RETAINED for reconciliation" >&2
+      return 24
+    fi
+    rmdir "$rdir" 2>/dev/null || rm -rf "${rdir:?}"
+    echo "sim create: simctl create failed (rc=$rc) and no device exists; reservation released" >&2
     return 1
   fi
 
