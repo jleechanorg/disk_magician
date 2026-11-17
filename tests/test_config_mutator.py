@@ -3,6 +3,7 @@ import json
 import os
 import select
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -55,9 +56,14 @@ class TestConfigMutator(unittest.TestCase):
                 "HOME": str(self.home),
                 "XDG_CONFIG_HOME": str(self.root / "xdg"),
                 "XDG_STATE_HOME": str(self.root / "state"),
-                "PATH": "/usr/bin:/bin",
+                "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+                "DISK_MAGICIAN_FRONTIER_ROOT_JSON": str(
+                    self.root / "frontier_last.json"
+                ),
             }
         )
+        env.pop("DISK_MAGICIAN_FRONTIER_JSON", None)
+        env.pop("DISK_MAGICIAN_FRONTIER_LAST", None)
         env.pop("DISK_MAGICIAN_STATE_REPO", None)
         if config is not None:
             env["DISK_MAGICIAN_CONFIG"] = str(config)
