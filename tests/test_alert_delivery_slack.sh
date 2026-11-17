@@ -62,16 +62,34 @@ export FAKE_SCRATCH_PATH="$SCRATCH_DIR"
 export DISK_MAGICIAN_DISKM_BIN="$BIN/disk-magician"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 mkdir -p "$DISK_MAGICIAN_STATE_DIR"
-rm -f "$HOME/.disk_magician_alert.silenced" 2>/dev/null || true
+# Never touch the operator's real silence marker: this test supplies its own
+# HOME so every $HOME-derived path (including the marker) is a temp dir.
+OPERATOR_HOME="${HOME}"
+REAL_MARKER_PRE="$TMP/real-marker-before"
+[[ -f "$OPERATOR_HOME/.disk_magician_alert.silenced" ]] && cp "$OPERATOR_HOME/.disk_magician_alert.silenced" "$REAL_MARKER_PRE"
+export HOME="$TMP/home"
+mkdir -p "$HOME"
 
 # Force the floor arm to fire so there is something loud to deliver.
 FIRING_ENV=(DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0)
 SILENT_ENV=(DISK_MAGICIAN_SCRATCH_FLOOR_GB=0 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0)
 
-run_alert() { # run_alert <curl-log> <env...>; echoes "rc=<n>"
+# Args after the log path may be VAR=value assignments or script flags. Split
+# them explicitly: passing a flag straight to `env` makes `env` consume it, so
+# a "--dry-run" intended for the script silently never reaches it.
+run_alert() { # run_alert <curl-log> [VAR=value...] [--script-flag...]; echoes "rc=<n>"
   local logfile="$1"; shift
+  local -a envvars=() flags=()
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --*) flags+=("$arg") ;;
+      *=*) envvars+=("$arg") ;;
+      *)   flags+=("$arg") ;;
+    esac
+  done
   local rc
-  env FAKE_CURL_LOG="$logfile" "$@" bash "$ALERT" >/dev/null 2>&1
+  env FAKE_CURL_LOG="$logfile" "${envvars[@]}" bash "$ALERT" "${flags[@]}" >/dev/null 2>${RUN_ERR:-/dev/null}
   rc=$?
   echo "rc=$rc"
 }
@@ -185,6 +203,43 @@ LOG8="$TMP/curl-8.log"
 res="$(run_alert "$LOG8" "${FIRING_ENV[@]}" DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com')"
 [[ "$res" == "rc=1" ]] && pass "failed email delivery still exits 1" \
   || fail "failed email delivery changed the exit contract: $res"
+
+# ── 9. --dry-run must be accepted and must not deliver ──────────────────────
+# Regression: the script advertised --dry-run in its usage text and
+# deliver_alert honoured DRY_RUN, but no case arm set it. The flag therefore
+# hit the default arm and the script exited with "Unknown arg", so a documented
+# flag did nothing. Assert acceptance directly (no "Unknown arg") and assert no
+# delivery happened.
+LOG9="$TMP/curl-9.log"
+OUT9="$TMP/out-9.txt"
+res="$(RUN_ERR="$OUT9" run_alert "$LOG9" "${FIRING_ENV[@]}" --dry-run \
+  DISK_MAGICIAN_ALERT_SLACK_WEBHOOK='https://hooks.slack.com/services/T00/B00/fake')"
+! grep -q 'Unknown arg' "$OUT9" \
+  && pass "--dry-run is accepted, not rejected as an unknown argument" \
+  || fail "--dry-run hit the default arm and was rejected"
+
+[[ "$(curl_calls "$LOG9")" -eq 0 ]] \
+  && pass "--dry-run performs no Slack delivery" \
+  || fail "--dry-run delivered to Slack ($(curl_calls "$LOG9") calls)"
+
+MAIL9="$TMP/mail-9.log"
+res="$(run_alert "$LOG9" "${FIRING_ENV[@]}" --dry-run \
+  FAKE_MAIL_LOG="$MAIL9" DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' 2>/dev/null)"
+[[ ! -s "$MAIL9" ]] \
+  && pass "--dry-run performs no email delivery" \
+  || fail "--dry-run sent email"
+
+# ── 10. This suite must never mutate the operator's real silence marker ─────
+# The test isolates HOME, so the script's $HOME-derived marker is a temp path.
+REAL_MARKER="$OPERATOR_HOME/.disk_magician_alert.silenced"
+if [[ -e "$REAL_MARKER" ]]; then
+  cmp -s "$REAL_MARKER" "$TMP/real-marker-before" \
+    && pass "operator silence marker left untouched by this suite" \
+    || fail "this suite modified the operator's real silence marker"
+else
+  [[ -e "$REAL_MARKER" ]] && fail "this suite created the operator's real silence marker"
+  pass "operator silence marker not created by this suite"
+fi
 
 echo
 if [[ "$FAIL" -eq 0 ]]; then

@@ -68,16 +68,31 @@ print(json.dumps({"text": "*diskm alert on %s*\n%s" % (os.environ["HOST"], os.en
     echo "slack delivery skipped: could not build a JSON payload" >&2
     return 0
   fi
-  if response="$(curl -sS -m "$DELIVERY_TIMEOUT_SEC" -X POST \
-      -H 'Content-type: application/json' \
+  local body_file http_code
+  body_file="$(mktemp "${TMPDIR:-/tmp}/diskm-slack-XXXXXX")" || body_file=/dev/null
+  # Separate the HTTP status from the body so acceptance is decided on both.
+  # curl exits 0 for any HTTP response, including 4xx/5xx, so exit status alone
+  # cannot tell "delivered" from "rejected"; and a webhook can answer 200 with an
+  # error body. Accept only 2xx plus a body that is empty or starts with "ok".
+  if http_code="$(curl -sS -m "$DELIVERY_TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
+      -X POST -H 'Content-type: application/json' \
       --data-binary "$payload" \
       "$SLACK_WEBHOOK" 2>&1)"; then
-    # Slack answers 200 with "ok"; a webhook can also return 200 plus an error body.
-    if [[ "${response:0:2}" != "ok" && -n "$response" ]]; then
-      echo "slack delivery reported: $response" >&2
-    fi
+    response="$(cat "$body_file" 2>/dev/null || true)"
+    rm -f "$body_file"
+    case "$http_code" in
+      2[0-9][0-9])
+        if [[ -n "$response" && "${response:0:2}" != "ok" ]]; then
+          echo "slack delivery NOT acknowledged (HTTP $http_code): $response" >&2
+        fi
+        ;;
+      *)
+        echo "slack delivery FAILED (HTTP $http_code): ${response:-no body}" >&2
+        ;;
+    esac
     return 0
   fi
+  rm -f "$body_file"
   echo "slack delivery FAILED: $response" >&2
   return 0
 }
@@ -85,6 +100,13 @@ print(json.dumps({"text": "*diskm alert on %s*\n%s" % (os.environ["HOST"], os.en
 deliver_alert_email() { # deliver_alert_email <message> <host>
   local message="$1" host="$2"
   local mailer="" response
+  # Bound the body. One aggregate message can carry many condition lines, and
+  # an unbounded body is an unbounded mail (and can trip relay size limits).
+  local max_bytes="${DISK_MAGICIAN_ALERT_EMAIL_MAX_BYTES:-8192}"
+  if [[ "${#message}" -gt "$max_bytes" ]]; then
+    message="${message:0:max_bytes}
+[... truncated: ${#1} bytes total, DISK_MAGICIAN_ALERT_EMAIL_MAX_BYTES=${max_bytes}]"
+  fi
   if command -v msmtp >/dev/null 2>&1; then
     mailer="msmtp"
   elif command -v sendmail >/dev/null 2>&1; then
@@ -270,6 +292,9 @@ if [[ $# -gt 0 ]]; then
   case "$1" in
     --silence)   set_silenced; exit 0 ;;
     --unsilence) unset_silenced; exit 0 ;;
+    # Must be a real arm: without one, --dry-run falls through to the alert path
+    # and delivers, which is the opposite of what it advertises.
+    --dry-run)   DRY_RUN=1 ;;
     --status)
       echo "Check path: $CHECK_PATH"
       echo "Snapshot file: $SNAPSHOT_FILE"
