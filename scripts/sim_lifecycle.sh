@@ -211,11 +211,26 @@ sim_lease() {
       # (review P0: it became leaseable before create finished registering it).
       sim_name_reserved "$udid" "$name" && continue
       local d; d="$(sim_lease_path "$udid")"
-      if mkdir "$d" 2>/dev/null; then
+      # Serialize against prune/release with the same per-UDID lock. Without this,
+      # prune's locked re-check could still race an acquire and delete a device
+      # that a caller had just leased (review P0, reproduced by /dot).
+      local alock; alock="$(sim_release_lock_path "$udid")"
+      mkdir -p "$(dirname "$alock")" 2>/dev/null || true
+      local aw=0
+      until mkdir "$alock" 2>/dev/null; do
+        sleep 0.1; aw=$((aw+1))
+        (( aw < 50 )) || break
+      done
+      if ! mkdir "$d" 2>/dev/null; then
+        rmdir "$alock" 2>/dev/null || true
+        continue
+      fi
+      if true; then
         local token="lt_$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
         local gen
         if ! gen="$(sim_next_generation "$udid")" || [[ -z "$gen" ]]; then
           rmdir "$d" 2>/dev/null || true
+          rmdir "$alock" 2>/dev/null || true
           echo "sim lease: cannot allocate generation (corrupt/unwritable counter); refusing" >&2
           return 22
         fi
@@ -225,6 +240,7 @@ sim_lease() {
         chmod 600 "$d/token_fingerprint" "$d/generation" "$d/owner" 2>/dev/null || true
         printf '{"schema_version": 1, "udid": "%s", "name": "%s", "state": "%s", "lease_generation": %s, "lease_token": "%s"}\n' \
           "$udid" "$name" "$state" "$gen" "$token"
+        rmdir "$alock" 2>/dev/null || true
         return 0
       fi
     done < <(sim_devices)
@@ -434,7 +450,9 @@ sim_name_reserved() {
   [[ -d "$rdir" ]] || return 1
   for r in "$rdir"/*; do
     [[ -d "$r" && ! -L "$r" ]] || continue
-    rn="$(cat "$r/name" 2>/dev/null)"
+    # Same format create writes: name= lives in meta, udid may be a file.
+    rn="$(sed -n 's/^name=//p' "$r/meta" 2>/dev/null | head -1)"
+    [[ -z "$rn" ]] && rn="$(cat "$r/name" 2>/dev/null)"
     ru="$(cat "$r/udid" 2>/dev/null)"
     [[ -n "$udid" && "$ru" == "$udid" ]] && return 0
     [[ -n "$name" && "$rn" == "$name" ]] && return 0
@@ -486,8 +504,14 @@ sim_recover_reservations() {
       if [[ -n "$rname" ]]; then
         found="$(sim_devices | awk -F'\t' -v n="$rname" '$2==n {print $1; exit}')"
         if [[ -n "$found" ]]; then
-          echo "recover:orphan-device $found ($rname) created but never registered; left inert, needs operator release/adopt" >&2
-          rmdir "$r" 2>/dev/null || rm -rf "${r:?}"
+          # Keep a DURABLE exclusion: deleting the reservation here let the very
+          # next lease succeed on an unregistered device (review P0, reproduced
+          # by /dot). The reservation is rewritten in place as an orphan record
+          # that sim_name_reserved keeps honouring until explicit reconciliation.
+          printf 'status=orphan\nudid=%s\nname=%s\npid=%s\n' \
+            "$found" "$rname" "$owner_pid" >"$r/meta" 2>/dev/null || true
+          printf '%s\n' "$found" >"$r/udid"
+          echo "recover:orphan-device $found ($rname) created but never registered; exclusion retained, needs operator reconcile" >&2
           continue
         fi
       fi

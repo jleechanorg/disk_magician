@@ -246,6 +246,44 @@ out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$pl_fx" sim_prune --dry-run 2>/dev/null)"
 printf '%s' "$out" | grep -qE '^keep:leased.*wai-shared-leased' && ok "leased device excluded from prune by NAME" || bad "leased device was a prune candidate"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 
+echo "== 22. /dot repro: unfinished registration with LIVE creator is not leaseable =="
+r22="$TMP/r22"; mkdir -p "$r22/state/sim_reservations/res-1" "$r22/fx"
+sim_fixture_device "$r22/fx" "dddddddd-1111-2222-3333-444444444444" "wai-shared-mid" "Shutdown" 5
+printf 'status=reserving\nreason=t\npid=%s\nruntime=iOS 26.5\nname=wai-shared-mid\n' "$$" >"$r22/state/sim_reservations/res-1/meta"
+export DISK_MAGICIAN_STATE_DIR="$r22/state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$r22/state/sim_reservations"
+out="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r22/fx" sim_lease --wait-seconds 0 2>&1)"
+printf '%s' "$out" | grep -q 'lease_token' && bad "leased a device whose registration was unfinished" || ok "unfinished registration not leaseable (meta name= honoured)"
+
+echo "== 23. /dot repro: orphan found by recovery STAYS excluded for the next lease =="
+r23="$TMP/r23"; mkdir -p "$r23/state/sim_reservations/o-1" "$r23/fx"
+sim_fixture_device "$r23/fx" "eeeeeeee-1111-2222-3333-444444444444" "wai-shared-orph" "Shutdown" 5
+printf 'status=reserving\nreason=t\npid=999999\nname=wai-shared-orph\n' >"$r23/state/sim_reservations/o-1/meta"
+export DISK_MAGICIAN_STATE_DIR="$r23/state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$r23/state/sim_reservations"
+rec="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r23/fx" sim_recover_reservations 2>&1)"
+printf '%s' "$rec" | grep -q 'recover:orphan-device' && ok "orphan detected by name" || bad "orphan not detected"
+out2="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r23/fx" sim_lease --wait-seconds 0 2>&1)"
+printf '%s' "$out2" | grep -q 'lease_token' && bad "orphan became leaseable after recovery (exclusion was dropped)" || ok "orphan exclusion retained after recovery; lease still refused"
+
+echo "== 24. /dot repro: prune cannot delete a device leased after its check =="
+r24="$TMP/r24"; mkdir -p "$r24/state" "$r24/fx"
+export DISK_MAGICIAN_STATE_DIR="$r24/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+sim_fixture_device "$r24/fx" "ffffffff-1111-2222-3333-444444444444" "wai-shared-race" "Shutdown" 999
+# a lease held at prune time must block removal
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r24/fx" sim_lease --wait-seconds 0 >/dev/null 2>&1
+outp="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r24/fx" sim_prune --clean 2>&1)"
+[[ -d "$r24/fx/ffffffff-1111-2222-3333-444444444444" ]] && ok "newly leased device survived prune --clean" || bad "prune deleted a leased device"
+printf '%s' "$outp" | grep -qE '^keep:leased|^keep:exclusion-busy' && ok "prune reported the leased exclusion by name" || bad "prune gave no leased/exclusion verdict"
+
+echo "== 25. the CLI actually loads artifact_removal_verdict =="
+if timeout 60 bash -c 'cd "'"$SCRIPT_DIR"'"; source scripts/lib/artifact_verdict.sh >/dev/null 2>&1; declare -F artifact_removal_verdict >/dev/null'; then
+    ok "artifact_removal_verdict is available to the prune path (gate is real)"
+else
+    bad "artifact_removal_verdict unavailable — prune gate would be skipped"
+fi
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

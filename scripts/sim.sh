@@ -5,6 +5,14 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/sim_lifecycle.sh"
+
+# Load the shared removal verdict so prune's gate is REAL, not an
+# always-skipped `declare -F` check (review P0: the CLI never loaded it, so
+# `prune` silently bypassed the secret/repo/liveness gates entirely).
+if [[ -f "$SCRIPT_DIR/lib/artifact_verdict.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/lib/artifact_verdict.sh"
+fi
 sub="${1:-status}"; shift || true
 case "$sub" in
   status)  sim_status_json "$@" ;;
