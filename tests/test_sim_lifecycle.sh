@@ -150,7 +150,7 @@ echo "== 12. interrupted create leaks no capacity (recoverable reservation) =="
 recov_fx="$TMP/recovfx"; mkdir -p "$recov_fx"
 export DISK_MAGICIAN_SIM_RESERVE_DIR="$TMP/state/sim_reservations"
 mkdir -p "$DISK_MAGICIAN_SIM_RESERVE_DIR/stale-1"
-printf 'status=reserving\n' >"$DISK_MAGICIAN_SIM_RESERVE_DIR/stale-1/meta"
+printf 'status=reserving\npid=999999\n' >"$DISK_MAGICIAN_SIM_RESERVE_DIR/stale-1/meta"
 before="$(find "$DISK_MAGICIAN_STATE_DIR/sim_reservations" -maxdepth 1 -type d ! -path "$DISK_MAGICIAN_STATE_DIR/sim_reservations" 2>/dev/null | wc -l | tr -d ' ')"
 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$recov_fx" sim_recover_reservations >/dev/null 2>&1
 after="$(find "$DISK_MAGICIAN_STATE_DIR/sim_reservations" -maxdepth 1 -type d ! -path "$DISK_MAGICIAN_STATE_DIR/sim_reservations" 2>/dev/null | wc -l | tr -d ' ')"
@@ -554,23 +554,195 @@ PATH="$r41/fake:$PATH" sim_create --reason "test" >/dev/null 2>"$TMP/e41"
 rc41=$?
 [[ "$rc41" -eq 22 ]] && ok "create refused on unreadable inventory (exit 22)" || bad "create proceeded with unreadable inventory (rc=$rc41)"
 
-echo "== 42. /dot repro: cap check and reservation are atomic (cap=1, two concurrent creates) =="
+echo "== 42. cap check and reservation are atomic: independent creators, effective cap 1 =="
 r42="$TMP/r42"; mkdir -p "$r42/state" "$r42/fake"
-export DISK_MAGICIAN_STATE_DIR="$r42/state"
-# Device list stays empty; create always "succeeds" slowly so the two race window is real.
 cat >"$r42/fake/xcrun" <<'FAKE'
 #!/bin/bash
-if [[ "$*" == *"list devices --json"* ]]; then printf '{"devices":{}}\n'; exit 0; fi
-if [[ "$*" == *"create"* ]]; then sleep 0.5; printf 'fafafafa-1111-2222-3333-44444444444\n'; exit 0; fi
+# stateful: create appends a device, list reports it (so ordering cannot matter)
+db="$(dirname "$0")/devs"
+if [[ "$*" == *"list devices --json"* ]]; then
+  printf '{"devices":{"rt":['; sep=""
+  [[ -f "$db" ]] && while read -r u n; do printf '%s{"udid":"%s","name":"%s","state":"Shutdown"}' "$sep" "$u" "$n"; sep=","; done <"$db"
+  printf ']}}\n'; exit 0
+fi
+if [[ "$*" == *" create "* ]]; then sleep 0.5; u="FAKE-$$-$RANDOM"; printf '%s %s\n' "$u" "$3" >>"$db"; printf '%s\n' "$u"; exit 0; fi
 exit 0
 FAKE
 chmod +x "$r42/fake/xcrun"
-( PATH="$r42/fake:$PATH" DISK_MAGICIAN_SIM_POOL_SLOTS=1 sim_create --reason a >/dev/null 2>&1; echo $? >"$TMP/c42a" ) &
-( PATH="$r42/fake:$PATH" DISK_MAGICIAN_SIM_POOL_SLOTS=1 sim_create --reason b >/dev/null 2>&1; echo $? >"$TMP/c42b" ) &
+for who in a b; do
+  ( PATH="$r42/fake:$PATH" DISK_MAGICIAN_STATE_DIR="$r42/state" DISK_MAGICIAN_SIM_POOL_SLOTS=1 \
+    bash -c 'source "$1"; sim_create --reason "$2" >/dev/null 2>&1; echo $? >"$3"' _ "$MODULE" "$who" "$TMP/c42$who" ) &
+done
 wait
 a42="$(cat "$TMP/c42a" 2>/dev/null)"; b42="$(cat "$TMP/c42b" 2>/dev/null)"
 wins42=0; [[ "$a42" == "0" ]] && wins42=$((wins42+1)); [[ "$b42" == "0" ]] && wins42=$((wins42+1))
-[[ "$wins42" -le 1 ]] && ok "at most one create won at cap=1 (a=$a42 b=$b42)" || bad "two creates both succeeded at cap=1"
+[[ "$wins42" -eq 1 ]] && ok "exactly one independent create won at cap=1 (a=$a42 b=$b42)" || bad "cap=1 admitted $wins42 independent creates (a=$a42 b=$b42)"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 43. recovery never reaps a reservation of unknown ownership, nor while create holds the lock =="
+r43="$TMP/r43"; mkdir -p "$r43/state/sim_reservations/nometa-1" "$r43/state/sim_reservations/nopid-1" "$r43/state/sim_reservations/dead-1" "$r43/fx"
+printf 'status=reserving\nname=wai-shared-np\n' >"$r43/state/sim_reservations/nopid-1/meta"
+printf 'status=reserving\npid=999999\nname=wai-shared-d\n' >"$r43/state/sim_reservations/dead-1/meta"
+export DISK_MAGICIAN_STATE_DIR="$r43/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+mkdir -p "$r43/state/lock/create.cap-lock"; printf '%s\n' "$$" >"$r43/state/lock/create.cap-lock/pid"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r43/fx" sim_recover_reservations >/dev/null 2>&1
+[[ -d "$r43/state/sim_reservations/nometa-1" && -d "$r43/state/sim_reservations/dead-1" ]] \
+  && ok "recovery drew no conclusion while create held the cap lock" || bad "recovery reaped a reservation while create held the lock"
+rm -f "$r43/state/lock/create.cap-lock/pid"; rmdir "$r43/state/lock/create.cap-lock"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r43/fx" sim_recover_reservations >/dev/null 2>&1
+[[ -d "$r43/state/sim_reservations/nometa-1" && -d "$r43/state/sim_reservations/nopid-1" ]] \
+  && ok "reservations with no meta / no creator pid preserved" || bad "unknown-owner reservation was deleted"
+[[ ! -d "$r43/state/sim_reservations/dead-1" ]] && ok "reservation of a provably dead creator still reclaimed" || bad "dead-creator reservation not reclaimed"
+[[ ! -e "$r43/state/lock/create.cap-lock" ]] && ok "recovery released the cap lock" || bad "recovery leaked the cap lock"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 44. only an actually leaseable device counts as a free slot for create =="
+r44="$TMP/r44"; mkdir -p "$r44/state" "$r44/fx"
+export DISK_MAGICIAN_STATE_DIR="$r44/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+sim_fixture_device "$r44/fx" "44444444-1111-2222-3333-444444444444" "wai-shared-leased" "Shutdown" 1 "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r44/fx" sim_lease --wait-seconds 0 >/dev/null 2>&1
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r44/fx" sim_create --reason "leased device is not a free slot" >/dev/null 2>&1
+[[ $? -eq 0 ]] && ok "create allowed when the only pool device is leased" || bad "a leased Shutdown device blocked create"
+sim_fixture_device "$r44/fx" "44444444-aaaa-2222-3333-444444444444" "wai-shared-old-rt" "Shutdown" 1 "com.apple.CoreSimulator.SimRuntime.iOS-25-0"
+DISK_MAGICIAN_SIM_POOL_SLOTS=10 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r44/fx" sim_create --reason "other runtime" --runtime "iOS 26.5" --name wai-shared-new-rt >/dev/null 2>&1
+[[ $? -eq 0 ]] && ok "create allowed when the only free device has another runtime" || bad "wrong-runtime device blocked create"
+DISK_MAGICIAN_SIM_POOL_SLOTS=10 DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r44/fx" sim_create --reason "should refuse" --runtime "iOS 25.0" >/dev/null 2>&1
+[[ $? -eq 21 ]] && ok "create still refused when a matching leaseable device exists" || bad "create ignored a genuinely free matching slot"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 45/46. status: failed inventory is an error; empty is valid; JSON is escaped =="
+r45="$TMP/r45"; mkdir -p "$r45/state" "$r45/fake"
+export DISK_MAGICIAN_STATE_DIR="$r45/state"; unset DISK_MAGICIAN_SIM_FIXTURE_ROOT DISK_MAGICIAN_SIM_RESERVE_DIR
+printf '#!/bin/bash\nexit 75\n' >"$r45/fake/xcrun"; chmod +x "$r45/fake/xcrun"
+out45="$(PATH="$r45/fake:$PATH" sim_status_json 2>/dev/null)"; rc45=$?
+[[ "$rc45" -ne 0 && -z "$out45" ]] && ok "status failed (rc=$rc45) on xcrun failure instead of printing devices: []" || bad "status hid a failed inventory (rc=$rc45)"
+printf '#!/bin/bash\necho "not json"\n' >"$r45/fake/xcrun"
+out45="$(PATH="$r45/fake:$PATH" sim_status_json 2>/dev/null)"; rc45=$?
+[[ "$rc45" -ne 0 && -z "$out45" ]] && ok "status failed on malformed JSON" || bad "status trusted malformed JSON"
+printf '#!/bin/bash\necho "{\\"devices\\":{}}"\n' >"$r45/fake/xcrun"
+out45="$(PATH="$r45/fake:$PATH" sim_status_json 2>/dev/null)"; rc45=$?
+[[ "$rc45" -eq 0 ]] && printf '%s' "$out45" | python3 -I -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["devices"]==[] else 1)' \
+  && ok "a real empty inventory is a valid empty status" || bad "empty inventory mis-reported (rc=$rc45)"
+cat >"$r45/fake/xcrun" <<'FAKE'
+#!/bin/bash
+cat <<'J'
+{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{"udid":"46464646-1111-2222-3333-444444444444","name":"wai-shared-q\"uote\\back","state":"Shutdown"}]}}
+J
+FAKE
+out46="$(PATH="$r45/fake:$PATH" sim_status_json 2>/dev/null)"
+printf '%s' "$out46" | python3 -I -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["devices"][0]["name"]=="wai-shared-q\"uote\\back" and d["schema_version"]==1 and "idle_minutes" in d["devices"][0] else 1)' \
+  && ok "status JSON round-trips a name with quote and backslash (same schema)" || bad "status JSON not valid / not escaped: ${out46:0:120}"
+lease46="$(PATH="$r45/fake:$PATH" WORLDAI_SIM_OWNER='o"w\ner' sim_lease --wait-seconds 0 2>/dev/null)"
+printf '%s' "$lease46" | python3 -I -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["name"]=="wai-shared-q\"uote\\back" and d["lease_generation"]==1 and d["lease_token"].startswith("lt_") else 1)' \
+  && ok "lease JSON valid with hostile name" || bad "lease JSON not valid: ${lease46:0:120}"
+out46b="$(PATH="$r45/fake:$PATH" sim_status_json 2>/dev/null)"
+printf '%s' "$out46b" | python3 -I -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["devices"][0]["lease_owner"]=="o\"w\\ner" and d["devices"][0]["lease_generation"]==1 else 1)' \
+  && ok "status JSON round-trips a hostile lease owner" || bad "owner not escaped: ${out46b:0:160}"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 47. lease selects the runtime on the simctl runtime KEY, not the device name =="
+r47="$TMP/r47"; mkdir -p "$r47/state" "$r47/fake"
+export DISK_MAGICIAN_STATE_DIR="$r47/state"
+cat >"$r47/fake/xcrun" <<'FAKE'
+#!/bin/bash
+cat <<'J'
+{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-25-0":[{"udid":"47000000-1111-2222-3333-444444444444","name":"wai-shared-ios-26-5-lookalike","state":"Shutdown"}],
+"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{"udid":"47ffffff-1111-2222-3333-444444444444","name":"wai-shared-plain","state":"Shutdown"}]}}
+J
+FAKE
+chmod +x "$r47/fake/xcrun"
+out47="$(PATH="$r47/fake:$PATH" sim_lease --wait-seconds 0 --runtime "iOS 26.5" 2>/dev/null)"
+printf '%s' "$out47" | grep -q '47ffffff' && ok "runtime selected by key (name lookalike on iOS 25.0 ignored)" || bad "lease picked the wrong runtime: ${out47:0:100}"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 48. lease never prints a token for an incomplete lease =="
+r48="$TMP/r48"; mkdir -p "$r48/state" "$r48/fx"
+export DISK_MAGICIAN_STATE_DIR="$r48/state"
+sim_fixture_device "$r48/fx" "48484848-1111-2222-3333-444444444444" "wai-shared-w" "Shutdown" 1
+sim_token_fingerprint() { printf '\n'; }      # simulate a metadata write that does not land
+out48="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r48/fx" sim_lease --wait-seconds 0 2>"$TMP/e48")"; rc48=$?
+source "$MODULE"                               # restore the real function
+[[ "$rc48" -ne 0 ]] && ! printf '%s' "$out48" | grep -q lease_token && ok "no token issued for a partial lease (rc=$rc48)" || bad "token issued for an incomplete lease"
+[[ ! -e "$r48/state/sim_leases/48484848-1111-2222-3333-444444444444" ]] && ok "owned partial lease dir removed" || bad "partial lease dir left behind"
+[[ ! -e "$r48/state/lock/48484848-1111-2222-3333-444444444444.release-lock" ]] && ok "per-UDID lock released after the failure" || bad "lock leaked after lease failure"
+[[ "$(cat "$r48/state/gen/48484848-1111-2222-3333-444444444444" 2>/dev/null)" == "1" ]] && ok "generation stays advanced" || bad "generation was rolled back"
+out48b="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r48/fx" sim_lease --wait-seconds 0 2>/dev/null)"
+printf '%s' "$out48b" | grep -q '"lease_generation": 2' && ok "next lease uses the next generation" || bad "retry did not succeed on generation 2"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 49. receipt age is exact under DST (calendar.timegm, not mktime - timezone) =="
+r49="$TMP/r49"; mkdir -p "$r49/state/gen" "$r49/state/receipts"
+export DISK_MAGICIAN_STATE_DIR="$r49/state"
+printf '1\n' >"$r49/state/gen/49494949-1111-2222-3333-444444444444"
+rel49="$(date -u -d '-2850 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2850M +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"action": "release", "udid": "49494949-1111-2222-3333-444444444444", "lease_generation": 1, "token_fingerprint": "x", "released_at": "%s"}\n' "$rel49" >"$r49/state/receipts/sim_release_receipts.jsonl"
+TZ='EST5EDT,M1.1.0,M12.5.0' sim_released_and_idle "49494949-1111-2222-3333-444444444444" \
+  && bad "47.5h-old release treated as past the 48h floor under DST" || ok "47.5h-old release stays inside the 48h floor under a DST zone"
+rel49b="$(date -u -d '-2910 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2910M +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"action": "release", "udid": "49494949-1111-2222-3333-444444444444", "lease_generation": 1, "token_fingerprint": "x", "released_at": "%s"}\n' "$rel49b" >"$r49/state/receipts/sim_release_receipts.jsonl"
+TZ='EST5EDT,M1.1.0,M12.5.0' sim_released_and_idle "49494949-1111-2222-3333-444444444444" \
+  && ok "48.5h-old release is past the floor under the same DST zone" || bad "48.5h-old release not recognised (receipt parsing broken)"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 50. prune calls deletion_log with the 4-argument contract =="
+r50="$TMP/r50"; mkdir -p "$r50/state/gen" "$r50/state/receipts" "$r50/fx"
+export DISK_MAGICIAN_STATE_DIR="$r50/state"
+sim_fixture_device "$r50/fx" "50505050-1111-2222-3333-444444444444" "wai-shared-d" "Shutdown" 999
+printf '1\n' >"$r50/state/gen/50505050-1111-2222-3333-444444444444"
+old50="$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-72H +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"action": "release", "udid": "50505050-1111-2222-3333-444444444444", "lease_generation": 1, "token_fingerprint": "x", "released_at": "%s"}\n' "$old50" >"$r50/state/receipts/sim_release_receipts.jsonl"
+artifact_removal_verdict() { printf 'remove\n'; }
+deletion_log() { local sc="$1" ac="$2" kb="$3" pa="$4"; printf '%s|%s|%s|%s\n' "$sc" "$ac" "$kb" "$pa" >>"$TMP/dl50"; }   # real signature; set -u kills a short call
+out50="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r50/fx" sim_prune --clean 2>&1)"
+unset -f artifact_removal_verdict deletion_log
+[[ ! -d "$r50/fx/50505050-1111-2222-3333-444444444444" ]] && ok "prune completed under set -u" || bad "prune did not remove the released device: $out50"
+grep -qE '^[^|]+\|sim-prune\|(-1|[0-9]+)\|.*/50505050-' "$TMP/dl50" 2>/dev/null && ok "deletion_log got script, action, kb, path" || bad "deletion_log called with the wrong arguments: $(cat "$TMP/dl50" 2>/dev/null)"
+[[ ! -e "$r50/state/lock/50505050-1111-2222-3333-444444444444.release-lock" ]] && ok "prune left no lock behind" || bad "prune leaked its lock"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 51. create fails closed if the inventory dies under the cap lock =="
+r51="$TMP/r51"; mkdir -p "$r51/state" "$r51/fake"
+export DISK_MAGICIAN_STATE_DIR="$r51/state"; unset DISK_MAGICIAN_SIM_FIXTURE_ROOT
+cat >"$r51/fake/xcrun" <<'FAKE'
+#!/bin/bash
+# first list call (create's slot check) works; every later call fails
+c="$(dirname "$0")/calls"; n=$(( $(cat "$c" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$c"
+[[ "$*" == *"list devices --json"* && "$n" -le 1 ]] && { printf '{"devices":{}}\n'; exit 0; }
+exit 75
+FAKE
+chmod +x "$r51/fake/xcrun"
+PATH="$r51/fake:$PATH" sim_create --reason "inventory dies" >/dev/null 2>&1; rc51=$?
+[[ "$rc51" -eq 22 ]] && ok "create refused (22) when the capacity count could not be read" || bad "create proceeded on a failed capacity count (rc=$rc51)"
+[[ ! -e "$r51/state/lock/create.cap-lock" ]] && ok "cap lock released after the refusal" || bad "cap lock leaked"
+[[ -z "$(ls -A "$r51/state/sim_reservations" 2>/dev/null)" ]] && ok "no reservation created" || bad "a reservation was created without a capacity proof"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 52. an option with no value is a usage error, never a hang =="
+for cmd in 'sim_create --reason' 'sim_create --reason x --runtime' 'sim_create --reason x --name' 'sim_lease --runtime' 'sim_lease --wait-seconds' 'sim_release U --token'; do
+  timeout 10 bash -c 'source "$1"; '"$cmd" _ "$MODULE" >/dev/null 2>&1; rc52=$?
+  [[ "$rc52" -eq 2 ]] && ok "'$cmd' -> usage error (2)" || bad "'$cmd' -> rc=$rc52 (124 = hung)"
+done
+
+echo "== 53. a lock is recovered only when its holder is provably dead =="
+l53="$TMP/l53"; mkdir -p "$l53"
+sleep 0 & dead53=$!; wait "$dead53"
+mkdir "$l53/dead"; printf '%s\n' "$dead53" >"$l53/dead/pid"
+sim_lock_take "$l53/dead" 0 2>/dev/null && ok "lock of a dead holder was recovered" || bad "dead holder's lock stayed stuck"
+mkdir "$l53/live"; printf '%s\n' "$$" >"$l53/live/pid"
+sim_lock_take "$l53/live" 0 2>/dev/null && bad "took a live holder's lock" || ok "lock of a live holder preserved"
+mkdir "$l53/nopid"
+sim_lock_take "$l53/nopid" 0 2>/dev/null && bad "took a lock with an unknown holder" || ok "lock with no recorded holder preserved (unknown)"
+mkdir "$l53/junk"; printf 'zzz\n' >"$l53/junk/pid"
+sim_lock_take "$l53/junk" 0 2>/dev/null && bad "took a lock with a garbage pid" || ok "lock with an unparsable pid preserved"
+sim_lock_drop "$l53/dead"; [[ ! -e "$l53/dead" ]] && ok "drop removes the lock and its pid file" || bad "drop left the lock"
+# end to end: a release interrupted by a dead process no longer wedges the device
+r53="$TMP/r53"; mkdir -p "$r53/state" "$r53/fx"
+export DISK_MAGICIAN_STATE_DIR="$r53/state"
+sim_fixture_device "$r53/fx" "53535353-1111-2222-3333-444444444444" "wai-shared-s" "Shutdown" 1
+mkdir -p "$r53/state/lock/53535353-1111-2222-3333-444444444444.release-lock"
+printf '%s\n' "$dead53" >"$r53/state/lock/53535353-1111-2222-3333-444444444444.release-lock/pid"
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r53/fx" sim_lease --wait-seconds 0 2>/dev/null | grep -q lease_token \
+  && ok "lease proceeds past a dead holder's leftover lock" || bad "device wedged by a dead holder's lock"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"
 
 echo ""

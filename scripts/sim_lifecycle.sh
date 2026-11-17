@@ -53,7 +53,7 @@ sim_device_root() {
   fi
 }
 
-# sim_fixture_device <root> <udid> <name> <state> <age_hours|-1>
+# sim_fixture_device <root> <udid> <name> <state> <age_hours|-1> [runtime-key]
 # Test-only helper; never called in production paths.
 sim_fixture_device() {
   local root="$1" udid="$2" name="$3" state="$4" age_h="$5"
@@ -61,6 +61,7 @@ sim_fixture_device() {
   mkdir -p "$d"
   printf '%s\n' "$name" >"$d/.name"
   printf '%s\n' "$state" >"$d/.state"
+  [[ -n "${6:-}" ]] && printf '%s\n' "$6" >"$d/.runtime"
   if [[ "$age_h" == "-1" ]]; then
     # unmeasurable: remove the marker the age reader depends on
     : >"$d/.no_mtime"
@@ -72,9 +73,22 @@ sim_fixture_device() {
   fi
 }
 
+# sim_mtime <path> / sim_newest_mtime <dir> — epoch seconds, GNU stat first and
+# BSD stat second (`stat -f '%m'` on GNU is a filesystem query, not an mtime).
+sim_mtime() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null; }
+sim_newest_mtime() {
+  local n
+  n="$(find "$1" -type f ! -name '.*' -exec stat -c '%Y' {} + 2>/dev/null | sort -rn | head -1)"
+  [[ -n "$n" ]] || n="$(find "$1" -type f ! -name '.*' -exec stat -f '%m' {} + 2>/dev/null | sort -rn | head -1)"
+  [[ -n "$n" ]] || n="$(sim_mtime "$1")"
+  printf '%s\n' "$n"
+}
+
 # sim_snapshot — ONE validated inventory snapshot.
 #
-# Returns 0 and prints udid<TAB>name<TAB>state<TAB>last_used rows only when the
+# Returns 0 and prints udid<TAB>name<TAB>state<TAB>last_used<TAB>runtime rows (an
+# unknown last_used or runtime is "-", because read collapses empty tab fields)
+# only when the
 # producer, the parser AND the schema all succeed. Any failure returns non-zero
 # with no rows, so callers can distinguish "no devices" from "could not read".
 # Previous code discarded one xcrun call's status and then trusted a second,
@@ -107,11 +121,12 @@ for runtime,devs in d["devices"].items():
         if not isinstance(x,dict) or not x.get("udid") or not x.get("state"):
             sys.exit(4)
         lu=x.get("lastUsedAt") or ""
-        ts=""
+        ts="-"
         if lu:
             try: ts=int(calendar.timegm(time.strptime(lu,"%Y-%m-%dT%H:%M:%SZ")))
-            except Exception: ts=""
-        buf.append("\t".join([x.get("udid",""), x.get("name",""), x.get("state","unknown"), str(ts)]))
+            except Exception: ts="-"
+        nm=str(x.get("name","")).replace("\t"," ").replace("\n"," ")
+        buf.append("\t".join([x.get("udid",""), nm, x.get("state","unknown"), str(ts), runtime]))
 for row in buf:
     print(row)
 ' || return 1
@@ -121,25 +136,26 @@ for row in buf:
   # Fixture mode is trusted input by construction.
   root="$(sim_device_root)"
   [[ -d "$root" ]] || return 0
-  local udid_path udid name state newest
+  local udid_path udid name state newest rtk
   for udid_path in "$root"/*; do
     [[ -d "$udid_path" && ! -L "$udid_path" ]] || continue
     udid="$(basename "$udid_path")"
     if [[ -f "$udid_path/.name" ]]; then
       name="$(cat "$udid_path/.name" 2>/dev/null)"
       state="$(cat "$udid_path/.state" 2>/dev/null)"
+      rtk="$(cat "$udid_path/.runtime" 2>/dev/null)"
       if [[ -f "$udid_path/.no_mtime" ]]; then
         newest=""
       else
-        newest="$(find "$udid_path" -type f ! -name '.*' -exec stat -f '%m' {} + 2>/dev/null | sort -rn | head -1)"
-        [[ -z "$newest" ]] && newest="$(stat -f '%m' "$udid_path" 2>/dev/null)"
+        newest="$(sim_newest_mtime "$udid_path")"
       fi
     else
       name="$udid"
       state="unknown"
       newest=""
+      rtk=""
     fi
-    printf '%s\t%s\t%s\t%s\n' "$udid" "$name" "$state" "$newest"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$udid" "$name" "$state" "${newest:--}" "${rtk:--}"
   done
   return 0
 }
@@ -151,6 +167,71 @@ sim_devices() {
 }
 
 sim_lease_path()   { printf '%s/%s\n' "$(sim_lease_dir)" "$1"; }
+
+# sim_json k=v ... — one JSON object via a real serializer, so names and owners
+# are escaped. A value "#N" is an integer, "@true" is true, "@null" is null.
+sim_json() {
+  python3 -I -c '
+import json,sys
+o={"schema_version":1}
+for kv in sys.argv[1:]:
+    k,_,v=kv.partition("=")
+    o[k]=int(v[1:]) if v[:1]=="#" else (True if v=="@true" else (None if v=="@null" else v))
+print(json.dumps(o))' "$@"
+}
+
+# Locks are directories holding the holder pid. A lock is broken ONLY when its
+# recorded pid is provably dead; no pid file or a live pid means unknown/held.
+sim_lock_break_if_dead() {
+  local dir="$1" p gone
+  p="$(cat "$dir/pid" 2>/dev/null)"
+  [[ "$p" =~ ^[1-9][0-9]*$ ]] || return 1
+  ps -p "$p" >/dev/null 2>&1 && return 1
+  gone="$dir.dead.${BASHPID:-$$}"
+  mv "$dir" "$gone" 2>/dev/null || return 1
+  if [[ "$(cat "$gone/pid" 2>/dev/null)" == "$p" ]]; then
+    rm -f "$gone/pid"; rmdir "$gone" 2>/dev/null
+    echo "sim: recovered stale lock $dir (holder pid $p is dead)" >&2
+    return 0
+  fi
+  mv "$gone" "$dir" 2>/dev/null || true   # raced a new holder: put it back
+  return 1
+}
+# sim_lock_take <dir> [extra-0.1s-retries] — 0 only when WE hold the lock.
+sim_lock_take() {
+  local dir="$1" tries="${2:-0}" n=0
+  mkdir -p "$(dirname "$dir")" 2>/dev/null || true
+  while :; do
+    if mkdir "$dir" 2>/dev/null; then
+      printf '%s\n' "${BASHPID:-$$}" >"$dir/pid" 2>/dev/null && return 0
+      rm -f "$dir/pid"; rmdir "$dir" 2>/dev/null
+      return 1
+    fi
+    sim_lock_break_if_dead "$dir" && continue
+    (( n < tries )) || return 1
+    sleep 0.1; n=$((n+1))
+  done
+}
+sim_lock_drop() { rm -f "$1/pid" 2>/dev/null; rmdir "$1" 2>/dev/null || true; }
+sim_cap_lock_path() { printf '%s/lock/create.cap-lock\n' "$(sim_state_root)"; }
+
+# sim_pool_leaseable <udid> <name> <state> <runtime-key> [requested-runtime]
+# True only for a device lease could actually hand out: pool name, Shutdown, no
+# lease (complete or half-written), not reserved, and the requested runtime when
+# one is given. The runtime is matched on the simctl runtime KEY, never the name.
+sim_pool_leaseable() {
+  local udid="$1" name="$2" state="$3" rtk="$4" want="${5:-}"
+  [[ "$name" == wai-shared-* && "$state" == "Shutdown" ]] || return 1
+  if [[ -n "$want" ]]; then
+    local ws ks
+    ws="$(printf '%s' "$want" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' '-')"
+    ks="$(printf '%s' "$rtk" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' '-')"
+    [[ "$ks" == "$ws" || "$ks" == *"-$ws" ]] || return 1
+  fi
+  [[ "$(sim_lease_state "$udid")" == "absent" ]] || return 1
+  sim_name_reserved "$udid" "$name" && return 1
+  return 0
+}
 
 # Generation is persisted in its OWN file that survives release, so a later lease
 # can never reuse a superseded generation number (review finding: release deleted
@@ -206,23 +287,30 @@ sim_is_leased() { [[ "$(sim_lease_state "$1")" == "complete" ]]; }
 sim_token_fingerprint() { printf '%s' "$1" | shasum -a 256 2>/dev/null | cut -d' ' -f1; }
 
 sim_status_json() {
-  local first=1 udid name state newest leased owner gen age
-  printf '{\n  "schema_version": 1,\n  "devices": [\n'
-  while IFS=$'\t' read -r udid name state newest; do
-    [[ -n "$udid" ]] || continue
-    leased=false; owner=""; gen=""
-    if sim_is_leased "$udid"; then leased=true; owner="$(sim_lease_owner "$udid")"; gen="$(sim_generation "$udid")"; fi
-    age=null
-    [[ "$newest" =~ ^[0-9]+$ ]] && age=$(( ($(sim_now) - newest) / 60 ))
-    [[ "$first" -eq 1 ]] || printf ',\n'
-    first=0
-    printf '    {"udid": "%s", "name": "%s", "state": "%s", "lease_owner": %s, "lease_generation": %s, "idle_minutes": %s}' \
-      "$udid" "$name" "$state" \
-      "$( [[ -n "$owner" ]] && printf '"%s"' "$owner" || printf 'null' )" \
-      "$( [[ -n "$gen" ]] && printf '%s' "$gen" || printf 'null' )" \
-      "$age"
-  done < <(sim_devices)
-  printf '\n  ]\n}\n'
+  # A failed inventory is an error, never an empty device list; a valid empty
+  # inventory still prints devices: [].
+  local snap udid name state newest rtk leased owner gen age
+  if ! snap="$(sim_snapshot 2>/dev/null)"; then
+    echo "sim status: inventory unavailable" >&2
+    return 22
+  fi
+  {
+    while IFS=$'\t' read -r udid name state newest rtk; do
+      [[ -n "$udid" ]] || continue
+      owner=""; gen=""
+      if sim_is_leased "$udid"; then owner="$(sim_lease_owner "$udid" | tr -d '\t\n')"; gen="$(sim_generation "$udid")"; fi
+      age=""
+      [[ "$newest" =~ ^[0-9]+$ ]] && age=$(( ($(sim_now) - newest) / 60 ))
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$udid" "$name" "$state" "$owner" "$gen" "$age"
+    done <<<"$snap"
+  } | python3 -I -c '
+import json,sys
+devs=[]
+for line in sys.stdin:
+    u,n,st,ow,g,a=line.rstrip("\n").split("\t")
+    devs.append({"udid":u,"name":n,"state":st,"lease_owner":ow or None,
+                 "lease_generation":int(g) if g else None,"idle_minutes":int(a) if a else None})
+print(json.dumps({"schema_version":1,"devices":devs},indent=2))'
 }
 
 # sim_lease — atomically acquire one unleased device. mkdir is the single-writer
@@ -231,57 +319,39 @@ sim_lease() {
   local wait_seconds=120 runtime=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --wait-seconds) wait_seconds="${2:?}"; shift 2 ;;
-      --runtime) runtime="${2:?}"; shift 2 ;;
+      --wait-seconds|--runtime)
+        [[ $# -ge 2 ]] || { echo "sim lease: $1 requires a value" >&2; return 2; }
+        if [[ "$1" == --runtime ]]; then runtime="$2"; else wait_seconds="$2"; fi
+        shift 2 ;;
       --json) shift ;;
       *) shift ;;
     esac
   done
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] || { echo "sim lease: --wait-seconds must be a non-negative integer" >&2; return 2; }
   mkdir -p "$(sim_lease_dir)" || { echo "sim lease: cannot create lease dir" >&2; return 22; }
 
-  local deadline=$(( $(sim_now) + wait_seconds )) udid name state newest
+  local deadline=$(( $(sim_now) + wait_seconds )) udid name state newest rtk snap
   while :; do
     # Refuse on an unreadable inventory rather than reporting "no free slot",
     # which would be a conclusion drawn from a failed read (review P0).
-    if ! sim_snapshot >/dev/null 2>&1; then
+    if ! snap="$(sim_snapshot 2>/dev/null)"; then
       echo "sim lease: inventory unavailable; refusing to guess" >&2
       return 22
     fi
-    while IFS=$'\t' read -r udid name state newest; do
+    while IFS=$'\t' read -r udid name state newest rtk; do
       [[ -n "$udid" ]] || continue
-      # only pool devices are leaseable; task-named devices need explicit adopt
-      [[ "$name" == wai-shared-* ]] || continue
-      # Never hand out a Booted (in-use) device, and require a positive safe state.
-      [[ "$state" == "Shutdown" ]] || continue
-      # Honour the requested runtime. Names are the only runtime signal the
-      # device list exposes, so this is a name match by necessity; the device
-      # type is verified at create time.
-      if [[ -n "$runtime" ]]; then
-        local rt_slug; rt_slug="$(printf '%s' "$runtime" | tr ' .' '--' | tr 'A-Z' 'a-z')"
-        [[ "$name" == *"$runtime"* || "$name" == *"$rt_slug"* ]] || continue
-      fi
-      # A device still being registered by `create` is not yet leaseable
-      # (review P0: it became leaseable before create finished registering it).
-      sim_name_reserved "$udid" "$name" && continue
+      # Pool, Shutdown, unleased, unreserved, requested runtime (matched on the
+      # simctl runtime key). Task-named devices need explicit adopt.
+      sim_pool_leaseable "$udid" "$name" "$state" "$rtk" "$runtime" || continue
       local d; d="$(sim_lease_path "$udid")"
       # Serialize against prune/release with the same per-UDID lock. Without this,
       # prune's locked re-check could still race an acquire and delete a device
       # that a caller had just leased (review P0, reproduced by /dot).
       local alock; alock="$(sim_release_lock_path "$udid")"
       mkdir -p "$(dirname "$alock")" 2>/dev/null || true
-      local aw=0 alock_held=false
-      # alock_held reflects OUR successful mkdir only. Checking `[[ -d $alock ]]`
-      # was wrong: a foreign holder's directory also satisfies it, so a losing
-      # acquirer proceeded and then rmdir'd the other process's lock (review P0).
-      if mkdir "$alock" 2>/dev/null; then
-        alock_held=true
-      else
-        while (( aw < 50 )); do
-          sleep 0.1; aw=$((aw+1))
-          if mkdir "$alock" 2>/dev/null; then alock_held=true; break; fi
-        done
-      fi
-      if [[ "$alock_held" != true ]]; then
+      # Only OUR successful take counts: a foreign holder's directory also exists
+      # (review P0: a losing acquirer once rmdir'd the other process's lock).
+      if ! sim_lock_take "$alock" 50; then
         echo "sim lease: acquire lock busy for $udid; skipping" >&2
         continue
       fi
@@ -291,11 +361,11 @@ sim_lease() {
       local live
       live="$(sim_devices | awk -F'\t' -v u="$udid" '$1==u {print $3}')"
       if [[ "$live" != "Shutdown" ]] || sim_is_leased "$udid" || sim_name_reserved "$udid" "$name"; then
-        rmdir "$alock" 2>/dev/null || true
+        sim_lock_drop "$alock"
         continue
       fi
       if ! mkdir "$d" 2>/dev/null; then
-        rmdir "$alock" 2>/dev/null || true
+        sim_lock_drop "$alock"
         continue
       fi
       if true; then
@@ -303,17 +373,26 @@ sim_lease() {
         local gen
         if ! gen="$(sim_next_generation "$udid")" || [[ -z "$gen" ]]; then
           rmdir "$d" 2>/dev/null || true
-          rmdir "$alock" 2>/dev/null || true
+          sim_lock_drop "$alock"
           echo "sim lease: cannot allocate generation (corrupt/unwritable counter); refusing" >&2
           return 22
         fi
-        printf '%s\n' "$gen" >"$d/generation"
-        printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner"
-        printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"
+        local out
+        if ! { printf '%s\n' "$gen" >"$d/generation" \
+            && printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner" \
+            && printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"; } 2>/dev/null \
+          || [[ "$(sim_lease_state "$udid")" != "complete" ]] \
+          || ! out="$(sim_json "udid=$udid" "name=$name" "state=$state" "lease_generation=#$gen" "lease_token=$token")"; then
+          # We created $d under the lock, so we own the partial lease. The
+          # generation stays advanced so a stale token can never validate again.
+          rm -rf "${d:?}"
+          sim_lock_drop "$alock"
+          echo "sim lease: could not persist a complete lease for $udid; no token issued" >&2
+          return 22
+        fi
         chmod 600 "$d/token_fingerprint" "$d/generation" "$d/owner" 2>/dev/null || true
-        printf '{"schema_version": 1, "udid": "%s", "name": "%s", "state": "%s", "lease_generation": %s, "lease_token": "%s"}\n' \
-          "$udid" "$name" "$state" "$gen" "$token"
-        rmdir "$alock" 2>/dev/null || true
+        sim_lock_drop "$alock"
+        printf '%s\n' "$out"
         return 0
       fi
     done < <(sim_devices)
@@ -333,7 +412,8 @@ sim_release() {
   local udid="" token=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --token) token="${2:?}"; shift 2 ;;
+      --token) [[ $# -ge 2 ]] || { echo "sim release: --token requires a value" >&2; return 2; }
+        token="$2"; shift 2 ;;
       --json) shift ;;
       -*) shift ;;
       *) udid="${1:-}"; shift ;;
@@ -351,12 +431,7 @@ sim_release() {
   # (review finding, 2026-11-16). The lock covers validate -> receipt -> delete.
   local lock; lock="$(sim_release_lock_path "$udid")"
   mkdir -p "$(dirname "$lock")" 2>/dev/null || true
-  local waited=0
-  until mkdir "$lock" 2>/dev/null; do
-    sleep 0.1
-    waited=$((waited+1))
-    (( waited < 300 )) || { echo "sim release: could not serialize (lock busy)" >&2; return 25; }
-  done
+  sim_lock_take "$lock" 300 || { echo "sim release: could not serialize (lock busy)" >&2; return 25; }
   # No RETURN trap: a RETURN trap outlives this function and later fires with
   # ${lock} out of scope, aborting the caller under `set -u` (found by the
   # concurrency test). Every exit path below removes the lock explicitly.
@@ -366,7 +441,7 @@ sim_release() {
   expected="$(cat "$d/token_fingerprint" 2>/dev/null)"
   actual="$(sim_token_fingerprint "$token")"
   if [[ -z "$expected" || "$expected" != "$actual" ]]; then
-    rmdir "${lock}" 2>/dev/null || true
+    sim_lock_drop "$lock"
     echo "sim release: stale-lease-token (generation superseded)" >&2
     return 23
   fi
@@ -376,7 +451,7 @@ sim_release() {
   # the ONLY thing that makes a device prunable, so silently dropping it would
   # leave a released device permanently unpickable while reporting success.
   mkdir -p "$(sim_receipt_dir)" 2>/dev/null || {
-    rmdir "${lock}" 2>/dev/null || true
+    sim_lock_drop "$lock"
     echo "sim release: cannot create receipt dir; refusing" >&2
     return 24
   }
@@ -386,18 +461,18 @@ sim_release() {
   local saved_meta; saved_meta="$(cat "$d/generation" "$d/owner" "$d/token_fingerprint" 2>/dev/null)"
   rm -rf "${d:?}" 2>/dev/null
   if [[ -d "$d" ]]; then
-    rmdir "${lock}" 2>/dev/null || true
+    sim_lock_drop "$lock"
     echo "sim release: could not remove the lease dir; refusing to write a receipt" >&2
     return 24
   fi
   if ! printf '{"action": "release", "udid": "%s", "lease_generation": %s, "token_fingerprint": "%s", "released_at": "%s"}\n' \
     "$udid" "${gen:-0}" "$expected" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     >>"$(sim_receipt_dir)/sim_release_receipts.jsonl" 2>/dev/null; then
-    rmdir "${lock}" 2>/dev/null || true
+    sim_lock_drop "$lock"
     echo "sim release: receipt write failed AFTER lease removal; device is unleased and unpickable (report for reconciliation)" >&2
     return 24
   fi
-  rmdir "${lock}" 2>/dev/null || true
+  sim_lock_drop "$lock"
   return 0
 }
 
@@ -412,7 +487,7 @@ sim_released_and_idle() {
   local cur_gen; cur_gen="$(cat "$(sim_generation_path "$udid")" 2>/dev/null)"
   [[ "$cur_gen" =~ ^[0-9]+$ ]] || return 1
   python3 - "$receipts" "$udid" "$(sim_floor_minutes)" "$cur_gen" <<'PY' 2>/dev/null
-import json,sys,time
+import json,sys,time,calendar
 path,udid,floor,cur=sys.argv[1],sys.argv[2],int(sys.argv[3]),int(sys.argv[4])
 best=None
 for line in open(path, errors='replace'):
@@ -426,7 +501,7 @@ for line in open(path, errors='replace'):
         if int(r.get('lease_generation'))!=cur: continue
     except Exception: continue
     try:
-        t=time.mktime(time.strptime(r['released_at'],'%Y-%m-%dT%H:%M:%SZ'))-time.timezone
+        t=calendar.timegm(time.strptime(r['released_at'],'%Y-%m-%dT%H:%M:%SZ'))
     except Exception: continue
     if best is None or t>best: best=t
 if best is None: sys.exit(1)
@@ -451,8 +526,8 @@ sim_prune() {
     echo "sim prune: inventory unavailable; refusing to act" >&2
     return 24
   fi
-  local udid name state newest removed=0 kept=0
-  while IFS=$'\t' read -r udid name state newest; do
+  local udid name state newest rtk removed=0 kept=0
+  while IFS=$'\t' read -r udid name state newest rtk; do
     [[ -n "$udid" ]] || continue
     # 1. Booted is never a candidate
     if [[ "$state" == "Booted" ]]; then echo "keep:booted $name"; kept=$((kept+1)); continue; fi
@@ -490,7 +565,7 @@ sim_prune() {
       # new lease cannot interleave with this delete (review P0).
       local plock; plock="$(sim_release_lock_path "$udid")"
       mkdir -p "$(dirname "$plock")" 2>/dev/null || true
-      mkdir "$plock" 2>/dev/null || { echo "keep:exclusion-busy $name"; kept=$((kept+1)); continue; }
+      sim_lock_take "$plock" 0 || { echo "keep:exclusion-busy $name"; kept=$((kept+1)); continue; }
 
       # FINAL positive re-check, under the lock. This must re-verify the RECEIPT
       # and the 48 h floor too, not just state and lease: a lease/release cycle
@@ -503,12 +578,12 @@ sim_prune() {
       still_leased=0
       [[ "$(sim_lease_state "$udid")" != "absent" ]] && still_leased=1
       if [[ "$still_state" != "Shutdown" || "$still_leased" -eq 1 ]]; then
-        rmdir "$plock" 2>/dev/null || true
+        sim_lock_drop "$plock"
         echo "keep:state-changed $name"
         kept=$((kept+1)); continue
       fi
       if ! sim_released_and_idle "$udid"; then
-        rmdir "$plock" 2>/dev/null || true
+        sim_lock_drop "$plock"
         echo "keep:receipt-stale-under-lock $name"
         kept=$((kept+1)); continue
       fi
@@ -526,7 +601,7 @@ sim_prune() {
         fi
       fi
       if ! declare -F artifact_removal_verdict >/dev/null 2>&1; then
-        rmdir "$plock" 2>/dev/null || true
+        sim_lock_drop "$plock"
         echo "keep:verdict-unavailable $name"
         kept=$((kept+1)); continue
       fi
@@ -537,19 +612,22 @@ sim_prune() {
       raw="$(artifact_removal_verdict "$target" 2>/dev/null)" || vrc=$?
       verdict="$(printf '%s' "$raw" | tr -d '[:space:]')"
       if [[ "$vrc" -ne 0 ]]; then
-        rmdir "$plock" 2>/dev/null || true
+        sim_lock_drop "$plock"
         echo "keep:verdict-error-$vrc $name"
         kept=$((kept+1)); continue
       fi
       if [[ "$verdict" != remove ]]; then
-        rmdir "$plock" 2>/dev/null || true
+        sim_lock_drop "$plock"
         echo "keep:verdict-${verdict:-empty} $name"
         kept=$((kept+1)); continue
       fi
 
-      if declare -F deletion_log >/dev/null 2>&1; then deletion_log "$target" "sim-prune"; fi
+      # deletion_log <script> <action> <kb> <path>; -1 when the size is unknown.
+      local kb; kb="$(du -sk "$target" 2>/dev/null | cut -f1)"
+      [[ "$kb" =~ ^[0-9]+$ ]] || kb=-1
+      if declare -F deletion_log >/dev/null 2>&1; then deletion_log "sim_lifecycle.sh" "sim-prune" "$kb" "$target"; fi
       rm -rf "${target:?}" 2>/dev/null && removed=$((removed+1))
-      rmdir "$plock" 2>/dev/null || true
+      sim_lock_drop "$plock"
     fi
   done < <(printf '%s\n' "$snap")
   echo "sim prune: candidates_removed=$removed kept=$kept dry_run=$dry"
@@ -573,7 +651,6 @@ sim_prune() {
 #      a created device holds a live lease from birth, an orphan is inert: it is
 #      leased, so prune skips it, and it is visible in `sim status`.
 # ---------------------------------------------------------------------------
-SIM_POOL_SLOTS="${DISK_MAGICIAN_SIM_POOL_SLOTS:-3}"
 # sim_name_reserved <udid> <name> — true while an unfinished `create` reservation
 # owns this device name or UDID, so lease cannot hand it out mid-registration.
 sim_name_reserved() {
@@ -595,15 +672,17 @@ sim_name_reserved() {
 sim_reserve_dir() { printf '%s\n' "${DISK_MAGICIAN_SIM_RESERVE_DIR:-$(sim_state_root)/sim_reservations}"; }
 
 sim_pool_slots() {
-  local n="${SIM_POOL_SLOTS:-3}"
+  local n="${DISK_MAGICIAN_SIM_POOL_SLOTS:-3}"
   [[ "$n" =~ ^[1-9][0-9]?$ ]] || n=3
   printf '%s\n' "$n"
 }
 
 # count pool devices + in-flight reservations (a reservation consumes a slot)
 sim_pool_used() {
-  local devices reservations
-  devices="$(sim_devices | awk -F'\t' '$2 ~ /^wai-shared-/ {n++} END{print n+0}')"
+  local devices reservations snap
+  # A failed inventory is not "zero devices": fail so the caller refuses.
+  snap="$(sim_snapshot 2>/dev/null)" || return 1
+  devices="$(printf '%s\n' "$snap" | awk -F'\t' '$2 ~ /^wai-shared-/ {n++} END{print n+0}')"
   reservations="$(find "$(sim_reserve_dir)" -maxdepth 1 -type d ! -path "$(sim_reserve_dir)" 2>/dev/null | wc -l | tr -d ' ')"
   printf '%s\n' "$(( ${devices:-0} + ${reservations:-0} ))"
 }
@@ -615,6 +694,14 @@ sim_pool_used() {
 sim_recover_reservations() {
   local rdir_override; rdir_override="$(sim_reserve_dir)"
   [[ -d "$rdir_override" ]] || return 0
+  # create writes its reservation meta under this same lock, so a reservation seen
+  # here is either fully initialised or abandoned. If the lock is busy no
+  # conclusion is drawn.
+  local clock; clock="$(sim_cap_lock_path)"
+  if ! sim_lock_take "$clock" 50; then
+    echo "recover:busy — create in progress; reservations preserved" >&2
+    return 0
+  fi
   # ONE validated snapshot for the whole pass. If it cannot be produced, no
   # conclusion may be drawn about any reservation (review P0).
   local snap snap_ok=1
@@ -633,7 +720,11 @@ sim_recover_reservations() {
     # Ownership: never reap a reservation whose creating process is alive.
     local owner_pid
     owner_pid="$(sed -n 's/^pid=//p' "$r/meta" 2>/dev/null | head -1)"
-    if [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    if [[ ! "$owner_pid" =~ ^[1-9][0-9]*$ ]]; then
+      echo "recover:skipped-unknown-owner $(basename "$r") — no creator pid recorded; preserved" >&2
+      continue
+    fi
+    if ps -p "$owner_pid" >/dev/null 2>&1; then
       echo "recover:skipped-live-creator $(basename "$r") pid=$owner_pid" >&2
       continue
     fi
@@ -688,6 +779,7 @@ sim_recover_reservations() {
     fi
     rm -rf "${r:?}"
   done
+  sim_lock_drop "$clock"
   return 0
 }
 
@@ -696,9 +788,10 @@ sim_create() {
   local reason="" runtime="" name="" json=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --reason) reason="${2:-}"; shift 2 ;;
-      --runtime) runtime="${2:-}"; shift 2 ;;
-      --name) name="${2:-}"; shift 2 ;;
+      --reason|--runtime|--name)
+        [[ $# -ge 2 ]] || { echo "sim create: $1 requires a value" >&2; return 2; }
+        case "$1" in --reason) reason="$2" ;; --runtime) runtime="$2" ;; *) name="$2" ;; esac
+        shift 2 ;;
       --json) json=true; shift ;;
       *) shift ;;
     esac
@@ -713,58 +806,69 @@ sim_create() {
   }
   # A failed inventory read is NOT spare capacity (review P0: with every read
   # failing, create still called simctl and returned success).
-  local snap_c
+  local snap_c cu cn cs cnew crt
   if ! snap_c="$(sim_snapshot)"; then
     echo "sim create: inventory unavailable; refusing (cannot prove a slot is needed)" >&2
     return 22
   fi
-  # An available slot must be used instead of creating.
-  if printf '%s\n' "$snap_c" | awk -F'\t' '$2 ~ /^wai-shared-/ && $3 != "Booted" {n++} END{exit !(n>0)}'; then
-    echo "sim create: refused — a pool slot is available; use 'diskm sim lease'" >&2
-    return 21
-  fi
+  # An available slot must be used instead of creating. Only a device lease could
+  # actually hand out counts: a leased, reserved or other-runtime device does not.
+  while IFS=$'\t' read -r cu cn cs cnew crt; do
+    [[ -n "$cu" ]] || continue
+    if sim_pool_leaseable "$cu" "$cn" "$cs" "$crt" "$runtime"; then
+      echo "sim create: refused — a pool slot is available; use 'diskm sim lease'" >&2
+      return 21
+    fi
+  done <<<"$snap_c"
   # Cap check AND reservation creation must be atomic. Without one lock two
   # simultaneous creates both passed the cap check and both succeeded at cap=1
   # (review P0, reproduced).
-  local clock; clock="$(sim_state_root)/lock/create.cap-lock"
-  mkdir -p "$(dirname "$clock")" 2>/dev/null || true
-  local cw=0
-  until mkdir "$clock" 2>/dev/null; do
-    sleep 0.1; cw=$((cw+1))
-    if (( cw >= 100 )); then
-      echo "sim create: cap lock busy; refusing rather than racing the cap" >&2
-      return 21
-    fi
-  done
+  local clock; clock="$(sim_cap_lock_path)"
+  if ! sim_lock_take "$clock" 100; then
+    echo "sim create: cap lock busy; refusing rather than racing the cap" >&2
+    return 21
+  fi
 
   local slots used
-  slots="$(sim_pool_slots)"; used="$(sim_pool_used)"
+  slots="$(sim_pool_slots)"
+  if ! used="$(sim_pool_used)"; then
+    sim_lock_drop "$clock"
+    echo "sim create: inventory unavailable under the cap lock; refusing" >&2
+    return 22
+  fi
   if (( used >= slots )); then
-    rmdir "$clock" 2>/dev/null || true
+    sim_lock_drop "$clock"
     echo "sim create: refused — pool cap reached (${used}/${slots}); an env var does not bypass the cap" >&2
     return 21
   fi
 
   # Step 1: durable reservation BEFORE touching simctl, still under the cap lock.
-  mkdir -p "$(sim_reserve_dir)" || { rmdir "$clock" 2>/dev/null || true; echo "sim create: cannot create reservation dir" >&2; return 22; }
+  mkdir -p "$(sim_reserve_dir)" || { sim_lock_drop "$clock"; echo "sim create: cannot create reservation dir" >&2; return 22; }
   local stamp rdir
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  rdir="$(sim_reserve_dir)/${stamp}-$$"
-  if ! mkdir "$rdir" 2>/dev/null; then
-    rmdir "$clock" 2>/dev/null || true
-    echo "sim create: reservation race lost" >&2
-    return 21
-  fi
-  # Reservation exists and consumes a slot; release the cap lock before the slow
-  # simctl call so other creates can proceed (the reservation already counts).
-  rmdir "$clock" 2>/dev/null || true
+  local me="${BASHPID:-$$}"
+  rdir="$(sim_reserve_dir)/${stamp}-$me"
   local device_type="${DISK_MAGICIAN_SIM_DEVICE_TYPE:-iPhone 17 Pro}"
   local rt="${runtime:-iOS 26.5}"
   name="${name:-wai-shared-$(printf '%s' "$rt" | tr ' .' '--' | tr 'A-Z' 'a-z')-$(printf '%s' "$stamp" | tail -c 6)}"
-
+  # Create AND initialise the reservation under the cap lock: recovery takes the
+  # same lock, so it can never see a reservation whose meta is not yet written.
   # name is recorded BEFORE simctl so a crash-after-create-before-register is
   # detectable by name (review P0).
-  printf 'status=reserving\nreason=%s\npid=%s\nruntime=%s\nname=%s\n' "$reason" "$$" "$runtime" "$name" >"$rdir/meta"
+  if ! mkdir "$rdir" 2>/dev/null; then
+    sim_lock_drop "$clock"
+    echo "sim create: reservation race lost" >&2
+    return 21
+  fi
+  if ! printf 'status=reserving\nreason=%s\npid=%s\nruntime=%s\nname=%s\n' "$reason" "$me" "$runtime" "$name" >"$rdir/meta" 2>/dev/null; then
+    rm -f "$rdir/meta"; rmdir "$rdir" 2>/dev/null
+    sim_lock_drop "$clock"
+    echo "sim create: cannot write reservation metadata; refusing" >&2
+    return 22
+  fi
+  # The initialised reservation consumes a slot; release the cap lock before the
+  # slow simctl call so other creates can proceed.
+  sim_lock_drop "$clock"
 
   local udid rc=0
   if [[ -n "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]]; then
@@ -804,8 +908,10 @@ sim_create() {
   fi
 
   # Step 2: record the produced UDID, then lease it so it is never unleased.
-  printf '%s\n' "$udid" >"$rdir/udid"
-  printf 'status=created\n' >>"$rdir/meta"
+  if ! { printf '%s\n' "$udid" >"$rdir/udid" && printf 'status=created\n' >>"$rdir/meta"; } 2>/dev/null; then
+    echo "sim create: cannot record created UDID $udid; device EXISTS but is unmanaged; reservation retained" >&2
+    return 24
+  fi
   mkdir -p "$(sim_lease_dir)" || {
     echo "sim create: cannot create lease dir; refusing (device $udid was created and is NOT leased)" >&2
     return 24
@@ -838,8 +944,7 @@ sim_create() {
   rm -rf "${rdir:?}"
 
   if [[ "$json" == true ]]; then
-    printf '{"schema_version": 1, "udid": "%s", "name": "%s", "state": "Shutdown", "lease_generation": %s, "lease_token": "%s", "created": true}\n' \
-      "$udid" "$name" "$gen" "$token"
+    sim_json "udid=$udid" "name=$name" "state=Shutdown" "lease_generation=#$gen" "lease_token=$token" "created=@true"
   else
     # Print the token as well: a caller that only received the UDID could never
     # release the device it just created (review finding).
