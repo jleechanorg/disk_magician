@@ -130,9 +130,9 @@ print(json.dumps({"channel": os.environ["CHANNEL"], "text": "*diskm alert on %s*
     echo "slack bot delivery skipped: could not create a temp file for the response" >&2
     return 0
   fi
-  if http_code="$(curl -sS -m "$DELIVERY_TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
-      -X POST -H 'Content-type: application/json; charset=utf-8' \
-      -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+  if http_code="$(SLACK_AUTH_TOKEN="$SLACK_BOT_TOKEN" python3 -c 'import json, os; print("header = " + json.dumps("Authorization: Bearer " + os.environ["SLACK_AUTH_TOKEN"]))' | \
+      curl -sS -m "$DELIVERY_TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
+      --config - -X POST -H 'Content-type: application/json; charset=utf-8' \
       --data-binary "$payload" https://slack.com/api/chat.postMessage 2>&1)"; then
     response="$(cat "$body_file" 2>/dev/null || true)"
     receipt="$(RESPONSE="$response" python3 -c 'import json, os, sys; d=json.loads(os.environ["RESPONSE"]); sys.exit(1) if d.get("ok") is not True else print("%s\t%s" % (d.get("channel", ""), d.get("ts", "")))' 2>/dev/null)" || receipt=""

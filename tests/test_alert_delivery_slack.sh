@@ -46,6 +46,11 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -w) write_status=1; shift 2 ;;
+    --config)
+      if [[ "$2" == "-" ]]; then
+        while IFS= read -r config_line; do printf '%s\n' "$config_line" >> "$FAKE_CURL_LOG"; done
+      fi
+      shift 2 ;;
     *) url="$1"; shift ;;
   esac
 done
