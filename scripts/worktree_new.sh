@@ -26,6 +26,8 @@ source "$_WTN_DIR/lib/layout_standard.sh"
 # shellcheck source=scripts/lib/admit_caller.sh
 [[ -f "$_WTN_DIR/lib/admit_caller.sh" ]] && source "$_WTN_DIR/lib/admit_caller.sh"
 [[ -f "$_WTN_DIR/lib/worktree_recency.sh" ]] && source "$_WTN_DIR/lib/worktree_recency.sh"
+# shellcheck source=scripts/lib/sparse_excludes.sh
+[[ -f "$_WTN_DIR/lib/sparse_excludes.sh" ]] && source "$_WTN_DIR/lib/sparse_excludes.sh"
 # C14 sources worktree_remove_hook, which sources this file back. Skip that
 # re-source when artifact_verdict.sh is already on the source stack, so running
 # it directly does not execute its top-level self-test twice. The
@@ -187,6 +189,36 @@ wtn_apply_sparse_excludes() {
     return 0
 }
 
+# wtn_sparse_paths <repo> <branch> — configured sparse exclusions for this repo
+# (scripts/lib/sparse_excludes.sh) that exist as a tree in <branch>, one per line.
+wtn_sparse_paths() {
+    local repo="$1" branch="$2" name p
+    [[ "${DISK_MAGICIAN_SPARSE_EXCLUDE_OFF:-0}" == "1" ]] && return 0
+    declare -F sparse_excludes_for_repo >/dev/null || return 0
+    name="$(wtn_repo_name "$repo")"
+    while IFS= read -r p; do
+        [[ -n "$p" ]] && [[ -n "$(git -C "$repo" ls-tree -d --name-only "refs/heads/$branch" -- "$p" 2>/dev/null)" ]] && printf '%s\n' "$p"
+    done < <(sparse_excludes_for_repo "$name")
+    return 0
+}
+
+# wtn_sparse_populate <wt> <path>... — sparse patterns then checkout, for a
+# worktree added with --no-checkout. A failed sparse setup falls back to the
+# normal full checkout (said on stderr); only a failed checkout is an error
+# (WTN_POPULATE_RC), so a half-made tree is never reported as success.
+wtn_sparse_populate() {
+    local wt="$1" pats=('/*') p; shift
+    WTN_POPULATE_RC=0
+    for p in "$@"; do pats+=("!/$p/"); done
+    if git -C "$wt" sparse-checkout set --no-cone "${pats[@]}" >/dev/null 2>&1; then
+        echo "worktree-new: sparse-excluded: $*" >&2
+    else
+        echo "worktree-new: sparse setup failed for $wt; falling back to full checkout" >&2
+        git -C "$wt" sparse-checkout disable >/dev/null 2>&1 || true
+    fi
+    wtn_timeout "${WTN_ADD_TIMEOUT:-30}" git -C "$wt" reset -q --hard HEAD >&2 || WTN_POPULATE_RC=$?
+}
+
 # wtn_create <repo> <branch> <path> <base> [new] — worktree add, git output to
 # stderr, ${WTN_ADD_TIMEOUT:-30} s cap; prints <path> on success; a failed
 # add leaves git's own rc in WTN_ADD_RC (worktree-new's exit, spec §7.1). Existing
@@ -242,7 +274,14 @@ wtn_create() {
         fi
     fi
     WTN_ADD_RC=0
-    wtn_timeout "${WTN_ADD_TIMEOUT:-30}" git -C "$repo" worktree add "$path" "$branch" >&2 || WTN_ADD_RC=$?
+    local sx=() nc=() p
+    while IFS= read -r p; do [[ -n "$p" ]] && sx+=("$p"); done < <(wtn_sparse_paths "$repo" "$branch")
+    # Excluded paths are never written: add without checkout, set the sparse
+    # patterns, then populate (yc7g). Without exclusions this is the plain add.
+    [[ "${#sx[@]}" -gt 0 ]] && nc=(--no-checkout)
+    wtn_timeout "${WTN_ADD_TIMEOUT:-30}" git -C "$repo" worktree add ${nc[@]+"${nc[@]}"} "$path" "$branch" >&2 || WTN_ADD_RC=$?
+    [[ "${#sx[@]}" -gt 0 && "$WTN_ADD_RC" == 0 ]] && wtn_sparse_populate "$path" "${sx[@]}" || true
+    [[ "${#sx[@]}" -gt 0 && "${WTN_POPULATE_RC:-0}" != 0 ]] && WTN_ADD_RC=$WTN_POPULATE_RC
     [[ -n "$branch_lock" ]] && rmdir "$branch_lock" 2>/dev/null || true
     if [[ "$WTN_ADD_RC" != 0 ]]; then
         echo "worktree-new: git worktree add failed: $path" >&2
