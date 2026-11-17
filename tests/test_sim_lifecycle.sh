@@ -405,6 +405,54 @@ PATH="$faker:$PATH" sim_recover_reservations >"$TMP/r32out" 2>&1
 grep -q 'recover:inventory-unavailable' "$TMP/r32out" && ok "reported inventory-unavailable rather than concluding absence" || bad "no inventory-unavailable verdict"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
 
+echo "== 33. /dot repro: valid rows THEN exit 75 must be rejected, not trusted =="
+r33="$TMP/r33"; mkdir -p "$r33/state" "$r33/fake"
+export DISK_MAGICIAN_STATE_DIR="$r33/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+cat >"$r33/fake/xcrun" <<'FAKE'
+#!/bin/bash
+if [[ "$*" == *"list devices --json"* ]]; then
+  printf '{"devices":{"rt":[{"udid":"cacacaca-1111-2222-3333-444444444444","name":"wai-shared-x","state":"Shutdown"}]}}\n'
+  exit 75
+fi
+exit 0
+FAKE
+chmod +x "$r33/fake/xcrun"
+out33="$(PATH="$r33/fake:$PATH" sim_snapshot 2>/dev/null)"; rc33=$?
+[[ "$rc33" -ne 0 && -z "$out33" ]] && ok "rows followed by exit 75 rejected (no rows emitted)" || bad "trusted rows from a failing producer"
+# and lease must refuse rather than issue a token
+out33b="$(PATH="$r33/fake:$PATH" sim_lease --wait-seconds 0 2>&1)"
+printf '%s' "$out33b" | grep -q 'lease_token' && bad "lease issued a token from unvalidated inventory" || ok "lease refused on unvalidated inventory"
+
+echo "== 34. /dot repro: malformed JSON at exit 0 must be rejected =="
+cat >"$r33/fake/xcrun" <<'FAKE'
+#!/bin/bash
+if [[ "$*" == *"list devices --json"* ]]; then printf 'not json at all\n'; exit 0; fi
+exit 0
+FAKE
+chmod +x "$r33/fake/xcrun"
+out34="$(PATH="$r33/fake:$PATH" sim_snapshot 2>/dev/null)"; rc34=$?
+[[ "$rc34" -ne 0 && -z "$out34" ]] && ok "malformed JSON at exit 0 rejected" || bad "trusted malformed JSON"
+# recovery must preserve the reservation when the snapshot is untrustworthy
+mkdir -p "$r33/state/sim_reservations/m-1"
+printf 'status=reserving\npid=999999\nname=wai-shared-m\n' >"$r33/state/sim_reservations/m-1/meta"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$r33/state/sim_reservations"
+PATH="$r33/fake:$PATH" sim_recover_reservations >/dev/null 2>&1
+[[ -d "$r33/state/sim_reservations/m-1" ]] && ok "reservation preserved under malformed inventory" || bad "malformed inventory cleared a reservation"
+unset DISK_MAGICIAN_SIM_RESERVE_DIR; export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
+echo "== 35. /dot repro: recovery must not treat an UNLEASED created device as leased =="
+r35="$TMP/r35"; mkdir -p "$r35/state/sim_reservations/c-1" "$r35/fx"
+sim_fixture_device "$r35/fx" "cbcbcbcb-1111-2222-3333-444444444444" "wai-shared-unleased" "Shutdown" 5
+printf 'status=created\npid=999999\nname=wai-shared-unleased\n' >"$r35/state/sim_reservations/c-1/meta"
+printf 'cbcbcbcb-1111-2222-3333-444444444444\n' >"$r35/state/sim_reservations/c-1/udid"
+export DISK_MAGICIAN_STATE_DIR="$r35/state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$r35/state/sim_reservations"
+out35="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r35/fx" sim_recover_reservations 2>&1)"
+printf '%s' "$out35" | grep -qi 'never leased' && ok "recovery detected a created-but-unleased device" || bad "recovery assumed the device was leased (said: $(printf '%s' "$out35" | tr '\n' ' ' | cut -c1-120))"
+out35b="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r35/fx" sim_lease --wait-seconds 0 2>&1)"
+printf '%s' "$out35b" | grep -q 'lease_token' && bad "unleased created device became leaseable" || ok "unleased created device still excluded from lease"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

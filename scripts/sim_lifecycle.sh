@@ -72,34 +72,53 @@ sim_fixture_device() {
   fi
 }
 
-# sim_devices — one line per device: udid<TAB>name<TAB>state<TAB>newest_mtime
+# sim_snapshot — ONE validated inventory snapshot.
 #
-# Production reads `xcrun simctl list devices --json`, which is authoritative for
-# name and state. `lastUsedAt` is used ONLY to measure idle time/order candidates;
-# it is never proof of abandonment (the release receipt is). The fixture root is
-# a test-only path and is never consulted unless the env var is set.
-sim_devices() {
-  if [[ -z "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]] && command -v xcrun >/dev/null 2>&1; then
-    xcrun simctl list devices --json 2>/dev/null | python3 -c '
+# Returns 0 and prints udid<TAB>name<TAB>state<TAB>last_used rows only when the
+# producer, the parser AND the schema all succeed. Any failure returns non-zero
+# with no rows, so callers can distinguish "no devices" from "could not read".
+# Previous code discarded one xcrun call's status and then trusted a second,
+# silently-reading call, so a failing inventory produced an empty list that every
+# caller treated as fact (review P0, reproduced with exit 75 and with malformed
+# JSON at exit 0).
+sim_snapshot() {
+  local root out rc=0
+  if [[ -z "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]]; then
+    command -v xcrun >/dev/null 2>&1 || return 1
+    out="$(xcrun simctl list devices --json 2>/dev/null)" || rc=$?
+    [[ "$rc" -eq 0 ]] || return 1
+    [[ -n "$out" ]] || return 1
+    printf '%s' "$out" | python3 -c '
 import json,sys,calendar,time
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
-now=time.time()
-for runtime, devs in (d.get("devices") or {}).items():
-    for x in devs or []:
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(3)                      # parser failure -> caller must not trust
+if not isinstance(d,dict) or not isinstance(d.get("devices"),dict):
+    sys.exit(4)                      # schema failure
+rows=0
+for runtime,devs in d["devices"].items():
+    if not isinstance(devs,list):
+        sys.exit(4)
+    for x in devs:
+        if not isinstance(x,dict) or not x.get("udid") or not x.get("state"):
+            sys.exit(4)
         lu=x.get("lastUsedAt") or ""
         ts=""
         if lu:
             try: ts=int(calendar.timegm(time.strptime(lu,"%Y-%m-%dT%H:%M:%SZ")))
             except Exception: ts=""
+        rows+=1
         print("\t".join([x.get("udid",""), x.get("name",""), x.get("state","unknown"), str(ts)]))
-' 2>/dev/null
+sys.exit(0 if rows or rows==0 else 0)
+' || return 1
     return 0
   fi
 
-  local root udid name state newest
+  # Fixture mode is trusted input by construction.
   root="$(sim_device_root)"
   [[ -d "$root" ]] || return 0
+  local udid_path udid name state newest
   for udid_path in "$root"/*; do
     [[ -d "$udid_path" && ! -L "$udid_path" ]] || continue
     udid="$(basename "$udid_path")"
@@ -109,17 +128,23 @@ for runtime, devs in (d.get("devices") or {}).items():
       if [[ -f "$udid_path/.no_mtime" ]]; then
         newest=""
       else
-        newest="$(find "$udid_path" -type f ! -name '.*' -exec stat -f '%m' {} + 2>/dev/null \
-                  | sort -rn | head -1)"
+        newest="$(find "$udid_path" -type f ! -name '.*' -exec stat -f '%m' {} + 2>/dev/null | sort -rn | head -1)"
         [[ -z "$newest" ]] && newest="$(stat -f '%m' "$udid_path" 2>/dev/null)"
       fi
     else
-      name="$(basename "$udid_path")"
+      name="$udid"
       state="unknown"
       newest=""
     fi
     printf '%s\t%s\t%s\t%s\n' "$udid" "$name" "$state" "$newest"
   done
+  return 0
+}
+
+# sim_devices — rows, or EMPTY on a failed snapshot. Callers that must not act on
+# an unreadable inventory use `sim_snapshot || fail-closed` directly.
+sim_devices() {
+  sim_snapshot 2>/dev/null || true
 }
 
 sim_lease_path()   { printf '%s/%s\n' "$(sim_lease_dir)" "$1"; }
@@ -194,6 +219,12 @@ sim_lease() {
 
   local deadline=$(( $(sim_now) + wait_seconds )) udid name state newest
   while :; do
+    # Refuse on an unreadable inventory rather than reporting "no free slot",
+    # which would be a conclusion drawn from a failed read (review P0).
+    if ! sim_snapshot >/dev/null 2>&1; then
+      echo "sim lease: inventory unavailable; refusing to guess" >&2
+      return 22
+    fi
     while IFS=$'\t' read -r udid name state newest; do
       [[ -n "$udid" ]] || continue
       # only pool devices are leaseable; task-named devices need explicit adopt
@@ -382,6 +413,13 @@ sim_prune() {
       *) shift ;;
     esac
   done
+  # A prune pass must start from a validated snapshot; otherwise no verdict is
+  # trustworthy (review P0: valid-looking rows followed by exit 75 were used).
+  local snap
+  if ! snap="$(sim_snapshot)"; then
+    echo "sim prune: inventory unavailable; refusing to act" >&2
+    return 24
+  fi
   local udid name state newest removed=0 kept=0
   while IFS=$'\t' read -r udid name state newest; do
     [[ -n "$udid" ]] || continue
@@ -468,7 +506,7 @@ sim_prune() {
       rm -rf "${target:?}" 2>/dev/null && removed=$((removed+1))
       rmdir "$plock" 2>/dev/null || true
     fi
-  done < <(sim_devices)
+  done < <(printf '%s\n' "$snap")
   echo "sim prune: candidates_removed=$removed kept=$kept dry_run=$dry"
   return 0
 }
@@ -532,6 +570,10 @@ sim_pool_used() {
 sim_recover_reservations() {
   local rdir_override; rdir_override="$(sim_reserve_dir)"
   [[ -d "$rdir_override" ]] || return 0
+  # ONE validated snapshot for the whole pass. If it cannot be produced, no
+  # conclusion may be drawn about any reservation (review P0).
+  local snap snap_ok=1
+  snap="$(sim_snapshot)" || snap_ok=0
   local rf udid r
   for r in "$rdir_override"/*; do
     [[ -d "$r" && ! -L "$r" ]] || continue
@@ -550,15 +592,7 @@ sim_recover_reservations() {
       echo "recover:skipped-live-creator $(basename "$r") pid=$owner_pid" >&2
       continue
     fi
-    # A failed/unparseable inventory is NOT proof of absence. Only a successful
-    # read whose result positively lacks the device may clear a reservation
-    # (review P0: a fake simctl exiting 75 caused a dead creator's reservation to
-    # be deleted, and the next lease handed out the unregistered device).
-    local inv_ok=1
-    if [[ -z "${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-}" ]] && command -v xcrun >/dev/null 2>&1; then
-      xcrun simctl list devices --json >/dev/null 2>&1 || inv_ok=0
-    fi
-    if [[ "$inv_ok" -eq 0 ]]; then
+    if [[ "$snap_ok" -ne 1 ]]; then
       echo "recover:inventory-unavailable $(basename "$r") — reservation preserved, no conclusion drawn" >&2
       continue
     fi
@@ -571,7 +605,7 @@ sim_recover_reservations() {
       rname="$(sed -n 's/^name=//p' "$r/meta" 2>/dev/null | head -1)"
       [[ -z "$rname" ]] && rname="$(cat "$r/name" 2>/dev/null)"
       if [[ -n "$rname" ]]; then
-        found="$(sim_devices | awk -F'\t' -v n="$rname" '$2==n {print $1; exit}')"
+        found="$(printf '%s\n' "$snap" | awk -F'\t' -v n="$rname" '$2==n {print $1; exit}')"
         if [[ -n "$found" ]]; then
           # Keep a DURABLE exclusion: deleting the reservation here let the very
           # next lease succeed on an unregistered device (review P0, reproduced
@@ -585,8 +619,20 @@ sim_recover_reservations() {
         fi
       fi
     fi
-    if [[ -n "$udid" ]] && sim_devices | awk -F'\t' -v u="$udid" '$1==u {found=1} END{exit !found}'; then
-      echo "recover:created $udid (inert: leased, never prunable without a release receipt)" >&2
+    if [[ -n "$udid" ]] && printf '%s\n' "$snap" | awk -F'\t' -v u="$udid" '$1==u {found=1} END{exit !found}'; then
+      # The device exists. Do NOT assume it is leased: a creator can die after
+      # recording the UDID but before writing the lease, leaving it unleased and
+      # thus leaseable to the next caller (review P0). Only a COMPLETE lease
+      # permits removing the reservation; otherwise mark it orphaned.
+      if sim_is_leased "$udid"; then
+        echo "recover:created $udid (inert: leased, never prunable without a release receipt)" >&2
+      else
+        printf 'status=orphan\nudid=%s\nname=%s\npid=%s\n' \
+          "$udid" "$(sed -n 's/^name=//p' "$r/meta" 2>/dev/null | head -1)" "$owner_pid" >"$r/meta" 2>/dev/null || true
+        printf '%s\n' "$udid" >"$r/udid"
+        echo "recover:orphan-device $udid (created but NEVER leased; exclusion retained)" >&2
+        continue
+      fi
     else
       echo "recover:reservation-cleared $(basename "$r") (no device was produced; capacity reclaimed)" >&2
     fi
