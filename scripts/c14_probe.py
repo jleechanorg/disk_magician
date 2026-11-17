@@ -1102,6 +1102,17 @@ def _xcode_device_support_generated(q):
     """Extracted device system symbols inside an iOS DeviceSupport root."""
     return q.lower().startswith("symbols/")
 
+_PW_WEBKIT_ROOT = re.compile(r"webkit-\d+")
+_PW_FRAMEWORK_HEADER = re.compile(r"[^/]+\.framework/Versions/[^/]+/(?:Private)?Headers/[^/]+\.h", re.I)
+
+def _playwright_webkit_generated(root, q):
+    """Apple framework headers vendored in a Playwright WebKit build (WebCore's
+    StoredCredentialsPolicy.h, FetchRequestCredentials.h, ...). Only inside a root named
+    webkit-<n> that carries Playwright's INSTALLATION_COMPLETE marker; caller checks the marker."""
+    n = q.rsplit("/", 1)[-1].lower()
+    return bool(_PW_WEBKIT_ROOT.fullmatch(root)) and bool(_PW_FRAMEWORK_HEADER.fullmatch(q)) \
+        and n[:-2] not in _SECRET_EXACT and not n.startswith("secrets")
+
 def secrets(inv_file, kind=""):
     try:
         kind = os.environ.get("C14_SECRET_KIND") or kind
@@ -1119,6 +1130,9 @@ def secrets(inv_file, kind=""):
             paths = (q for q in paths if not _xcode_generated(q))
         elif kind == "xcode-device-support":
             paths = (q for q in paths if not _xcode_device_support_generated(q))
+        root = next((e.get("name", "") for e in entries if e["path"] == "."), "")
+        if any(e["path"] == "INSTALLATION_COMPLETE" and e.get("type") != "dir" for e in entries):
+            paths = (q for q in paths if not _playwright_webkit_generated(root, q))
         print("yes" if any(SECRET_RE.fullmatch(q.rsplit("/", 1)[-1]) and not exempt_name(q) for q in paths) else "no")
     except Exception:
         print("kept:check-failed")
