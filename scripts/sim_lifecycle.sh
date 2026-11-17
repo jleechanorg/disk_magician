@@ -380,14 +380,23 @@ sim_release() {
     echo "sim release: cannot create receipt dir; refusing" >&2
     return 24
   }
+  # ORDER MATTERS. Remove the lease BEFORE writing the receipt. A crash between
+  # the two then leaves "leased, no receipt" (a device nothing will ever prune),
+  # never "released and still leased" (a device whose state is contradictory).
+  local saved_meta; saved_meta="$(cat "$d/generation" "$d/owner" "$d/token_fingerprint" 2>/dev/null)"
+  rm -rf "${d:?}" 2>/dev/null
+  if [[ -d "$d" ]]; then
+    rmdir "${lock}" 2>/dev/null || true
+    echo "sim release: could not remove the lease dir; refusing to write a receipt" >&2
+    return 24
+  fi
   if ! printf '{"action": "release", "udid": "%s", "lease_generation": %s, "token_fingerprint": "%s", "released_at": "%s"}\n' \
     "$udid" "${gen:-0}" "$expected" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     >>"$(sim_receipt_dir)/sim_release_receipts.jsonl" 2>/dev/null; then
     rmdir "${lock}" 2>/dev/null || true
-    echo "sim release: receipt write failed; refusing" >&2
+    echo "sim release: receipt write failed AFTER lease removal; device is unleased and unpickable (report for reconciliation)" >&2
     return 24
   fi
-  rm -rf "${d:?}" 2>/dev/null
   rmdir "${lock}" 2>/dev/null || true
   return 0
 }
@@ -693,24 +702,53 @@ sim_create() {
     echo "sim create: --reason is required (a pool slot insuffices only for a stated reason)" >&2
     return 2
   }
+  # A failed inventory read is NOT spare capacity (review P0: with every read
+  # failing, create still called simctl and returned success).
+  local snap_c
+  if ! snap_c="$(sim_snapshot)"; then
+    echo "sim create: inventory unavailable; refusing (cannot prove a slot is needed)" >&2
+    return 22
+  fi
   # An available slot must be used instead of creating.
-  if sim_devices | awk -F'\t' '$2 ~ /^wai-shared-/ && $3 != "Booted" {n++} END{exit !(n>0)}'; then
+  if printf '%s\n' "$snap_c" | awk -F'\t' '$2 ~ /^wai-shared-/ && $3 != "Booted" {n++} END{exit !(n>0)}'; then
     echo "sim create: refused — a pool slot is available; use 'diskm sim lease'" >&2
     return 21
   fi
+  # Cap check AND reservation creation must be atomic. Without one lock two
+  # simultaneous creates both passed the cap check and both succeeded at cap=1
+  # (review P0, reproduced).
+  local clock; clock="$(sim_state_root)/lock/create.cap-lock"
+  mkdir -p "$(dirname "$clock")" 2>/dev/null || true
+  local cw=0
+  until mkdir "$clock" 2>/dev/null; do
+    sleep 0.1; cw=$((cw+1))
+    if (( cw >= 100 )); then
+      echo "sim create: cap lock busy; refusing rather than racing the cap" >&2
+      return 21
+    fi
+  done
+
   local slots used
   slots="$(sim_pool_slots)"; used="$(sim_pool_used)"
-  (( used < slots )) || {
+  if (( used >= slots )); then
+    rmdir "$clock" 2>/dev/null || true
     echo "sim create: refused — pool cap reached (${used}/${slots}); an env var does not bypass the cap" >&2
     return 21
-  }
+  fi
 
-  # Step 1: durable reservation BEFORE touching simctl.
-  mkdir -p "$(sim_reserve_dir)" || { echo "sim create: cannot create reservation dir" >&2; return 22; }
+  # Step 1: durable reservation BEFORE touching simctl, still under the cap lock.
+  mkdir -p "$(sim_reserve_dir)" || { rmdir "$clock" 2>/dev/null || true; echo "sim create: cannot create reservation dir" >&2; return 22; }
   local stamp rdir
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   rdir="$(sim_reserve_dir)/${stamp}-$$"
-  mkdir "$rdir" 2>/dev/null || { echo "sim create: reservation race lost" >&2; return 21; }
+  if ! mkdir "$rdir" 2>/dev/null; then
+    rmdir "$clock" 2>/dev/null || true
+    echo "sim create: reservation race lost" >&2
+    return 21
+  fi
+  # Reservation exists and consumes a slot; release the cap lock before the slow
+  # simctl call so other creates can proceed (the reservation already counts).
+  rmdir "$clock" 2>/dev/null || true
   local device_type="${DISK_MAGICIAN_SIM_DEVICE_TYPE:-iPhone 17 Pro}"
   local rt="${runtime:-iOS 26.5}"
   name="${name:-wai-shared-$(printf '%s' "$rt" | tr ' .' '--' | tr 'A-Z' 'a-z')-$(printf '%s' "$stamp" | tail -c 6)}"
@@ -772,13 +810,22 @@ sim_create() {
   local token="lt_$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
   local gen
   if ! gen="$(sim_next_generation "$udid")" || [[ -z "$gen" ]]; then
-    echo "sim create: cannot allocate generation; device $udid left unleased, needs operator handling" >&2
+    # The device exists but is unmanaged. Keep the reservation so the name/UDID
+    # stays excluded, and say so explicitly.
+    printf 'status=pending-reconcile\n' >>"$rdir/meta"
+    echo "sim create: cannot allocate generation; device $udid EXISTS but is unmanaged; reservation retained" >&2
     return 24
   fi
   printf '%s\n' "$gen" >"$d/generation"
   printf '%s\n' "${WORLDAI_SIM_OWNER:-$(id -un)}" >"$d/owner"
   printf '%s\n' "$(sim_token_fingerprint "$token")" >"$d/token_fingerprint"
-  chmod 600 "$d/generation" "$d/last_generation" "$d/owner" "$d/token_fingerprint" 2>/dev/null || true
+  chmod 600 "$d/generation" "$d/owner" "$d/token_fingerprint" 2>/dev/null || true
+  # Only drop the reservation once the lease is verifiably complete.
+  if [[ "$(sim_lease_state "$udid")" != "complete" ]]; then
+    printf 'status=pending-reconcile\n' >>"$rdir/meta"
+    echo "sim create: created $udid but its lease is not complete; reservation retained" >&2
+    return 24
+  fi
   rm -rf "${rdir:?}"
 
   if [[ "$json" == true ]]; then

@@ -544,6 +544,33 @@ PATH="$r40/fake:$PATH" sim_recover_reservations >/dev/null 2>&1
 [[ -d "$r40/state/sim_reservations/late-1" ]] && ok "late-appearing device preserved the reservation" || bad "stale snapshot cleared a reservation for a device that exists"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
 
+echo "== 41. /dot repro: create must refuse when inventory is unreadable (not spare capacity) =="
+r41="$TMP/r41"; mkdir -p "$r41/state" "$r41/fake"
+export DISK_MAGICIAN_STATE_DIR="$r41/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR DISK_MAGICIAN_SIM_FIXTURE_ROOT
+printf '#!/bin/bash\nexit 75\n' >"$r41/fake/xcrun"; chmod +x "$r41/fake/xcrun"
+PATH="$r41/fake:$PATH" sim_create --reason "test" >/dev/null 2>"$TMP/e41"
+rc41=$?
+[[ "$rc41" -eq 22 ]] && ok "create refused on unreadable inventory (exit 22)" || bad "create proceeded with unreadable inventory (rc=$rc41)"
+
+echo "== 42. /dot repro: cap check and reservation are atomic (cap=1, two concurrent creates) =="
+r42="$TMP/r42"; mkdir -p "$r42/state" "$r42/fake"
+export DISK_MAGICIAN_STATE_DIR="$r42/state"
+# Device list stays empty; create always "succeeds" slowly so the two race window is real.
+cat >"$r42/fake/xcrun" <<'FAKE'
+#!/bin/bash
+if [[ "$*" == *"list devices --json"* ]]; then printf '{"devices":{}}\n'; exit 0; fi
+if [[ "$*" == *"create"* ]]; then sleep 0.5; printf 'fafafafa-1111-2222-3333-44444444444\n'; exit 0; fi
+exit 0
+FAKE
+chmod +x "$r42/fake/xcrun"
+( PATH="$r42/fake:$PATH" DISK_MAGICIAN_SIM_POOL_SLOTS=1 sim_create --reason a >/dev/null 2>&1; echo $? >"$TMP/c42a" ) &
+( PATH="$r42/fake:$PATH" DISK_MAGICIAN_SIM_POOL_SLOTS=1 sim_create --reason b >/dev/null 2>&1; echo $? >"$TMP/c42b" ) &
+wait
+a42="$(cat "$TMP/c42a" 2>/dev/null)"; b42="$(cat "$TMP/c42b" 2>/dev/null)"
+wins42=0; [[ "$a42" == "0" ]] && wins42=$((wins42+1)); [[ "$b42" == "0" ]] && wins42=$((wins42+1))
+[[ "$wins42" -le 1 ]] && ok "at most one create won at cap=1 (a=$a42 b=$b42)" || bad "two creates both succeeded at cap=1"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
