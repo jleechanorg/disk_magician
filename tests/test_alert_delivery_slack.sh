@@ -262,6 +262,14 @@ grep -q 'slack delivery FAILED' "$ERR11" \
   && pass "curl failure is reported as a delivery failure with detail" \
   || fail "curl failure produced no delivery-failure diagnostic"
 
+# The whole point of the original bug: the local warning must still be emitted,
+# and it must be emitted BEFORE any delivery attempt so a slow or wedged
+# delivery path cannot delay it. Assert ordering, not mere presence: both
+# orderings look identical once the run completes.
+awk '/WARNING/{w=NR} /slack delivery/{d=NR} END{exit !(w && d && w<d)}' "$ERR11" \
+  && pass "local warning is emitted before the delivery attempt" \
+  || fail "local warning did not precede delivery (or was lost)"
+
 # ── 12. A 200 with a rejection body must not be reported as delivered ──────
 # Slack's webhook answers the literal body "ok" on acceptance; a 200 carrying
 # an error string is a rejection. An empty 200 must also fail closed.
@@ -293,26 +301,67 @@ for case in "200|ok" "200|invalid_payload" "200|"; do
 done
 
 # ── 13. Email must fail closed when no timer is available ──────────────────
-# Without a 'timeout' binary the MTA call was unbounded, so a wedged relay
-# could block the alert job forever. Simulate a PATH with no timeout.
-# A fixed PATH with no timer: /usr/bin and /bin only. Verify the premise
-# instead of assuming it, so the test cannot silently stop testing anything.
-NO_TIMEOUT_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-if PATH="$NO_TIMEOUT_PATH" command -v timeout >/dev/null 2>&1; then
-  echo "SKIP: a 'timeout' binary exists on the fixed path; cannot test the no-timer case"
+# Without a 'timeout' binary the MTA call was unbounded, so a wedged relay could
+# block the alert job forever. Build a controlled PATH that HAS the fake MTA and
+# the tools the script needs but NOT a timer. A fallback PATH like /usr/bin:/bin
+# is wrong twice over: /usr/bin/timeout may exist (making the case untestable and
+# the assertion unreachable), and the fake MTA lives in $BIN so it would vanish.
+NOMTA_BIN="$TMP/bin-no-timer"
+mkdir -p "$NOMTA_BIN"
+NEEDED_TOOLS="bash sed grep cat mktemp rm printf dirname hostname python3 df awk head tr"
+missing=""
+for tool in $NEEDED_TOOLS; do
+  real="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
+  ln -sf "$real" "$NOMTA_BIN/$tool" 2>/dev/null || missing="$missing $tool"
+done
+# The fake MTA must be present so the code reaches the timer check.
+cat > "$NOMTA_BIN/sendmail" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+exit 0
+EOF
+chmod +x "$NOMTA_BIN/sendmail"
+# The fake diskm must be present too, for the same reason.
+cp "$BIN/disk-magician" "$NOMTA_BIN/disk-magician" 2>/dev/null || true
+chmod +x "$NOMTA_BIN/disk-magician" 2>/dev/null || true
+
+if [[ -n "$missing" ]]; then
+  # Honest skip: say why, and never reference a file that was not created.
+  echo "SKIP: cannot build a complete toolchain for the no-timer case:$missing"
 else
-  ERR13="$TMP/err-13.txt"
-  env PATH="$NO_TIMEOUT_PATH" FAKE_CURL_LOG="$TMP/curl-13.log" \
-    HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
-    DISK_MAGICIAN_DISKM_BIN="$BIN/disk-magician" \
-    DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
-    DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
-    DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
-    bash "$ALERT" >/dev/null 2>"$ERR13" || true
+  if PATH="$NOMTA_BIN" command -v timeout >/dev/null 2>&1; then
+    echo "SKIP: a timer leaked into the controlled PATH; case cannot be exercised"
+  else
+    ERR13="$TMP/err-13.txt"
+    env PATH="$NOMTA_BIN" FAKE_CURL_LOG="$TMP/curl-13.log" \
+      HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
+      DISK_MAGICIAN_DISKM_BIN="$NOMTA_BIN/disk-magician" \
+      DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
+      DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
+      DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
+      bash "$ALERT" >/dev/null 2>"$ERR13" || true
+    grep -q 'no .timeout. command' "$ERR13" \
+      && pass "email fails closed with a diagnostic when no timer is available" \
+      || fail "email did not fail closed without a timer"
+    # The no-timer path must not create a mail temp file at all. Count only
+    # files this run could have created: a shared /tmp accumulates unrelated
+    # siblings from other runs, so a global glob proves nothing.
+    before13="$TMP/mail-temps-before13"
+    after13="$TMP/mail-temps-after13"
+    ls "${TMPDIR:-/tmp}"/diskm-alert-* 2>/dev/null | wc -l | tr -d ' ' > "$before13"
+    env PATH="$NOMTA_BIN" FAKE_CURL_LOG="$TMP/curl-13b.log" \
+      HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
+      DISK_MAGICIAN_DISKM_BIN="$NOMTA_BIN/disk-magician" \
+      DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
+      DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
+      DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
+      bash "$ALERT" >/dev/null 2>&1 || true
+    ls "${TMPDIR:-/tmp}"/diskm-alert-* 2>/dev/null | wc -l | tr -d ' ' > "$after13"
+    [[ "$(cat "$after13")" -le "$(cat "$before13")" ]] \
+      && pass "no-timer path creates no mail temp file" \
+      || fail "no-timer path created $(( $(cat "$after13") - $(cat "$before13") )) mail temp file(s)"
+  fi
 fi
-grep -q 'no .timeout. command' "$ERR13" \
-  && pass "email fails closed with a diagnostic when no timer is available" \
-  || fail "email did not fail closed without a timer"
 
 # ── 14. --status reports configuration without leaking destinations ─────────
 OUT14="$(DISK_MAGICIAN_ALERT_SLACK_WEBHOOK='https://hooks.slack.com/services/SECRETXYZ' \
@@ -327,6 +376,66 @@ grep -q 'Email delivery configured: YES' <<<"$OUT14" \
 ! grep -q 'SECRETXYZ\|secret@example.com' <<<"$OUT14" \
   && pass "--status never echoes destination values" \
   || fail "--status leaked a destination value"
+
+# ── 15. A TERM-ignoring MTA must still be hard-bounded ──────────────────────
+# Plain `timeout` sends TERM only. An MTA that ignores TERM outlived its budget
+# (measured elsewhere: 2.23s actual against a 0.2s budget), so the bound has to
+# include a KILL deadline. Assert wall clock, not just that timeout was invoked.
+HARDMTA="$TMP/bin-hardmta"
+mkdir -p "$HARDMTA"
+cp "$BIN/curl" "$HARDMTA/curl" 2>/dev/null || true
+cat > "$HARDMTA/sendmail" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+cat > /dev/null
+sleep 8
+EOF
+chmod +x "$HARDMTA/sendmail"
+cp "$BIN/disk-magician" "$HARDMTA/disk-magician" 2>/dev/null || true
+chmod +x "$HARDMTA/disk-magician" 2>/dev/null || true
+START15=$(date +%s)
+env PATH="$HARDMTA:$PATH" FAKE_CURL_LOG="$TMP/curl-15.log" \
+  HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
+  DISK_MAGICIAN_DISKM_BIN="$HARDMTA/disk-magician" \
+  DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
+  DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
+  DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
+  DISK_MAGICIAN_ALERT_EMAIL_TIMEOUT_SEC=1 DISK_MAGICIAN_ALERT_EMAIL_KILL_GRACE_SEC=1 \
+  bash "$ALERT" >/dev/null 2>&1 || true
+ELAPSED15=$(( $(date +%s) - START15 ))
+[[ "$ELAPSED15" -lt 8 ]] \
+  && pass "a TERM-ignoring MTA is hard-killed inside its budget (${ELAPSED15}s < 8s)" \
+  || fail "TERM-ignoring MTA outlived its budget (${ELAPSED15}s)"
+
+# ── 16. A Slack failure must not suppress the email attempt ────────────────
+CHAN_BIN="$TMP/bin-chan"
+mkdir -p "$CHAN_BIN"
+cat > "$CHAN_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl: (7) Failed to connect\n' >&2
+exit 7
+EOF
+chmod +x "$CHAN_BIN/curl"
+cat > "$CHAN_BIN/sendmail" <<'EOF'
+#!/usr/bin/env bash
+cat >> "$CHAN_MAIL_LOG"
+exit 0
+EOF
+chmod +x "$CHAN_BIN/sendmail"
+cp "$BIN/disk-magician" "$CHAN_BIN/disk-magician" 2>/dev/null || true
+chmod +x "$CHAN_BIN/disk-magician" 2>/dev/null || true
+MAIL16="$TMP/mail-16.log"
+env PATH="$CHAN_BIN:$PATH" CHAN_MAIL_LOG="$MAIL16" FAKE_CURL_LOG="$TMP/curl-16.log" \
+  HOME="$HOME" FAKE_SCRATCH_PATH="$SCRATCH_DIR" \
+  DISK_MAGICIAN_DISKM_BIN="$CHAN_BIN/disk-magician" \
+  DISK_MAGICIAN_STATE_DIR="$DISK_MAGICIAN_STATE_DIR" \
+  DISK_MAGICIAN_SCRATCH_FLOOR_GB=999999 DISK_MAGICIAN_SCRATCH_FLOOR_PCT=0 \
+  DISK_MAGICIAN_ALERT_SLACK_WEBHOOK='https://hooks.slack.com/services/T00/B00/fake' \
+  DISK_MAGICIAN_ALERT_EMAIL_TO='alerts@example.com' \
+  bash "$ALERT" >/dev/null 2>&1 || true
+[[ -s "$MAIL16" ]] \
+  && pass "email is still attempted after a Slack delivery failure" \
+  || fail "a Slack failure suppressed the email attempt"
 
 echo
 if [[ "$FAIL" -eq 0 ]]; then

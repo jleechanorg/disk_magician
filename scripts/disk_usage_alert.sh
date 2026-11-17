@@ -31,6 +31,7 @@ DELIVERY_TIMEOUT_SEC="${DISK_MAGICIAN_ALERT_DELIVERY_TIMEOUT_SEC:-10}"
 SLACK_WEBHOOK="${DISK_MAGICIAN_ALERT_SLACK_WEBHOOK:-}"
 EMAIL_TO="${DISK_MAGICIAN_ALERT_EMAIL_TO:-}"
 EMAIL_TIMEOUT_SEC="${DISK_MAGICIAN_ALERT_EMAIL_TIMEOUT_SEC:-20}"
+EMAIL_KILL_GRACE_SEC="${DISK_MAGICIAN_ALERT_EMAIL_KILL_GRACE_SEC:-5}"
 
 usage() {
   cat <<EOF
@@ -124,6 +125,17 @@ deliver_alert_email() { # deliver_alert_email <message> <host>
     echo "email delivery skipped: no msmtp or sendmail on PATH" >&2
     return 0
   fi
+  # Bound the MTA hard. Plain `timeout` sends TERM only, so an MTA that ignores
+  # TERM outlives its budget (measured: 2.23s actual against a 0.2s budget).
+  # -k adds a KILL deadline after a short grace period. Check for the timer
+  # BEFORE creating any temp file so the no-timer path leaves nothing behind.
+  local timeout_cmd=()
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd=(timeout -k "$EMAIL_KILL_GRACE_SEC" "$EMAIL_TIMEOUT_SEC")
+  else
+    echo "email delivery skipped: no 'timeout' command to bound the MTA call" >&2
+    return 0
+  fi
   local mail_file
   mail_file="$(mktemp "${TMPDIR:-/tmp}/diskm-alert-XXXXXX")" || return 0
   {
@@ -134,15 +146,6 @@ deliver_alert_email() { # deliver_alert_email <message> <host>
     printf '%s\n' "$message"
     printf '\n-- \ndisk_magician disk_usage_alert.sh\n'
   } > "$mail_file"
-  # Fail closed on an unbounded send: without a timer the MTA can block the
-  # alert job indefinitely (and an alert that never finishes is not an alert).
-  local timeout_cmd=()
-  if command -v timeout >/dev/null 2>&1; then
-    timeout_cmd=(timeout "$EMAIL_TIMEOUT_SEC")
-  else
-    echo "email delivery skipped: no 'timeout' command to bound the MTA call" >&2
-    return 0
-  fi
   # Capture the status inside the conditional: set -e would otherwise exit the
   # script with the MTA's code before the best-effort handler can run.
   local rc=0
@@ -495,10 +498,12 @@ if [[ "$space_alert" == true || "$streak_alert" == true || "$ledger_alert" == tr
         python3 -c 'import json,sys; [print("WARNING: volume " + str(a)) for a in json.loads(sys.argv[1])]' "$volume_alarms"
       fi
     )"
-    # Human channel. Journal/stdout remain as before, so this adds a destination
-    # rather than replacing one.
-    deliver_alert "$ALERT_TEXT"
+    # Emit the local warning FIRST. Delivery can be slow or wedge on a network
+    # peer, and the operator (or the unit's log) must see the condition even if
+    # the delivery path misbehaves. Journal/stdout behaviour is unchanged; the
+    # remote channels are additive.
     printf '%s\n' "$ALERT_TEXT" >&2
+    deliver_alert "$ALERT_TEXT"
     exit 1
   fi
 else
