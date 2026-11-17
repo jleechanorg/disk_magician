@@ -807,10 +807,11 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     # $p is parent-canonicalized above, so canonicalize each target the same way;
     # an unresolvable target never matches (fail closed).
     if [[ -n "${DISK_MAGICIAN_OPERATOR_TARGETS:-}" ]]; then
-        local ot
+        local ot otd
         while IFS= read -r ot; do
             ot=${ot%/}; [[ "${ot##*/}" =~ ^\.{0,2}$ ]] && continue
-            ot="$(cd "$(dirname "$ot")" 2>/dev/null && pwd -P)/${ot##*/}"
+            otd="$(cd "$(dirname "$ot")" 2>/dev/null && pwd -P)" && [[ -n "$otd" ]] || continue
+            ot="$otd/${ot##*/}"
             [[ "$ot" == "$p" ]] && { proofs+=" operator-named"; break; }
         done <<<"$DISK_MAGICIAN_OPERATOR_TARGETS"
     fi
