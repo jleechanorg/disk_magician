@@ -815,7 +815,17 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
     # Proof 5: producer released its lease.
     [[ "$released" == 1 ]] && proofs+=" producer-released"
     # Proof 6: named by the operator for this run.
-    if [[ -n "${DISK_MAGICIAN_OPERATOR_TARGETS:-}" ]] && grep -qxF -- "$p" <<<"$DISK_MAGICIAN_OPERATOR_TARGETS"; then proofs+=" operator-named"; fi
+    # $p is parent-canonicalized above, so canonicalize each target the same way;
+    # an unresolvable target never matches (fail closed).
+    if [[ -n "${DISK_MAGICIAN_OPERATOR_TARGETS:-}" ]]; then
+        local ot otd
+        while IFS= read -r ot; do
+            ot=${ot%/}; [[ "${ot##*/}" =~ ^\.{0,2}$ ]] && continue
+            otd="$(cd "$(dirname "$ot")" 2>/dev/null && pwd -P)" && [[ -n "$otd" ]] || continue
+            ot="$otd/${ot##*/}"
+            [[ "$ot" == "$p" ]] && { proofs+=" operator-named"; break; }
+        done <<<"$DISK_MAGICIAN_OPERATOR_TARGETS"
+    fi
     # Proof 3: rescued. Only when nothing else proves it; the push must succeed.
     if [[ -z "$proofs" ]] && declare -F rescue_check >/dev/null 2>&1 && rescue_check "$p" >/dev/null 2>&1; then
         if [[ "${C14_NO_RESCUE_PUSH:-}" == 1 ]]; then echo kept:rescue-required; return 0
