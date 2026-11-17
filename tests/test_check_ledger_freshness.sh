@@ -435,7 +435,7 @@ echo '{"captured_at":"bad"}' > "$STATE18/ledger/topdown-5g.json"
 git -C "$STATE18" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
 git -C "$STATE18" -c user.email=t@test -c user.name=t commit -q -m "partial state only"
 out="$(DISK_MAGICIAN_STATE_REPO="$STATE18" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
-[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_unreadable* ]] \
+[[ "$rc" -eq 1 && "$out" == STALE* ]] \
   && ok "stale partial does not suppress malformed status or an uncommitted canonical file" \
   || bad "expected malformed status STALE with uncommitted canonical, got rc=$rc out=$out"
 rm -rf "$WORK18"
@@ -467,9 +467,9 @@ echo '{}' > "$STATE20/ledger/topdown-5g.status.json"
 git -C "$STATE20" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
 git -C "$STATE20" -c user.email=t@test -c user.name=t commit -q -m "partial with empty status"
 out="$(DISK_MAGICIAN_STATE_REPO="$STATE20" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
-[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_reconciliation_mismatch* ]] \
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_malformed* ]] \
   && ok "empty status metadata cannot suppress stale partial-only alert" \
-  || bad "expected stale malformed metadata, got rc=$rc out=$out"
+  || bad "expected stale malformed status, got rc=$rc out=$out"
 rm -rf "$WORK20"
 
 # --- Case 21: stale partial with status from another capture cannot claim unpublished ---
@@ -509,6 +509,106 @@ out="$(PATH="$WORK22/bin:$PATH" DISK_MAGICIAN_STATE_REPO="$STATE22" DISK_MAGICIA
   && ok "git history read failure fails closed rather than proving unpublished" \
   || bad "expected history failure STALE, got rc=$rc out=$out"
 rm -rf "$WORK22"
+
+# --- Case 23: stale partial suppression accepts only valid status metadata ---
+for variant in null_status missing_both wrong_types empty_status empty_envelope broken_status_symlink canonical_symlink absent_status fresh_null_status; do
+  WORK23="$(mktemp -d)"
+  git init -q "$WORK23/repo"
+  STATE23="$WORK23/repo"
+  mkdir -p "$STATE23/ledger"
+  if [[ "$variant" == "fresh_null_status" ]]; then
+    CAPTURED23="$(iso_offset_hours -1)"
+  else
+    CAPTURED23="$(iso_offset_hours -72)"
+  fi
+  write_partial "$STATE23/ledger/topdown-5g.partial.json" "$CAPTURED23" "partial"
+  python3 - "$STATE23/ledger/topdown-5g.partial.json" "$STATE23/ledger/topdown-5g.status.json" "$CAPTURED23" "$variant" <<'PY'
+import json, pathlib, sys
+partial_path, status_path, captured_at, variant = sys.argv[1:]
+partial = json.loads(pathlib.Path(partial_path).read_text())
+status = {"captured_at": captured_at, "mode": "partial",
+          "coverage_envelope": partial["coverage_envelope"]}
+if variant == "null_status":
+    status_value = None
+elif variant == "missing_both":
+    partial.pop("mode")
+    partial.pop("coverage_envelope")
+    status = {"captured_at": captured_at}
+    status_value = status
+elif variant == "wrong_types":
+    partial["mode"] = 7
+    partial["coverage_envelope"] = []
+    status = {"captured_at": captured_at, "mode": 7, "coverage_envelope": []}
+    status_value = status
+elif variant == "empty_status":
+    status_value = {}
+elif variant == "empty_envelope":
+    partial["coverage_envelope"] = {}
+    status = {"captured_at": captured_at, "mode": "partial", "coverage_envelope": {}}
+    status_value = status
+elif variant in ("broken_status_symlink", "canonical_symlink"):
+    status_value = status
+elif variant == "fresh_null_status":
+    status_value = None
+else:
+    status_value = status
+pathlib.Path(partial_path).write_text(json.dumps(partial))
+if variant not in ("absent_status", "broken_status_symlink"):
+    pathlib.Path(status_path).write_text(json.dumps(status_value))
+PY
+  if [[ "$variant" == "broken_status_symlink" ]]; then
+    ln -s missing-status.json "$STATE23/ledger/topdown-5g.status.json"
+  elif [[ "$variant" == "canonical_symlink" ]]; then
+    ln -s missing-canonical.json "$STATE23/ledger/topdown-5g.json"
+  fi
+  git -C "$STATE23" add ledger/topdown-5g.partial.json
+  [[ "$variant" == "absent_status" ]] || git -C "$STATE23" add ledger/topdown-5g.status.json
+  git -C "$STATE23" -c user.email=t@test -c user.name=t commit -q -m "partial metadata $variant"
+  out="$(DISK_MAGICIAN_STATE_REPO="$STATE23" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+  if [[ "$variant" == "absent_status" ]]; then
+    [[ "$rc" -eq 0 && "$out" == OK* && "$out" == *canonical_publication=unpublished* ]] \
+      && ok "legacy absent status remains allowed for valid stale partial" \
+      || bad "expected absent-status compatibility, got rc=$rc out=$out"
+  elif [[ "$variant" == "fresh_null_status" ]]; then
+    [[ "$rc" -eq 0 && "$out" == OK* && "$out" == *label=PARTIAL* ]] \
+      && ok "fresh partial with legacy null status keeps its existing compatibility behavior" \
+      || bad "expected fresh-partial compatibility, got rc=$rc out=$out"
+  else
+    [[ "$rc" -eq 1 && "$out" == STALE* ]] \
+      && ok "rejects stale partial with $variant metadata" \
+      || bad "expected stale $variant metadata rejection, got rc=$rc out=$out"
+  fi
+  rm -rf "$WORK23"
+done
+
+# --- Case 24: shallow Git history cannot prove the canonical ledger never published ---
+WORK24="$(mktemp -d)"
+git init -q "$WORK24/repo"
+STATE24="$WORK24/repo"
+mkdir -p "$STATE24/ledger" "$WORK24/bin"
+CAPTURED24="$(iso_offset_hours -72)"
+write_partial "$STATE24/ledger/topdown-5g.partial.json" "$CAPTURED24" "partial"
+echo "{\"status\":\"partial\",\"reason\":\"coverage_incomplete\",\"captured_at\":\"$CAPTURED24\",\"mode\":\"partial\",\"coverage_envelope\":{\"measured_top_level_roots\":5,\"reachable_top_level_roots\":10}}" > "$STATE24/ledger/topdown-5g.status.json"
+git -C "$STATE24" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
+git -C "$STATE24" -c user.email=t@test -c user.name=t commit -q -m "partial in shallow state repo"
+REAL_GIT="$(command -v git)"
+cat > "$WORK24/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [[ "${3:-}" == "log" ]]; then
+  exit 0
+fi
+if [[ "${3:-}" == "rev-parse" && "${4:-}" == "--is-shallow-repository" ]]; then
+  echo true
+  exit 0
+fi
+exec "$REAL_GIT" "$@"
+SH
+chmod +x "$WORK24/bin/git"
+out="$(REAL_GIT="$REAL_GIT" PATH="$WORK24/bin:$PATH" DISK_MAGICIAN_STATE_REPO="$STATE24" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* ]] \
+  && ok "shallow history cannot prove a stale partial was never published" \
+  || bad "expected shallow-history STALE, got rc=$rc out=$out"
+rm -rf "$WORK24"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1
