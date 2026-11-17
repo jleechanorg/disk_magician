@@ -9,6 +9,7 @@ are counted once, and other filesystems are skipped.
 """
 import ctypes
 import os
+import stat
 import sys
 
 FSOPT_NOFOLLOW = 0x1
@@ -46,6 +47,8 @@ def private_bytes(path, st, getattrlist):
 def tree_kb(root):
     getattrlist = _libc_getattrlist()
     root_st = os.lstat(root)
+    if not stat.S_ISDIR(root_st.st_mode):  # a file or symlink root is sized itself, like du
+        return (private_bytes(root, root_st, getattrlist) + 1023) // 1024
     seen, total = set(), 0
     stack = [root]
     while stack:

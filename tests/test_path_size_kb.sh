@@ -315,6 +315,15 @@ if [[ "$(uname -s)" == Darwin ]]; then
   else record_fail "Test 8: clone dir private size" "expected < 256 KB, got ${T8_CLONE_KB}"; fi
   if (( T8_FRESH_KB >= 4096 )); then record_pass "Test 8: unshared 4 MiB file still measures >= 4096 KB (got ${T8_FRESH_KB})"
   else record_fail "Test 8: unshared file size" "expected >= 4096 KB, got ${T8_FRESH_KB}"; fi
+  # cleanup_tmp.sh also sizes single files; a file root must not read as 0 KB.
+  T8_FILE_KB="$(python3 "$REPO_ROOT/scripts/private_size_kb.py" "$T8_FRESH/blob.bin" | cut -f1)"
+  if (( T8_FILE_KB >= 4096 )); then record_pass "Test 8: single-file root measures >= 4096 KB (got ${T8_FILE_KB})"
+  else record_fail "Test 8: single-file root" "expected >= 4096 KB, got ${T8_FILE_KB}"; fi
+  # A symlink root is sized as the link itself, like du without -L.
+  ln -s "$T8_FRESH" "$TMP_ROOT/t8-link"
+  T8_LINK_KB="$(python3 "$REPO_ROOT/scripts/private_size_kb.py" "$TMP_ROOT/t8-link" | cut -f1)"
+  if (( T8_LINK_KB < 64 )); then record_pass "Test 8: symlink root is not followed (got ${T8_LINK_KB})"
+  else record_fail "Test 8: symlink root" "expected < 64 KB, got ${T8_LINK_KB}"; fi
   # Same sizer path the budget uses: cleanup_tmp.sh dry-run reports the private size.
   T8_PTMP="$TMP_ROOT/t8-ptmp"; mkdir -p "$T8_PTMP/pr8888-scratch" "$TMP_ROOT/t8-tmp" "$TMP_ROOT/t8-home"
   chmod 0700 "$TMP_ROOT/t8-home"
