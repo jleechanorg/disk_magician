@@ -68,7 +68,7 @@ sys.exit(0 if url.scheme in {"http", "https"} and (url.username or url.password)
 }
 
 guard_state_repo_push() {
-  local branch remote_url remote_exists=false remote_ref="" scan_range gitleaks_bin
+  local branch remote_url remote_exists=false remote_ref="" scan_range gitleaks_bin gl_dir gl_conf gl_rc
   branch="$(git -C "$STATE_DIR" symbolic-ref --quiet --short HEAD)" || {
     echo "Snapshot history guard: detached HEAD is not safe to push." >&2
     return 1
@@ -146,8 +146,26 @@ guard_state_repo_push() {
     echo "Snapshot history guard: gitleaks is unavailable; refusing unscanned push." >&2
     return 1
   }
-  if ! "$gitleaks_bin" git --no-banner --no-color --redact=100 \
-      --log-opts="$scan_range" "$STATE_DIR" >/dev/null 2>&1; then
+  # Machine-generated frontier/ledger JSON (millions of lines, no human-authored
+  # secrets) is excluded; every other path stays scanned. The scan is bounded
+  # and a timeout fails closed (bead disk_magician-2cpy).
+  gl_dir="$(mktemp -d "${TMPDIR:-/tmp}/dm-gitleaks.XXXXXX")"
+  gl_conf="$gl_dir/gitleaks.toml"  # gitleaks infers the format from the .toml suffix
+  cat >"$gl_conf" <<'TOML'
+[extend]
+useDefault = true
+[allowlist]
+description = "machine-generated disk_magician evidence/ledger JSON"
+paths = ['^evidence/frontier-[^/]*\.json$', '^ledger/[^/]*\.json$']
+TOML
+  gl_rc=0
+  timeout "${DISK_MAGICIAN_GITLEAKS_TIMEOUT:-600}" "$gitleaks_bin" git --no-banner --no-color --redact=100 \
+    --config "$gl_conf" --log-opts="$scan_range" "$STATE_DIR" >/dev/null 2>&1 || gl_rc=$?
+  rm -f "$gl_conf"; rmdir "$gl_dir"
+  if [[ "$gl_rc" -eq 124 ]]; then
+    echo "Snapshot history guard: secret scan timed out after ${DISK_MAGICIAN_GITLEAKS_TIMEOUT:-600}s; refusing unscanned push." >&2
+    return 1
+  elif [[ "$gl_rc" -ne 0 ]]; then
     echo "Snapshot history guard: secret scan rejected outgoing snapshot history." >&2
     return 1
   fi
