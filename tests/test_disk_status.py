@@ -1176,6 +1176,13 @@ class TestDiskStatus(unittest.TestCase):
         self.assertEqual(win_stale["status"], "warn")
         self.assertGreater(win_stale["newest_age_hours"], 48.0)
 
+    def test_state_repo_comes_from_the_shared_resolver(self):
+        resolved = str(self.root / "resolver-state")
+        with mock.patch.dict(os.environ, {"DISK_MAGICIAN_STATE_REPO": str(self.root / "env-state")}), \
+                mock.patch.object(disk_status.resolve_state_repo_path, "resolve", return_value=resolved):
+            ev = disk_status.DiskStatusEvaluator()
+        self.assertEqual(ev.state_repo, Path(resolved).resolve())
+
 
 if __name__ == "__main__":
     unittest.main()
