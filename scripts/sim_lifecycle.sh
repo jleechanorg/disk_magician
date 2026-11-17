@@ -96,7 +96,10 @@ except Exception:
     sys.exit(3)                      # parser failure -> caller must not trust
 if not isinstance(d,dict) or not isinstance(d.get("devices"),dict):
     sys.exit(4)                      # schema failure
-rows=0
+# Buffer ALL rows first. Printing as we validate meant a valid row reached the
+# caller before a later malformed row failed the parse, and the caller status
+# masking then acted on a partial inventory (review P0 reproduced).
+buf=[]
 for runtime,devs in d["devices"].items():
     if not isinstance(devs,list):
         sys.exit(4)
@@ -108,9 +111,9 @@ for runtime,devs in d["devices"].items():
         if lu:
             try: ts=int(calendar.timegm(time.strptime(lu,"%Y-%m-%dT%H:%M:%SZ")))
             except Exception: ts=""
-        rows+=1
-        print("\t".join([x.get("udid",""), x.get("name",""), x.get("state","unknown"), str(ts)]))
-sys.exit(0 if rows or rows==0 else 0)
+        buf.append("\t".join([x.get("udid",""), x.get("name",""), x.get("state","unknown"), str(ts)]))
+for row in buf:
+    print(row)
 ' || return 1
     return 0
   fi
@@ -176,9 +179,20 @@ sim_next_generation() {
 sim_generation()   { cat "$(sim_lease_path "$1")/generation" 2>/dev/null; }
 sim_lease_owner()  { cat "$(sim_lease_path "$1")/owner" 2>/dev/null; }
 
+# A lease is complete only when the fingerprint is non-empty AND the generation
+# and owner are present. An empty fingerprint file previously counted as a lease,
+# so recovery cleared the exclusion for a device with no real lease (review P0).
 sim_is_leased() {
-  local d; d="$(sim_lease_path "$1")"
-  [[ -d "$d" && -f "$d/token_fingerprint" ]]
+  local d fp gen owner
+  d="$(sim_lease_path "$1")"
+  [[ -d "$d" && ! -L "$d" ]] || return 1
+  fp="$(cat "$d/token_fingerprint" 2>/dev/null)"
+  gen="$(cat "$d/generation" 2>/dev/null)"
+  owner="$(cat "$d/owner" 2>/dev/null)"
+  [[ -n "$fp" && "$fp" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ -n "$gen" && "$gen" =~ ^[0-9]+$ ]] || return 1
+  [[ -n "$owner" ]] || return 1
+  return 0
 }
 
 sim_token_fingerprint() { printf '%s' "$1" | shasum -a 256 2>/dev/null | cut -d' ' -f1; }

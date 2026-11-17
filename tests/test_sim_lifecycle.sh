@@ -453,6 +453,44 @@ out35b="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r35/fx" sim_lease --wait-seconds 0 2>
 printf '%s' "$out35b" | grep -q 'lease_token' && bad "unleased created device became leaseable" || ok "unleased created device still excluded from lease"
 export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
 
+echo "== 36. /dot repro: valid row THEN malformed row must emit NO rows at all =="
+r36="$TMP/r36"; mkdir -p "$r36/state" "$r36/fake"
+export DISK_MAGICIAN_STATE_DIR="$r36/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+cat >"$r36/fake/xcrun" <<'FAKE'
+#!/bin/bash
+if [[ "$*" == *"list devices --json"* ]]; then
+  printf '{"devices":{"rt":[{"udid":"dcdcdcdc-1111-2222-3333-444444444444","name":"wai-shared-ok","state":"Shutdown"},{"bogus":"no udid"}]}}\n'
+  exit 0
+fi
+exit 0
+FAKE
+chmod +x "$r36/fake/xcrun"
+out36="$(PATH="$r36/fake:$PATH" sim_snapshot 2>/dev/null)"; rc36=$?
+[[ "$rc36" -ne 0 && -z "$out36" ]] && ok "partial snapshot rejected with zero rows (buffered)" || bad "emitted rows before validation failed"
+out36b="$(PATH="$r36/fake:$PATH" sim_lease --wait-seconds 0 2>&1)"
+printf '%s' "$out36b" | grep -q 'lease_token' && bad "lease issued a token from a partial snapshot" || ok "lease refused a partial snapshot"
+
+echo "== 37. /dot repro: an EMPTY fingerprint is not a complete lease =="
+r37="$TMP/r37"; mkdir -p "$r37/state/sim_leases" "$r37/state/sim_reservations/c-1" "$r37/fx"
+sim_fixture_device "$r37/fx" "ddcddcdc-1111-2222-3333-444444444444" "wai-shared-emptyfp" "Shutdown" 5
+# lease dir with an EMPTY fingerprint and no owner/generation
+mkdir -p "$r37/state/sim_leases/ddcddcdc-1111-2222-3333-444444444444"
+: >"$r37/state/sim_leases/ddcddcdc-1111-2222-3333-444444444444/token_fingerprint"
+printf 'status=created\npid=999999\nname=wai-shared-emptyfp\n' >"$r37/state/sim_reservations/c-1/meta"
+printf 'ddcddcdc-1111-2222-3333-444444444444\n' >"$r37/state/sim_reservations/c-1/udid"
+export DISK_MAGICIAN_STATE_DIR="$r37/state"
+export DISK_MAGICIAN_SIM_RESERVE_DIR="$r37/state/sim_reservations"
+if sim_is_leased "ddcddcdc-1111-2222-3333-444444444444"; then
+    bad "empty fingerprint counted as a complete lease"
+else
+    ok "empty fingerprint is not a complete lease"
+fi
+DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r37/fx" sim_recover_reservations >/dev/null 2>&1
+[[ -d "$r37/state/sim_reservations/c-1" ]] && ok "reservation preserved despite an incomplete lease dir" || bad "recovery cleared a reservation on an incomplete lease"
+out37="$(DISK_MAGICIAN_SIM_FIXTURE_ROOT="$r37/fx" sim_lease --wait-seconds 0 2>&1)"
+printf '%s' "$out37" | grep -q 'lease_token' && bad "device became leaseable with an incomplete lease" || ok "device still excluded with an incomplete lease"
+export DISK_MAGICIAN_STATE_DIR="$TMP/state"; unset DISK_MAGICIAN_SIM_RESERVE_DIR
+
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
