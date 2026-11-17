@@ -39,7 +39,25 @@ if [[ "${FAKE_CURL_FAIL:-0}" == "1" ]]; then
   printf 'curl: (7) Failed to connect\n' >&2
   exit 7
 fi
-printf 'ok\n'
+out=""
+write_status=0
+url=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) write_status=1; shift 2 ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "$url" in
+  https://hooks.slack.com/services/T00/B00/fake|https://slack.com/api/chat.postMessage) ;;
+  *) echo "refusing unrecognized test curl target" >&2; exit 97 ;;
+esac
+response='ok'
+[[ "$FAKE_CURL_LOG" == *bot* ]] && response='{"ok":true,"channel":"C0BCVG4F560","ts":"1731878400.000001"}'
+[[ "${FAKE_SLACK_API_REJECT:-0}" == "1" ]] && response='{"ok":false,"error":"channel_not_found"}'
+[[ -n "$out" ]] && printf '%s' "$response" > "$out"
+[[ "$write_status" == "1" ]] && printf '200'
 exit 0
 EOF
 chmod +x "$BIN/curl"
@@ -56,6 +74,7 @@ mkdir -p "$TOOLBIN"
 missing_tools=""
 for tool in $HERMETIC_TOOLS; do
   real="$(command -v "$tool" 2>/dev/null)" || { missing_tools="${missing_tools:+$missing_tools }$tool"; continue; }
+  [[ "$tool" == "rm" ]] && real=/bin/rm
   ln -sf "$real" "$TOOLBIN/$tool" 2>/dev/null || missing_tools="${missing_tools:+$missing_tools }$tool"
 done
 # Keep the timer in its own directory so the no-timer case can omit it by PATH
@@ -130,7 +149,11 @@ run_alert() { # run_alert <curl-log> [VAR=value...] [--script-flag...]; echoes "
   # under set -u, and the aggregate runner sets that. Seed a no-op so both
   # arrays are always safe to expand, and keep the expansions guarded.
   local rc
-  env FAKE_CURL_LOG="$logfile" ${envvars[@]+"${envvars[@]}"} \
+  env CLAUDE_CODE_TMPDIR="${CLAUDE_CODE_TMPDIR:-$TMP}" \
+    PYTEST_DEBUG_TEMPROOT="${PYTEST_DEBUG_TEMPROOT:-$TMP}" \
+    SLACK_BOT_TOKEN= HERMES_SLACK_BOT_TOKEN= SLACK_CHANNEL= \
+    HERMES_MONITOR_SLACK_TARGET= DISK_MAGICIAN_ALERT_SLACK_CHANNEL= \
+    FAKE_CURL_LOG="$logfile" ${envvars[@]+"${envvars[@]}"} BASH_ENV=/dev/null \
     bash "$ALERT" ${flags[@]+"${flags[@]}"} >/dev/null 2>${RUN_ERR:-/dev/null}
   rc=$?
   echo "rc=$rc"
@@ -185,6 +208,46 @@ calls="$(curl_calls "$LOG5")"
 [[ "$calls" -eq 1 ]] \
   && pass "one run performs exactly one delivery regardless of how many arms fired" \
   || fail "expected exactly 1 delivery, got $calls"
+
+# ── 5b. Existing Slack bot transport can target the selected channel ─────────
+LOGB="$TMP/curl-bot.log"
+RUN_ERR="$TMP/curl-bot.err"
+res="$(run_alert "$LOGB" "${FIRING_ENV[@]}" SLACK_BOT_TOKEN='fake-test-token' DISK_MAGICIAN_ALERT_SLACK_CHANNEL=C0BCVG4F560)"
+[[ "$(curl_calls "$LOGB")" -eq 1 && "$res" == "rc=1" ]] \
+  && pass "bot-token route delivers one message while preserving alert exit" \
+  || fail "bot-token route failed ($res, calls=$(curl_calls "$LOGB"))"
+grep -q 'https://slack.com/api/chat.postMessage' "$LOGB" \
+  && pass "bot-token route uses Slack chat.postMessage" \
+  || fail "bot-token route did not use chat.postMessage"
+grep -q 'C0BCVG4F560' "$LOGB" && grep -q 'Bearer fake-test-token' "$LOGB" \
+  && pass "bot-token route supplies selected channel and bearer token" \
+  || fail "bot-token route omitted channel or bearer token"
+grep -q 'acknowledged (channel=C0BCVG4F560 ts=1731878400.000001)' "$RUN_ERR" \
+  && pass "bot-token route records Slack channel and timestamp receipt without message content" \
+  || fail "bot-token route did not record its Slack receipt"
+unset RUN_ERR
+
+# Global Slack credentials and target do not opt this service in. Also prove an
+# adversarial BASH_ENV cannot repopulate the opt-in after the test clears it.
+EVIL_BASH_ENV="$TMP/evil-bash-env"
+cat > "$EVIL_BASH_ENV" <<'EOF'
+export SLACK_BOT_TOKEN=evil-test-token
+export HERMES_MONITOR_SLACK_TARGET=C0BCVG4F560
+export DISK_MAGICIAN_ALERT_SLACK_CHANNEL=C0BCVG4F560
+EOF
+LOGE="$TMP/curl-bash-env.log"
+res="$(run_alert "$LOGE" "${FIRING_ENV[@]}" BASH_ENV="$EVIL_BASH_ENV" SLACK_BOT_TOKEN='fake-test-token' HERMES_MONITOR_SLACK_TARGET=C0BCVG4F560)"
+[[ "$(curl_calls "$LOGE")" -eq 0 && "$res" == "rc=1" ]] \
+  && pass "global Slack target and hostile BASH_ENV cannot enable bot delivery" \
+  || fail "unsolicited bot delivery occurred from inherited environment"
+
+# A Slack API rejection inside HTTP 200 is not acknowledged, but delivery is
+# best-effort and must not mask the fired alert.
+LOGR="$TMP/curl-bot-reject.log"
+res="$(run_alert "$LOGR" "${FIRING_ENV[@]}" FAKE_SLACK_API_REJECT=1 SLACK_BOT_TOKEN='fake-test-token' DISK_MAGICIAN_ALERT_SLACK_CHANNEL=C0BCVG4F560)"
+[[ "$res" == "rc=1" ]] \
+  && pass "Slack API rejection preserves the alert exit contract" \
+  || fail "API rejection changed the exit contract: $res"
 
 # The delivered body must aggregate the whole run, not a single arm: the floor
 # arm is what we forced, so its text must be present in the one message.

@@ -59,6 +59,7 @@ LEDGER_REL="ledger/topdown-5g.json"
 STATUS_PATH="$STATE_DIR/ledger/topdown-5g.status.json"
 
 last_epoch="$(git -C "$STATE_DIR" log -1 --format=%ct -- "$LEDGER_REL" 2>/dev/null || echo 0)"
+[[ -z "$last_epoch" ]] && last_epoch=0
 last_iso="none"
 if [[ -n "$last_epoch" && "$last_epoch" != "0" ]]; then
   last_iso="$(git -C "$STATE_DIR" log -1 --format=%cI -- "$LEDGER_REL" 2>/dev/null || echo unknown)"
@@ -180,9 +181,6 @@ def check_partial():
     age_hours = (now_dt - ts).total_seconds() / 3600.0
     if ts > now_dt:
         return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "captured_at_in_future"
-    if age_hours > stale_hours:
-        return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "partial_stale"
-
     try:
         with open(status_path) as f:
             status = json.load(f)
@@ -199,6 +197,9 @@ def check_partial():
             or status.get("coverage_envelope") != safe_get(partial, "coverage_envelope")
         ):
             return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "status_reconciliation_mismatch"
+
+    if age_hours > stale_hours:
+        return False, age_hours, captured_at, safe_get(partial, "mode"), None, None, "partial_stale"
 
     envelope = safe_get(partial, "coverage_envelope")
     measured = safe_get(envelope, "measured_top_level_roots")
@@ -285,6 +286,14 @@ if [[ "$p_valid" == "yes" ]]; then
     "${c_age_hours:-NA}" "$last_iso" "$pub_status" "$pub_reason" \
     "${p_age_hours:-0}" "${p_captured_at:-unknown}" "${p_mode:-unknown}" \
     "${p_measured:-?}" "${p_reachable:-?}" "$FDA_FIELDS"
+  exit 0
+fi
+
+# Partial scans are not published ledgers. Until a complete canonical ledger
+# has ever been committed, an otherwise-valid partial that simply aged out is
+# expected and should not page forever. Malformed partials still fail closed.
+if [[ "$last_epoch" == "0" && ! -e "$STATE_DIR/ledger/topdown-5g.json" && "$p_reason" == "partial_stale" ]]; then
+  printf "OK\tlast_commit=none\tlabel=UNPUBLISHED_PARTIAL\tcanonical_publication=unpublished\tpartial_status=partial_stale%s\n" "$FDA_FIELDS"
   exit 0
 fi
 

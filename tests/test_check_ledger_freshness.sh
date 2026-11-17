@@ -134,9 +134,22 @@ cat >"$BIN3/df" <<'SH'
 echo 'Filesystem 1024-blocks Used Available Capacity Mounted'
 echo '/dev/x 1000000000 100000000 900000000 10% /'
 SH
-chmod +x "$BIN3/df"
-alert_out="$(HOME="$WORK3/home" PATH="$BIN3:$PATH" DISK_MAGICIAN_STATE_DIR="$WORK3/alert-state" DISK_MAGICIAN_STATE_REPO="$STATE3" DISK_MAGICIAN_SNAPSHOT_FILE="$WORK3/absent.json" bash "$REPO_ROOT/scripts/disk_usage_alert.sh" 2>&1)" && alert_rc=0 || alert_rc=$?
-[[ "$alert_rc" -eq 1 && "$alert_out" == *Published*ledger*stale* ]] && ok "alert escalates stale canonical despite fresh partial" || bad "fresh partial masked canonical publication alert"
+cat >"$BIN3/curl" <<'SH'
+#!/usr/bin/env bash
+out=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$out" ]] && printf '%s' '{"ok":true,"channel":"C00000000","ts":"test.1"}' > "$out"
+printf '200'
+SH
+chmod +x "$BIN3/df" "$BIN3/curl"
+alert_out="$(HOME="$WORK3/home" PATH="$BIN3:$PATH" SLACK_BOT_TOKEN= HERMES_SLACK_BOT_TOKEN= SLACK_CHANNEL= HERMES_MONITOR_SLACK_TARGET= DISK_MAGICIAN_ALERT_SLACK_CHANNEL= DISK_MAGICIAN_STATE_DIR="$WORK3/alert-state" DISK_MAGICIAN_STATE_REPO="$STATE3" DISK_MAGICIAN_SNAPSHOT_FILE="$WORK3/absent.json" CLAUDE_CODE_TMPDIR="${CLAUDE_CODE_TMPDIR:-$WORK3}" PYTEST_DEBUG_TEMPROOT="${PYTEST_DEBUG_TEMPROOT:-$WORK3}" BASH_ENV=/dev/null bash "$REPO_ROOT/scripts/disk_usage_alert.sh" 2>&1)" && alert_rc=0 || alert_rc=$?
+[[ "$alert_rc" -eq 1 && "$alert_out" == *Published*ledger*stale* ]] && ok "alert escalates stale canonical despite fresh partial" || bad "fresh partial masked canonical publication alert (rc=$alert_rc out=$alert_out)"
 rm -rf "$WORK3"
 
 # --- Case 4: canonical stale, partial.json structurally invalid -> STALE ---
@@ -379,6 +392,55 @@ line_count="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
   && ok "partial-valid output prints a single OK line with FDA_FIELDS appended" \
   || bad "expected single OK line with FDA_FIELDS on same line, got line_count=$line_count out=$out"
 rm -rf "$WORK16"
+
+# --- Case 17: stale partial-only ledger before any complete publication is normal ---
+WORK17="$(mktemp -d)"
+git init -q "$WORK17/repo"
+STATE17="$WORK17/repo"
+mkdir -p "$STATE17/ledger"
+CAPTURED17="$(iso_offset_hours -72)"
+write_partial "$STATE17/ledger/topdown-5g.partial.json" "$CAPTURED17" "partial"
+echo "{\"status\":\"partial\",\"reason\":\"coverage_incomplete\",\"captured_at\":\"$CAPTURED17\",\"mode\":\"partial\",\"coverage_envelope\":{\"measured_top_level_roots\":5,\"reachable_top_level_roots\":10}}" > "$STATE17/ledger/topdown-5g.status.json"
+git -C "$STATE17" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
+git -C "$STATE17" -c user.email=t@test -c user.name=t commit -q -m "initial partial scan without complete publication"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE17" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 0 && "$out" == OK* && "$out" == *canonical_publication=unpublished* ]] \
+  && ok "does not alert on an old partial-only ledger when no complete ledger has ever published" \
+  || bad "expected OK unpublished state got rc=$rc out=$out"
+rm -rf "$WORK17"
+
+# --- Case 18: stale partial with malformed status and uncommitted canonical stays STALE ---
+WORK18="$(mktemp -d)"
+git init -q "$WORK18/repo"
+STATE18="$WORK18/repo"
+mkdir -p "$STATE18/ledger"
+CAPTURED18="$(iso_offset_hours -72)"
+write_partial "$STATE18/ledger/topdown-5g.partial.json" "$CAPTURED18" "partial"
+echo 'not-json' > "$STATE18/ledger/topdown-5g.status.json"
+echo '{"captured_at":"bad"}' > "$STATE18/ledger/topdown-5g.json"
+git -C "$STATE18" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
+git -C "$STATE18" -c user.email=t@test -c user.name=t commit -q -m "partial state only"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE18" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_unreadable* ]] \
+  && ok "stale partial does not suppress malformed status or an uncommitted canonical file" \
+  || bad "expected malformed status STALE with uncommitted canonical, got rc=$rc out=$out"
+rm -rf "$WORK18"
+
+# --- Case 19: stale partial with mismatched same-time status remains STALE ---
+WORK19="$(mktemp -d)"
+git init -q "$WORK19/repo"
+STATE19="$WORK19/repo"
+mkdir -p "$STATE19/ledger"
+CAPTURED19="$(iso_offset_hours -72)"
+write_partial "$STATE19/ledger/topdown-5g.partial.json" "$CAPTURED19" "partial"
+echo "{\"captured_at\":\"$CAPTURED19\",\"mode\":\"complete\",\"coverage_envelope\":{\"measured_top_level_roots\":5,\"reachable_top_level_roots\":10}}" > "$STATE19/ledger/topdown-5g.status.json"
+git -C "$STATE19" add ledger/topdown-5g.partial.json ledger/topdown-5g.status.json
+git -C "$STATE19" -c user.email=t@test -c user.name=t commit -q -m "mismatched partial status"
+out="$(DISK_MAGICIAN_STATE_REPO="$STATE19" DISK_MAGICIAN_LEDGER_STALE_HOURS=48 "$SCRIPT" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 1 && "$out" == STALE* && "$out" == *status_reconciliation_mismatch* ]] \
+  && ok "stale partial does not suppress same-time status reconciliation mismatch" \
+  || bad "expected reconciliation mismatch STALE, got rc=$rc out=$out"
+rm -rf "$WORK19"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

@@ -29,6 +29,10 @@ LEDGER_STALE_HOURS="${DISK_MAGICIAN_LEDGER_STALE_HOURS:-48}"
 DRY_RUN=0
 DELIVERY_TIMEOUT_SEC="${DISK_MAGICIAN_ALERT_DELIVERY_TIMEOUT_SEC:-10}"
 SLACK_WEBHOOK="${DISK_MAGICIAN_ALERT_SLACK_WEBHOOK:-}"
+SLACK_BOT_TOKEN="${SLACK_BOT_TOKEN:-${HERMES_SLACK_BOT_TOKEN:-}}"
+# The bot route is opt-in for this service; global Slack targets must not turn
+# on a new alert sender as a side effect of the process environment.
+SLACK_CHANNEL="${DISK_MAGICIAN_ALERT_SLACK_CHANNEL:-}"
 EMAIL_TO="${DISK_MAGICIAN_ALERT_EMAIL_TO:-}"
 EMAIL_TIMEOUT_SEC="${DISK_MAGICIAN_ALERT_EMAIL_TIMEOUT_SEC:-20}"
 EMAIL_KILL_GRACE_SEC="${DISK_MAGICIAN_ALERT_EMAIL_KILL_GRACE_SEC:-5}"
@@ -45,6 +49,10 @@ Options:
 
 Delivery (opt-in, best-effort; a failure never changes the exit contract):
   DISK_MAGICIAN_ALERT_SLACK_WEBHOOK   Slack incoming-webhook URL.
+  DISK_MAGICIAN_ALERT_SLACK_CHANNEL  Explicit Slack bot destination (required
+                                      with a bot token; no default destination).
+  SLACK_BOT_TOKEN (or HERMES_SLACK_BOT_TOKEN)
+                                      Existing Slack bot token environment.
   DISK_MAGICIAN_ALERT_EMAIL_TO        Notification email recipient.
 EOF
 }
@@ -104,6 +112,45 @@ print(json.dumps({"text": "*diskm alert on %s*\n%s" % (os.environ["HOST"], os.en
     echo "slack delivery FAILED: curl could not reach the webhook: ${curl_err:-no detail}" >&2
   fi
   [[ -n "$body_file" ]] && rm -f "$body_file"
+  return 0
+}
+
+deliver_alert_slack_bot() { # deliver_alert_slack_bot <message> <host>
+  local message="$1" host="$2" payload body_file response http_code curl_err receipt receipt_channel receipt_ts
+  payload="$(MESSAGE="$message" HOST="$host" CHANNEL="$SLACK_CHANNEL" python3 -c '
+import json, os
+print(json.dumps({"channel": os.environ["CHANNEL"], "text": "*diskm alert on %s*\n%s" % (os.environ["HOST"], os.environ["MESSAGE"])}))
+' 2>/dev/null)" || payload=""
+  if [[ -z "$payload" ]]; then
+    echo "slack bot delivery skipped: could not build a JSON payload" >&2
+    return 0
+  fi
+  body_file="$(mktemp "${TMPDIR:-/tmp}/diskm-slack-XXXXXX")" || body_file=""
+  if [[ -z "$body_file" ]]; then
+    echo "slack bot delivery skipped: could not create a temp file for the response" >&2
+    return 0
+  fi
+  if http_code="$(curl -sS -m "$DELIVERY_TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
+      -X POST -H 'Content-type: application/json; charset=utf-8' \
+      -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+      --data-binary "$payload" https://slack.com/api/chat.postMessage 2>&1)"; then
+    response="$(cat "$body_file" 2>/dev/null || true)"
+    receipt="$(RESPONSE="$response" python3 -c 'import json, os, sys; d=json.loads(os.environ["RESPONSE"]); sys.exit(1) if d.get("ok") is not True else print("%s\t%s" % (d.get("channel", ""), d.get("ts", "")))' 2>/dev/null)" || receipt=""
+    if [[ ! "$http_code" =~ ^2[0-9][0-9]$ || -z "$receipt" ]]; then
+      echo "slack bot delivery NOT acknowledged (HTTP ${http_code:-unknown})" >&2
+    else
+      IFS=$'\t' read -r receipt_channel receipt_ts <<< "$receipt"
+      if [[ -z "$receipt_channel" || -z "$receipt_ts" ]]; then
+        echo "slack bot delivery NOT acknowledged (HTTP $http_code; missing receipt fields)" >&2
+      else
+        echo "slack bot delivery acknowledged (channel=$receipt_channel ts=$receipt_ts)" >&2
+      fi
+    fi
+  else
+    curl_err="$http_code"
+    echo "slack bot delivery FAILED: curl could not reach Slack: ${curl_err:-no detail}" >&2
+  fi
+  rm -f "$body_file"
   return 0
 }
 
@@ -168,7 +215,7 @@ deliver_alert() { # deliver_alert <message-text>
     echo "[dry-run] would deliver alert to Slack and/or email." >&2
     return 0
   fi
-  if [[ -z "$SLACK_WEBHOOK" && -z "$EMAIL_TO" ]]; then
+  if [[ -z "$SLACK_WEBHOOK" && -z "$EMAIL_TO" && ( -z "$SLACK_BOT_TOKEN" || -z "$SLACK_CHANNEL" ) ]]; then
     return 0
   fi
   host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)"
@@ -179,6 +226,12 @@ deliver_alert() { # deliver_alert <message-text>
       deliver_alert_slack "$message" "$host"
     else
       echo "slack delivery skipped: curl not available" >&2
+    fi
+  elif [[ -n "$SLACK_BOT_TOKEN" && -n "$SLACK_CHANNEL" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      deliver_alert_slack_bot "$message" "$host"
+    else
+      echo "slack bot delivery skipped: curl not available" >&2
     fi
   fi
   if [[ -n "$EMAIL_TO" ]]; then
@@ -324,7 +377,7 @@ if [[ $# -gt 0 ]]; then
       echo "Scratch floor: ${SCRATCH_FLOOR_GB} GiB free / ${SCRATCH_FLOOR_PCT}% free (0 disables an arm)"
       # Report configured-ness as booleans only: never echo a webhook URL or an
       # address into logs, terminals, or pasted support output.
-      echo "Slack delivery configured: $([[ -n "$SLACK_WEBHOOK" ]] && echo 'YES' || echo 'NO')"
+      echo "Slack delivery configured: $([[ -n "$SLACK_WEBHOOK" || ( -n "$SLACK_BOT_TOKEN" && -n "$SLACK_CHANNEL" ) ]] && echo 'YES' || echo 'NO')"
       echo "Email delivery configured: $([[ -n "$EMAIL_TO" ]] && echo 'YES' || echo 'NO')"
       echo "Silenced: $(is_silenced && echo 'YES' || echo 'NO')"
       IFS=$'\t' read -r status_streak status_coverage_pct status_reasons <<< "$(update_coverage_streak)"
