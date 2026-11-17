@@ -969,6 +969,26 @@ withlfsobj_wt="$(bash "$SCRIPT" "$TMPROOT/withlfsobj" feat/withlfsobj 2>/dev/nul
 assert_eq "$rc" "0" "LFS-objects worktree-new exit"
 assert_eq "$(git -C "$withlfsobj_wt" config --get lfs.locksverify 2>/dev/null || true)" "" "LFS-objects repo does not force lfs.locksverify=false"
 
+echo "== sparse exclusion applied at creation (yc7g) =="
+mkdir -p "$TMPROOT/sparse/roadmap/dashboards/prw/telemetry" "$TMPROOT/sparse/roadmap/docs"
+git init -q -b main "$TMPROOT/sparse/roadmap"
+echo big > "$TMPROOT/sparse/roadmap/dashboards/prw/telemetry/big.jsonl"
+echo keep > "$TMPROOT/sparse/roadmap/docs/keep.md"
+git -C "$TMPROOT/sparse/roadmap" add -A
+git -C "$TMPROOT/sparse/roadmap" commit -q -m base
+sparse_out="$(bash "$SCRIPT" "$TMPROOT/sparse/roadmap" feat/sparse 2>&1)"; rc=$?
+sparse_wt="$(printf '%s\n' "$sparse_out" | tail -1)"
+assert_eq "$rc" "0" "sparse roadmap worktree-new exit"
+[[ ! -e "$sparse_wt/dashboards/prw/telemetry/big.jsonl" ]] && ok "telemetry file absent from working tree" || bad "telemetry file was checked out"
+[[ -f "$sparse_wt/docs/keep.md" ]] && ok "non-excluded file present" || bad "non-excluded file missing"
+assert_eq "$(git -C "$sparse_wt" ls-tree -r --name-only HEAD | grep -c telemetry/big.jsonl)" "1" "telemetry file still tracked in git"
+[[ "$sparse_out" == *"sparse-excluded: dashboards/prw/telemetry"* ]] && ok "applied exclusion printed" || bad "exclusion not printed: $sparse_out"
+git init -q -b main "$TMPROOT/sparse/other"
+mkdir -p "$TMPROOT/sparse/other/dashboards/prw/telemetry"; echo x > "$TMPROOT/sparse/other/dashboards/prw/telemetry/big.jsonl"
+git -C "$TMPROOT/sparse/other" add -A; git -C "$TMPROOT/sparse/other" commit -q -m base
+other_wt="$(bash "$SCRIPT" "$TMPROOT/sparse/other" feat/other 2>/dev/null)"
+[[ -f "$other_wt/dashboards/prw/telemetry/big.jsonl" ]] && ok "unconfigured repo keeps full checkout" || bad "unconfigured repo was sliced"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

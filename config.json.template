@@ -1,5 +1,6 @@
 {
   "library_frontier_enabled": true,
+  "worktree_sparse_excludes": {"roadmap": ["dashboards/prw/telemetry"]},
   "monitored_dirs": [
     {
       "key": "claude_root",

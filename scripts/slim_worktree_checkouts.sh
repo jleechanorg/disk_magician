@@ -38,6 +38,8 @@ source "$SCRIPT_DIR/lib/worktree_recency.sh"
 source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=lib/lsof_linux.sh
 source "$SCRIPT_DIR/lib/lsof_linux.sh"
+# shellcheck source=lib/sparse_excludes.sh
+source "$SCRIPT_DIR/lib/sparse_excludes.sh"
 # shellcheck source=lib/ao_worktree_config.sh
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh" 2>/dev/null || true
 
@@ -160,6 +162,12 @@ for root in "${ROOTS[@]}"; do
     [[ -f "$wt/.git" && ! -L "$wt" ]] || continue
     [[ "$seen" == *"|$wt|"* ]] && continue
     seen+="$wt|"
+    # Union the repo's configured exclusions (yc7g) with --exclude.
+    WT_EXCLUDES=(${EXCLUDES[@]+"${EXCLUDES[@]}"})
+    while IFS= read -r _cx; do
+      [[ -n "$_cx" ]] || continue
+      case " ${WT_EXCLUDES[*]-} " in *" $_cx "*) ;; *) WT_EXCLUDES+=("$_cx") ;; esac
+    done < <(sparse_excludes_for_repo "$(sparse_repo_name "$wt")")
 
     if [[ "$INCLUDE_AO" != 1 ]] && is_ao_owned "$wt"; then skipped_ao=$((skipped_ao+1)); continue; fi
     # An already-sparse worktree keeps its existing exclusions and gains any requested
@@ -172,7 +180,7 @@ for root in "${ROOTS[@]}"; do
         [[ "$line" =~ ^\!/(.+)/$ ]] && existing+=("${BASH_REMATCH[1]}")
       done < "$(gitdir_of "$wt")/info/sparse-checkout"
       missing=0
-      for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+      for ex in ${WT_EXCLUDES[@]+"${WT_EXCLUDES[@]}"}; do
         found=0
         for e in ${existing[@]+"${existing[@]}"}; do [[ "$e" == "$ex" ]] && { found=1; break; }; done
         (( found )) || missing=1
@@ -186,7 +194,7 @@ for root in "${ROOTS[@]}"; do
     # Any locally modified file under an excluded path means the exclusion would
     # hide uncommitted work. Untracked files are unaffected by sparse-checkout.
     dirty_hit=""
-    for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+    for ex in ${WT_EXCLUDES[@]+"${WT_EXCLUDES[@]}"}; do
       if git -C "$wt" status --porcelain --untracked-files=no -- "$ex" 2>/dev/null | grep -q .; then
         dirty_hit="$ex"
         break
@@ -195,7 +203,7 @@ for root in "${ROOTS[@]}"; do
     if [[ -n "$dirty_hit" ]]; then skipped_dirty=$((skipped_dirty+1)); echo "  DIRTY-SKIP $wt (local changes under $dirty_hit)"; continue; fi
 
     kb=0
-    for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+    for ex in ${WT_EXCLUDES[@]+"${WT_EXCLUDES[@]}"}; do
       e=$(du -sk "$wt/$ex" 2>/dev/null | awk '{print $1}')
       [[ "$e" =~ ^[0-9]+$ ]] && kb=$((kb + e))
     done
@@ -206,7 +214,7 @@ for root in "${ROOTS[@]}"; do
     else
       patterns=("/*")
       for e in ${existing[@]+"${existing[@]}"}; do patterns+=("!/$e/"); done
-      for ex in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
+      for ex in ${WT_EXCLUDES[@]+"${WT_EXCLUDES[@]}"}; do
         dup=0
         for e in ${existing[@]+"${existing[@]}"}; do [[ "$e" == "$ex" ]] && { dup=1; break; }; done
         (( dup )) || patterns+=("!/$ex/")
