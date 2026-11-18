@@ -66,8 +66,74 @@ def _parse_workflow_jobs(workflow_path: Path) -> dict[str, dict[str, str]]:
             elif stripped.startswith("if:"):
                 val = stripped[len("if:") :].strip()
                 jobs[current_job]["if"] = val
+            elif stripped.startswith("timeout-minutes:"):
+                val = stripped[len("timeout-minutes:") :].strip()
+                jobs[current_job]["timeout-minutes"] = val
 
     return jobs
+
+
+def _parse_job_steps(workflow_path: Path, job_id: str) -> dict[str, str]:
+    """Extract step name -> step body text for a top-level job using stdlib only."""
+    steps: dict[str, str] = {}
+    in_jobs = False
+    in_target_job = False
+    in_steps = False
+    current_name: str | None = None
+    current_lines: list[str] = []
+
+    def _flush() -> None:
+        if current_name is not None:
+            steps[current_name] = "\n".join(current_lines)
+
+    for raw_line in workflow_path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            if current_name is not None:
+                current_lines.append("")
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        stripped = raw_line.strip()
+
+        if indent == 0:
+            _flush()
+            current_name = None
+            current_lines = []
+            in_jobs = stripped == "jobs:"
+            in_target_job = False
+            in_steps = False
+            continue
+        if not in_jobs:
+            continue
+        if indent == 2 and stripped.endswith(":"):
+            _flush()
+            current_name = None
+            current_lines = []
+            in_target_job = stripped[:-1].strip() == job_id
+            in_steps = False
+            continue
+        if not in_target_job:
+            continue
+        if indent == 4:
+            if stripped == "steps:":
+                in_steps = True
+            else:
+                _flush()
+                current_name = None
+                current_lines = []
+                in_steps = False
+            continue
+        if not in_steps:
+            continue
+        if indent == 6 and stripped.startswith("- name:"):
+            _flush()
+            current_name = stripped[len("- name:") :].strip().strip("'\"")
+            current_lines = [raw_line]
+            continue
+        if current_name is not None:
+            current_lines.append(raw_line)
+
+    _flush()
+    return steps
 
 
 class TestCISelfHostedRunners(unittest.TestCase):
@@ -164,17 +230,57 @@ class TestCISelfHostedRunners(unittest.TestCase):
             f"{ci_path} must export VENV_PYTHON to $GITHUB_ENV",
         )
         self.assertIn(
-            '"$VENV_PYTHON" -m unittest',
+            "uv venv --seed",
             text,
-            f"{ci_path} must run unittest with \"$VENV_PYTHON\"",
+            f"{ci_path} must seed pip inside uv venv for packaging tests",
         )
         self.assertIn(
-            '"$VENV_PYTHON" -m pytest',
+            "pytest-xdist",
             text,
-            f"{ci_path} must run pytest with \"$VENV_PYTHON\"",
+            f"{ci_path} must install pytest-xdist into diskm-ci-venv",
         )
+        self.assertIn(
+            '"$VENV_PYTHON" -m pytest -n 8 -q tests',
+            text,
+            f"{ci_path} must run parallel pytest with \"$VENV_PYTHON\"",
+        )
+        self.assertIn(
+            '"$VENV_PYTHON" -m pytest -q',
+            text,
+            f"{ci_path} must run inventory pytest with \"$VENV_PYTHON\"",
+        )
+        self.assertNotIn("unittest discover", text)
         self.assertNotIn("python3 -m unittest", text)
         self.assertNotIn("python3 -m pytest", text)
+
+    def test_ci_timeout_and_caffeinate_guard(self) -> None:
+        ci_path = WORKFLOWS_DIR / "ci.yml"
+        jobs = _parse_workflow_jobs(ci_path)
+        self.assertEqual(
+            jobs.get("test", {}).get("timeout-minutes"),
+            "90",
+            f"{ci_path} jobs.test must keep timeout-minutes: 90",
+        )
+        steps = _parse_job_steps(ci_path, "test")
+        guarded_steps = (
+            "Check shell syntax and ShellCheck errors",
+            "Run Python tests",
+            "Run inventory integration tests",
+            "Run shell tests",
+        )
+        for step_name in guarded_steps:
+            self.assertIn(step_name, steps, f"Missing step {step_name!r} in {ci_path}")
+            body = steps[step_name]
+            self.assertIn(
+                "-x /usr/bin/caffeinate",
+                body,
+                f"Step {step_name!r} must guard /usr/bin/caffeinate executability",
+            )
+            self.assertIn(
+                "/usr/bin/caffeinate -i",
+                body,
+                f"Step {step_name!r} must run under /usr/bin/caffeinate -i",
+            )
 
     def test_evidence_gate_targets_self_hosted_mikey(self) -> None:
         gate_path = WORKFLOWS_DIR / "evidence-gate.yml"
