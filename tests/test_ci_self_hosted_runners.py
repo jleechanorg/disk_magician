@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -9,13 +10,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
-HOSTED_RUNNERS = (
-    "macos-15",
-    "macos-14",
-    "macos-latest",
-    "ubuntu-latest",
-    "ubuntu-24.04",
-    "ubuntu-22.04",
+HOSTED_RUNNER_RE = re.compile(
+    r"(?<![\w-])(?:ubuntu|macos|windows)-[A-Za-z0-9._-]+"
 )
 
 
@@ -67,6 +63,9 @@ def _parse_workflow_jobs(workflow_path: Path) -> dict[str, dict[str, str]]:
             elif stripped.startswith("runs-on:"):
                 val = stripped[len("runs-on:") :].strip()
                 jobs[current_job]["runs-on"] = val
+            elif stripped.startswith("if:"):
+                val = stripped[len("if:") :].strip()
+                jobs[current_job]["if"] = val
 
     return jobs
 
@@ -75,15 +74,17 @@ class TestCISelfHostedRunners(unittest.TestCase):
     """Ensure CI and Evidence Gate workflows target self-hosted runners."""
 
     def test_no_github_hosted_runners_in_workflows(self) -> None:
-        for name in ("ci.yml", "evidence-gate.yml"):
-            path = WORKFLOWS_DIR / name
+        workflow_paths = sorted(WORKFLOWS_DIR.glob("*.yml"))
+        self.assertTrue(workflow_paths, f"No workflow files found in {WORKFLOWS_DIR}")
+        for path in workflow_paths:
             text = path.read_text(encoding="utf-8")
-            for runner in HOSTED_RUNNERS:
-                pattern = re.compile(rf"(?<![\w-]){re.escape(runner)}(?![\w-])")
-                self.assertIsNone(
-                    pattern.search(text),
-                    f"{path} still references GitHub-hosted runner {runner!r}",
-                )
+            match = HOSTED_RUNNER_RE.search(text)
+            self.assertIsNone(
+                match,
+                f"{path} still references GitHub-hosted runner {match.group(0)!r}"
+                if match
+                else "",
+            )
             self.assertNotIn(
                 "sudo ",
                 text,
@@ -93,6 +94,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
     def test_ci_test_and_lint_targets_native_macos(self) -> None:
         ci_path = WORKFLOWS_DIR / "ci.yml"
         jobs = _parse_workflow_jobs(ci_path)
+        self.assertIn("test", jobs, f"Expected job 'test' in {ci_path}, got: {jobs}")
         matching = [
             job for job in jobs.values() if job.get("name") == "Test and lint"
         ]
@@ -108,6 +110,72 @@ class TestCISelfHostedRunners(unittest.TestCase):
             f"'Test and lint' job must target self-hosted-native-macos, got runs-on={runs_on!r}",
         )
 
+    def test_ci_guards_untrusted_fork_prs(self) -> None:
+        ci_path = WORKFLOWS_DIR / "ci.yml"
+        jobs = _parse_workflow_jobs(ci_path)
+        test_job = jobs.get("test", {})
+        if_expr = test_job.get("if", "")
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            if_expr,
+            f"jobs.test in {ci_path} must gate fork PRs, got if={if_expr!r}",
+        )
+        self.assertIn(
+            "github.event_name != 'pull_request'",
+            if_expr,
+            f"jobs.test in {ci_path} must allow non-PR events, got if={if_expr!r}",
+        )
+
+    def test_ci_venv_path_precedence_and_explicit_venv_python(self) -> None:
+        ci_path = WORKFLOWS_DIR / "ci.yml"
+        lines = ci_path.read_text(encoding="utf-8").splitlines()
+        text = "\n".join(lines)
+
+        def _find_github_path_line(entry: str) -> int:
+            for idx, line in enumerate(lines):
+                if entry in line and "$GITHUB_PATH" in line:
+                    return idx
+            self.fail(f"Missing $GITHUB_PATH append for {entry!r} in {ci_path}")
+
+        homebrew_idx = _find_github_path_line("/opt/homebrew/bin")
+        home_bin_idx = _find_github_path_line("$HOME/bin")
+        local_bin_idx = _find_github_path_line("$HOME/.local/bin")
+        venv_bin_idx = _find_github_path_line("$VENV_DIR/bin")
+
+        self.assertGreater(
+            venv_bin_idx,
+            homebrew_idx,
+            "$VENV_DIR/bin must be appended to $GITHUB_PATH after /opt/homebrew/bin",
+        )
+        self.assertGreater(
+            venv_bin_idx,
+            home_bin_idx,
+            "$VENV_DIR/bin must be appended to $GITHUB_PATH after $HOME/bin",
+        )
+        self.assertGreater(
+            venv_bin_idx,
+            local_bin_idx,
+            "$VENV_DIR/bin must be appended to $GITHUB_PATH after $HOME/.local/bin",
+        )
+
+        self.assertRegex(
+            text,
+            r'VENV_PYTHON=\$\{?VENV_DIR\}?/bin/python.*GITHUB_ENV',
+            f"{ci_path} must export VENV_PYTHON to $GITHUB_ENV",
+        )
+        self.assertIn(
+            '"$VENV_PYTHON" -m unittest',
+            text,
+            f"{ci_path} must run unittest with \"$VENV_PYTHON\"",
+        )
+        self.assertIn(
+            '"$VENV_PYTHON" -m pytest',
+            text,
+            f"{ci_path} must run pytest with \"$VENV_PYTHON\"",
+        )
+        self.assertNotIn("python3 -m unittest", text)
+        self.assertNotIn("python3 -m pytest", text)
+
     def test_evidence_gate_targets_self_hosted_mikey(self) -> None:
         gate_path = WORKFLOWS_DIR / "evidence-gate.yml"
         jobs = _parse_workflow_jobs(gate_path)
@@ -120,15 +188,16 @@ class TestCISelfHostedRunners(unittest.TestCase):
             f"Expected exactly one job with exact name 'Evidence Gate' in {gate_path}, got: {jobs}",
         )
         runs_on = matching[0].get("runs-on", "")
-        self.assertIn(
-            "self-hosted",
-            runs_on,
-            f"'Evidence Gate' job must target self-hosted, got runs-on={runs_on!r}",
+        fallback_match = re.search(r"\|\|\s*'([^']+)'", runs_on)
+        self.assertIsNotNone(
+            fallback_match,
+            f"Expected JSON fallback label list in runs-on={runs_on!r}",
         )
-        self.assertIn(
-            "self-hosted-mikey",
-            runs_on,
-            f"'Evidence Gate' job must target self-hosted-mikey, got runs-on={runs_on!r}",
+        labels = json.loads(fallback_match.group(1))
+        self.assertEqual(
+            labels,
+            ["self-hosted", "Linux", "self-hosted-mikey"],
+            f"'Evidence Gate' default labels must pin Linux, got {labels!r}",
         )
 
 
