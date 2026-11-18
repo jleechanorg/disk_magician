@@ -203,7 +203,7 @@ clear_contents() {
 CUSTOM_DD_IDLE_MINUTES="$(safety_disposable_recency_floor_minutes)"
 
 clean_custom_derived_data() {
-  local ptmp utmp cand target seen=$'\n' before_kb
+  local ptmp utmp cand target seen=$'\n' before_kb wt_root repo_dir wt_dir
   # Same overridable roots as the other scratch sweepers; an unresolved root drops its globs.
   ptmp="$(scratch_roots_get_private_tmp)"
   utmp="$(scratch_roots_get_user_tmp)"
@@ -213,8 +213,21 @@ clean_custom_derived_data() {
       "$ptmp"/worldai_frontend*/* "$ptmp"/worldai_frontend*/*/* \
       "$ptmp"/*-native*/* "$ptmp"/*-native*/build/* \
       "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
-      ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_* "$utmp"/dd-*}; do
+      ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_* "$utmp"/dd-*} \
+      "$HOME"/.worktrees/*/*/*; do
     [[ -d "$cand" && ! -L "$cand" ]] || continue
+    # Standard worktree candidates are one bounded level below a worktree.
+    # Require every traversed component to be a real directory so a symlinked
+    # root, repo, or worktree cannot redirect this discovery outside the tree.
+    if [[ "$cand" == "$HOME/.worktrees/"* ]]; then
+      wt_root="$HOME/.worktrees"
+      wt_dir="${cand%/*}"
+      repo_dir="${wt_dir%/*}"
+      [[ "${repo_dir%/*}" == "$wt_root" && "${wt_dir%/*}" == "$repo_dir" && \
+          -d "$wt_root" && ! -L "$wt_root" && \
+          -d "$repo_dir" && ! -L "$repo_dir" && \
+          -d "$wt_dir" && ! -L "$wt_dir" ]] || continue
+    fi
     [[ "${cand##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ ]] && continue
     if _av_derived_data_shape "$cand"; then
       target="$cand"

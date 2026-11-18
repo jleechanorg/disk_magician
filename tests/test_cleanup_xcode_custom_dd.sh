@@ -92,6 +92,27 @@ age "$TMPROOT/ptmp" 2940 && age "$TMPROOT/utmp" 2940 && age "$HOME/dd_gen" 2940 
 age "$SDD" 2940
 age "$HOME/dd_recent" 2820
 
+# Arbitrary DerivedData-shaped direct children of real standard worktrees are
+# eligible, while fresh, unshaped, symlinked, and explicitly protected entries stay.
+WT="$HOME/.worktrees/project/feature-wt"
+mkdir -p "$WT/custom-output/Build" "$WT/custom-output/Index.noindex" \
+    "$WT/fresh-cache/Build" "$WT/fresh-cache/Index.noindex" \
+    "$WT/plain-output/Build" "$WT/protected-output/Build" "$WT/protected-output/Index.noindex" \
+    "$HOME/worktree-link-target/feature-wt/custom-output/Build" "$HOME/worktree-link-target/feature-wt/custom-output/Index.noindex"
+printf 'o' >"$WT/custom-output/Build/old.o"
+printf 'o' >"$WT/fresh-cache/Build/fresh.o"
+printf 'o' >"$WT/plain-output/Build/not-derived-data.o"
+printf 'o' >"$WT/protected-output/Build/protected.o"
+printf 'o' >"$HOME/worktree-link-target/feature-wt/custom-output/Build/linked.o"
+ln -s "$HOME/worktree-link-target/feature-wt/custom-output" "$WT/linked-output"
+mkdir -p "$HOME/.worktrees"
+ln -s "$HOME/worktree-link-target" "$HOME/.worktrees/linked-project"
+ln -s "$HOME/worktree-link-target/feature-wt" "$HOME/.worktrees/project/linked-wt"
+age "$WT/custom-output" 2940 && age "$WT/plain-output" 2940 && age "$WT/protected-output" 2940 && age "$HOME/worktree-link-target" 2940
+SAFETY_FILE="$TMPROOT/safety.json"
+printf '{"never_delete":[{"path":"%s","reason":"test protection"}]}' "$WT/protected-output" >"$SAFETY_FILE"
+export DISK_MAGICIAN_SAFETY_FILE="$SAFETY_FILE"
+
 run() { bash "$REPO_ROOT/scripts/cleanup_xcode.sh" "$@" 2>&1; }
 run_with_env() { env "$1=$2" bash "$REPO_ROOT/scripts/cleanup_xcode.sh" --clean 2>&1; }
 
@@ -106,6 +127,13 @@ out="$(run --clean)"
 [[ ! -e "$HOME/dd_idle" ]] && ok "idle DerivedData-shaped dir removed" || bad "dd_idle still present"
 [[ -d "$HOME/dd_recent" ]] && ok "recent dir kept" || bad "recent dir removed"
 [[ -f "$HOME/dd_notdd/notes.txt" ]] && ok "non-DerivedData dir kept" || bad "non-DerivedData dir removed"
+[[ ! -e "$WT/custom-output" ]] && ok "old nonstandard shaped worktree child removed" || bad "old nonstandard shaped worktree child kept"
+[[ -d "$WT/fresh-cache" ]] && ok "young shaped worktree child kept" || bad "young shaped worktree child removed"
+[[ -L "$WT/linked-output" && -f "$HOME/worktree-link-target/feature-wt/custom-output/Build/linked.o" ]] \
+    && ok "symlinked shaped worktree child ignored" || bad "symlinked shaped worktree child followed"
+[[ -d "$WT/plain-output/Build" ]] && ok "unshaped worktree child kept" || bad "unshaped worktree child removed"
+[[ -d "$WT/protected-output/Build" ]] && ok "safety-protected shaped worktree child kept" || bad "safety-protected worktree child removed"
+[[ -d "$HOME/worktree-link-target/feature-wt/custom-output" ]] && ok "symlinked worktree parent not traversed" || bad "symlinked worktree parent traversed"
 [[ ! -e "$HOME/proj_dd_nested/DerivedData" && -f "$HOME/proj_dd_nested/README.md" ]] \
     && ok "only the DerivedData/ child of a parent is removed" || bad "nested DerivedData handling wrong"
 [[ -L "$HOME/dd_link" ]] && ok "symlink itself left in place" || bad "symlink removed"
