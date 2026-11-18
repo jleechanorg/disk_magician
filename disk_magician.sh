@@ -588,6 +588,9 @@ case "$CMD" in
   cleanup_xcode|cleanup-xcode)
     "$SCRIPT_DIR/scripts/cleanup_xcode.sh" "$@"
     ;;
+  sim)
+    "$SCRIPT_DIR/scripts/sim.sh" "$@"
+    ;;
   cleanup_worktrees|cleanup-worktrees|prune_worktrees|prune-worktrees)
     "$SCRIPT_DIR/scripts/cleanup_worktrees.sh" "$@"
     ;;

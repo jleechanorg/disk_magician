@@ -303,6 +303,41 @@ _av_rebuildable() (
     app_root="$(cd "$app_root" 2>/dev/null && pwd -P)" && [[ -n "$app_root" && "$1" == "$app_root"/Xcode*.app ]] && return 0
     return 1
 )
+
+# _av_simulator_release_proof <path>: a simulator device is a removal proof only
+# when this exact immediate CoreSimulator device child has a current-generation
+# release receipt older than the fixed 48 h floor, remains Shutdown in a fresh
+# simctl inventory, and has no simulator lease record. This kind lives in the
+# shared C14 gate, so callers cannot turn arbitrary content into a proof with a
+# caller-supplied boolean. Receipt, floor, inventory and lease semantics remain
+# owned by the simulator lifecycle helpers rather than being reimplemented here.
+_av_simulator_release_proof() (
+    local p="$1" root state udid generation receipt generation_value snap
+    udid="${p##*/}"
+    [[ "$udid" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || return 1
+    root="${DISK_MAGICIAN_SIM_FIXTURE_ROOT:-$HOME/Library/Developer/CoreSimulator/Devices}"
+    [[ -d "$root" && ! -L "$root" ]] || return 1
+    root="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
+    [[ "$p" == "$root/$udid" && -d "$p" && ! -L "$p" ]] || return 1
+
+    state="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
+    generation="$state/gen/$udid"
+    receipt="$state/receipts/sim_release_receipts.jsonl"
+    [[ -d "$state/gen" && ! -L "$state/gen" && -f "$generation" && ! -L "$generation" &&
+       -f "$receipt" && ! -L "$receipt" && ! -e "$state/sim_leases/$udid" && ! -L "$state/sim_leases/$udid" ]] || return 1
+    generation_value="$(cat "$generation" 2>/dev/null)" || return 1
+    [[ "$generation_value" =~ ^[1-9][0-9]*$ ]] || return 1
+    # The lifecycle module only declares helpers; it does not source this file.
+    # Sourcing it in this subshell is therefore one-way and reuses the canonical
+    # generation, release-floor, inventory and tri-state lease implementation.
+    # shellcheck source=scripts/sim_lifecycle.sh
+    source "$_AV_DIR/../sim_lifecycle.sh" || return 1
+    [[ "$(sim_lease_state "$udid")" == absent ]] || return 1
+    sim_released_and_idle "$udid" || return 1
+    snap="$(sim_snapshot)" || return 1
+    printf '%s\n' "$snap" | awk -F'\t' -v u="$udid" '$1==u {rows++; if($3=="Shutdown") shutdown++} END{exit rows==1 && shutdown==1 ? 0 : 1}'
+)
+
 # _av_sparkle_installed_twin <bundle-name> <staged-path>: rc 0 when the same app is
 # installed outside the cache (which proves the staged copy is a leftover).
 _av_sparkle_installed_twin() (
@@ -724,6 +759,8 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
             esac; } ;;
         os_clone) _av_os_clone_proof "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:check-failed; return 0; }
             reb=1 ;;
+        simulator-device) _av_simulator_release_proof "$p" || { echo kept:simulator-proof; return 0; }
+            proofs+=" simulator-release" ;;
         xcode-derived-data) ! _av_derived_data "$p" || reb=1 ;;
         sparkle-update-staging) ! _av_sparkle_update_staging "$p" || reb=1 ;;
         '') # Verified publication proves content outside repositories. With a repository in the
