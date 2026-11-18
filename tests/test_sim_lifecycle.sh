@@ -990,11 +990,11 @@ exec /bin/mv "$@"
 FAKE
 chmod +x "$r58/fake/ps" "$r58/fake/mv"
 export RACE_ROOT="$r58" RACE_LOCK="$r58/state/lock/test.lock" RACE_MODULE="$MODULE"
-PATH="$r58/fake:$PATH" RACE_ROLE=A bash -c 'source "$RACE_MODULE"; if sim_lock_take "$RACE_LOCK" 0; then printf "%s\n" "$BASHPID" >"$RACE_ROOT/A_PID"; echo acquired >"$RACE_ROOT/A_RESULT"; touch "$RACE_ROOT/A_LOCK"; while [[ ! -e "$RACE_ROOT/C_DONE" ]]; do sleep 0.01; done; else echo busy >"$RACE_ROOT/A_RESULT"; fi' &
+PATH="$r58/fake:$PATH" RACE_ROLE=A bash -c 'source "$RACE_MODULE"; if sim_lock_take "$RACE_LOCK" 0; then printf "%s\n" "$$" >"$RACE_ROOT/A_PID"; echo acquired >"$RACE_ROOT/A_RESULT"; touch "$RACE_ROOT/A_LOCK"; while [[ ! -e "$RACE_ROOT/C_DONE" ]]; do sleep 0.01; done; else echo busy >"$RACE_ROOT/A_RESULT"; fi' &
 pid_a=$!
 PATH="$r58/fake:$PATH" RACE_ROLE=B bash -c 'source "$RACE_MODULE"; if sim_lock_take "$RACE_LOCK" 0; then echo acquired >"$RACE_ROOT/B_RESULT"; else echo busy >"$RACE_ROOT/B_RESULT"; fi; touch "$RACE_ROOT/B_DONE"' &
 pid_b=$!
-PATH="$r58/fake:$PATH" RACE_ROLE=C bash -c 'for _ in {1..500}; do [[ -e "$RACE_ROOT/B_MOVED" || -e "$RACE_ROOT/B_DONE" ]] && break; sleep 0.01; done; source "$RACE_MODULE"; if sim_lock_take "$RACE_LOCK" 0; then printf "%s\n" "$BASHPID" >"$RACE_ROOT/C_PID"; echo acquired >"$RACE_ROOT/C_RESULT"; touch "$RACE_ROOT/C_LOCK"; else echo busy >"$RACE_ROOT/C_RESULT"; fi; touch "$RACE_ROOT/C_DONE"' &
+PATH="$r58/fake:$PATH" RACE_ROLE=C bash -c 'for _ in {1..500}; do [[ -e "$RACE_ROOT/B_MOVED" || -e "$RACE_ROOT/B_DONE" ]] && break; sleep 0.01; done; source "$RACE_MODULE"; if sim_lock_take "$RACE_LOCK" 0; then printf "%s\n" "$$" >"$RACE_ROOT/C_PID"; echo acquired >"$RACE_ROOT/C_RESULT"; touch "$RACE_ROOT/C_LOCK"; else echo busy >"$RACE_ROOT/C_RESULT"; fi; touch "$RACE_ROOT/C_DONE"' &
 pid_c=$!
 wait "$pid_a"; wait "$pid_b"; wait "$pid_c"
 if [[ "$(cat "$r58/A_RESULT" 2>/dev/null)" == acquired && "$(cat "$r58/B_RESULT" 2>/dev/null)" == busy && \
