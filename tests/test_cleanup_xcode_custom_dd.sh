@@ -109,6 +109,35 @@ mkdir -p "$HOME/.worktrees"
 ln -s "$HOME/worktree-link-target" "$HOME/.worktrees/linked-project"
 ln -s "$HOME/worktree-link-target/feature-wt" "$HOME/.worktrees/project/linked-wt"
 age "$WT/custom-output" 2940 && age "$WT/plain-output" 2940 && age "$WT/protected-output" 2940 && age "$HOME/worktree-link-target" 2940
+
+# A genuine linked worktree with hidden path components exercises direct-child
+# discovery for names such as .dd that pathname globs do not match.
+HIDDEN_REPO="$HOME/.worktrees/.project"
+HIDDEN_WT="$HIDDEN_REPO/.feature-wt"
+mkdir -p "$HIDDEN_REPO"
+git init --bare -q "$TMPROOT/fixture-remote.git"
+git init -q "$TMPROOT/fixture-source"
+git -C "$TMPROOT/fixture-source" config user.name fixture
+git -C "$TMPROOT/fixture-source" config user.email fixture@example.invalid
+printf 'source\n' >"$TMPROOT/fixture-source/README.md"
+git -C "$TMPROOT/fixture-source" add README.md
+git -C "$TMPROOT/fixture-source" commit -qm initial
+git -C "$TMPROOT/fixture-source" branch -M main
+git -C "$TMPROOT/fixture-source" remote add origin "$TMPROOT/fixture-remote.git"
+git -C "$TMPROOT/fixture-source" push -qu origin main
+git -C "$TMPROOT/fixture-source" worktree add -q -b fixture "$HIDDEN_WT"
+mkdir -p "$HIDDEN_WT/.dd/Build" "$HIDDEN_WT/.dd/Index.noindex"
+printf 'old object' >"$HIDDEN_WT/.dd/Build/old.o"
+age "$HIDDEN_WT/.dd" 2940
+
+# A separate arbitrary-name child under an AO-owned worktree must stay protected.
+AO_WT="$HOME/.worktrees/ao-project/ao-feature"
+git -C "$TMPROOT/fixture-source" worktree add -q -b ao-fixture "$AO_WT"
+mkdir -p "$AO_WT/custom-ao-output/Build" "$AO_WT/custom-ao-output/Index.noindex"
+printf 'old AO object' >"$AO_WT/custom-ao-output/Build/old.o"
+age "$AO_WT/custom-ao-output" 2940
+AO_CONFIG="$TMPROOT/ao-config.yaml"
+printf 'projects: {demo: {worktreeDir: "%s"}}\n' "$AO_WT" >"$AO_CONFIG"
 SAFETY_FILE="$TMPROOT/safety.json"
 printf '{"never_delete":[{"path":"%s","reason":"test protection"}]}' "$WT/protected-output" >"$SAFETY_FILE"
 export DISK_MAGICIAN_SAFETY_FILE="$SAFETY_FILE"
@@ -123,11 +152,14 @@ out="$(run --dry-run)"
 [[ -d "$HOME/dd_idle" ]] && ok "dry-run removes nothing" || bad "dry-run removed dd_idle"
 
 echo "-- clean --"
-out="$(run --clean)"
+out="$(env DISK_MAGICIAN_AO_CONFIG="$AO_CONFIG" bash "$REPO_ROOT/scripts/cleanup_xcode.sh" --clean 2>&1)"
 [[ ! -e "$HOME/dd_idle" ]] && ok "idle DerivedData-shaped dir removed" || bad "dd_idle still present"
 [[ -d "$HOME/dd_recent" ]] && ok "recent dir kept" || bad "recent dir removed"
 [[ -f "$HOME/dd_notdd/notes.txt" ]] && ok "non-DerivedData dir kept" || bad "non-DerivedData dir removed"
 [[ ! -e "$WT/custom-output" ]] && ok "old nonstandard shaped worktree child removed" || bad "old nonstandard shaped worktree child kept"
+[[ ! -e "$HIDDEN_WT/.dd" ]] && ok "old .dd child in hidden linked-worktree layout removed" || bad "old .dd child in hidden linked-worktree layout kept"
+[[ -d "$AO_WT/custom-ao-output" ]] && ok "old shaped child in AO-owned worktree kept" || bad "AO-owned worktree child removed: $out"
+[[ "$out" == *"AO-SKIP $AO_WT/custom-ao-output (ao-owned)"* ]] && ok "AO-owned worktree skip reason logged" || bad "AO-owned worktree skip reason missing: $out"
 [[ -d "$WT/fresh-cache" ]] && ok "young shaped worktree child kept" || bad "young shaped worktree child removed"
 [[ -L "$WT/linked-output" && -f "$HOME/worktree-link-target/feature-wt/custom-output/Build/linked.o" ]] \
     && ok "symlinked shaped worktree child ignored" || bad "symlinked shaped worktree child followed"

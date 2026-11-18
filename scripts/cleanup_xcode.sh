@@ -202,8 +202,62 @@ clear_contents() {
 # so an ambient environment cannot make freshly-written build output eligible.
 CUSTOM_DD_IDLE_MINUTES="$(safety_disposable_recency_floor_minutes)"
 
+process_custom_derived_data_candidate() {
+  local cand="$1" target wt_root wt_dir repo_dir before_kb _safety_reason ao_reason
+  [[ -d "$cand" && ! -L "$cand" ]] || return 0
+  # Every component from the real worktree root through the candidate must be a
+  # directory, not a symlink. find below never follows links during discovery.
+  if [[ "$cand" == "$HOME/.worktrees/"* ]]; then
+    wt_root="$HOME/.worktrees"
+    wt_dir="${cand%/*}"
+    repo_dir="${wt_dir%/*}"
+    [[ "${repo_dir%/*}" == "$wt_root" && "${wt_dir%/*}" == "$repo_dir" && \
+        -d "$wt_root" && ! -L "$wt_root" && \
+        -d "$repo_dir" && ! -L "$repo_dir" && \
+        -d "$wt_dir" && ! -L "$wt_dir" ]] || return 0
+  fi
+  [[ "${cand##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ ]] && return 0
+  if _av_derived_data_shape "$cand"; then
+    target="$cand"
+  elif _av_derived_data_shape "$cand/DerivedData"; then
+    target="$cand/DerivedData"
+  else
+    return 0
+  fi
+  if [[ "$cand" == "$HOME/.worktrees/"* ]]; then
+    if ! declare -F wrh_ao_skip_reason >/dev/null 2>&1; then
+      log "Custom Xcode DerivedData: AO-SKIP $wt_dir (ao-check-unavailable)"
+      return 0
+    fi
+    ao_reason="$(wrh_ao_skip_reason "$wt_dir" 2>/dev/null || true)"
+    if [[ -n "$ao_reason" ]]; then
+      log "Custom Xcode DerivedData: AO-SKIP $target ($ao_reason)"
+      return 0
+    fi
+  fi
+  [[ "${_CUSTOM_DD_SEEN:-$'\n'}" == *$'\n'"$target"$'\n'* ]] && return 0
+  _CUSTOM_DD_SEEN+="$target"$'\n'
+  if ! _safety_reason="$(safety_gate "$target" 2>/dev/null)"; then
+    log "Custom Xcode DerivedData: SAFETY-SKIP $target ($_safety_reason)"
+    return 0
+  fi
+  scratch_budget_report_measurement "$target" || exit $?
+  if worktree_is_recently_active_minutes "$target" "$CUSTOM_DD_IDLE_MINUTES"; then
+    log "Custom Xcode DerivedData: written within ${CUSTOM_DD_IDLE_MINUTES}m or recency unmeasurable, keeping $target"
+    return 0
+  fi
+  before_kb=$(size_kb "$target")
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Custom Xcode DerivedData: [dry-run] would remove $target ($(fmt_kb "$before_kb"))"
+  else
+    log "Custom Xcode DerivedData: removing $target ($(fmt_kb "$before_kb"))"
+    c14_remove "$target" --kind xcode-derived-data || true
+  fi
+}
+
 clean_custom_derived_data() {
-  local ptmp utmp cand target seen=$'\n' before_kb wt_root repo_dir wt_dir
+  local ptmp utmp cand
+  _CUSTOM_DD_SEEN=$'\n'
   # Same overridable roots as the other scratch sweepers; an unresolved root drops its globs.
   ptmp="$(scratch_roots_get_private_tmp)"
   utmp="$(scratch_roots_get_user_tmp)"
@@ -213,49 +267,14 @@ clean_custom_derived_data() {
       "$ptmp"/worldai_frontend*/* "$ptmp"/worldai_frontend*/*/* \
       "$ptmp"/*-native*/* "$ptmp"/*-native*/build/* \
       "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
-      ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_* "$utmp"/dd-*} \
-      "$HOME"/.worktrees/*/*/*; do
-    [[ -d "$cand" && ! -L "$cand" ]] || continue
-    # Standard worktree candidates are one bounded level below a worktree.
-    # Require every traversed component to be a real directory so a symlinked
-    # root, repo, or worktree cannot redirect this discovery outside the tree.
-    if [[ "$cand" == "$HOME/.worktrees/"* ]]; then
-      wt_root="$HOME/.worktrees"
-      wt_dir="${cand%/*}"
-      repo_dir="${wt_dir%/*}"
-      [[ "${repo_dir%/*}" == "$wt_root" && "${wt_dir%/*}" == "$repo_dir" && \
-          -d "$wt_root" && ! -L "$wt_root" && \
-          -d "$repo_dir" && ! -L "$repo_dir" && \
-          -d "$wt_dir" && ! -L "$wt_dir" ]] || continue
-    fi
-    [[ "${cand##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ ]] && continue
-    if _av_derived_data_shape "$cand"; then
-      target="$cand"
-    elif _av_derived_data_shape "$cand/DerivedData"; then
-      target="$cand/DerivedData"
-    else
-      continue
-    fi
-    [[ "$seen" == *$'\n'"$target"$'\n'* ]] && continue
-    seen+="$target"$'\n'
-    local _safety_reason
-    if ! _safety_reason="$(safety_gate "$target" 2>/dev/null)"; then
-      log "Custom Xcode DerivedData: SAFETY-SKIP $target ($_safety_reason)"
-      continue
-    fi
-    scratch_budget_report_measurement "$target" || exit $?
-    if worktree_is_recently_active_minutes "$target" "$CUSTOM_DD_IDLE_MINUTES"; then
-      log "Custom Xcode DerivedData: written within ${CUSTOM_DD_IDLE_MINUTES}m or recency unmeasurable, keeping $target"
-      continue
-    fi
-    before_kb=$(size_kb "$target")
-    if [[ "$DRY_RUN" == true ]]; then
-      log "Custom Xcode DerivedData: [dry-run] would remove $target ($(fmt_kb "$before_kb"))"
-    else
-      log "Custom Xcode DerivedData: removing $target ($(fmt_kb "$before_kb"))"
-      c14_remove "$target" --kind xcode-derived-data || true
-    fi
+      ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_* "$utmp"/dd-*}; do
+    process_custom_derived_data_candidate "$cand"
   done
+  local wt_root="$HOME/.worktrees"
+  [[ -d "$wt_root" && ! -L "$wt_root" ]] || return 0
+  while IFS= read -r -d '' cand; do
+    process_custom_derived_data_candidate "$cand"
+  done < <(find "$wt_root" -mindepth 3 -maxdepth 3 -type d -print0 2>/dev/null)
 }
 
 # worldai iOS release CI leaves /private/tmp/worldai-ios-release-<run>-<attempt>/ with
