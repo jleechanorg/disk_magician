@@ -14,63 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  linux-lint:
-    name: Linux lint and sync checks
-    runs-on: [self-hosted, self-hosted-mikey]
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Ensure shellcheck is installed
-        run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            SC_BIN="${RUNNER_TEMP}/sc-bin"
-            SC_VER="v0.10.0"
-            SC_ARCH="$(uname -m)"
-            SC_URL="https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.${SC_ARCH}.tar.xz"
-            mkdir -p "$SC_BIN"
-            if command -v curl >/dev/null 2>&1 && command -v xz >/dev/null 2>&1 \
-              && curl -fsSL "$SC_URL" | tar -xJf - -C "$SC_BIN" --strip-components=1 "shellcheck-${SC_VER}/shellcheck"; then
-              chmod +x "$SC_BIN/shellcheck"
-              echo "$SC_BIN" >> "$GITHUB_PATH"
-            else
-              python3 -m venv "${RUNNER_TEMP}/sc-venv"
-              "${RUNNER_TEMP}/sc-venv/bin/pip" install -q shellcheck-py
-              echo "${RUNNER_TEMP}/sc-venv/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-
-      - name: Verify package-tree synchronization
-        run: bash ./disk_magician.sh sync-package-tree --check
-
-      - name: Verify pyproject version monotonicity
-        run: bash ./disk_magician.sh check-version
-
-      - name: Check shell syntax and ShellCheck errors
-        run: |
-          # Cap concurrency at 2 and batch files per shellcheck process so GHC
-          # runtime stays well within the 3072 MiB ezgha container cgroup limit
-          # (host nproc=32 previously spawned 32 concurrent shellcheck processes and OOM-killed).
-          SHELL_FILES=()
-          while IFS= read -r -d '' candidate; do
-            case "$(head -n 1 "$candidate" 2>/dev/null || true)" in
-              *bash|*sh)
-                /bin/bash -n "$candidate"
-                SHELL_FILES+=("$candidate")
-                ;;
-            esac
-          done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
-          if [ "${#SHELL_FILES[@]}" -gt 0 ]; then
-            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 20 -P 2 shellcheck --severity=error --external-sources
-          fi
-
   test:
     name: Test and lint
-    needs: [linux-lint]
     runs-on: ${{ fromJson(vars.NATIVE_MACOS_RUNNER_LABELS || '["self-hosted-native-macos"]') }}
     timeout-minutes: 60
     steps:
@@ -105,6 +50,27 @@ jobs:
               esac
             fi
           done
+
+      - name: Verify package-tree synchronization
+        run: bash ./disk_magician.sh sync-package-tree --check
+
+      - name: Verify pyproject version monotonicity
+        run: bash ./disk_magician.sh check-version
+
+      - name: Check shell syntax and ShellCheck errors
+        run: |
+          SHELL_FILES=()
+          while IFS= read -r -d '' candidate; do
+            case "$(head -n 1 "$candidate" 2>/dev/null || true)" in
+              *bash|*sh)
+                /bin/bash -n "$candidate"
+                SHELL_FILES+=("$candidate")
+                ;;
+            esac
+          done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
+          if [ "${#SHELL_FILES[@]}" -gt 0 ]; then
+            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 25 -P 4 shellcheck --severity=error --external-sources
+          fi
 
       - name: Run Python tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
