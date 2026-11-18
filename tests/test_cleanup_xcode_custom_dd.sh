@@ -120,7 +120,13 @@ git init -q "$TMPROOT/fixture-source"
 git -C "$TMPROOT/fixture-source" config user.name fixture
 git -C "$TMPROOT/fixture-source" config user.email fixture@example.invalid
 printf 'source\n' >"$TMPROOT/fixture-source/README.md"
-git -C "$TMPROOT/fixture-source" add README.md
+mkdir -p "$TMPROOT/fixture-source/tracked-clean/Build" "$TMPROOT/fixture-source/tracked-clean/Index.noindex" \
+    "$TMPROOT/fixture-source/tracked-output/Build" "$TMPROOT/fixture-source/tracked-output/Index.noindex"
+printf 'tracked clean\n' >"$TMPROOT/fixture-source/tracked-clean/Build/tracked.o"
+printf 'idx\n' >"$TMPROOT/fixture-source/tracked-clean/Index.noindex/.keep"
+printf 'tracked original\n' >"$TMPROOT/fixture-source/tracked-output/Build/tracked.o"
+printf 'idx\n' >"$TMPROOT/fixture-source/tracked-output/Index.noindex/.keep"
+git -C "$TMPROOT/fixture-source" add README.md tracked-clean tracked-output
 git -C "$TMPROOT/fixture-source" commit -qm initial
 git -C "$TMPROOT/fixture-source" branch -M main
 git -C "$TMPROOT/fixture-source" remote add origin "$TMPROOT/fixture-remote.git"
@@ -128,6 +134,9 @@ git -C "$TMPROOT/fixture-source" push -qu origin main
 git -C "$TMPROOT/fixture-source" worktree add -q -b fixture "$HIDDEN_WT"
 mkdir -p "$HIDDEN_WT/.dd/Build" "$HIDDEN_WT/.dd/Index.noindex"
 printf 'old object' >"$HIDDEN_WT/.dd/Build/old.o"
+printf 'modified tracked object\n' >"$HIDDEN_WT/tracked-output/Build/tracked.o"
+age "$HIDDEN_WT/tracked-clean" 2940
+age "$HIDDEN_WT/tracked-output" 2940
 age "$HIDDEN_WT/.dd" 2940
 
 # A separate arbitrary-name child under an AO-owned worktree must stay protected.
@@ -150,6 +159,9 @@ out="$(run --dry-run)"
 [[ "$out" == *"would remove $HOME/dd_idle"* ]] && ok "dry-run names the idle dir" || bad "dry-run missed idle dir: $out"
 [[ "$out" == *"keeping $HOME/dd_recent"* ]] && ok "dry-run keeps the recent dir" || bad "dry-run did not report recent dir"
 [[ -d "$HOME/dd_idle" ]] && ok "dry-run removes nothing" || bad "dry-run removed dd_idle"
+[[ "$out" == *"would remove $HIDDEN_WT/.dd"* ]] && ok "dry-run names untracked .dd in worktree" || bad "dry-run missed .dd: $out"
+[[ "$out" == *"keeping $HIDDEN_WT/tracked-clean (kept:git-tracked)"* ]] && ok "dry-run keeps clean tracked shaped child" || bad "dry-run did not keep tracked-clean: $out"
+[[ "$out" == *"keeping $HIDDEN_WT/tracked-output (kept:git-tracked)"* ]] && ok "dry-run keeps dirty tracked shaped child" || bad "dry-run did not keep tracked-output: $out"
 
 echo "-- clean --"
 out="$(env DISK_MAGICIAN_AO_CONFIG="$AO_CONFIG" bash "$REPO_ROOT/scripts/cleanup_xcode.sh" --clean 2>&1)"
@@ -158,6 +170,14 @@ out="$(env DISK_MAGICIAN_AO_CONFIG="$AO_CONFIG" bash "$REPO_ROOT/scripts/cleanup
 [[ -f "$HOME/dd_notdd/notes.txt" ]] && ok "non-DerivedData dir kept" || bad "non-DerivedData dir removed"
 [[ ! -e "$WT/custom-output" ]] && ok "old nonstandard shaped worktree child removed" || bad "old nonstandard shaped worktree child kept"
 [[ ! -e "$HIDDEN_WT/.dd" ]] && ok "old .dd child in hidden linked-worktree layout removed" || bad "old .dd child in hidden linked-worktree layout kept"
+[[ -f "$HIDDEN_WT/tracked-clean/Build/tracked.o" && "$(cat "$HIDDEN_WT/tracked-clean/Build/tracked.o")" == "tracked clean" ]] \
+    && ok "clean tracked file under shaped worktree child preserved" || bad "clean tracked file under shaped worktree child lost"
+[[ "$out" == *"C14 kept: $HIDDEN_WT/tracked-clean (kept:git-tracked)"* ]] \
+    && ok "C14 explicitly kept clean tracked shaped child" || bad "C14 did not report clean tracked child preservation: $out"
+[[ -f "$HIDDEN_WT/tracked-output/Build/tracked.o" && "$(cat "$HIDDEN_WT/tracked-output/Build/tracked.o")" == "modified tracked object" ]] \
+    && ok "dirty tracked file under shaped worktree child preserved" || bad "dirty tracked file under shaped worktree child lost"
+[[ "$out" == *"C14 kept: $HIDDEN_WT/tracked-output (kept:git-tracked)"* ]] \
+    && ok "C14 explicitly kept dirty tracked shaped child" || bad "C14 did not report dirty tracked child preservation: $out"
 [[ -d "$AO_WT/custom-ao-output" ]] && ok "old shaped child in AO-owned worktree kept" || bad "AO-owned worktree child removed: $out"
 [[ "$out" == *"AO-SKIP $AO_WT/custom-ao-output (ao-owned)"* ]] && ok "AO-owned worktree skip reason logged" || bad "AO-owned worktree skip reason missing: $out"
 [[ -d "$WT/fresh-cache" ]] && ok "young shaped worktree child kept" || bad "young shaped worktree child removed"

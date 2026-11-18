@@ -124,6 +124,47 @@ _av_xcode_device_support() (
   _av_rebuildable "$p" >/dev/null
 )
 
+# _xcode_git_tracked_reason <path>: print `kept:git-tracked` or `kept:check-failed`
+# (and return 0) when <path> is inside a git repository and holds tracked files
+# (clean or dirty) or the git lookup fails closed; return 1 otherwise.
+_xcode_git_tracked_reason() (
+  local p="${1:-}" inside top tracked
+  [[ -n "$p" && -d "$p" && ! -L "$p" ]] || return 1
+  if ! command -v git >/dev/null 2>&1; then
+    local cur="$p"
+    while [[ -n "$cur" ]]; do
+      [[ -e "$cur/.git" ]] && { echo kept:check-failed; return 0; }
+      [[ "$cur" == / ]] && break
+      cur="${cur%/*}"
+      [[ -n "$cur" ]] || cur=/
+    done
+    return 1
+  fi
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+  export GIT_OPTIONAL_LOCKS=0 LC_ALL=C
+  if ! inside="$(git -C "$p" rev-parse --is-inside-work-tree 2>&1)"; then
+    case "$inside" in
+      *"not a git repository"*) return 1 ;;
+      *) echo kept:check-failed; return 0 ;;
+    esac
+  fi
+  if [[ "$inside" != true ]]; then
+    if [[ "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then
+      echo kept:git-tracked
+      return 0
+    fi
+    return 1
+  fi
+  top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || { echo kept:check-failed; return 0; }
+  [[ -n "$top" ]] || { echo kept:check-failed; return 0; }
+  tracked="$(git --literal-pathspecs -C "$p" ls-files -- . 2>/dev/null)" || { echo kept:check-failed; return 0; }
+  if [[ -n "$tracked" ]]; then
+    echo kept:git-tracked
+    return 0
+  fi
+  return 1
+)
+
 artifact_removal_verdict() {
   [[ "${1:-}" == --self-test ]] && { _av_self_test; return 0; }
   local tmpdir inv result reason admin_inv secret_kind="" a prev=""
@@ -145,6 +186,10 @@ artifact_removal_verdict() {
   inv="$tmpdir/inventory.json"
   admin_inv="$tmpdir/admin.jsonl"
   result="$(GIT_OPTIONAL_LOCKS=0 C14_SECRET_KIND="$secret_kind" C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" _av_artifact_removal_verdict "${args[@]+"${args[@]}"}")"
+  local git_reason
+  if [[ "$result" == remove ]] && git_reason="$(_xcode_git_tracked_reason "${1:-}")"; then
+    result="$git_reason"
+  fi
   if [[ ( "$result" == kept:* || "$result" == deferred:* ) && -f "$inv" && -n "${DISK_MAGICIAN_C14_LEDGER:-}" ]]; then
     reason=${result#*:}
     python3 "$_AV_DIR/../c14_probe.py" account "$inv" "$DISK_MAGICIAN_C14_LEDGER" "$reason" >/dev/null 2>&1 || true
@@ -203,7 +248,7 @@ clear_contents() {
 CUSTOM_DD_IDLE_MINUTES="$(safety_disposable_recency_floor_minutes)"
 
 process_custom_derived_data_candidate() {
-  local cand="$1" target wt_root wt_dir repo_dir before_kb _safety_reason ao_reason
+  local cand="$1" target wt_root wt_dir repo_dir before_kb _safety_reason ao_reason _git_reason
   [[ -d "$cand" && ! -L "$cand" ]] || return 0
   # Every component from the real worktree root through the candidate must be a
   # directory, not a symlink. find below never follows links during discovery.
@@ -248,7 +293,11 @@ process_custom_derived_data_candidate() {
   fi
   before_kb=$(size_kb "$target")
   if [[ "$DRY_RUN" == true ]]; then
-    log "Custom Xcode DerivedData: [dry-run] would remove $target ($(fmt_kb "$before_kb"))"
+    if _git_reason="$(_xcode_git_tracked_reason "$target")"; then
+      log "Custom Xcode DerivedData: keeping $target ($_git_reason)"
+    else
+      log "Custom Xcode DerivedData: [dry-run] would remove $target ($(fmt_kb "$before_kb"))"
+    fi
   else
     log "Custom Xcode DerivedData: removing $target ($(fmt_kb "$before_kb"))"
     c14_remove "$target" --kind xcode-derived-data || true
