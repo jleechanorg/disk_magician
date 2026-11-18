@@ -528,7 +528,7 @@ rm -rf "${STATE8:?}/codex_db_leases/${DB8_ID:?}.lease" "${M1_BIN:?}"
 echo "Test 9: Conservative active-open-client policy (dedicated real reader/writer and uncertain scan)"
 DB9="$TMP_DIR/test9_open.sqlite"
 create_test_db "$DB9" 100 50 2
-DB9_INODE_BEFORE=$(stat -f '%i' "$DB9" 2>/dev/null || stat -c '%i' "$DB9")
+DB9_INODE_BEFORE=$(stat -c '%i' "$DB9" 2>/dev/null || stat -f '%i' "$DB9")
 
 # Case 9A: Dedicated REAL active reader held until release signal
 READY9_R="$TMP_DIR/ready9_reader"
@@ -611,7 +611,7 @@ wait "$WRITER_PID9" 2>/dev/null || true
 expect "real active writer detected and DB skipped" "Active open client" "$OUT9_WRITER"
 expect_eq "real active writer exited non-zero" "1" "$RC9_WRITER"
 
-DB9_INODE_AFTER=$(stat -f '%i' "$DB9" 2>/dev/null || stat -c '%i' "$DB9")
+DB9_INODE_AFTER=$(stat -c '%i' "$DB9" 2>/dev/null || stat -f '%i' "$DB9")
 expect_eq "DB inode unchanged after open client skip" "$DB9_INODE_BEFORE" "$DB9_INODE_AFTER"
 
 # Case 9C: Uncertain lsof scan: rc1 with stderr warning fails closed
@@ -720,6 +720,83 @@ if [[ "$OUT9_TRACEFS" == *"lsof inspection warning/error"* ]]; then
   echo "  FAIL: tracefs-only warning became the failure reason"
   TEST_FAILURES=$((TEST_FAILURES+1))
 fi
+# Case 9I: Unrelated disjoint mount warning (e.g. Docker overlay/nsfs mount) must NOT
+# fail closed; DB is vacuumed cleanly (rc=0) without "lsof inspection warning/error".
+DB9I_DIR="$TMP_DIR/db9i_dir"
+DISJOINT_MOUNT_9I="$TMP_DIR/unrelated_overlay_mount"
+mkdir -p "$DB9I_DIR" "$DISJOINT_MOUNT_9I"
+DB9I="$DB9I_DIR/test9i.sqlite"
+create_test_db "$DB9I" 100 50 2
+cat > "$MOCK_LSOF/lsof" <<SHIM
+#!/bin/bash
+printf "lsof: WARNING: can't stat() overlay file system %s\n      Output information may be incomplete.\n" "$DISJOINT_MOUNT_9I" >&2
+exit 1
+SHIM
+chmod +x "$MOCK_LSOF/lsof"
+
+set +e
+OUT9I=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF/lsof" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state9i" "$SCRIPT" --clean --codex-dir "$DB9I_DIR" --db "$DB9I" 2>&1)
+RC9I=$?
+set -e
+
+expect "Case 9I: unrelated mount warning recognized as benign" "unrelated mount stat warning(s)" "$OUT9I"
+expect_not "Case 9I: unrelated mount warning does not fail closed" "lsof inspection warning/error" "$OUT9I"
+expect "Case 9I: DB vacuumed cleanly after unrelated mount warning" "Codex DB vacuum complete" "$OUT9I"
+expect_eq "Case 9I: cleanup exits 0" "0" "$RC9I"
+expect_eq "Case 9I: freelist dropped to 0" "0" "$("$REAL_SQLITE3" "$DB9I" "PRAGMA freelist_count;")"
+
+# Case 9J: Overlapping mount warning (target dir / ancestor / root) MUST fail closed.
+DB9J_DIR="$TMP_DIR/db9j_dir"
+mkdir -p "$DB9J_DIR"
+DB9J="$DB9J_DIR/test9j.sqlite"
+create_test_db "$DB9J" 100 50 2
+cat > "$MOCK_LSOF/lsof" <<SHIM
+#!/bin/bash
+printf "lsof: WARNING: can't stat() overlay file system %s\n      Output information may be incomplete.\n" "$DB9J_DIR" >&2
+exit 1
+SHIM
+chmod +x "$MOCK_LSOF/lsof"
+
+set +e
+OUT9J=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF/lsof" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state9j" "$SCRIPT" --clean --codex-dir "$DB9J_DIR" --db "$DB9J" 2>&1)
+RC9J=$?
+set -e
+
+expect "Case 9J: overlapping mount warning fails closed" "lsof inspection warning/error" "$OUT9J"
+expect_eq "Case 9J: overlapping mount warning exits 1" "1" "$RC9J"
+expect_not "Case 9J: overlapping mount warning does not vacuum" "Codex DB vacuum complete" "$OUT9J"
+
+cat > "$MOCK_LSOF/lsof" <<'SHIM'
+#!/bin/bash
+printf "lsof: WARNING: can't stat() overlay file system /\n      Output information may be incomplete.\n" >&2
+exit 1
+SHIM
+chmod +x "$MOCK_LSOF/lsof"
+
+set +e
+OUT9J_ROOT=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF/lsof" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state9j_root" "$SCRIPT" --clean --codex-dir "$DB9J_DIR" --db "$DB9J" 2>&1)
+RC9J_ROOT=$?
+set -e
+
+expect "Case 9J (root): root mount warning fails closed" "lsof inspection warning/error" "$OUT9J_ROOT"
+expect_eq "Case 9J (root): root mount warning exits 1" "1" "$RC9J_ROOT"
+
+# Case 9K: NUL byte in lsof stderr MUST fail closed before Bash captures stderr.
+cat > "$MOCK_LSOF/lsof" <<'SHIM'
+#!/bin/bash
+printf '\0' >&2
+exit 1
+SHIM
+chmod +x "$MOCK_LSOF/lsof"
+
+set +e
+OUT9K=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_LSOF/lsof" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state9k" "$SCRIPT" --clean --codex-dir "$DB9J_DIR" --db "$DB9J" 2>&1)
+RC9K=$?
+set -e
+
+expect "Case 9K: NUL byte in lsof stderr fails closed" "lsof inspection warning/error" "$OUT9K"
+expect_eq "Case 9K: NUL byte in lsof stderr exits 1" "1" "$RC9K"
+
 rm -rf "$MOCK_LSOF" "$WRAP_LSOF_READER" "$WRAP_LSOF_WRITER"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -728,7 +805,7 @@ rm -rf "$MOCK_LSOF" "$WRAP_LSOF_READER" "$WRAP_LSOF_WRITER"
 echo "Test 10: REAL exit-0 wal_checkpoint busy row handled as non-success"
 DB10="$TMP_DIR/test10_busy_checkpoint.sqlite"
 create_test_db "$DB10" 200 100 2
-DB10_INODE_BEFORE=$(stat -f '%i' "$DB10" 2>/dev/null || stat -c '%i' "$DB10")
+DB10_INODE_BEFORE=$(stat -c '%i' "$DB10" 2>/dev/null || stat -f '%i' "$DB10")
 ROWS_BEFORE=$("$REAL_SQLITE3" "$DB10" "SELECT count(*) FROM t;")
 
 SHIM_BIN="$TMP_DIR/shim_bin"
@@ -781,7 +858,7 @@ OUT10=$(PATH="$SHIM_BIN:$PATH" DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MA
 RC10=$?
 set -e
 
-DB10_INODE_AFTER=$(stat -f '%i' "$DB10" 2>/dev/null || stat -c '%i' "$DB10")
+DB10_INODE_AFTER=$(stat -c '%i' "$DB10" 2>/dev/null || stat -f '%i' "$DB10")
 ROWS_AFTER=$("$REAL_SQLITE3" "$DB10" "SELECT count(*) FROM t WHERE payload != 'busy_test';")
 INTEG10=$("$REAL_SQLITE3" "$DB10" "PRAGMA integrity_check;")
 
@@ -1031,11 +1108,11 @@ rm -rf "$WRAP_BIN"
 echo "Test 14: Clean execution verifies freelist drop, WAL truncation, and data integrity"
 DB14="$TMP_DIR/test14_clean_verified.sqlite"
 create_test_db "$DB14" 150 75 2
-DB14_INODE_BEFORE=$(stat -f '%i' "$DB14" 2>/dev/null || stat -c '%i' "$DB14")
+DB14_INODE_BEFORE=$(stat -c '%i' "$DB14" 2>/dev/null || stat -f '%i' "$DB14")
 ROWS14_BEFORE=$("$REAL_SQLITE3" "$DB14" "SELECT count(*) FROM t;")
 
 OUT14=$(DISK_MAGICIAN_LSOF_BIN="$MOCK_CLEAN_LSOF" DISK_MAGICIAN_STATE_DIR="$TMP_DIR/state14" "$SCRIPT" --clean --db "$DB14" 2>&1)
-DB14_INODE_AFTER=$(stat -f '%i' "$DB14" 2>/dev/null || stat -c '%i' "$DB14")
+DB14_INODE_AFTER=$(stat -c '%i' "$DB14" 2>/dev/null || stat -f '%i' "$DB14")
 ROWS14_AFTER=$("$REAL_SQLITE3" "$DB14" "SELECT count(*) FROM t;")
 INTEG14=$("$REAL_SQLITE3" "$DB14" "PRAGMA integrity_check;")
 FL14_AFTER=$("$REAL_SQLITE3" "$DB14" "PRAGMA freelist_count;")
@@ -1259,7 +1336,7 @@ create_test_db "$DB18" 100 50 2
 WAL18="${DB18}-wal"
 touch "$WAL18"
 
-DB18_INODE_BEFORE=$(stat -f '%i' "$DB18" 2>/dev/null || stat -c '%i' "$DB18")
+DB18_INODE_BEFORE=$(stat -c '%i' "$DB18" 2>/dev/null || stat -f '%i' "$DB18")
 DB18_ROWS_BEFORE=$("$REAL_SQLITE3" "$DB18" "SELECT count(*) FROM t;")
 STATE18="$TMP_DIR/state18"
 mkdir -p "$STATE18/codex_db_leases"
@@ -1306,7 +1383,7 @@ expect "logged WAL read failure or incomplete maintenance" "Maintenance incomple
 
 # Verify DB file, data, inode, integrity intact
 expect_eq "DB file still exists" "1" "$([[ -f "$DB18" ]] && echo 1 || echo 0)"
-DB18_INODE_AFTER=$(stat -f '%i' "$DB18" 2>/dev/null || stat -c '%i' "$DB18")
+DB18_INODE_AFTER=$(stat -c '%i' "$DB18" 2>/dev/null || stat -f '%i' "$DB18")
 expect_eq "DB inode preserved" "$DB18_INODE_BEFORE" "$DB18_INODE_AFTER"
 DB18_ROWS_AFTER=$("$REAL_SQLITE3" "$DB18" "SELECT count(*) FROM t;")
 expect_eq "DB row count preserved" "$DB18_ROWS_BEFORE" "$DB18_ROWS_AFTER"
