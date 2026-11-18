@@ -707,7 +707,12 @@ except OSError:
 PYREGISTRYMKDIR
 }
 _lease_reuse_lock_acquire() {
-    local lease="$1" lock="$1.reuse-lock" attempt identity slot stamp mkdir_rc
+    local lease="$1" lock="$1.reuse-lock" attempt identity slot stamp mkdir_rc metadata_ok=1
+    [[ -z "$_lease_scope_signals" ]] || return 1
+    # Prepare the timestamp before publishing the directory. An interrupted
+    # process must leave the owner metadata visible before the identity probe.
+    stamp="$(date +%s 2>/dev/null)" || stamp=""
+    [[ "$stamp" =~ ^[0-9]+$ ]] || return 1
     [[ -z "$_lease_scope_signals" ]] || return 1
     for attempt in 0 1; do
         if [[ "${_lease_registry_wait_path:-}" == "$lock" ]]; then
@@ -719,30 +724,14 @@ _lease_reuse_lock_acquire() {
         [[ -z "$_lease_scope_signals" && "$attempt" == 0 ]] || return 1
         lease_reuse_lock_recover "$lease" || return 1
     done
-    identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(str(s.st_dev)+":"+str(s.st_ino))' "$lock")" || { rmdir "$lock" 2>/dev/null || true; return 1; }
+    if ! printf '%s\n' "$_lease_scope_pid" > "$lock/pid" 2>/dev/null; then metadata_ok=0; fi
+    if ! printf '%s\n' "$stamp" > "$lock/acquired_at" 2>/dev/null; then metadata_ok=0; fi
+    identity="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(str(s.st_dev)+":"+str(s.st_ino))' "$lock")" || return 1
     slot=${#_lease_scope_paths[@]}
-    _lease_scope_paths[slot]="$lease"; _lease_scope_ids[slot]="$identity"; _lease_scope_stamps[slot]=""; _lease_scope_complete[slot]=0
-    if [[ -n "$_lease_scope_signals" ]] || ! printf '%s\n' "$_lease_scope_pid" > "$lock/pid" 2>/dev/null; then
-        rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true
-        rmdir "$lock" 2>/dev/null || true
-        _lease_scope_paths[slot]=""
-        return 1
-    fi
-    stamp="$(date +%s 2>/dev/null)" || stamp=""
-    if [[ ! "$stamp" =~ ^[0-9]+$ || -n "$_lease_scope_signals" ]] || ! printf '%s\n' "$stamp" > "$lock/acquired_at" 2>/dev/null; then
-        rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true
-        rmdir "$lock" 2>/dev/null || true
-        _lease_scope_paths[slot]=""
-        return 1
-    fi
-    _lease_scope_stamps[slot]="$stamp"
+    _lease_scope_paths[slot]="$lease"; _lease_scope_ids[slot]="$identity"; _lease_scope_stamps[slot]="$stamp"; _lease_scope_complete[slot]=0
+    (( metadata_ok )) || return 1
+    [[ -z "$_lease_scope_signals" ]] || return 1
     _lease_scope_complete[slot]=1
-    if [[ -n "$_lease_scope_signals" ]]; then
-        rm -f "$lock/pid" "$lock/acquired_at" 2>/dev/null || true
-        rmdir "$lock" 2>/dev/null || true
-        _lease_scope_paths[slot]=""
-        return 1
-    fi
 }
 lease_reuse_lock_release() {
     local i
