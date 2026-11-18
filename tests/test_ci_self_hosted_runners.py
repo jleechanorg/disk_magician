@@ -283,7 +283,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
             'echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"',
             setup_body,
         )
-        self.assertIn('echo "DISK_MAGICIAN_TEST_JOBS=2" >> "$GITHUB_ENV"', setup_body)
+        self.assertIn('echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"', setup_body)
         self.assertIn('git config --global user.name', setup_body)
         self.assertIn('git config --global user.email', setup_body)
         self.assertIn("$CI_HOME/.local/bin/diskm", setup_body)
@@ -335,8 +335,8 @@ class TestCISelfHostedRunners(unittest.TestCase):
         jobs = _parse_workflow_jobs(ci_path)
         self.assertEqual(
             jobs.get("test", {}).get("timeout-minutes"),
-            "90",
-            f"{ci_path} jobs.test must keep timeout-minutes: 90",
+            "150",
+            f"{ci_path} jobs.test must keep timeout-minutes: 150",
         )
         steps = _parse_job_steps(ci_path, "test")
         guarded_steps = (

@@ -28,9 +28,11 @@ FAKE_WORKER = textwrap.dedent('''\
     env > "$d/env.$key"
     touch "$d/running.$key"
     echo "$(ls "$d"/running.* | wc -l)" >> "$d/concurrency.log"
-    spec=$(python3 -c "import json,sys; print(json.load(open('$d/spec.json')).get('$key', {}).get('mode','ok'))")
-    secs=$(python3 -c "import json; print(json.load(open('$d/spec.json')).get('$key', {}).get('sleep', 0))")
-    kb=$(python3 -c "import json; print(json.load(open('$d/spec.json')).get('$key', {}).get('kb', 100))")
+    if command -v jq >/dev/null 2>&1; then
+      IFS=$'\\t' read -r spec secs kb < <(jq -r --arg k "$key" '.[$k] // {} | [(.mode // "ok"), (.sleep // 0), (.kb // 100)] | @tsv' "$d/spec.json")
+    else
+      IFS=$'\\t' read -r spec secs kb < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])).get(sys.argv[2],{}); print("{}\\t{}\\t{}".format(d.get("mode","ok"), d.get("sleep",0), d.get("kb",100)))' "$d/spec.json" "$key")
+    fi
     if [[ "$spec" == "children" ]]; then
       timeout 120 sleep 120 & echo $! >> "$d/pids"
       ( sleep 120 & echo $! >> "$d/pids"; wait ) &

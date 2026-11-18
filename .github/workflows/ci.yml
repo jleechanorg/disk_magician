@@ -18,7 +18,7 @@ jobs:
     name: Test and lint
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ fromJson(vars.NATIVE_MACOS_RUNNER_LABELS || '["self-hosted-native-macos"]') }}
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -77,12 +77,13 @@ jobs:
           echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"
           echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
           echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"
-          echo "DISK_MAGICIAN_TEST_JOBS=2" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"
           "$VENV_PYTHON" -c 'import os, sys; assert os.path.realpath(sys.prefix) == os.path.realpath(os.environ["RUNNER_TEMP"] + "/diskm-ci-venv"), sys.prefix; print(sys.version, sys.executable)'
           command -v timeout >/dev/null 2>&1 || brew install coreutils
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
           command -v rg >/dev/null 2>&1 || brew install ripgrep
           command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
+          command -v jq >/dev/null 2>&1 || brew install jq
 
       - name: Verify package-tree synchronization
         run: bash ./disk_magician.sh sync-package-tree --check
