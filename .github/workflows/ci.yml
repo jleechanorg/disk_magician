@@ -14,28 +14,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test and lint
-    runs-on: macos-15
-    timeout-minutes: 90
+  linux-lint:
+    name: Linux lint and sync checks
+    runs-on: [self-hosted, self-hosted-mikey]
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.13"
-
-      - name: Install test tools
+      - name: Ensure shellcheck is installed
         run: |
-          python3 -m pip install pytest
-          command -v timeout >/dev/null 2>&1 || brew install coreutils
-          command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
-          command -v rg >/dev/null 2>&1 || brew install ripgrep
-          command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            if command -v sudo >/dev/null 2>&1; then
+              sudo apt-get update && sudo apt-get install -y shellcheck
+            else
+              apt-get update && apt-get install -y shellcheck
+            fi
+          fi
 
       - name: Verify package-tree synchronization
         run: bash ./disk_magician.sh sync-package-tree --check
@@ -45,14 +43,55 @@ jobs:
 
       - name: Check shell syntax and ShellCheck errors
         run: |
-          while IFS= read -r -d '' candidate; do
+          JOBS="$(nproc 2>/dev/null || echo 4)"
+          find disk_magician.sh install.sh scripts tests -type f -print0 | xargs -0 -n 1 -P "$JOBS" bash -c '
+            set -euo pipefail
+            candidate="$1"
             case "$(head -n 1 "$candidate")" in
               *bash|*sh)
                 /bin/bash -n "$candidate"
                 shellcheck --severity=error --external-sources "$candidate"
                 ;;
             esac
-          done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
+          ' _
+
+  test:
+    name: Test and lint
+    needs: [linux-lint]
+    runs-on: ${{ fromJson(vars.NATIVE_MACOS_RUNNER_LABELS || '["self-hosted-native-macos"]') }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up isolated Python 3.13 venv and verify tools
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          PY_BIN="$(command -v python3.13 || command -v python3.12 || command -v python3)"
+          VENV_DIR="${RUNNER_TEMP}/diskm-ci-venv"
+          if command -v uv >/dev/null 2>&1; then
+            uv venv --clear "$VENV_DIR" --python "$PY_BIN"
+            uv pip install --python "$VENV_DIR/bin/python" pytest
+          else
+            "$PY_BIN" -m venv --clear "$VENV_DIR"
+            "$VENV_DIR/bin/pip" install -q pytest
+          fi
+          echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          for tool in timeout shellcheck rg gitleaks; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              case "$tool" in
+                timeout) brew install coreutils ;;
+                rg) brew install ripgrep ;;
+                *) brew install "$tool" ;;
+              esac
+            fi
+          done
 
       - name: Run Python tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -68,3 +107,10 @@ jobs:
 
       - name: Run shell tests
         run: bash ./disk_magician.sh test-shell
+
+      - name: Clean up isolated CI venv
+        if: always()
+        run: |
+          if [ -n "${RUNNER_TEMP:-}" ] && [ -d "${RUNNER_TEMP}/diskm-ci-venv" ]; then
+            rm -rf "${RUNNER_TEMP}/diskm-ci-venv"
+          fi
