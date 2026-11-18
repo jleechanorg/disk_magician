@@ -28,10 +28,19 @@ jobs:
       - name: Ensure shellcheck is installed
         run: |
           if ! command -v shellcheck >/dev/null 2>&1; then
-            if command -v sudo >/dev/null 2>&1; then
-              sudo apt-get update && sudo apt-get install -y shellcheck
+            SC_BIN="${RUNNER_TEMP}/sc-bin"
+            SC_VER="v0.10.0"
+            SC_ARCH="$(uname -m)"
+            SC_URL="https://github.com/koalaman/shellcheck/releases/download/${SC_VER}/shellcheck-${SC_VER}.linux.${SC_ARCH}.tar.xz"
+            mkdir -p "$SC_BIN"
+            if command -v curl >/dev/null 2>&1 && command -v xz >/dev/null 2>&1 \
+              && curl -fsSL "$SC_URL" | tar -xJf - -C "$SC_BIN" --strip-components=1 "shellcheck-${SC_VER}/shellcheck"; then
+              chmod +x "$SC_BIN/shellcheck"
+              echo "$SC_BIN" >> "$GITHUB_PATH"
             else
-              apt-get update && apt-get install -y shellcheck
+              python3 -m venv "${RUNNER_TEMP}/sc-venv"
+              "${RUNNER_TEMP}/sc-venv/bin/pip" install -q shellcheck-py
+              echo "${RUNNER_TEMP}/sc-venv/bin" >> "$GITHUB_PATH"
             fi
           fi
 

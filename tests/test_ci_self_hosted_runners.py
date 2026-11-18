@@ -84,6 +84,11 @@ class TestCISelfHostedRunners(unittest.TestCase):
                     pattern.search(text),
                     f"{path} still references GitHub-hosted runner {runner!r}",
                 )
+            self.assertNotIn(
+                "sudo ",
+                text,
+                f"{path} must not use sudo (ezgha containers enforce no-new-privileges)",
+            )
 
     def test_ci_test_and_lint_targets_native_macos(self) -> None:
         ci_path = WORKFLOWS_DIR / "ci.yml"
