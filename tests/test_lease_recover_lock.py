@@ -544,13 +544,12 @@ case "$mode" in
   term)
     trap 'builtin printf "TERM delivered\n" > "$LEASE_TEST_TRAP_MARK"; exit 42' TERM
     LEASE_TEST_TARGET_PID="$$"
-    date() {
-      if [[ "${1:-}" == "+%s" ]]; then
-        builtin printf '1793220000\n'
-        kill -TERM "$LEASE_TEST_TARGET_PID"
-        return 0
-      fi
-      command date "$@"
+    LEASE_TEST_PRINTF_COUNT=0
+    printf() {
+      local printf_count="$LEASE_TEST_PRINTF_COUNT"
+      LEASE_TEST_PRINTF_COUNT=$((LEASE_TEST_PRINTF_COUNT + 1))
+      builtin printf "$@" || return $?
+      if [[ "$printf_count" == 1 ]]; then kill -TERM "$LEASE_TEST_TARGET_PID"; fi
     }
     lease_reuse_lock_acquire "$lease"
     exit 99
@@ -558,14 +557,15 @@ case "$mode" in
   term-return-retry)
     trap 'builtin printf "TERM handled\n" >> "$LEASE_TEST_TRAP_MARK"' TERM
     LEASE_TEST_TARGET_PID="$$"
-    date() {
-      if [[ "${1:-}" == "+%s" && ! -e "$LEASE_TEST_DATE_SENT" ]]; then
+    LEASE_TEST_PRINTF_COUNT=0
+    printf() {
+      local printf_count="$LEASE_TEST_PRINTF_COUNT"
+      LEASE_TEST_PRINTF_COUNT=$((LEASE_TEST_PRINTF_COUNT + 1))
+      builtin printf "$@" || return $?
+      if [[ "$printf_count" == 1 ]]; then
         : > "$LEASE_TEST_DATE_SENT"
-        builtin printf '1793220000\n'
         kill -TERM "$LEASE_TEST_TARGET_PID"
-        return 0
       fi
-      command date "$@"
     }
     if lease_reuse_lock_acquire "$lease"; then first_rc=0; else first_rc=$?; fi
     if lease_reuse_lock_acquire "$lease"; then second_rc=0; else second_rc=$?; fi
@@ -598,6 +598,75 @@ esac
     assert write_error.returncode == 0, (write_error.stdout, write_error.stderr)
     assert not Path(str(writer_lease) + ".reuse-lock").exists()
     print("PASS: acquired_at write failure removes only the newly acquired lock")
+
+    if __import__("sys").platform.startswith("linux"):
+        # Hold the post-mkdir inode probe so a killed acquirer exercises whether
+        # owner metadata is published before the identity probe can finish.
+        probe_bin = Path(temp) / "probe-bin"
+        probe_bin.mkdir()
+        probe_wrapper = probe_bin / "python3"
+        probe_wrapper.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-c" && "${2:-}" == *"os.lstat(sys.argv[1])"* ]]; then
+  : > "$LEASE_TEST_PROBE_READY"
+  while [[ ! -e "$LEASE_TEST_PROBE_GO" ]]; do sleep 0.01; done
+  : > "$LEASE_TEST_PROBE_DONE"
+fi
+"$LEASE_TEST_REAL_PYTHON" "$@"
+''')
+        probe_wrapper.chmod(0o755)
+        probe_state = Path(temp) / "probe-state"
+        probe_lease_dir = probe_state / "worktree_leases"
+        probe_lease_dir.mkdir(parents=True)
+        probe_lease = probe_lease_dir / "fixture.json"
+        probe_lock = Path(str(probe_lease) + ".reuse-lock")
+        probe_ready = Path(temp) / "probe-ready"
+        probe_go = Path(temp) / "probe-go"
+        probe_done = Path(temp) / "probe-done"
+        real_python = shutil.which("python3")
+        assert real_python
+        probe_env = {
+            **writer_env,
+            "PATH": f"{probe_bin}:{os.environ['PATH']}",
+            "LEASE_TEST_PROBE_READY": str(probe_ready),
+            "LEASE_TEST_PROBE_GO": str(probe_go),
+            "LEASE_TEST_PROBE_DONE": str(probe_done),
+            "LEASE_TEST_REAL_PYTHON": real_python,
+        }
+        acquirer = subprocess.Popen(
+            ["bash", "-c", 'source "$1"; lease_reuse_lock_acquire "$2"',
+             "bash", str(ROOT / "scripts/lib/worktree_lease.sh"), str(probe_lease)],
+            env=probe_env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not probe_ready.exists():
+            time.sleep(0.01)
+        assert probe_ready.exists(), "Python lstat identity probe did not reach its block"
+        assert probe_lock.is_dir() and {p.name for p in probe_lock.iterdir()} == {"pid", "acquired_at"}
+        published_pid = (probe_lock / "pid").read_text().strip()
+        published_stamp = (probe_lock / "acquired_at").read_text().strip()
+        assert published_pid == str(acquirer.pid) and published_stamp.isdigit()
+        acquirer.kill()
+        acquirer.wait(timeout=5)
+        probe_go.touch()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not probe_done.exists():
+            time.sleep(0.01)
+        assert probe_done.exists(), "blocked Python identity probe did not finish after release"
+        assert probe_lock.is_dir() and {p.name for p in probe_lock.iterdir()} == {"pid", "acquired_at"}
+        assert (probe_lock / "pid").read_text().strip() == published_pid
+        assert (probe_lock / "acquired_at").read_text().strip() == published_stamp
+        retry = subprocess.run(
+            ["bash", "-c", 'source "$1"; lease_reuse_lock_acquire "$2" && lease_reuse_lock_release "$2"',
+             "bash", str(ROOT / "scripts/lib/worktree_lease.sh"), str(probe_lease)],
+            env=writer_env, text=True, capture_output=True, check=False,
+        )
+        assert retry.returncode == 0, (
+            f"lock left by killed acquirer blocked reacquisition under default TTL "
+            f"(rc={retry.returncode}, stdout={retry.stdout!r}, stderr={retry.stderr!r})"
+        )
+        assert not probe_lock.exists()
+        print("PASS: SIGKILL during blocked identity probe leaves recoverable metadata for immediate reacquisition")
 
     interrupted_env = {**writer_env, "LEASE_TEST_TRAP_MARK": str(writer_mark)}
     interrupted = subprocess.run(
