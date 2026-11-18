@@ -74,10 +74,10 @@ jobs:
           VENV_DIR="${RUNNER_TEMP}/diskm-ci-venv"
           if command -v uv >/dev/null 2>&1; then
             uv venv --clear "$VENV_DIR" --python "$PY_BIN"
-            uv pip install --python "$VENV_DIR/bin/python" pytest
+            uv pip install --python "$VENV_DIR/bin/python" pytest "PyYAML>=6.0"
           else
             "$PY_BIN" -m venv --clear "$VENV_DIR"
-            "$VENV_DIR/bin/pip" install -q pytest
+            "$VENV_DIR/bin/pip" install -q pytest "PyYAML>=6.0"
           fi
           echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
