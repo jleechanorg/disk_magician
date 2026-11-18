@@ -33,10 +33,10 @@ jobs:
           VENV_DIR="${RUNNER_TEMP}/diskm-ci-venv"
           if command -v uv >/dev/null 2>&1; then
             uv venv --seed --clear "$VENV_DIR" --python "$PY_BIN"
-            uv pip install --python "$VENV_DIR/bin/python" pytest pytest-xdist "PyYAML>=6.0"
+            uv pip install --python "$VENV_DIR/bin/python" pytest "PyYAML>=6.0"
           else
             "$PY_BIN" -m venv --clear "$VENV_DIR"
-            "$VENV_DIR/bin/pip" install -q pytest pytest-xdist "PyYAML>=6.0"
+            "$VENV_DIR/bin/pip" install -q pytest "PyYAML>=6.0"
           fi
           VENV_PYTHON="${VENV_DIR}/bin/python"
           CI_HOME="${RUNNER_TEMP}/ci-home"
@@ -77,7 +77,7 @@ jobs:
           echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"
           echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
           echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"
-          echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_TEST_JOBS=2" >> "$GITHUB_ENV"
           "$VENV_PYTHON" -c 'import os, sys; assert os.path.realpath(sys.prefix) == os.path.realpath(os.environ["RUNNER_TEMP"] + "/diskm-ci-venv"), sys.prefix; print(sys.version, sys.executable)'
           command -v timeout >/dev/null 2>&1 || brew install coreutils
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
@@ -114,13 +114,12 @@ jobs:
         env:
           HOME: ${{ env.CI_HOME }}
         run: |
+          unset BASH_ENV
           if [ -x /usr/bin/caffeinate ]; then
-            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -n 4 -q tests --ignore=tests/test_lease_recover_lock.py --ignore=tests/test_lease_outer_callers.py --ignore=tests/test_volume.py --ignore=tests/test_cli_reliability.py --ignore=tests/test_worktree_hygiene.py --ignore=tests/test_package_dependency.py --ignore=tests/test_review_governor_edges.py --ignore=tests/test_reclaim_scheduler_coverage.py --ignore=tests/test_snapshot_measure_parallel.py --ignore=tests/test_job_inventory.py
-            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -q tests/test_lease_outer_callers.py tests/test_volume.py tests/test_cli_reliability.py tests/test_worktree_hygiene.py tests/test_package_dependency.py tests/test_review_governor_edges.py tests/test_reclaim_scheduler_coverage.py tests/test_snapshot_measure_parallel.py tests/test_job_inventory.py
+            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -q tests --ignore=tests/test_lease_recover_lock.py
             /usr/bin/caffeinate -i "$VENV_PYTHON" tests/test_lease_recover_lock.py
           else
-            "$VENV_PYTHON" -m pytest -n 4 -q tests --ignore=tests/test_lease_recover_lock.py --ignore=tests/test_lease_outer_callers.py --ignore=tests/test_volume.py --ignore=tests/test_cli_reliability.py --ignore=tests/test_worktree_hygiene.py --ignore=tests/test_package_dependency.py --ignore=tests/test_review_governor_edges.py --ignore=tests/test_reclaim_scheduler_coverage.py --ignore=tests/test_snapshot_measure_parallel.py --ignore=tests/test_job_inventory.py
-            "$VENV_PYTHON" -m pytest -q tests/test_lease_outer_callers.py tests/test_volume.py tests/test_cli_reliability.py tests/test_worktree_hygiene.py tests/test_package_dependency.py tests/test_review_governor_edges.py tests/test_reclaim_scheduler_coverage.py tests/test_snapshot_measure_parallel.py tests/test_job_inventory.py
+            "$VENV_PYTHON" -m pytest -q tests --ignore=tests/test_lease_recover_lock.py
             "$VENV_PYTHON" tests/test_lease_recover_lock.py
           fi
 
@@ -128,6 +127,7 @@ jobs:
         env:
           HOME: ${{ env.CI_HOME }}
         run: |
+          unset BASH_ENV
           if [ -x /usr/bin/caffeinate ]; then
             /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -q \
               tests/test_directory_inventory.py \
@@ -148,6 +148,7 @@ jobs:
         env:
           HOME: ${{ env.CI_HOME }}
         run: |
+          unset BASH_ENV
           if [ -x /usr/bin/caffeinate ]; then
             /usr/bin/caffeinate -i bash ./disk_magician.sh test-shell
           else

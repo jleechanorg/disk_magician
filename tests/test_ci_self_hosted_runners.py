@@ -240,20 +240,30 @@ class TestCISelfHostedRunners(unittest.TestCase):
             text,
             f"{ci_path} must seed pip inside uv venv for packaging tests",
         )
-        self.assertIn(
+        self.assertNotIn(
             "pytest-xdist",
             text,
-            f"{ci_path} must install pytest-xdist into diskm-ci-venv",
+            f"{ci_path} must not install pytest-xdist into diskm-ci-venv",
         )
         self.assertIn(
-            '"$VENV_PYTHON" -m pytest -n 4 -q tests',
+            'pytest "PyYAML>=6.0"',
             text,
-            f"{ci_path} must run parallel pytest with \"$VENV_PYTHON\"",
+            f"{ci_path} must install pytest and PyYAML>=6.0 into diskm-ci-venv",
+        )
+        self.assertIn(
+            '"$VENV_PYTHON" -m pytest -q tests --ignore=tests/test_lease_recover_lock.py',
+            text,
+            f'{ci_path} must run serial pytest with "$VENV_PYTHON"',
+        )
+        self.assertIn(
+            '"$VENV_PYTHON" tests/test_lease_recover_lock.py',
+            text,
+            f'{ci_path} must run test_lease_recover_lock.py directly with "$VENV_PYTHON"',
         )
         self.assertIn(
             '"$VENV_PYTHON" -m pytest -q',
             text,
-            f"{ci_path} must run inventory pytest with \"$VENV_PYTHON\"",
+            f'{ci_path} must run inventory pytest with "$VENV_PYTHON"',
         )
         self.assertNotIn("unittest discover", text)
         self.assertNotIn("python3 -m unittest", text)
@@ -273,7 +283,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
             'echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"',
             setup_body,
         )
-        self.assertIn('echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"', setup_body)
+        self.assertIn('echo "DISK_MAGICIAN_TEST_JOBS=2" >> "$GITHUB_ENV"', setup_body)
         self.assertIn('git config --global user.name', setup_body)
         self.assertIn('git config --global user.email', setup_body)
         self.assertIn("$CI_HOME/.local/bin/diskm", setup_body)
@@ -288,34 +298,27 @@ class TestCISelfHostedRunners(unittest.TestCase):
             "Run inventory integration tests",
             "Run shell tests",
         ):
+            step_body = steps.get(step_name, "")
             self.assertIn(
                 "HOME: ${{ env.CI_HOME }}",
-                steps.get(step_name, ""),
+                step_body,
                 f"Step {step_name!r} must isolate HOME to env.CI_HOME",
+            )
+            self.assertIn(
+                "unset BASH_ENV",
+                step_body,
+                f"Step {step_name!r} must unset BASH_ENV",
             )
 
         python_step = steps.get("Run Python tests", "")
-        timing_suites = (
-            "tests/test_lease_outer_callers.py",
-            "tests/test_volume.py",
-            "tests/test_cli_reliability.py",
-            "tests/test_worktree_hygiene.py",
-            "tests/test_package_dependency.py",
-            "tests/test_review_governor_edges.py",
-            "tests/test_reclaim_scheduler_coverage.py",
-            "tests/test_snapshot_measure_parallel.py",
-            "tests/test_job_inventory.py",
-        )
-        for suite in (*timing_suites, "tests/test_lease_recover_lock.py"):
-            self.assertIn(
-                f"--ignore={suite}",
-                python_step,
-                f"Parallel pytest must ignore timing-sensitive suite {suite}",
-            )
-        self.assertIn(
-            '"$VENV_PYTHON" -m pytest -q ' + " ".join(timing_suites),
+        self.assertNotIn(
+            "-n ",
             python_step,
-            "Timing-sensitive pytest suites must run serially",
+            "Run Python tests must run serially without pytest-xdist -n workers",
+        )
+        self.assertIn(
+            '"$VENV_PYTHON" -m pytest -q tests --ignore=tests/test_lease_recover_lock.py',
+            python_step,
         )
         self.assertIn(
             '"$VENV_PYTHON" tests/test_lease_recover_lock.py',
