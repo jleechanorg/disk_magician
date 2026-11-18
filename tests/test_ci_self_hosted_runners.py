@@ -304,6 +304,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
             "tests/test_review_governor_edges.py",
             "tests/test_reclaim_scheduler_coverage.py",
             "tests/test_snapshot_measure_parallel.py",
+            "tests/test_job_inventory.py",
         )
         for suite in (*timing_suites, "tests/test_lease_recover_lock.py"):
             self.assertIn(
