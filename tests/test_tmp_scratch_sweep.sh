@@ -83,6 +83,9 @@ if [[ "$1" == "scratch-prune" ]]; then
   exit "${SCRATCH_PRUNE_MOCK_EXIT:-0}"
 fi
 if [[ "$*" == "volume ballast recover scratch" ]]; then exit "${VOLUME_MOCK_ENSURE_RC:-0}"; fi
+if [[ -n "${VOLUME_MOCK_LARGE_BYTES:-}" ]]; then
+  python3 -c 'import sys; n=int(sys.argv[1]); line="measurement_method=file-summed-apparent threshold_mib=100 flags=A:directory,F:file,L:link,E:unfinished path=/tmp/fake/unit\n"; sys.stdout.write((line * ((n // len(line)) + 1))[:n])' "$VOLUME_MOCK_LARGE_BYTES"
+fi
 [[ "${VOLUME_MOCK_SLEEP:-0}" == 0 ]] || sleep "$VOLUME_MOCK_SLEEP"
 if [[ "${VOLUME_MOCK_MODE:-receipt}" == lock ]]; then
   echo "[volume_reclaim] skipped, scratch lock held after waiting 20s" >&2
@@ -540,6 +543,56 @@ assert_receipt_field "missing terminal receipt leaves reclaimed bytes unknown" "
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=124 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1 || true
 assert_receipt_field "timed out prune leaves removal count unknown" "$R" "str(d['last_terminal']['candidates']['scratch_prune_removed'])" "None"
 assert_receipt_field "timed out prune leaves reclaimed bytes unknown" "$R" "str(d['last_terminal']['postcondition']['freed_bytes'])" "None"
+
+echo "Test 14: >200 KiB VOLUME_OUTPUT avoids Argument list too long (E2BIG)"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_LARGE_BYTES=250000 \
+  /bin/bash "$SCRIPT" --scratch-only --clean >"$TMP_ROOT/large-vol.out" 2>&1
+LARGE_VOL_RC=$?
+set -e
+if [[ "$LARGE_VOL_RC" -eq 0 ]]; then
+  echo "  PASS  >200 KiB VOLUME_OUTPUT completes without E2BIG"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  >200 KiB VOLUME_OUTPUT failed (rc=$LARGE_VOL_RC): $(tail -n 5 "$TMP_ROOT/large-vol.out")"
+  FAIL=$(( FAIL + 1 ))
+fi
+if grep -q 'Argument list too long' "$TMP_ROOT/large-vol.out"; then
+  echo "  FAIL  Argument list too long appeared on large VOLUME_OUTPUT"
+  FAIL=$(( FAIL + 1 ))
+else
+  echo "  PASS  no Argument list too long on large VOLUME_OUTPUT"
+  PASS=$(( PASS + 1 ))
+fi
+assert_receipt_field "large VOLUME_OUTPUT preserves volume_removed" "$R" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "2"
+assert_receipt_field "large VOLUME_OUTPUT records success" "$R" "d.get('last_terminal', {}).get('outcome')" "success"
+
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_LARGE_BYTES=250000 \
+  VOLUME_MOCK_SLEEP=6 DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS=1 \
+  /bin/bash "$SCRIPT" --clean >"$TMP_ROOT/large-vol-timeout.out" 2>&1
+LARGE_VOL_TO_RC=$?
+set -e
+if [[ "$LARGE_VOL_TO_RC" -ne 0 ]] && ! grep -q 'Argument list too long' "$TMP_ROOT/large-vol-timeout.out"; then
+  echo "  PASS  >200 KiB VOLUME_OUTPUT timeout avoids E2BIG"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  >200 KiB VOLUME_OUTPUT timeout hit E2BIG or exited 0 (rc=$LARGE_VOL_TO_RC)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "large VOLUME_OUTPUT timeout records volume timeout" "$STATE_DIR/receipts/volume_reclaim.json" "d.get('last_terminal', {}).get('outcome')" "timeout"
+if python3 - "$STATE_DIR/receipts/volume_reclaim.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))["last_terminal"]
+assert len(r["reason"]) <= 600, len(r["reason"])
+PY
+then
+  echo "  PASS  large VOLUME_OUTPUT timeout reason is bounded"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  large VOLUME_OUTPUT timeout reason exceeded bound"
+  FAIL=$(( FAIL + 1 ))
+fi
 
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

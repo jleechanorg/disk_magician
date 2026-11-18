@@ -57,6 +57,7 @@ source "$SCRIPT_DIR/lib/scratch_budget.sh"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 
 artifact_batch_output_file=""
+artifact_blocked_file=""
 scratch_lock_set_traps
 
 ORIG_ARGS=("$@")
@@ -577,6 +578,7 @@ fi
 # once for all real-directory candidates before any candidate can be removed.
 # On Bash 3.2, avoid an empty array expansion and do not create a temp file or
 # invoke Python when there are no candidate directories.
+_artifact_discovery_blocked=()
 if (( ${#candidates[@]} )); then
   candidate_dirs=()
   for _candidate in ${candidates[@]+"${candidates[@]}"}; do
@@ -604,13 +606,15 @@ if (( ${#candidates[@]} )); then
   _artifact_extra=()
   if (( ${#candidate_dirs[@]} )); then
     artifact_batch_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-artifacts.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable; exit 75; }
+    artifact_blocked_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-blocked.XXXXXX")" || { rm -f "$artifact_batch_output_file"; artifact_batch_output_file=""; emit_discovery_deferred_summary unmeasurable; exit 75; }
     _artifact_mode=batch
     [[ "$root_registered" == true ]] && _artifact_mode=batch-generic
-    printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" >"$artifact_batch_output_file"
+    printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" "$artifact_blocked_file" >"$artifact_batch_output_file"
     _artifact_rc=$?
     if (( _artifact_rc != 0 )); then
-      rm -f "$artifact_batch_output_file"
+      rm -f "$artifact_batch_output_file" "$artifact_blocked_file"
       artifact_batch_output_file=""
+      artifact_blocked_file=""
       if (( _artifact_rc == 124 )); then
         emit_discovery_deferred_summary deadline
       else
@@ -618,6 +622,11 @@ if (( ${#candidates[@]} )); then
       fi
       exit 75
     fi
+    while IFS= read -r -d '' _blocked_root; do
+      [[ -n "$_blocked_root" ]] && _artifact_discovery_blocked+=("$_blocked_root")
+    done <"$artifact_blocked_file"
+    rm -f "$artifact_blocked_file"
+    artifact_blocked_file=""
 
     _artifact_fields=()
     _artifact_field=""
@@ -798,6 +807,15 @@ sys.stderr.write(f"{below}\n")
     fi
     if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
     [[ -d "$entry" ]] || continue
+    _artifact_blocked=false
+    for _blocked in ${_artifact_discovery_blocked[@]+"${_artifact_discovery_blocked[@]}"}; do
+      if [[ "$entry" == "$_blocked" ]]; then _artifact_blocked=true; break; fi
+    done
+    if [[ "$_artifact_blocked" == true ]]; then
+      echo "kept:artifact-discovery-unmeasurable $entry"
+      kept=$(( kept + 1 ))
+      continue
+    fi
     # Manual minimum-size filtering is a prioritization control, not an
     # automatic retention gate. Apply it before the expensive age walk so a
     # tiny slow sibling cannot consume the entire bounded ordering pass.
