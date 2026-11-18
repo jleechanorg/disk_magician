@@ -240,7 +240,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
             f"{ci_path} must install pytest-xdist into diskm-ci-venv",
         )
         self.assertIn(
-            '"$VENV_PYTHON" -m pytest -n 8 -q tests',
+            '"$VENV_PYTHON" -m pytest -n 4 -q tests',
             text,
             f"{ci_path} must run parallel pytest with \"$VENV_PYTHON\"",
         )
@@ -252,6 +252,56 @@ class TestCISelfHostedRunners(unittest.TestCase):
         self.assertNotIn("unittest discover", text)
         self.assertNotIn("python3 -m unittest", text)
         self.assertNotIn("python3 -m pytest", text)
+
+    def test_ci_isolates_home_git_config_and_serial_timing_suites(self) -> None:
+        ci_path = WORKFLOWS_DIR / "ci.yml"
+        steps = _parse_job_steps(ci_path, "test")
+
+        setup_body = steps.get("Set up isolated Python 3.13 venv and verify tools", "")
+        self.assertIn('CI_HOME="${RUNNER_TEMP}/ci-home"', setup_body)
+        self.assertIn('GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"', setup_body)
+        self.assertIn('echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"', setup_body)
+        self.assertIn('echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"', setup_body)
+        self.assertIn('git config --global user.name', setup_body)
+        self.assertIn('git config --global user.email', setup_body)
+
+        for step_name in (
+            "Run Python tests",
+            "Run inventory integration tests",
+            "Run shell tests",
+        ):
+            self.assertIn(
+                "HOME: ${{ env.CI_HOME }}",
+                steps.get(step_name, ""),
+                f"Step {step_name!r} must isolate HOME to env.CI_HOME",
+            )
+
+        python_step = steps.get("Run Python tests", "")
+        timing_suites = (
+            "tests/test_lease_outer_callers.py",
+            "tests/test_volume.py",
+            "tests/test_cli_reliability.py",
+            "tests/test_worktree_hygiene.py",
+        )
+        for suite in (*timing_suites, "tests/test_lease_recover_lock.py"):
+            self.assertIn(
+                f"--ignore={suite}",
+                python_step,
+                f"Parallel pytest must ignore timing-sensitive suite {suite}",
+            )
+        self.assertIn(
+            '"$VENV_PYTHON" -m pytest -q ' + " ".join(timing_suites),
+            python_step,
+            "Timing-sensitive pytest suites must run serially",
+        )
+        self.assertIn(
+            '"$VENV_PYTHON" tests/test_lease_recover_lock.py',
+            python_step,
+        )
+
+        cleanup_body = steps.get("Clean up isolated CI venv", "")
+        self.assertIn("/ci-home", cleanup_body)
+        self.assertIn("/gitconfig-ci", cleanup_body)
 
     def test_ci_timeout_and_caffeinate_guard(self) -> None:
         ci_path = WORKFLOWS_DIR / "ci.yml"

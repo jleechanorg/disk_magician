@@ -38,12 +38,20 @@ jobs:
             "$PY_BIN" -m venv --clear "$VENV_DIR"
             "$VENV_DIR/bin/pip" install -q pytest pytest-xdist "PyYAML>=6.0"
           fi
+          CI_HOME="${RUNNER_TEMP}/ci-home"
+          mkdir -p "$CI_HOME"
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"
+          rm -f "$GIT_CONFIG_GLOBAL"
+          GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.name "disk_magician CI"
+          GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.email "ci@disk-magician.test"
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
           echo "$HOME/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
           VENV_PYTHON="${VENV_DIR}/bin/python"
           echo "VENV_PYTHON=${VENV_DIR}/bin/python" >> "$GITHUB_ENV"
+          echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"
+          echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
           "$VENV_PYTHON" -c 'import os, sys; assert os.path.realpath(sys.prefix) == os.path.realpath(os.environ["RUNNER_TEMP"] + "/diskm-ci-venv"), sys.prefix; print(sys.version, sys.executable)'
           command -v timeout >/dev/null 2>&1 || brew install coreutils
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
@@ -76,16 +84,22 @@ jobs:
           fi
 
       - name: Run Python tests
+        env:
+          HOME: ${{ env.CI_HOME }}
         run: |
           if [ -x /usr/bin/caffeinate ]; then
-            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -n 8 -q tests --ignore=tests/test_lease_recover_lock.py
+            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -n 4 -q tests --ignore=tests/test_lease_recover_lock.py --ignore=tests/test_lease_outer_callers.py --ignore=tests/test_volume.py --ignore=tests/test_cli_reliability.py --ignore=tests/test_worktree_hygiene.py
+            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -q tests/test_lease_outer_callers.py tests/test_volume.py tests/test_cli_reliability.py tests/test_worktree_hygiene.py
             /usr/bin/caffeinate -i "$VENV_PYTHON" tests/test_lease_recover_lock.py
           else
-            "$VENV_PYTHON" -m pytest -n 8 -q tests --ignore=tests/test_lease_recover_lock.py
+            "$VENV_PYTHON" -m pytest -n 4 -q tests --ignore=tests/test_lease_recover_lock.py --ignore=tests/test_lease_outer_callers.py --ignore=tests/test_volume.py --ignore=tests/test_cli_reliability.py --ignore=tests/test_worktree_hygiene.py
+            "$VENV_PYTHON" -m pytest -q tests/test_lease_outer_callers.py tests/test_volume.py tests/test_cli_reliability.py tests/test_worktree_hygiene.py
             "$VENV_PYTHON" tests/test_lease_recover_lock.py
           fi
 
       - name: Run inventory integration tests
+        env:
+          HOME: ${{ env.CI_HOME }}
         run: |
           if [ -x /usr/bin/caffeinate ]; then
             /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -q \
@@ -104,6 +118,8 @@ jobs:
           fi
 
       - name: Run shell tests
+        env:
+          HOME: ${{ env.CI_HOME }}
         run: |
           if [ -x /usr/bin/caffeinate ]; then
             /usr/bin/caffeinate -i bash ./disk_magician.sh test-shell
@@ -114,6 +130,6 @@ jobs:
       - name: Clean up isolated CI venv
         if: always()
         run: |
-          if [ -n "${RUNNER_TEMP:-}" ] && [ -d "${RUNNER_TEMP}/diskm-ci-venv" ]; then
-            rm -rf "${RUNNER_TEMP}/diskm-ci-venv"
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${RUNNER_TEMP}" != "/" ]; then
+            rm -rf "${RUNNER_TEMP:?}/diskm-ci-venv" "${RUNNER_TEMP:?}/ci-home" "${RUNNER_TEMP:?}/gitconfig-ci"
           fi
