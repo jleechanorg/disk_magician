@@ -877,16 +877,24 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
     make_tree eligible-after-blocked 49 >/dev/null
     chmod 000 "$SCRATCH_ROOT/blocked-cand/work/residual"
     out_dry="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --dry-run 2>&1)"; rc=$?
-    [[ "$rc" == 0 ]] && ok "normal dry-run with nested unreadable dir exits 0" || bad "normal dry-run with nested unreadable dir exits 0" "rc=$rc out=$(printf %s "$out_dry" | tr '\n' ' ' | cut -c1-300)"
+    [[ "$rc" == 75 ]] && ok "normal dry-run with nested unreadable dir exits 75" || bad "normal dry-run with nested unreadable dir exits 75" "rc=$rc out=$(printf %s "$out_dry" | tr '\n' ' ' | cut -c1-300)"
     check "normal dry-run isolates blocked candidate" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/blocked-cand" "$out_dry"
+    check "normal dry-run reports blocked candidate detail frontier" "detail:E " "$out_dry"
+    check "normal dry-run reports unfinished detail for blocked candidate" "detail:unfinished rc=1 path=$SCRATCH_ROOT/blocked-cand" "$out_dry"
+    check "normal dry-run counts deferred blocked candidate" "deferred_candidates=1" "$out_dry"
+    check "normal dry-run emits measurement-unfinished" "deferred:measurement-unfinished" "$out_dry"
     if printf '%s\n' "$out_dry" | grep -qE "^would-remove:[^ ]* $SCRATCH_ROOT/eligible-after-blocked($| )"; then
       ok "normal dry-run evaluates eligible sibling"
     else
       bad "normal dry-run evaluates eligible sibling" "$(printf %s "$out_dry" | tr '\n' ' ' | cut -c1-300)"
     fi
     out_clean="$(run env SCRATCH_TOP_LEVEL_APPROVED=1 bash "$SCRIPT" --clean 2>&1)"; rc=$?
-    [[ "$rc" == 0 ]] && ok "normal clean with nested unreadable dir exits 0" || bad "normal clean with nested unreadable dir exits 0" "rc=$rc out=$(printf %s "$out_clean" | tr '\n' ' ' | cut -c1-300)"
+    [[ "$rc" == 75 ]] && ok "normal clean with nested unreadable dir exits 75" || bad "normal clean with nested unreadable dir exits 75" "rc=$rc out=$(printf %s "$out_clean" | tr '\n' ' ' | cut -c1-300)"
     check "normal clean keeps blocked candidate" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/blocked-cand" "$out_clean"
+    check "normal clean reports blocked candidate detail frontier" "detail:E " "$out_clean"
+    check "normal clean reports unfinished detail for blocked candidate" "detail:unfinished rc=1 path=$SCRATCH_ROOT/blocked-cand" "$out_clean"
+    check "normal clean counts deferred blocked candidate" "deferred_candidates=1" "$out_clean"
+    check "normal clean emits measurement-unfinished" "deferred:measurement-unfinished" "$out_clean"
     [[ -d "$SCRATCH_ROOT/blocked-cand/build/nested-ok" ]] && ok "blocked candidate nested child is preserved" || bad "blocked candidate nested child is preserved"
     [[ ! -e "$SCRATCH_ROOT/eligible-after-blocked" ]] && ok "normal clean removes eligible sibling after blocked candidate" || bad "normal clean removes eligible sibling after blocked candidate"
     chmod 700 "$SCRATCH_ROOT/blocked-cand/work/residual"
@@ -901,8 +909,13 @@ if [[ -z "${SCRATCH_PRUNE_TEST_FILTER:-}" || "${SCRATCH_PRUNE_TEST_FILTER:-}" ==
     chmod 000 "$SCRATCH_ROOT/blocked-auto/work/residual"
     AUTO_CURSOR="$T/unreadable-auto.cursor"
     out_auto="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= DISK_MAGICIAN_CONFIG="$VOLUME_CONFIG" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 bash "$SCRIPT" --clean --cursor "$AUTO_CURSOR" 2>&1)"; rc=$?
-    [[ "$rc" == 0 ]] && ok "automatic cursor clean with nested unreadable dir exits 0" || bad "automatic cursor clean with nested unreadable dir exits 0" "rc=$rc out=$(printf %s "$out_auto" | tr '\n' ' ' | cut -c1-300)"
+    [[ "$rc" == 75 ]] && ok "automatic cursor clean with nested unreadable dir exits 75" || bad "automatic cursor clean with nested unreadable dir exits 75" "rc=$rc out=$(printf %s "$out_auto" | tr '\n' ' ' | cut -c1-300)"
     check "automatic clean isolates blocked candidate" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/blocked-auto" "$out_auto"
+    check "automatic clean counts deferred blocked candidate" "deferred_candidates=1" "$out_auto"
+    check "automatic clean emits measurement-unfinished" "deferred:measurement-unfinished" "$out_auto"
+    auto_detail="$(cat "$DISK_MAGICIAN_STATE_DIR/scratch_detail/latest.txt" 2>/dev/null || true)"
+    check "automatic clean detail sink records blocked candidate frontier" "detail:E " "$auto_detail"
+    check "automatic clean detail sink records unfinished blocked candidate" "detail:unfinished rc=1 path=$SCRATCH_ROOT/blocked-auto" "$auto_detail"
     [[ -d "$SCRATCH_ROOT/blocked-auto" ]] && ok "automatic clean preserves blocked candidate" || bad "automatic clean preserves blocked candidate"
     [[ ! -e "$SCRATCH_ROOT/eligible-auto-after" ]] && ok "automatic clean removes eligible 49h candidate after blocked candidate" || bad "automatic clean removes eligible 49h candidate after blocked candidate"
     if [[ -f "$AUTO_CURSOR" ]] && python3 - "$AUTO_CURSOR" "$SCRATCH_ROOT/blocked-auto" "$SCRATCH_ROOT/eligible-auto-after" <<'PY'
@@ -919,6 +932,7 @@ PY
     register_test_volume
     STATE="$DISK_MAGICIAN_STATE_DIR"
     make_tree a-blocked-lru 49 >/dev/null
+    head -c 614400 /dev/urandom >"$SCRATCH_ROOT/a-blocked-lru/payload.bin"
     mkdir -p "$SCRATCH_ROOT/a-blocked-lru/work/residual"
     old_stamp "$SCRATCH_ROOT/a-blocked-lru" 49
     make_managed_tree b-eligible-lru 49 >/dev/null
@@ -926,7 +940,12 @@ PY
     old_stamp "$SCRATCH_ROOT/worldai_frontend/build/b-eligible-lru" 49
     chmod 000 "$SCRATCH_ROOT/a-blocked-lru/work/residual"
     out_lru="$(lru_run env DISK_MAGICIAN_SCRATCH_MIN_KB=0 bash "$SCRIPT" --clean --budget-pct 5 --budget-preserve-content-keeps 2>&1)"; rc=$?
+    [[ "$rc" == 75 ]] && ok "budget clean with nested unreadable dir exits 75" || bad "budget clean with nested unreadable dir exits 75" "rc=$rc out=$(printf %s "$out_lru" | tr '\n' ' ' | cut -c1-300)"
     check "budget mode reports blocked candidate as artifact-discovery-unmeasurable" "kept:artifact-discovery-unmeasurable $SCRATCH_ROOT/a-blocked-lru" "$out_lru"
+    check "budget mode reports blocked candidate detail frontier" "detail:E " "$out_lru"
+    check "budget mode reports unfinished detail for blocked candidate" "detail:unfinished rc=1 path=$SCRATCH_ROOT/a-blocked-lru" "$out_lru"
+    check "budget mode counts deferred blocked candidate" "deferred_candidates=1" "$out_lru"
+    check "budget mode emits deferred:budget-result-unmeasurable" "deferred:budget-result-unmeasurable reason=incomplete-measurement-unfinished" "$out_lru"
     [[ -d "$SCRATCH_ROOT/a-blocked-lru" ]] && ok "budget mode preserves blocked candidate" || bad "budget mode preserves blocked candidate"
     [[ ! -e "$SCRATCH_ROOT/worldai_frontend/build/b-eligible-lru" ]] && ok "budget mode still evicts eligible candidate after blocked candidate" || bad "budget mode still evicts eligible candidate after blocked candidate" "$(printf %s "$out_lru" | tr '\n' ' ' | cut -c1-300)"
     chmod 700 "$SCRATCH_ROOT/a-blocked-lru/work/residual"

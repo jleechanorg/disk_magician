@@ -291,7 +291,7 @@ PY
   elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && { grep -q '\[scratch_prune\] skipped, scratch lock held' <<<"$SCRATCH_PRUNE_OUTPUT" || grep -q '^skipped:lease-busy' <<<"$SCRATCH_PRUNE_OUTPUT"; }; then
     SCRATCH_PRUNE_LOCK_SKIPPED=true
     SCRATCH_PRUNE_OUTCOME=skipped_lock
-  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && grep -q '^partial:budget-target-unmet' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && { grep -q '^partial:budget-target-unmet' <<<"$SCRATCH_PRUNE_OUTPUT" || { [[ -n "$SCRATCH_PRUNE_SUMMARY" ]] && grep -qE '^deferred:(measurement-unfinished|budget-result-unmeasurable)' <<<"$SCRATCH_PRUNE_OUTPUT"; }; }; then
     SCRATCH_PRUNE_OUTCOME=partial
   elif [[ "$SCRATCH_PRUNE_RC" == 75 ]]; then
     SCRATCH_PRUNE_OUTCOME=error

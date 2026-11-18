@@ -812,6 +812,12 @@ sys.stderr.write(f"{below}\n")
       if [[ "$entry" == "$_blocked" ]]; then _artifact_blocked=true; break; fi
     done
     if [[ "$_artifact_blocked" == true ]]; then
+      if [[ -d "$entry" && ! -L "$entry" ]]; then
+        report_candidate_detail "$entry" || true
+      fi
+      DEFERRED_CANDIDATES=$(( DEFERRED_CANDIDATES + 1 ))
+      MEASUREMENT_INCOMPLETE=1
+      [[ -z "$budget_stop" ]] && budget_stop=measurement-unfinished
       echo "kept:artifact-discovery-unmeasurable $entry"
       kept=$(( kept + 1 ))
       continue
@@ -871,6 +877,11 @@ while IFS= read -r -d '' entry; do
     # same unreadable root and stalls again. The keep-only helper never invokes
     # C14/quarantine, but persists the finished visit and keeps the same
     # deferred/cursor break contract as the unproven-content branch.
+    if [[ -d "$entry" && ! -L "$entry" ]]; then
+      report_candidate_detail "$entry" || true
+    fi
+    DEFERRED_CANDIDATES=$(( DEFERRED_CANDIDATES + 1 ))
+    MEASUREMENT_INCOMPLETE=1
     kept=$(( kept + 1 ))
     if [[ "$SCRATCH_AUTOMATIC" == 1 && "$DRY_RUN" != true ]]; then
       outcome="$(scratch_budget_quarantine_remove "$entry" --keep-unproven-content)"

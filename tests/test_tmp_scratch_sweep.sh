@@ -505,6 +505,60 @@ else
   FAIL=$(( FAIL + 1 ))
 fi
 
+echo "Test 11d: summarized measurement-unfinished rc 75 records partial with preserved removal count"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  SCRATCH_PRUNE_MOCK_LINE=$'scanned=5 kept=1 removable=2 removed=2 eligible_estimate=2 candidate_size_estimate_kb=0 deletion_size_estimate_kb=0 deferred_candidates=1 data_free_before_bytes=0 data_free_after_bytes=0 data_free_interval_delta_bytes=0\ndeferred:measurement-unfinished' \
+  VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+UNFINISHED_75_RC=$?
+set -e
+if [[ "$UNFINISHED_75_RC" -eq 0 ]]; then
+  echo "  PASS  summarized measurement-unfinished rc 75 exits 0"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  summarized measurement-unfinished rc 75 exited $UNFINISHED_75_RC (expected 0)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "measurement-unfinished rc 75 records parent partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "measurement-unfinished rc 75 records scratch_prune partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_outcome')" "partial"
+assert_receipt_field "measurement-unfinished rc 75 preserves scratch_prune_removed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_removed'))" "2"
+assert_receipt_field "measurement-unfinished rc 75 records deferred_count 1" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('deferred_count'))" "1"
+
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  SCRATCH_PRUNE_MOCK_LINE=$'scanned=5 kept=1 removable=2 removed=2 eligible_estimate=2 candidate_size_estimate_kb=0 deletion_size_estimate_kb=0 deferred_candidates=1 data_free_before_bytes=0 data_free_after_bytes=0 data_free_interval_delta_bytes=0\ndeferred:budget-result-unmeasurable reason=incomplete-measurement-unfinished' \
+  VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+UNMEASURABLE_BUDGET_75_RC=$?
+set -e
+if [[ "$UNMEASURABLE_BUDGET_75_RC" -eq 0 ]]; then
+  echo "  PASS  summarized budget-result-unmeasurable rc 75 exits 0"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  summarized budget-result-unmeasurable rc 75 exited $UNMEASURABLE_BUDGET_75_RC (expected 0)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "budget-result-unmeasurable rc 75 records parent partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "budget-result-unmeasurable rc 75 records scratch_prune partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_outcome')" "partial"
+assert_receipt_field "budget-result-unmeasurable rc 75 preserves scratch_prune_removed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_removed'))" "2"
+
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  SCRATCH_PRUNE_MOCK_LINE="deferred:measurement-unfinished" \
+  VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+UNSUMMARIZED_75_RC=$?
+set -e
+if [[ "$UNSUMMARIZED_75_RC" -ne 0 ]]; then
+  echo "  PASS  unsummarized measurement-unfinished rc 75 remains nonzero error"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  unsummarized measurement-unfinished rc 75 exited 0 (expected nonzero)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "unsummarized measurement-unfinished rc 75 records error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+
 echo "Test 11a: volume-only lock contention after a scratch-prune no-op is skipped_lock, not available-floor"
 : > "$INVOCATION_LOG"
 set +e
