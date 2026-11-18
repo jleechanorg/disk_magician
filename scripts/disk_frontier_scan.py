@@ -128,11 +128,13 @@ GDU_CMD = _discover_gnu_du_cmd()
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 GDU_LOCALIZED_ERROR_RE = re.compile(
     r"^(?:.*/)?g?du: .*? '(.+)': (Permission denied|Operation not permitted|"
-    r"No such file or directory|Input/output error|Interrupted system call)$"
+    r"No such file or directory|Input/output error|Interrupted system call|"
+    r"Resource deadlock avoided)$"
 )
 GDU_FTS_ERROR_RE = re.compile(
     r"^(?:.*/)?g?du: fts_read failed: (.+): (No such file or directory|"
-    r"Permission denied|Operation not permitted|Input/output error|Interrupted system call)$"
+    r"Permission denied|Operation not permitted|Input/output error|"
+    r"Interrupted system call|Resource deadlock avoided)$"
 )
 
 
@@ -439,9 +441,11 @@ def verify_system_boundary_attestation(
 def is_symlink_only_dir(path):
     """True for a directory that is empty or holds only symlinks (0 bytes of data).
 
-    Any error keeps the root unfinished (fail closed).
+    Never follows symlinks; any error keeps the root unfinished (fail closed).
     """
     try:
+        if stat.S_ISLNK(getattr(os.lstat(path), "st_mode", 0)):
+            return False
         with os.scandir(path) as entries:
             return all(entry.is_symlink() for entry in entries)
     except OSError:
@@ -788,6 +792,7 @@ def run_gdu_inventory(paths, timeout_s, tracker, max_records):
         "No such file or directory": "inventory_path_disappeared",
         "Input/output error": "inventory_io_error",
         "Interrupted system call": "inventory_interrupted_system_call",
+        "Resource deadlock avoided": "inventory_resource_deadlock",
     }
     for line in proc.stderr.splitlines():
         line = line.strip()
@@ -2031,15 +2036,19 @@ def build_report(
     measured_by_top = collections.defaultdict(int)
     exact_measured = {}
 
+    root_abs = os.path.abspath(scanner.root)
+
     def top_child(path):
         try:
-            rel = os.path.relpath(os.path.realpath(path), os.path.realpath(scanner.root))
+            rel = os.path.relpath(os.path.abspath(path), root_abs)
         except (OSError, ValueError):
             return None, None
+        if rel == os.curdir:
+            return root_abs, rel
         if rel == os.pardir or rel.startswith(os.pardir + os.sep):
             return None, None
         first = rel.split(os.sep, 1)[0]
-        return os.path.join(os.path.realpath(scanner.root), first), rel
+        return os.path.join(root_abs, first), rel
 
     for path, kb in scanner.measured.items():
         top, rel = top_child(path)
@@ -2077,7 +2086,6 @@ def build_report(
         else:
             opaque_intrinsic_gates.append(intrinsic)
 
-    mode = "complete" if not operational_unfinished else "partial"
 
     unfinished_by_top = collections.defaultdict(list)
     intrinsic_by_top = collections.defaultdict(list)
@@ -2098,7 +2106,7 @@ def build_report(
 
     top_level_ledger = []
     for original_path in sorted(scanner.level1_paths):
-        path = os.path.realpath(original_path)
+        path = os.path.abspath(original_path)
         reasons = sorted(set(unfinished_by_top[path]))
         intrinsic_reasons = sorted(set(intrinsic_by_top[path]))
         cross_device_only = (
@@ -2269,6 +2277,14 @@ def build_report(
             and bool(system_denied_paths)
             and system_denied_paths.issubset(attested_paths)
         )
+    scan_complete = (
+        not operational_unfinished
+        and unfinished_top_level_roots == 0
+        and measured_top_level_roots == reachable_top_level_roots
+        and accounting_equation["display_ledger_valid"]
+        and accounting_equation["displayed_balanced"]
+    )
+    mode = "complete" if scan_complete else "partial"
     coverage_complete = (
         mode == "complete"
         and (
