@@ -52,17 +52,21 @@ jobs:
 
       - name: Check shell syntax and ShellCheck errors
         run: |
-          JOBS="$(nproc 2>/dev/null || echo 4)"
-          find disk_magician.sh install.sh scripts tests -type f -print0 | xargs -0 -n 1 -P "$JOBS" bash -c '
-            set -euo pipefail
-            candidate="$1"
-            case "$(head -n 1 "$candidate")" in
+          # Cap concurrency at 2 and batch files per shellcheck process so GHC
+          # runtime stays well within the 3072 MiB ezgha container cgroup limit
+          # (host nproc=32 previously spawned 32 concurrent shellcheck processes and OOM-killed).
+          SHELL_FILES=()
+          while IFS= read -r -d '' candidate; do
+            case "$(head -n 1 "$candidate" 2>/dev/null || true)" in
               *bash|*sh)
                 /bin/bash -n "$candidate"
-                shellcheck --severity=error --external-sources "$candidate"
+                SHELL_FILES+=("$candidate")
                 ;;
             esac
-          ' _
+          done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
+          if [ "${#SHELL_FILES[@]}" -gt 0 ]; then
+            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 20 -P 2 shellcheck --severity=error --external-sources
+          fi
 
   test:
     name: Test and lint
