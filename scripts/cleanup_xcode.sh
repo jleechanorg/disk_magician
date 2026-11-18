@@ -124,6 +124,47 @@ _av_xcode_device_support() (
   _av_rebuildable "$p" >/dev/null
 )
 
+# _xcode_git_tracked_reason <path>: print `kept:git-tracked` or `kept:check-failed`
+# (and return 0) when <path> is inside a git repository and holds tracked files
+# (clean or dirty) or the git lookup fails closed; return 1 otherwise.
+_xcode_git_tracked_reason() (
+  local p="${1:-}" inside top tracked
+  [[ -n "$p" && -d "$p" && ! -L "$p" ]] || return 1
+  if ! command -v git >/dev/null 2>&1; then
+    local cur="$p"
+    while [[ -n "$cur" ]]; do
+      [[ -e "$cur/.git" ]] && { echo kept:check-failed; return 0; }
+      [[ "$cur" == / ]] && break
+      cur="${cur%/*}"
+      [[ -n "$cur" ]] || cur=/
+    done
+    return 1
+  fi
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+  export GIT_OPTIONAL_LOCKS=0 LC_ALL=C
+  if ! inside="$(git -C "$p" rev-parse --is-inside-work-tree 2>&1)"; then
+    case "$inside" in
+      *"not a git repository"*) return 1 ;;
+      *) echo kept:check-failed; return 0 ;;
+    esac
+  fi
+  if [[ "$inside" != true ]]; then
+    if [[ "$(git -C "$p" rev-parse --is-bare-repository 2>/dev/null)" == true ]]; then
+      echo kept:git-tracked
+      return 0
+    fi
+    return 1
+  fi
+  top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || { echo kept:check-failed; return 0; }
+  [[ -n "$top" ]] || { echo kept:check-failed; return 0; }
+  tracked="$(git --literal-pathspecs -C "$p" ls-files -- . 2>/dev/null)" || { echo kept:check-failed; return 0; }
+  if [[ -n "$tracked" ]]; then
+    echo kept:git-tracked
+    return 0
+  fi
+  return 1
+)
+
 artifact_removal_verdict() {
   [[ "${1:-}" == --self-test ]] && { _av_self_test; return 0; }
   local tmpdir inv result reason admin_inv secret_kind="" a prev=""
@@ -145,6 +186,10 @@ artifact_removal_verdict() {
   inv="$tmpdir/inventory.json"
   admin_inv="$tmpdir/admin.jsonl"
   result="$(GIT_OPTIONAL_LOCKS=0 C14_SECRET_KIND="$secret_kind" C14_INVENTORY_FILE="$inv" C14_ADMIN_INVENTORY="$admin_inv" C14_INVENTORY_OUT="$admin_inv" _av_artifact_removal_verdict "${args[@]+"${args[@]}"}")"
+  local git_reason
+  if [[ "$result" == remove ]] && git_reason="$(_xcode_git_tracked_reason "${1:-}")"; then
+    result="$git_reason"
+  fi
   if [[ ( "$result" == kept:* || "$result" == deferred:* ) && -f "$inv" && -n "${DISK_MAGICIAN_C14_LEDGER:-}" ]]; then
     reason=${result#*:}
     python3 "$_AV_DIR/../c14_probe.py" account "$inv" "$DISK_MAGICIAN_C14_LEDGER" "$reason" >/dev/null 2>&1 || true
@@ -202,8 +247,66 @@ clear_contents() {
 # so an ambient environment cannot make freshly-written build output eligible.
 CUSTOM_DD_IDLE_MINUTES="$(safety_disposable_recency_floor_minutes)"
 
+process_custom_derived_data_candidate() {
+  local cand="$1" target wt_root wt_dir repo_dir before_kb _safety_reason ao_reason _git_reason
+  [[ -d "$cand" && ! -L "$cand" ]] || return 0
+  # Every component from the real worktree root through the candidate must be a
+  # directory, not a symlink. find below never follows links during discovery.
+  if [[ "$cand" == "$HOME/.worktrees/"* ]]; then
+    wt_root="$HOME/.worktrees"
+    wt_dir="${cand%/*}"
+    repo_dir="${wt_dir%/*}"
+    [[ "${repo_dir%/*}" == "$wt_root" && "${wt_dir%/*}" == "$repo_dir" && \
+        -d "$wt_root" && ! -L "$wt_root" && \
+        -d "$repo_dir" && ! -L "$repo_dir" && \
+        -d "$wt_dir" && ! -L "$wt_dir" ]] || return 0
+  fi
+  [[ "${cand##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ ]] && return 0
+  if _av_derived_data_shape "$cand"; then
+    target="$cand"
+  elif _av_derived_data_shape "$cand/DerivedData"; then
+    target="$cand/DerivedData"
+  else
+    return 0
+  fi
+  if [[ "$cand" == "$HOME/.worktrees/"* ]]; then
+    if ! declare -F wrh_ao_skip_reason >/dev/null 2>&1; then
+      log "Custom Xcode DerivedData: AO-SKIP $wt_dir (ao-check-unavailable)"
+      return 0
+    fi
+    ao_reason="$(wrh_ao_skip_reason "$wt_dir" 2>/dev/null || true)"
+    if [[ -n "$ao_reason" ]]; then
+      log "Custom Xcode DerivedData: AO-SKIP $target ($ao_reason)"
+      return 0
+    fi
+  fi
+  [[ "${_CUSTOM_DD_SEEN:-$'\n'}" == *$'\n'"$target"$'\n'* ]] && return 0
+  _CUSTOM_DD_SEEN+="$target"$'\n'
+  if ! _safety_reason="$(safety_gate "$target" 2>/dev/null)"; then
+    log "Custom Xcode DerivedData: SAFETY-SKIP $target ($_safety_reason)"
+    return 0
+  fi
+  scratch_budget_report_measurement "$target" || exit $?
+  if worktree_is_recently_active_minutes "$target" "$CUSTOM_DD_IDLE_MINUTES"; then
+    log "Custom Xcode DerivedData: written within ${CUSTOM_DD_IDLE_MINUTES}m or recency unmeasurable, keeping $target"
+    return 0
+  fi
+  before_kb=$(size_kb "$target")
+  if [[ "$DRY_RUN" == true ]]; then
+    if _git_reason="$(_xcode_git_tracked_reason "$target")"; then
+      log "Custom Xcode DerivedData: keeping $target ($_git_reason)"
+    else
+      log "Custom Xcode DerivedData: [dry-run] would remove $target ($(fmt_kb "$before_kb"))"
+    fi
+  else
+    log "Custom Xcode DerivedData: removing $target ($(fmt_kb "$before_kb"))"
+    c14_remove "$target" --kind xcode-derived-data || true
+  fi
+}
+
 clean_custom_derived_data() {
-  local ptmp utmp cand target seen=$'\n' before_kb
+  local ptmp utmp cand
+  _CUSTOM_DD_SEEN=$'\n'
   # Same overridable roots as the other scratch sweepers; an unresolved root drops its globs.
   ptmp="$(scratch_roots_get_private_tmp)"
   utmp="$(scratch_roots_get_user_tmp)"
@@ -214,35 +317,13 @@ clean_custom_derived_data() {
       "$ptmp"/*-native*/* "$ptmp"/*-native*/build/* \
       "$ptmp"/worldai_claw/*/* "$ptmp"/ipad*/*} \
       ${utmp:+"$utmp"/tmp.* "$utmp"/*_dd* "$utmp"/dd_* "$utmp"/dd-*}; do
-    [[ -d "$cand" && ! -L "$cand" ]] || continue
-    [[ "${cand##*/}" =~ ^worldai-ios-release-[0-9]+-[0-9]+$ ]] && continue
-    if _av_derived_data_shape "$cand"; then
-      target="$cand"
-    elif _av_derived_data_shape "$cand/DerivedData"; then
-      target="$cand/DerivedData"
-    else
-      continue
-    fi
-    [[ "$seen" == *$'\n'"$target"$'\n'* ]] && continue
-    seen+="$target"$'\n'
-    local _safety_reason
-    if ! _safety_reason="$(safety_gate "$target" 2>/dev/null)"; then
-      log "Custom Xcode DerivedData: SAFETY-SKIP $target ($_safety_reason)"
-      continue
-    fi
-    scratch_budget_report_measurement "$target" || exit $?
-    if worktree_is_recently_active_minutes "$target" "$CUSTOM_DD_IDLE_MINUTES"; then
-      log "Custom Xcode DerivedData: written within ${CUSTOM_DD_IDLE_MINUTES}m or recency unmeasurable, keeping $target"
-      continue
-    fi
-    before_kb=$(size_kb "$target")
-    if [[ "$DRY_RUN" == true ]]; then
-      log "Custom Xcode DerivedData: [dry-run] would remove $target ($(fmt_kb "$before_kb"))"
-    else
-      log "Custom Xcode DerivedData: removing $target ($(fmt_kb "$before_kb"))"
-      c14_remove "$target" --kind xcode-derived-data || true
-    fi
+    process_custom_derived_data_candidate "$cand"
   done
+  local wt_root="$HOME/.worktrees"
+  [[ -d "$wt_root" && ! -L "$wt_root" ]] || return 0
+  while IFS= read -r -d '' cand; do
+    process_custom_derived_data_candidate "$cand"
+  done < <(find "$wt_root" -mindepth 3 -maxdepth 3 -type d -print0 2>/dev/null)
 }
 
 # worldai iOS release CI leaves /private/tmp/worldai-ios-release-<run>-<attempt>/ with
