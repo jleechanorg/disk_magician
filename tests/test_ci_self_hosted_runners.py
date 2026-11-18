@@ -206,6 +206,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
         homebrew_idx = _find_github_path_line("/opt/homebrew/bin")
         home_bin_idx = _find_github_path_line("$HOME/bin")
         local_bin_idx = _find_github_path_line("$HOME/.local/bin")
+        ci_shims_idx = _find_github_path_line("$CI_SHIMS")
         venv_bin_idx = _find_github_path_line("$VENV_DIR/bin")
 
         self.assertGreater(
@@ -222,6 +223,11 @@ class TestCISelfHostedRunners(unittest.TestCase):
             venv_bin_idx,
             local_bin_idx,
             "$VENV_DIR/bin must be appended to $GITHUB_PATH after $HOME/.local/bin",
+        )
+        self.assertGreater(
+            venv_bin_idx,
+            ci_shims_idx,
+            "$VENV_DIR/bin must be appended to $GITHUB_PATH after $CI_SHIMS",
         )
 
         self.assertRegex(
@@ -259,11 +265,23 @@ class TestCISelfHostedRunners(unittest.TestCase):
 
         setup_body = steps.get("Set up isolated Python 3.13 venv and verify tools", "")
         self.assertIn('CI_HOME="${RUNNER_TEMP}/ci-home"', setup_body)
+        self.assertIn('CI_SHIMS="${RUNNER_TEMP}/ci-lowprio-shims"', setup_body)
         self.assertIn('GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"', setup_body)
         self.assertIn('echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"', setup_body)
         self.assertIn('echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"', setup_body)
+        self.assertIn(
+            'echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"',
+            setup_body,
+        )
+        self.assertIn('echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"', setup_body)
         self.assertIn('git config --global user.name', setup_body)
         self.assertIn('git config --global user.email', setup_body)
+        self.assertIn("$CI_HOME/.local/bin/diskm", setup_body)
+        self.assertIn("registry.json", setup_body)
+        self.assertIn("./scripts/resolve_config.py", setup_body)
+        self.assertIn("config.json.template", setup_body)
+        self.assertIn("$CI_SHIMS/taskpolicy", setup_body)
+        self.assertIn("$CI_SHIMS/nice", setup_body)
 
         for step_name in (
             "Run Python tests",
@@ -282,6 +300,10 @@ class TestCISelfHostedRunners(unittest.TestCase):
             "tests/test_volume.py",
             "tests/test_cli_reliability.py",
             "tests/test_worktree_hygiene.py",
+            "tests/test_package_dependency.py",
+            "tests/test_review_governor_edges.py",
+            "tests/test_reclaim_scheduler_coverage.py",
+            "tests/test_snapshot_measure_parallel.py",
         )
         for suite in (*timing_suites, "tests/test_lease_recover_lock.py"):
             self.assertIn(
@@ -301,6 +323,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
 
         cleanup_body = steps.get("Clean up isolated CI venv", "")
         self.assertIn("/ci-home", cleanup_body)
+        self.assertIn("/ci-lowprio-shims", cleanup_body)
         self.assertIn("/gitconfig-ci", cleanup_body)
 
     def test_ci_timeout_and_caffeinate_guard(self) -> None:

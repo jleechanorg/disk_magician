@@ -38,8 +38,32 @@ jobs:
             "$PY_BIN" -m venv --clear "$VENV_DIR"
             "$VENV_DIR/bin/pip" install -q pytest pytest-xdist "PyYAML>=6.0"
           fi
+          VENV_PYTHON="${VENV_DIR}/bin/python"
           CI_HOME="${RUNNER_TEMP}/ci-home"
-          mkdir -p "$CI_HOME"
+          mkdir -p "$CI_HOME/.local/bin"
+          printf '#!/usr/bin/env bash\nexec "%s/disk_magician.sh" "$@"\n' "${GITHUB_WORKSPACE}" > "$CI_HOME/.local/bin/diskm"
+          chmod +x "$CI_HOME/.local/bin/diskm"
+          if [ -f "$HOME/.disk_magician_state/volumes/registry.json" ]; then
+            mkdir -p "$CI_HOME/.disk_magician_state/volumes"
+            cp "$HOME/.disk_magician_state/volumes/registry.json" "$CI_HOME/.disk_magician_state/volumes/registry.json"
+            HOST_CFG="$("$VENV_PYTHON" ./scripts/resolve_config.py || true)"
+            if [ -n "$HOST_CFG" ] && [ -f "$HOST_CFG" ]; then
+              mkdir -p "$CI_HOME/.config/disk-magician"
+              "$VENV_PYTHON" -c '
+          import json, pathlib, sys
+          tpl = json.loads(pathlib.Path("config.json.template").read_text(encoding="utf-8"))
+          host = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if "volumes" in host:
+              tpl["volumes"] = host["volumes"]
+          pathlib.Path(sys.argv[2]).write_text(json.dumps(tpl, indent=2) + "\n", encoding="utf-8")
+          ' "$HOST_CFG" "$CI_HOME/.config/disk-magician/config.json"
+            fi
+          fi
+          CI_SHIMS="${RUNNER_TEMP}/ci-lowprio-shims"
+          mkdir -p "$CI_SHIMS"
+          printf '%s\n' '#!/usr/bin/env bash' '[[ "${1:-}" == "-b" ]] && shift' 'exec "$@"' > "$CI_SHIMS/taskpolicy"
+          printf '%s\n' '#!/usr/bin/env bash' 'if [[ "${1:-}" == "-n" ]]; then shift 2; fi' 'exec "$@"' > "$CI_SHIMS/nice"
+          chmod +x "$CI_SHIMS/taskpolicy" "$CI_SHIMS/nice"
           GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"
           rm -f "$GIT_CONFIG_GLOBAL"
           GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.name "disk_magician CI"
@@ -47,11 +71,13 @@ jobs:
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
           echo "$HOME/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$CI_SHIMS" >> "$GITHUB_PATH"
           echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
-          VENV_PYTHON="${VENV_DIR}/bin/python"
           echo "VENV_PYTHON=${VENV_DIR}/bin/python" >> "$GITHUB_ENV"
           echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"
           echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"
           "$VENV_PYTHON" -c 'import os, sys; assert os.path.realpath(sys.prefix) == os.path.realpath(os.environ["RUNNER_TEMP"] + "/diskm-ci-venv"), sys.prefix; print(sys.version, sys.executable)'
           command -v timeout >/dev/null 2>&1 || brew install coreutils
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
@@ -72,15 +98,16 @@ jobs:
           fi
           SHELL_FILES=()
           while IFS= read -r -d '' candidate; do
-            case "$(head -n 1 "$candidate" 2>/dev/null || true)" in
+            IFS= read -r first_line < "$candidate" || true
+            case "$first_line" in
               *bash|*sh)
-                "${CAFFEINATE[@]}" /bin/bash -n "$candidate"
                 SHELL_FILES+=("$candidate")
                 ;;
             esac
           done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
           if [ "${#SHELL_FILES[@]}" -gt 0 ]; then
-            printf '%s\0' "${SHELL_FILES[@]}" | "${CAFFEINATE[@]}" xargs -0 -n 25 -P 8 shellcheck --severity=error --external-sources
+            printf '%s\0' "${SHELL_FILES[@]}" | "${CAFFEINATE[@]}" xargs -0 -n 1 -P 8 /bin/bash -n
+            printf '%s\0' "${SHELL_FILES[@]}" | "${CAFFEINATE[@]}" xargs -0 -n 10 -P 8 shellcheck --severity=error --external-sources
           fi
 
       - name: Run Python tests
@@ -88,12 +115,12 @@ jobs:
           HOME: ${{ env.CI_HOME }}
         run: |
           if [ -x /usr/bin/caffeinate ]; then
-            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -n 4 -q tests --ignore=tests/test_lease_recover_lock.py --ignore=tests/test_lease_outer_callers.py --ignore=tests/test_volume.py --ignore=tests/test_cli_reliability.py --ignore=tests/test_worktree_hygiene.py
-            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -q tests/test_lease_outer_callers.py tests/test_volume.py tests/test_cli_reliability.py tests/test_worktree_hygiene.py
+            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -n 4 -q tests --ignore=tests/test_lease_recover_lock.py --ignore=tests/test_lease_outer_callers.py --ignore=tests/test_volume.py --ignore=tests/test_cli_reliability.py --ignore=tests/test_worktree_hygiene.py --ignore=tests/test_package_dependency.py --ignore=tests/test_review_governor_edges.py --ignore=tests/test_reclaim_scheduler_coverage.py --ignore=tests/test_snapshot_measure_parallel.py
+            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -q tests/test_lease_outer_callers.py tests/test_volume.py tests/test_cli_reliability.py tests/test_worktree_hygiene.py tests/test_package_dependency.py tests/test_review_governor_edges.py tests/test_reclaim_scheduler_coverage.py tests/test_snapshot_measure_parallel.py
             /usr/bin/caffeinate -i "$VENV_PYTHON" tests/test_lease_recover_lock.py
           else
-            "$VENV_PYTHON" -m pytest -n 4 -q tests --ignore=tests/test_lease_recover_lock.py --ignore=tests/test_lease_outer_callers.py --ignore=tests/test_volume.py --ignore=tests/test_cli_reliability.py --ignore=tests/test_worktree_hygiene.py
-            "$VENV_PYTHON" -m pytest -q tests/test_lease_outer_callers.py tests/test_volume.py tests/test_cli_reliability.py tests/test_worktree_hygiene.py
+            "$VENV_PYTHON" -m pytest -n 4 -q tests --ignore=tests/test_lease_recover_lock.py --ignore=tests/test_lease_outer_callers.py --ignore=tests/test_volume.py --ignore=tests/test_cli_reliability.py --ignore=tests/test_worktree_hygiene.py --ignore=tests/test_package_dependency.py --ignore=tests/test_review_governor_edges.py --ignore=tests/test_reclaim_scheduler_coverage.py --ignore=tests/test_snapshot_measure_parallel.py
+            "$VENV_PYTHON" -m pytest -q tests/test_lease_outer_callers.py tests/test_volume.py tests/test_cli_reliability.py tests/test_worktree_hygiene.py tests/test_package_dependency.py tests/test_review_governor_edges.py tests/test_reclaim_scheduler_coverage.py tests/test_snapshot_measure_parallel.py
             "$VENV_PYTHON" tests/test_lease_recover_lock.py
           fi
 
@@ -131,5 +158,5 @@ jobs:
         if: always()
         run: |
           if [ -n "${RUNNER_TEMP:-}" ] && [ "${RUNNER_TEMP}" != "/" ]; then
-            rm -rf "${RUNNER_TEMP:?}/diskm-ci-venv" "${RUNNER_TEMP:?}/ci-home" "${RUNNER_TEMP:?}/gitconfig-ci"
+            rm -rf "${RUNNER_TEMP:?}/diskm-ci-venv" "${RUNNER_TEMP:?}/ci-home" "${RUNNER_TEMP:?}/ci-lowprio-shims" "${RUNNER_TEMP:?}/gitconfig-ci"
           fi
