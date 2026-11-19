@@ -94,6 +94,8 @@ sqlite3 "$DB" "INSERT INTO t (v) VALUES ('after-reader');"
 OUT=$(HERMES_STATE_DB="$DB" "$SCRIPT" --apply 2>&1)
 expect "live apply without approval refused" "REFUSING: " "$OUT"
 expect "refusal names the approval env" "HERMES_DB_CHECKPOINT_APPROVED=1" "$OUT"
+expect "refusal cites AGENTS.md Lane D authority" "AGENTS.md § Fast-Path Execution Protocol, Lane D" "$OUT"
+expect "AGENTS.md documents HERMES_DB_CHECKPOINT_APPROVED=1" "HERMES_DB_CHECKPOINT_APPROVED=1" "$(cat "$REPO_ROOT/AGENTS.md")"
 OUT=$(HERMES_STATE_DB="$DB" HERMES_DB_CHECKPOINT_APPROVED=1 HERMES_DB_BUSY_TIMEOUT_MS=200 "$SCRIPT" --apply 2>&1)
 expect "approved apply reports busy checkpoint" "checkpoint BUSY" "$OUT"
 expect "checkpoint result line clean format" "checkpoint result busy|log|checkpointed=" "$OUT"

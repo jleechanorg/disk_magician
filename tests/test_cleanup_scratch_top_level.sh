@@ -288,6 +288,8 @@ echo "Test 2: --clean without SCRATCH_TOP_LEVEL_APPROVED=1 refuses"
 out="$(run bash "$SCRIPT" --clean 2>&1)"; rc=$?
 [[ "$rc" == 2 ]] && ok "--clean refuses with rc=2" || bad "--clean refuses with rc=2" "rc=$rc"
 check "refusal names the approval variable" "SCRATCH_TOP_LEVEL_APPROVED=1" "$out"
+check "refusal cites AGENTS.md Lane A authority" "AGENTS.md § Fast-Path Execution Protocol, Lane A" "$out"
+grep -q "SCRATCH_TOP_LEVEL_APPROVED=1" "$ROOT/AGENTS.md" && cmp -s "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md" && cmp -s "$ROOT/AGENTS.md" "$ROOT/GEMINI.md" && ok "AGENTS.md/CLAUDE.md/GEMINI.md document SCRATCH_TOP_LEVEL_APPROVED=1 in sync" || bad "AGENTS.md/CLAUDE.md/GEMINI.md document SCRATCH_TOP_LEVEL_APPROVED=1 in sync"
 [[ -d "$SCRATCH_ROOT/plain-old" ]] && ok "unapproved clean deleted nothing" || bad "unapproved clean deleted nothing"
 
 echo "Test 3: approved clean removes an eligible dir and logs the row"
