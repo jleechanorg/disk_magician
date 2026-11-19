@@ -129,15 +129,19 @@ jobs:
 
       - name: Check shell syntax and ShellCheck errors
         run: |
+          SHELL_FILES=()
           while IFS= read -r -d '' candidate; do
             IFS= read -r first_line < "$candidate" || true
             case "$first_line" in
               *bash|*sh)
-                /bin/bash -n "$candidate"
-                shellcheck --severity=error --external-sources "$candidate"
+                SHELL_FILES+=("$candidate")
                 ;;
             esac
           done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
+          if [ "${#SHELL_FILES[@]}" -gt 0 ]; then
+            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 1 -P 4 /bin/bash -n
+            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 25 -P 2 shellcheck --severity=error
+          fi
 
       - name: Run Python tests
         env:
