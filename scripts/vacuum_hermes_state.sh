@@ -121,7 +121,7 @@ if ! $APPLY; then
 fi
 
 if [[ -n "$holders" && "${HERMES_DB_CHECKPOINT_APPROVED:-}" != 1 ]]; then
-  log "REFUSING: $DB is held open by pid(s) ${holders}; set HERMES_DB_CHECKPOINT_APPROVED=1 to checkpoint a live db."
+  log "REFUSING: $DB is held open by pid(s) ${holders}; set HERMES_DB_CHECKPOINT_APPROVED=1 to checkpoint a live db (see AGENTS.md § Fast-Path Execution Protocol, Lane D)."
   exit 0
 fi
 

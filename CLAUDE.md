@@ -32,7 +32,9 @@ When the user invokes `/diskm`, asks why disk space is low, or requests a disk c
 2. **Step 2 (Immediate Parallel `flash` Subagent Cleanup)**:
    - Do **not** run all 22 categories serially in one foreground shell when reclaiming large space (`100–300+ GiB`), and do **not** start with `cleanup_dev_caches.sh` (which walks `~/Library/Caches` while holding `.owner-mutation.reuse-lock`).
    - Instead, dispatch **parallel `flash` subagents** across non-contending high-yield lanes:
-     - **Lane A (Scratch Volume, 20–150+ GiB)**: `diskm scratch-prune --clean` (`scripts/cleanup_scratch_top_level.sh --clean`)
+     - **Lane A (Scratch Volume, 20–150+ GiB)**:
+       - Routine C14-only safe pass (removes C14-verified ephemeral Scratch entries >=48h without overriding content keeps): `DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 diskm scratch-prune --clean` (`scripts/cleanup_scratch_top_level.sh --clean`)
+       - Operator-approved content-override / manual `--budget-pct` pass (overrides `kept:secret-like|kept:unproven-content|kept:no-proof` after `--dry-run` review while preserving live leases, open files, live cwds, dirty/unpushed repos, and linked worktrees; gate introduced in `#295` / `e571f75ee` and ratified here): `SCRATCH_TOP_LEVEL_APPROVED=1 diskm scratch-prune --clean`
      - **Lane B (Worktree Slimming -> Deps -> Dormant Worktrees, 30–180+ GiB)**:
        1. `WORKTREE_APPROVED=1 diskm slim-worktrees --clean` (`scripts/slim_worktree_checkouts.sh --clean`)
        2. `WORKTREE_APPROVED=1 diskm cleanup-worktree-deps --clean` (`scripts/cleanup_worktree_deps.sh --clean`)
@@ -43,7 +45,7 @@ When the user invokes `/diskm`, asks why disk space is low, or requests a disk c
        - `CODE_SIGN_CLONES_APPROVED=1 diskm cleanup-code-sign-clones --clean`
        - `FILEPROVIDER_EVICT_APPROVED=1 diskm evict-fileprovider --clean`
      - **Lane D (Agent State & SQLite Vacuum, 5–20 GiB)**:
-       - `diskm vacuum-hermes-state --clean`, `diskm cleanup-codex-db --clean`, `diskm cleanup-antigravity-brain --clean`, `diskm cleanup-tmp --clean`
+       - `diskm vacuum-hermes-state --clean` (exports `HERMES_DB_CHECKPOINT_APPROVED=1` internally for online WAL checkpoint + FTS5 compaction; direct `scripts/vacuum_hermes_state.sh --apply` on a live-open `~/.hermes/state.db` requires `HERMES_DB_CHECKPOINT_APPROVED=1`, matching `launchd/com.disk-magician.hermes-vacuum.plist`), `diskm cleanup-codex-db --clean`, `diskm cleanup-antigravity-brain --clean`, `diskm cleanup-tmp --clean`
 3. **Step 3 (Zero-Reclaim / Silent-Preservation Diagnostic Rule)**:
    - Never report *"canonical stack is exhausted"* when free space is still below target. If a cleaner exits `0` with `0 B` reclaimed, inspect the skip breakdown (`kept:lease-busy`, `ao-owned-or-unknown`, `kept:admin-unknown`, `kept:recent-activity`, `dirty-or-untracked`) and verify `~/.disk_magician_state/worktree_leases/.owner-mutation.reuse-lock` is not wedged before concluding nothing is reclaimable.
 

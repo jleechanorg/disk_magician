@@ -189,7 +189,7 @@ if [[ "$DRY_RUN" != true && "$SCRATCH_AUTOMATIC" == 1 && "${SCRATCH_TOP_LEVEL_AP
   exit 2
 fi
 if [[ "$DRY_RUN" != true && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" != "1" && "$SCRATCH_AUTOMATIC" != 1 ]]; then
-  echo "Refusing to delete: set SCRATCH_TOP_LEVEL_APPROVED=1 after reviewing the dry-run output." >&2
+  echo "Refusing to delete: set SCRATCH_TOP_LEVEL_APPROVED=1 after reviewing the dry-run output, or DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 for C14-only safe mode (see AGENTS.md § Fast-Path Execution Protocol, Lane A)." >&2
   exit 2
 fi
 
