@@ -56,15 +56,10 @@ STEP_TIMEOUT="${DISK_MAGICIAN_PRESSURE_STEP_TIMEOUT:-600}"
 # SIGKILL escalation (bead disk_magician-xt2y). `timeout STEP_TIMEOUT cmd`
 # sends TERM only; a step child that traps TERM and then keeps working (the
 # deferred-TERM case observed on this host) outlives its deadline. That matters
-# beyond the step itself: cleanup_tmp's scratch flock fd is deliberately
-# inheritable (scripts/scratch_lock.py os.set_inheritable), flock lives on the
-# open file description, so any surviving descendant keeps
-# ~/.disk_magician_locks/scratch_cleanup.lock held and every competing cleanup
-# then fails closed (rc 75 "skipped, scratch lock held"). STEP_KILL_AFTER is
-# the grace period between TERM and SIGKILL; 0 disables escalation (byte-for-
-# byte pre-fix behaviour). Both values accept the DISK_MAGICIAN_PRESSURE_* env
-# hook pattern used by FREE_GB_OVERRIDE above so tests can drive them
-# deterministically.
+# because the scheduler must bound subprocesses as well as the immediate child.
+# STEP_KILL_AFTER is the grace period between TERM and SIGKILL.
+# A zero value disables escalation. Both timeout settings use the same
+# DISK_MAGICIAN_PRESSURE_* environment naming as FREE_GB_OVERRIDE.
 STEP_KILL_AFTER="${DISK_MAGICIAN_PRESSURE_STEP_KILL_AFTER:-20}"
 DRY_RUN=false
 # Testing hook: skip the real `df` read and use a fabricated free-GB value
@@ -451,7 +446,7 @@ if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
 else
   STEP1_RC=$?
   if [[ $STEP1_RC -eq 75 ]]; then
-    # EX_TEMPFAIL from scratch_lock.py: another scratch cleanup owns the lock.
+    # A legacy cleanup override can still report a held whole-job lock.
     STEP1_RC=0
     STEP1_SKIPPED=true
     log "pressure_sweep: step 1/3 cleanup_tmp.sh skipped (scratch lock held) — continuing to step 2."

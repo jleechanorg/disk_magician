@@ -5,10 +5,9 @@
 # --dry-run; unattended deletions of ~/.claude/state remain strictly forbidden),
 # failure-continuing between steps but propagating a nonzero exit if either step
 # failed, so an unattended launchd job doesn't silently look healthy when a
-# step is broken. The 20-minute --scratch-only mode runs safe registered-volume
-# the available-floor volume reclaim pass before the slower Scratch prune, so
-# host sparse-image trim gets bounded time even when candidate itemization runs
-# to its deadline.
+# step is broken. In Scratch-only mode a configured LRU pass starts first.
+# The available-floor pass still runs first without an LRU budget, so sparse
+# image trim gets bounded time when automatic discovery uses the deadline.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
@@ -140,8 +139,20 @@ CHILD_TRIGGER="tmp_scratch_sweep:${RECEIPT_RUN_ID}"
 # the path but a different owner, so it cannot double-count the same kept bytes.
 : "${DISK_MAGICIAN_C14_LEDGER_OWNER:=tmp_scratch_sweep}"
 export DISK_MAGICIAN_C14_LEDGER_OWNER
-OLD_CHILD_ID="$(python3 "$RECEIPT_HELPER" read --job cleanup_tmp --last 2>/dev/null | python3 -c 'import json,sys; x=json.load(sys.stdin); print(x.get("id", "") if x else "")' 2>/dev/null || true)"
-OLD_VOLUME_ID="$(python3 "$RECEIPT_HELPER" read --job volume_reclaim --last 2>/dev/null | python3 -c 'import json,sys; x=json.load(sys.stdin); print(x.get("id", "") if x else "")' 2>/dev/null || true)"
+# Another cleaner can finish between our child exit and this read. Select
+# the terminal receipt belonging to this scheduler invocation.
+read_child_receipt() {
+  python3 "$RECEIPT_HELPER" read --job "$1" 2>/dev/null | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+completed = data.get("completed") or []
+receipt = next(
+    (row for row in reversed(completed) if row.get("trigger") == sys.argv[1]),
+    None,
+)
+print(json.dumps(receipt))
+' "$CHILD_TRIGGER" 2>/dev/null
+}
 run_cleanup_tmp() {
   if [[ -n "$ACT_DEADLINE_AT" || -n "$ACT_CURSOR" ]]; then
     DISK_MAGICIAN_RECEIPT_TRIGGER="$CHILD_TRIGGER" "$SCRIPT_DIR/cleanup_tmp.sh" "$@" ${governor_args[@]+"${governor_args[@]}"}
@@ -160,11 +171,8 @@ SCRATCH_PRUNE_OUTCOME="not-run"
 SCRATCH_PRUNE_REMOVED=0
 SCRATCH_PRUNE_SCANNED=0
 run_volume_reclaim_phase() {
-# Give the existing volume-reclaim phase first use of the shared deadline.
-# Scratch pruning can spend the entire 15-minute window itemising a large
-# candidate; volume reclaim owns the host sparse-image trim needed to return
-# freed Scratch blocks to the root filesystem. The established 300s phase cap
-# leaves the remainder for Scratch pruning.
+# Volume reclaim owns sparse-image trim and has its own cap within the
+# scheduler deadline.
 volume_args=(volume reclaim --available-floor)
 [[ "$clean_flag" == "--clean" ]] && volume_args+=(--clean)
 VOLUME_TIMEOUT_SEC="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
@@ -240,7 +248,8 @@ PY
 fi
 [[ -n "$VOLUME_OUTPUT" ]] && printf '%s\n' "$VOLUME_OUTPUT"
 }
-if [[ "$SWEEP_MODE" == scratch-only ]]; then
+SCRATCH_LRU_PCT="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
+if [[ "$SWEEP_MODE" == scratch-only && ! "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
   run_volume_reclaim_phase
 fi
 if [[ "$SWEEP_MODE" == scratch-only ]]; then
@@ -249,7 +258,6 @@ if [[ "$SWEEP_MODE" == scratch-only ]]; then
   # Opt-in LRU budget mode (walx, default off): DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=N
   # in the scheduler environment replaces the C14-only automatic pass with the
   # approved LRU eviction down to N% used. The variable is the operator approval.
-  SCRATCH_LRU_PCT="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
   if [[ "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
     scratch_args+=(--budget-pct "$SCRATCH_LRU_PCT" --budget-preserve-content-keeps)
     # Pass the operator's shorter budget window through to the pruner. Without
@@ -263,7 +271,19 @@ if [[ "$SWEEP_MODE" == scratch-only ]]; then
     scratch_args+=(--available-floor)
     scratch_mode_env=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 SCRATCH_TOP_LEVEL_APPROVED=0)
   fi
-  SCRATCH_TIMEOUT_SEC="$(python3 - "$ACT_DEADLINE_AT" <<'PY'
+  SCRATCH_PHASE_DEADLINE_AT="$ACT_DEADLINE_AT"
+  if [[ "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ && "${DISK_MAGICIAN_OSTYPE:-$OSTYPE}" == linux* ]]; then
+    # A sparse image returns space to the host via trim after deletion.
+    # Keep the existing volume phase allowance when the overall budget fits it.
+    SCRATCH_PHASE_DEADLINE_AT="$(python3 - "$ACT_DEADLINE_AT" "${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}" <<'PY'
+import sys,time
+deadline=float(sys.argv[1])
+reserve=int(sys.argv[2]) if sys.argv[2].isascii() and sys.argv[2].isdigit() and sys.argv[2][0] != "0" else 300
+print(deadline-reserve if deadline-time.monotonic() > reserve else sys.argv[1])
+PY
+)"
+  fi
+  SCRATCH_TIMEOUT_SEC="$(python3 - "$SCRATCH_PHASE_DEADLINE_AT" <<'PY'
 import sys,time
 try: remaining=max(0.0,float(sys.argv[1])-time.monotonic())
 except (TypeError,ValueError): remaining=0.0
@@ -274,7 +294,7 @@ PY
     SCRATCH_PRUNE_OUTPUT="skipped:bounded-runtime-unavailable"
     SCRATCH_PRUNE_RC=124
   else
-    run_bounded_capture SCRATCH_PRUNE_OUTPUT env ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$SCRATCH_CURSOR" \
+    run_bounded_capture SCRATCH_PRUNE_OUTPUT env ACT_DEADLINE_AT="$SCRATCH_PHASE_DEADLINE_AT" ACT_CURSOR="$SCRATCH_CURSOR" \
       DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" "${scratch_mode_env[@]}" \
       DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= \
       "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${SCRATCH_TIMEOUT_SEC}s" \
@@ -348,7 +368,7 @@ else
   fi
   "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
 fi
-if [[ "$SWEEP_MODE" == full ]]; then
+if [[ "$SWEEP_MODE" == full || "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
   run_volume_reclaim_phase
 fi
 # Same classification as the scratch-prune child: rc 75 with the lock helper's
@@ -370,18 +390,18 @@ fi
 volume_receipt_file="$(mktemp "${TMPDIR:-/tmp}/dm-sweep-vol-receipt.XXXXXX")" || exit 1
 volume_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sweep-vol-output.XXXXXX")" || { rm -f "$volume_receipt_file"; exit 1; }
 trap 'rm -f "${volume_receipt_file:-}" "${volume_output_file:-}"' EXIT
-python3 "$RECEIPT_HELPER" read --job volume_reclaim --last >"$volume_receipt_file" 2>/dev/null || true
+read_child_receipt volume_reclaim >"$volume_receipt_file" || true
 printf '%s' "$VOLUME_OUTPUT" >"$volume_output_file"
-VOLUME_METRICS="$(python3 - "$volume_receipt_file" "$OLD_VOLUME_ID" "$CHILD_TRIGGER" "$volume_output_file" "$clean_flag" <<'PYV'
+VOLUME_METRICS="$(python3 - "$volume_receipt_file" "$volume_output_file" "$clean_flag" <<'PYV'
 import json,sys
 from pathlib import Path
 try: r=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"))
 except Exception: r={}
-volume_output=Path(sys.argv[4]).read_text(encoding="utf-8", errors="replace")
+volume_output=Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
 stripped_output=volume_output.strip()
-if isinstance(r,dict) and r.get("id")!=sys.argv[2] and r.get("trigger")==sys.argv[3]:
+if isinstance(r,dict):
  c=r.get("candidates") or {}; p=r.get("postcondition") or {}
- print(json.dumps({"valid":True,"outcome":r.get("outcome"),"aged_scanned":c.get("aged_scanned"),"removed":c.get("removed"),"target_reached":(p.get("target_reached") if sys.argv[5]=="--clean" else None),"top_kept_reason":c.get("top_kept_reason"),"ballast_restore_failures":c.get("ballast_restore_failures",0)},separators=(",",":")))
+ print(json.dumps({"valid":True,"outcome":r.get("outcome"),"aged_scanned":c.get("aged_scanned"),"removed":c.get("removed"),"target_reached":(p.get("target_reached") if sys.argv[3]=="--clean" else None),"top_kept_reason":c.get("top_kept_reason"),"ballast_restore_failures":c.get("ballast_restore_failures",0)},separators=(",",":")))
 elif stripped_output == "skipped:measurement-unavailable":
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"measurement-unavailable"},separators=(",",":")))
 elif stripped_output == "skipped:unavailable" or stripped_output.startswith("skipped:below-trigger:"):
@@ -419,14 +439,14 @@ if [[ "$SWEEP_MODE" == scratch-only ]]; then
   [[ "$SCRATCH_PRUNE_OUTCOME" == timeout ]] && scratch_interrupted=1
   CHILD_METRICS="{\"removed_count\":${SCRATCH_PRUNE_REMOVED},\"deferred_count\":${scratch_deferred},\"interrupted_count\":${scratch_interrupted},\"df_delta_bytes\":0}"
 else
-CHILD_RECEIPT="$(python3 "$RECEIPT_HELPER" read --job cleanup_tmp --last 2>/dev/null || true)"
-CHILD_METRICS="$(python3 - "$CHILD_RECEIPT" "$OLD_CHILD_ID" "$CHILD_TRIGGER" <<'PY'
+CHILD_RECEIPT="$(read_child_receipt cleanup_tmp || true)"
+CHILD_METRICS="$(python3 - "$CHILD_RECEIPT" <<'PY'
 import json, sys
 try:
     rec=json.loads(sys.argv[1])
 except Exception:
     print("{}"); raise SystemExit
-if not isinstance(rec,dict) or rec.get("id")==sys.argv[2] or rec.get("trigger")!=sys.argv[3]:
+if not isinstance(rec,dict):
     print("{}"); raise SystemExit
 c=rec.get("candidates") or {}
 p=rec.get("postcondition") or {}

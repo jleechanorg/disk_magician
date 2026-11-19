@@ -655,6 +655,42 @@ _av_top_level_veto() {
     return 1
 }
 
+# C14 same-target identity binding used by exact-target cleanup callers.
+# Authority: scripts/lib/quarantine.sh's C14 verdict-to-rename contract and the
+# caller's explicit exact-entry target require rejecting a path replacement.
+_av_frozen_identity_matches() {
+    local path="$1" expected="$2" actual
+    [[ -z "$expected" ]] && return 0
+    [[ "$expected" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || return 1
+    actual="$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(str(s.st_dev)+":"+str(s.st_ino)+":"+str(s.st_uid))' "$path" 2>/dev/null)" || return 1
+    [[ "$actual" == "$expected" ]]
+}
+_av_frozen_entry_matches() {
+    local path="$1" expected="$2" parent_expected="$3"
+    _av_frozen_identity_matches "$path" "$expected" || return 1
+    [[ -z "$parent_expected" ]] || _av_frozen_identity_matches "$(dirname "$path")" "$parent_expected"
+}
+_av_frozen_inventory_matches() {
+    local path="$1" inventory="$2" expected="$3"
+    [[ -z "$expected" ]] && return 0
+    python3 - "$path" "$inventory" "$expected" <<'PY'
+import json, os, sys
+path, inventory_path, expected = sys.argv[1:]
+try:
+    expected_dev, expected_ino, expected_uid = (int(part) for part in expected.split(":"))
+    with open(inventory_path) as stream:
+        entries = json.load(stream)
+    root = next(row for row in entries if isinstance(row, dict) and row.get("path") == ".")
+    current = os.lstat(path)
+except Exception:
+    raise SystemExit(1)
+if (root.get("dev"), root.get("ino")) != (expected_dev, expected_ino):
+    raise SystemExit(1)
+if (current.st_dev, current.st_ino, current.st_uid) != (expected_dev, expected_ino, expected_uid):
+    raise SystemExit(1)
+PY
+}
+
 # artifact_removal_verdict <path> [...] | --self-test
 # Subshell so the cwd change inside wrh_live_cwd_reason never leaks to callers.
 _av_artifact_removal_verdict() (
@@ -694,6 +730,7 @@ _av_artifact_removal_verdict() (
         own_claim="$(cd "$(dirname "$own_claim")" 2>/dev/null && pwd -P)/${own_claim##*/}"
     fi
     p=${p%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
+    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" || { echo kept:identity-mismatch; return 0; }
     if [[ -n "$deadline" && ! "$deadline" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo kept:check-failed; return 0; fi
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
     q="$(python3 "$_AV_DIR/../resolve_config.py")" || { echo kept:volume-config; return 0; }
@@ -716,10 +753,15 @@ if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kep
         [[ "${DISK_MAGICIAN_TEST_CONTEXT:-}" == 1 ]] || { echo kept:check-failed; return 0; }
         printf 'race fixture\n' >"$DISK_MAGICIAN_TEST_AFTER_NOMINATE" || { echo kept:check-failed; return 0; }
     fi
+    # Recheck immediately before capturing the C14 inventory. The quarantine
+    # phase then verifies that inventory against the entry at rename time.
+    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" || { echo kept:identity-mismatch; return 0; }
     inv=${C14_INVENTORY_FILE:-}
     [[ -n "$inv" ]] || { echo kept:check-failed; return 0; }
     st="$(python3 "$_AV_DIR/../c14_probe.py" inventory "$p" "$inv" ${deadline:+"$deadline"})"
     if [[ "$st" != ok ]]; then echo "${st:-kept:check-failed}"; return 0; fi
+    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" &&
+        _av_frozen_inventory_matches "$p" "$inv" "$frozen_id" || { echo kept:identity-mismatch; return 0; }
     # The one lease file whose owner-null state T3 may free. Never an ancestor
     # or descendant: only this exact path's own lease can match $q below.
     candidate_lease="$(lease_path_for "$p")" || { echo kept:check-failed; return 0; }

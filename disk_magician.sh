@@ -79,7 +79,7 @@ Commands:
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
   scratch-prune          Reclaim C14-recognized Scratch artifacts behind lease/live-cwd/open-file
                          gates (--clean needs operator approval or internal safe automatic mode).
-  emergency              One-off emergency reclaim of tmp + Scratch under one lock hold; one 48h pass by default.
+  emergency              One-off emergency reclaim of tmp + Scratch; one 48h pass by default.
                          Lower ages require an explicit --max-age-hours override (minimum 2h).
                          Flags: --target-gb N --max-age-hours H --dry-run --include-worktrees.
   cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.
@@ -106,6 +106,8 @@ Commands:
                          Session-exit release of that session's leases (deletes nothing).
   lease-recover-lock --registry
                          Quarantine an exact stale empty lock or dead-PID partial lock past TTL; never deletes it.
+  quarantine remove-scratch <direct-child> [--dry-run|--clean]
+                         Remove one exact C14-eligible entry from registered Scratch (dry-run by default).
   quarantine restore <id> Restore one identity-checked kept quarantine entry.
   quarantine reconcile [--deadline-at T] [--cursor F] Resume indexed quarantine recovery.
   quarantine verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]
@@ -715,6 +717,7 @@ case "$CMD" in
   quarantine)
     subcommand="${1:-}"; shift || true
     case "$subcommand" in
+      remove-scratch) exec bash "$SCRIPT_DIR/scripts/quarantine_remove_scratch.sh" "$@" ;;
       restore) [[ $# -eq 1 ]] || { echo "Usage: diskm quarantine restore <id>" >&2; exit 2; }; exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" restore "$1" ;;
       reconcile) exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" reconcile "$@" ;;
       verdict)
@@ -742,7 +745,7 @@ case "$CMD" in
           DISK_MAGICIAN_C14_LEDGER= DISK_MAGICIAN_C14_PROOF_OUT= artifact_removal_verdict "$verdict_path" --no-rescue-push
         fi
         ;;
-      *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]|verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]}" >&2; exit 2 ;;
+      *) echo "Usage: diskm quarantine {remove-scratch <direct-child> [--dry-run|--clean]|restore <id>|reconcile [--deadline-at T] [--cursor F]|verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]}" >&2; exit 2 ;;
     esac
     ;;
   worktree_quarantine|worktree-quarantine)

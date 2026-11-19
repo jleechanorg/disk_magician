@@ -30,6 +30,7 @@ printf 'x%.0s' {1..2048} > "$priv/pr4242-scratch/payload.bin"
 /usr/bin/find "$priv/pr4242-scratch" -exec touch -t 202001010000 {} + 2>/dev/null || \
   find "$priv/pr4242-scratch" -exec touch -t 202001010000 {} +
 
+sibling_run_id="$(HOME="$home" python3 "$ROOT/scripts/job_receipt.py" begin --job cleanup_tmp --trigger concurrent-sibling --precondition '{}')"
 out="$T/run.out"
 env -i HOME="$home" \
   PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" \
@@ -59,8 +60,11 @@ fi
 receipts="$home/.disk_magician_state/receipts/cleanup_tmp.json"
 if [[ -f "$receipts" ]]; then
   ok "receipt file exists"
-  [[ "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("active") or []))' "$receipts")" == 0 ]] && \
-    ok "no run is left active after the pass" || bad "no run is left active after the pass"
+  [[ -n "$sibling_run_id" ]] && ok "sibling run id captured" || bad "sibling run id captured"
+  active_count="$(jq ".active | length" "$receipts")"
+  if [[ "$active_count" == 1 ]]; then ok "concurrent sibling run remains active"; else bad "concurrent sibling run remains active" "active=$active_count"; fi
+  active_run_id="$(jq -r ".active[0].run_id // \"missing\"" "$receipts")"
+  if [[ "$active_run_id" == "$sibling_run_id" ]]; then ok "cleanup_tmp finish preserves the sibling run identity"; else bad "cleanup_tmp finish preserves the sibling run identity" "expected=$sibling_run_id actual=$active_run_id"; fi
   last_outcome="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(((d.get("last_terminal") or {}).get("outcome")) or "missing")' "$receipts")"
   [[ "$last_outcome" != "missing" && "$last_outcome" != "error" ]] && \
     ok "the terminal receipt has a non-error outcome ($last_outcome)" || \

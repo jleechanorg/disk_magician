@@ -48,6 +48,11 @@ python3 "$helper" finish --job cleanup_tmp --run-id "$run_id" --outcome "$outcom
   --reason "mock cleanup result" --safety '{}' \
   --candidates '{"count":null,"bytes":null,"removed_count":'"${TMP_MOCK_REMOVED:-0}"',"deferred_count":0,"interrupted_count":0}' \
   --postcondition '{"df_delta_bytes":0,"freed_bytes":0}' >/dev/null
+
+if [[ "${MOCK_CONCURRENT_RECEIPTS:-0}" == 1 ]]; then
+  other_id="$(python3 "$helper" begin --job cleanup_tmp --trigger concurrent-fixture)"
+  python3 "$helper" finish --job cleanup_tmp --run-id "$other_id" --outcome success_noop >/dev/null
+fi
 exit "$rc"
 MOCK
 
@@ -103,6 +108,11 @@ outcome="${VOLUME_MOCK_OUTCOME:-success}"
 target=true
 [[ "$outcome" != partial ]] || target=false
 python3 "$helper" finish --job volume_reclaim --run-id "$run_id" --outcome "$outcome"   --reason "mock volume result" --trigger "$trigger" --safety '{}'   --candidates "{\"aged_scanned\":3,\"removed\":${VOLUME_MOCK_REMOVED:-2},\"top_kept_reason\":\"lease_active\",\"ballast_restore_failures\":${VOLUME_MOCK_BALLAST_FAILURES:-0}}"   --postcondition "{\"target_reached\":$target}" >/dev/null
+if [[ "${MOCK_CONCURRENT_RECEIPTS:-0}" == 1 ]]; then
+  other_id="$(python3 "$helper" begin --job volume_reclaim --trigger concurrent-fixture)"
+  python3 "$helper" finish --job volume_reclaim --run-id "$other_id" --outcome success_noop >/dev/null
+fi
+
 MOCK
 chmod +x "$TMP_ROOT/disk_magician.sh"
 export DISK_MAGICIAN_RECEIPT_HELPER="$MOCK_BIN/job_receipt.py"
@@ -175,11 +185,31 @@ assert_receipt_field "volume reclaim result is retained when Scratch prune times
 
 echo "Test 0c: the LRU budget opt-in switches the Scratch pass to approved budget mode"
 : > "$INVOCATION_LOG"
+LRU_TEST_DEADLINE="$(python3 -c 'import time; print(time.monotonic()+60)')"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 \
-  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
+  DISK_MAGICIAN_OSTYPE=linux-gnu DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS=5 \
+  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$LRU_TEST_DEADLINE" >/dev/null 2>&1 || true
 LRU_CALLS="$(cat "$INVOCATION_LOG")"
 assert_contains "opt-in passes --budget-pct to scratch-prune" "disk_magician scratch-prune --clean --budget-pct 50 --budget-preserve-content-keeps " "$LRU_CALLS"
 assert_contains "opt-in runs the approved non-automatic mode" "scratch_prune_mode automatic=0 approval=1" "$LRU_CALLS"
+LRU_PRUNE_LINE="$(grep -n '^disk_magician scratch-prune' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+LRU_VOLUME_LINE="$(grep -n '^disk_magician volume reclaim' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+if [[ -n "$LRU_PRUNE_LINE" && -n "$LRU_VOLUME_LINE" && "$LRU_PRUNE_LINE" -lt "$LRU_VOLUME_LINE" ]]; then
+  echo "  PASS  scheduled LRU starts before volume reclaim can consume its budget"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  scheduled LRU starts before volume reclaim can consume its budget"
+  FAIL=$((FAIL+1))
+fi
+LRU_PHASE_DEADLINE="$(awk '/^disk_magician scratch-prune / {for(i=1;i<=NF;i++) if($i ~ /^deadline=/){print substr($i,10); exit}}' "$INVOCATION_LOG")"
+[[ -n "$LRU_PHASE_DEADLINE" ]]
+if python3 -c 'import sys; sys.exit(not (4.99 < float(sys.argv[1])-float(sys.argv[2]) < 5.01))' "$LRU_TEST_DEADLINE" "$LRU_PHASE_DEADLINE"; then
+  echo "  PASS  Linux LRU leaves the configured time for sparse-image trim"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  Linux LRU leaves the configured time for sparse-image trim"
+  FAIL=$((FAIL+1))
+fi
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=0 \
   /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
@@ -302,6 +332,19 @@ echo "Test 7a: scheduler routes volume reclaim and folds its trigger-bound metri
 assert_contains "scheduler invokes volume reclaim" "disk_magician volume reclaim --available-floor --clean trigger=tmp_scratch_sweep:" "$(cat "$INVOCATION_LOG")"
 assert_receipt_field "parent receipt includes volume artifacts removed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "2"
 assert_receipt_field "parent receipt includes volume safety reason" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('volume_top_kept_reason')" "lease_active"
+
+echo "=== child receipts remain bound when an independent cleaner finishes ==="
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" MOCK_CONCURRENT_RECEIPTS=1 TMP_MOCK_REMOVED=3 /bin/bash "$SCRIPT" --clean
+CONCURRENT_RC=$?
+set -e
+if [[ "$CONCURRENT_RC" == 0 ]]; then
+  echo "  PASS  concurrent child receipts preserve successful sweep"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  concurrent child receipts preserve successful sweep (rc=$CONCURRENT_RC)"; FAIL=$((FAIL + 1))
+fi
+assert_receipt_field "volume receipt preserves this sweep's removal count" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d['last_terminal']['candidates']['volume_removed'])" "2"
+assert_receipt_field "temp receipt preserves this sweep's removal count" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d['last_terminal']['candidates']['removed_count'])" "3"
 
 echo "Test 7b: partial volume result propagates to scheduler receipt"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_OUTCOME=partial /bin/bash "$SCRIPT" --scratch-only --clean

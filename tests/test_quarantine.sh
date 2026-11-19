@@ -215,6 +215,21 @@ check 'expired phase2 defers and leaves the item restorable' bash -c '[[ "$1" ==
 prepare_quarantine; DISK_MAGICIAN_TEST_KILL_AT=mid_delete python3 "$ROOT/scripts/quarantine_rename.py" phase2 "$BINDING" "$QID" >/dev/null 2>&1
 RECON_ID="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile)"
 check 'reconcile deleting outcome carries the quarantine id' bash -c '[[ "$1" == *"removed:$2"* ]]' _ "$RECON_ID" "$QID"
+# Selecting the same candidate from independent cleanup jobs can now overlap.
+fixture
+(run; printf '%s\n' "$OUT") > "$TMP/contender-one" &
+first_pid=$!
+(run; printf '%s\n' "$OUT") > "$TMP/contender-two" &
+second_pid=$!
+wait "$first_pid"
+wait "$second_pid"
+contender_one="$(cat "$TMP/contender-one")"
+contender_two="$(cat "$TMP/contender-two")"
+check 'simultaneous removers complete only one removal of the same artifact' bash -c '
+  [[ ! -e "$3" ]] || exit 1
+  [[ "$1" == removed:* && "$2" == kept:* || "$1" == kept:* && "$2" == removed:* ]]
+' _ "$contender_one" "$contender_two" "$A"
+
 # Malformed reconcile deadlines fail closed without an unlocked traceback fallback.
 BAD_RECON="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile --deadline-at abc 2>&1; echo "rc=$?")"
 check 'malformed reconcile deadline fails closed without traceback' bash -c '[[ "$1" == *"ALERT: invalid quarantine reconcile deadline"* && "$1" == *"rc=1"* && "$1" != *Traceback* ]]' _ "$BAD_RECON"

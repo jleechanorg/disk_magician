@@ -2237,25 +2237,42 @@ raise SystemExit(volume.ballast_cmd('recover','scratch'))
             write.assert_not_called()
         self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
 
-    def test_ballast_recovery_respects_active_cleanup_lock_and_inherited_owner(self):
-        import scratch_lock
+    def test_ballast_recovery_proceeds_while_legacy_cleanup_lock_is_held(self):
         self.make_fit()
         self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
-        fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+        legacy_lock_dir = self.root / ".disk_magician_locks"
+        legacy_lock_dir.mkdir(mode=0o700)
+        fd = os.open(legacy_lock_dir / "scratch_cleanup.lock", os.O_CREAT | os.O_RDWR, 0o600)
         volume.fcntl.flock(fd, volume.fcntl.LOCK_EX | volume.fcntl.LOCK_NB)
         try:
             command = [sys.executable, str(ROOT / "scripts/volume.py"), "ballast", "recover", "scratch"]
             result = volume.subprocess.run(command, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(volume.ballast_ok(self.mp))
+            self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+        finally:
+            os.close(fd)
+
+    def test_ballast_recovery_defers_immediately_when_registry_is_busy(self):
+        import time
+        self.make_fit()
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        _, registry_lock = volume.registry_paths()
+        lock = registry_lock.open("a+")
+        volume.fcntl.flock(lock, volume.fcntl.LOCK_EX)
+        try:
+            command = [sys.executable, str(ROOT / "scripts/volume.py"), "ballast", "recover", "scratch"]
+            started = time.monotonic()
+            try:
+                result = volume.subprocess.run(command, capture_output=True, timeout=2)
+            except volume.subprocess.TimeoutExpired:
+                self.fail("ballast recovery waited on the volume registry lock")
+            self.assertLess(time.monotonic() - started, 1.5)
             self.assertEqual(result.returncode, 75)
             self.assertFalse(volume.ballast_ok(self.mp))
             self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
         finally:
-            os.close(fd)
-        result = volume.subprocess.run([sys.executable, str(ROOT / "scripts/scratch_lock.py"),
-            "run", "--caller", "recovery-test", "--script", sys.executable, "--args", "--",
-            str(ROOT / "scripts/volume.py"), "ballast", "recover", "scratch"], capture_output=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(volume.ballast_ok(self.mp))
+            lock.close()
 
     def test_pending_recovery_reports_typed_low_space_without_clearing_intent(self):
         self.make_fit()

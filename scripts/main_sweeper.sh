@@ -338,8 +338,7 @@ main() {
     if [[ "${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}" =~ ^[1-9][0-9]?$ && -f "$REPO_ROOT/scripts/cleanup_scratch_top_level.sh" ]]; then
       # Authority: CLAUDE.md:247 + operator decision 2026-11-18 ("yes permanently hands off")
       log "Running fast >=1 GiB Scratch LRU eviction (budget ${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT}%)..."
-      DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=25 \
-        DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 \
+      DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 \
         DISK_MAGICIAN_SCRATCH_DETAIL=off \
         SCRATCH_TOP_LEVEL_APPROVED=1 \
         run_job_step "Phase 2: scratch_prune --budget-pct" bash "$REPO_ROOT/scripts/cleanup_scratch_top_level.sh" "$CLEAN_ARG" --budget-pct "$DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT" --budget-preserve-content-keeps || true

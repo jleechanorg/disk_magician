@@ -352,10 +352,15 @@ def registry(state_dir: str | Path | None = None) -> dict[str, Any]:
     return value
 
 
-def locked_registry() -> tuple[Path, Any]:
+def locked_registry(*, blocking: bool = True) -> tuple[Path, Any]:
     registry_file, lock_file = registry_paths()
     handle = lock_file.open("a+")
-    fcntl.flock(handle, fcntl.LOCK_EX)
+    operation = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+    try:
+        fcntl.flock(handle, operation)
+    except BlockingIOError:
+        handle.close()
+        raise
     return registry_file, handle
 
 
@@ -692,15 +697,13 @@ def log_ballast_release(path: Path, volume_uuid: str, action: str) -> bool:
 def ballast_cmd(action: str, name: str) -> int:
     registry_file = None
     lock_handle = None
-    cleanup_fd = None
     try:
-        if action in {"ensure", "recover"}:
-            import scratch_lock
-            inherited = os.environ.get(scratch_lock.ENV_FD, "")
-            if not (inherited.isdigit() and scratch_lock.verify_fd(int(inherited))):
-                cleanup_fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
-                fcntl.flock(cleanup_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        registry_file, lock_handle = locked_registry()
+        # The registry transaction serializes ballast intents and allocation
+        # identity. Do not make independent cleanup jobs contend on a global lock.
+        # Ballast recovery/release is a scheduled cleanup operation. Defer this
+        # one volume mutation when the short registry transaction is busy instead
+        # of making unrelated cleanup jobs wait on it.
+        registry_file, lock_handle = locked_registry(blocking=False)
         if linux_backend_enabled(name):
             settings, scratch = cls(name)
             entry = registry()["volumes"].get(name)
@@ -795,8 +798,6 @@ def ballast_cmd(action: str, name: str) -> int:
     finally:
         if lock_handle is not None:
             lock_handle.close()
-        if cleanup_fd is not None:
-            os.close(cleanup_fd)
 
 
 def encryption_is_acknowledged(settings: dict[str, Any]) -> bool:
