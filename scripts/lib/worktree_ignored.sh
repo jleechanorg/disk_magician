@@ -50,6 +50,52 @@ has_ignored_user_data() {
 
 _WI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# worktree_status_classify <wt> <status_porcelain>:
+# Classify `git status --porcelain` output consistently across dry-run,
+# pre-removal race check, C14 content check, and WRH verdict.
+# Prints "clean" (rc 0) when <status_porcelain> is empty or contains only
+# unquoted ?? / !! entries allowed by ignored_entry_rebuildable and cleared by
+# c14_probe.py any-secret. Prints "dirty" (rc 1) on any tracked/staged/
+# submodule/other line, or "untracked" (rc 1) when only ?? / !! lines exist and
+# any is quoted ("..."), non-rebuildable, or secret-like.
+worktree_status_classify() {
+    local wt="$1" status_porcelain="$2"
+    if [[ -z "$status_porcelain" ]]; then
+        echo "clean"
+        return 0
+    fi
+    # Rebuildable untracked/ignored output must never mask tracked index/worktree edits.
+    if grep -qvE '^(\?\?|!!) ' <<<"$status_porcelain"; then
+        echo "dirty"
+        return 1
+    fi
+    local line entry rebuildable_entries=""
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        entry="${line:3}"
+        # Reject empty or C-quoted/escaped porcelain paths ("...") and anything
+        # outside the shared rebuildable allowlist.
+        if [[ -z "$entry" || "$entry" == \"* ]] || ! ignored_entry_rebuildable "$wt" "$entry"; then
+            echo "untracked"
+            return 1
+        fi
+        rebuildable_entries+="$entry"$'\n'
+    done <<<"$status_porcelain"
+    # Unignored entries inside rebuildable dirs (e.g., node_modules/pkg/.env)
+    # are not listed by `git ls-files -o -i`, so clear them through the single
+    # secret-name owner before treating the worktree status as clean.
+    if [[ -n "$rebuildable_entries" ]]; then
+        local res rc=0
+        res="$(printf '%s' "$rebuildable_entries" | python3 -I "$_WI_DIR/../c14_probe.py" any-secret 2>/dev/null)" || rc=$?
+        if [[ "$rc" -ne 1 || "$res" != none ]]; then
+            echo "untracked"
+            return 1
+        fi
+    fi
+    echo "clean"
+    return 0
+}
+
 # _wi_nonsecret_scan <dir>: rc 1 = no secret-like name anywhere under <dir>;
 # rc 0 = a secret-like name exists, or the scan could not be completed (fail closed).
 # Used only when <dir> is not a git repository, where there is no index in which
