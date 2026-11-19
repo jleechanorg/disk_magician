@@ -162,9 +162,9 @@ wrh_removal_verdict() {
             worktree_is_recently_active_minutes "$real" "$amount" && { printf 'kept:recent-activity\n'; return 0; } ;;
         *) printf 'kept:recent-activity\n'; return 0 ;;  # invalid spec fails closed
     esac
-    status="$(git -C "$real" status --porcelain --untracked-files=all 2>/dev/null)" ||
+    status="$(git -C "$real" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" ||
         { printf 'kept:git-status-failed\n'; return 0; }
-    [[ -z "$status" ]] || { printf 'kept:dirty\n'; return 0; }
+    worktree_status_classify "$real" "$status" >/dev/null || { printf 'kept:dirty\n'; return 0; }
     has_hidden_state "$real" && { printf 'kept:hidden-state\n'; return 0; }
     has_ignored_user_data "$real" && { printf 'kept:ignored-data\n'; return 0; }
     case "$scope" in

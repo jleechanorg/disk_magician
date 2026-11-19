@@ -82,8 +82,9 @@ c14_repo_content_ok() (
         ! flags="$(_av_git -C "$r" ls-files -v 2>/dev/null)"; then
         echo kept:check-failed; return 1
     fi
-    # Tracked or submodule changes, untracked files, or hidden index flags.
-    if [[ -n "$st" && "$mode" != --overlay-manifest ]] || _wi_has_flagged_index_entries "$r" "$flags"; then
+    # Tracked or submodule changes, non-rebuildable untracked files, or hidden index flags.
+    if { [[ "$mode" != --overlay-manifest ]] && ! worktree_status_classify "$r" "$st" >/dev/null; } ||
+        _wi_has_flagged_index_entries "$r" "$flags"; then
         echo kept:dirty; return 1
     fi
     has_hidden_state "$r" && { echo kept:secret-like; return 1; }

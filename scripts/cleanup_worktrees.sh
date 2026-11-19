@@ -552,34 +552,15 @@ classify_content_and_merge() {
         return 0
     fi
     if [[ -n "$status_porcelain" ]]; then
-        # Rebuildable untracked output must never mask tracked index/worktree edits.
-        if grep -qvE '^(\?\?|!!)' <<<"$status_porcelain"; then
-            echo "dirty"
-            return 0
-        fi
-        if grep -qE '^(\?\?|!!)' <<<"$status_porcelain"; then
-            # Removal uses --force --force, so every untracked entry is deleted
-            # with the checkout. Entries the repo's own allowlist already calls
-            # rebuildable (.husky/_, node_modules, dist-web, __pycache__, ...)
-            # carry nothing a rebuild cannot recreate, so they must not block the
-            # merge checks below the way the ignored-data path already allows.
-            # Anything else — untracked source, evidence, agent tool-state, a
-            # generic build/ dir, or a quoted/ambiguous path — keeps the
-            # worktree preserved.
-            local untracked_entry non_rebuildable=""
-            while IFS= read -r untracked_entry; do
-                [[ -n "$untracked_entry" ]] || continue
-                if ! ignored_entry_rebuildable "$wt_path" "$untracked_entry"; then
-                    non_rebuildable="$untracked_entry"
-                    break
-                fi
-            done <<<"$(sed -n 's/^?? //p; s/^!! //p' <<<"$status_porcelain")"
-            if [[ -n "$non_rebuildable" ]]; then
-                echo "untracked"
-                return 0
-            fi
-        else
-            echo "dirty"
+        # Removal uses --force --force, so every untracked entry is deleted
+        # with the checkout. Entries the repo's own allowlist already calls
+        # rebuildable (.husky/_, node_modules, dist-web, __pycache__, ...)
+        # carry nothing a rebuild cannot recreate, so they must not block the
+        # merge checks below; tracked edits, non-rebuildable untracked entries,
+        # quoted/ambiguous paths, and secret-like names still preserve.
+        local status_kind
+        if ! status_kind="$(worktree_status_classify "$wt_path" "$status_porcelain")"; then
+            echo "$status_kind"
             return 0
         fi
     fi
@@ -1176,7 +1157,7 @@ _process_repo_local_worktrees() {
                 fi
                 local final_status final_status_rc=0
                 final_status="$(GIT_OPTIONAL_LOCKS=0 git -C "$abs_path" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null)" || final_status_rc=$?
-                if [[ "$final_status_rc" -ne 0 || -n "$final_status" ]]; then
+                if [[ "$final_status_rc" -ne 0 ]] || ! worktree_status_classify "$abs_path" "$final_status" >/dev/null; then
                     ledger_line "repo-local" "PRESERVE" "$abs_path" "changed-after-size" "$extra"
                     REPO_LOCAL_PRESERVED=$(( REPO_LOCAL_PRESERVED + 1 ))
                     act_candidate_done || return 3
