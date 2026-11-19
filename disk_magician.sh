@@ -79,7 +79,7 @@ Commands:
   cleanup-tmp            Clean ephemeral /private/tmp directories older than retention.
   scratch-prune          Reclaim C14-recognized Scratch artifacts behind lease/live-cwd/open-file
                          gates (--clean needs operator approval or internal safe automatic mode).
-  emergency              One-off emergency reclaim of tmp + Scratch under one lock hold; one 48h pass by default.
+  emergency              One-off emergency reclaim of tmp + Scratch; one 48h pass by default.
                          Lower ages require an explicit --max-age-hours override (minimum 2h).
                          Flags: --target-gb N --max-age-hours H --dry-run --include-worktrees.
   cleanup-apfs-snapshots Delete local APFS (Time Machine) snapshots older than 1 day.

@@ -1,10 +1,4 @@
 # shellcheck shell=bash
-# Compatibility hooks for formerly serialized cleanup entrypoints.
-# These jobs now run independently; scoped safety checks remain in the cleaners.
-scratch_lock_acquire() {
-  return 0
-}
-
 # Shared scratch cleanup traps preserve handlers installed by the caller, then
 # release only temporary files owned by the current script.
 SCRATCH_LOCK_PREVIOUS_EXIT_TRAP=""
