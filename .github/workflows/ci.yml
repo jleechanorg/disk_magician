@@ -169,6 +169,8 @@ jobs:
               "test_reclaim_scheduler_coverage.py",
               "test_render_topdown_ledger.py",
               "test_review_governor_edges.py",
+              "test_scratch_pressure.py",
+              "test_snapshot_failure_diagnostics.py",
           }
           suites = sorted(
               p for p in glob.glob("tests/test_*.py")
