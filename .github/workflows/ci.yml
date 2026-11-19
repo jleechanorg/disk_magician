@@ -118,7 +118,7 @@ jobs:
           echo "CI_SHIMS=${CI_SHIMS}" >> "$GITHUB_ENV"
           echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
           echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"
-          echo "DISK_MAGICIAN_TEST_JOBS=8" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"
           "$VENV_PYTHON" -c 'import os, sys; assert os.path.realpath(sys.prefix) == os.path.realpath(os.environ["RUNNER_TEMP"] + "/diskm-ci-venv"), sys.prefix; print(sys.version, sys.executable)'
 
       - name: Verify package-tree synchronization
@@ -139,8 +139,8 @@ jobs:
             esac
           done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
           if [ "${#SHELL_FILES[@]}" -gt 0 ]; then
-            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 1 -P 8 /bin/bash -n
-            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 10 -P 8 shellcheck --severity=error --external-sources
+            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 1 -P 4 /bin/bash -n
+            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 20 -P 2 shellcheck --severity=error --external-sources
           fi
 
       - name: Run Python tests
