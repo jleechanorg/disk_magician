@@ -611,7 +611,9 @@ if command -v xcrun >/dev/null 2>&1; then
     sim_prune_arg="--dry-run"
     [[ "$DRY_RUN" == false ]] && sim_prune_arg="--clean"
     diskm_entry="$SCRIPT_DIR/../disk_magician.sh"
-    if [[ -f "$diskm_entry" ]]; then
+    if [[ "$SIMCTL_STATUS" == degraded* ]]; then
+      log "simulator prune skipped: CoreSimulator already ${SIMCTL_STATUS}"
+    elif [[ -f "$diskm_entry" ]]; then
       if [[ -z "$TIMEOUT_CMD" ]]; then
         log "simulator prune skipped: no timeout(1)/gtimeout available to bound 'disk_magician.sh sim prune ${sim_prune_arg}'"
       else
@@ -622,9 +624,6 @@ if command -v xcrun >/dev/null 2>&1; then
           prune_timeout=120
         fi
         (( prune_timeout >= 1 )) || prune_timeout=120
-        if [[ -n "${DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS:-}" && -z "${DISK_MAGICIAN_SIM_PRUNE_TIMEOUT_SECONDS:-}" ]]; then
-          prune_timeout="$SIMCTL_TIMEOUT_SECONDS"
-        fi
         prune_rc=0
         if [[ "$TIMEOUT_KILL_AFTER_SUPPORTED" == true ]]; then
           "$TIMEOUT_CMD" --kill-after="$SIMCTL_KILL_AFTER_S" "$prune_timeout" bash "$diskm_entry" sim prune "$sim_prune_arg" || prune_rc=$?

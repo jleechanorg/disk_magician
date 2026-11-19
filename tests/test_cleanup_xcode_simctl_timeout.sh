@@ -49,6 +49,9 @@ case "\${FAKE_XCRUN_MODE:-fast}" in
     [ "\$n" -eq 1 ] && sleep 90
     ;;
 esac
+case "\$*" in
+  *simctl*list*) printf '{"devices":{}}\n' ;;
+esac
 exit 0
 STUB
 # lsof stub with no holders: no live-cwd/open-file probe against the host.
