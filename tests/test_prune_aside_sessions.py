@@ -569,16 +569,67 @@ exit 0
 
 
     def test_get_dir_size_uses_in_process_by_default_and_falls_back_on_deadline(self):
-        """get_dir_size measures in-process without subprocess unless ACT_DEADLINE_AT or stub requires it."""
+        """get_dir_size passes a 300s monotonic deadline to diskm_measure.main and fails closed as unmeasured on rc=124."""
         from unittest.mock import patch
+        import scripts.prune_aside_sessions as pas
 
-        sample = self.u0_sessions / "inproc_session"
+        sample = self.u0_sessions / "2020-01-01_inproc_session"
         sample.mkdir(parents=True)
-        (sample / "payload.json").write_bytes(b"a" * 2048)
+        payload = sample / "payload.json"
+        payload.write_bytes(b"a" * 2048)
+        old_ts = time.time() - 5 * 86400
+        os.utime(payload, (old_ts, old_ts))
+        os.utime(sample, (old_ts, old_ts))
 
         real_env = {k: v for k, v in os.environ.items() if k != "ACT_DEADLINE_AT"}
+        captured_argv = []
+        scripts_dir = str(Path(pas.__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import diskm_measure
+
+        orig_main = diskm_measure.main
+
+        def spy_main(argv=None):
+            captured_argv.append(list(argv) if argv is not None else [])
+            return orig_main(argv)
+
         with patch.dict(os.environ, real_env, clear=True):
-            self.assertEqual(get_dir_size(sample), 2048)
+            t_before = time.monotonic()
+            with patch.object(diskm_measure, "main", side_effect=spy_main):
+                self.assertEqual(get_dir_size(sample), 2048)
+            t_after = time.monotonic()
+            self.assertEqual(len(captured_argv), 1)
+            self.assertEqual(captured_argv[0][0], str(sample))
+            self.assertEqual(captured_argv[0][1], "100")
+            self.assertEqual(captured_argv[0][3], "--nul")
+            deadline_val = float(captured_argv[0][2])
+            self.assertGreaterEqual(deadline_val, t_before + 299.0)
+            self.assertLessEqual(deadline_val, t_after + 301.0)
+
+        # ACT_DEADLINE_AT clamping in _session_measure_deadline_arg
+        with patch.dict(os.environ, {**real_env, "ACT_DEADLINE_AT": "1250.5"}, clear=True):
+            self.assertEqual(pas._session_measure_deadline_arg(now_mono=1000.0), "1250.500000")
+        with patch.dict(os.environ, {**real_env, "ACT_DEADLINE_AT": "1500.0"}, clear=True):
+            self.assertEqual(pas._session_measure_deadline_arg(now_mono=1000.0), "1300.000000")
+        with patch.dict(os.environ, {**real_env, "ACT_DEADLINE_AT": "not-a-float"}, clear=True):
+            self.assertIsNone(pas._session_measure_deadline_arg(now_mono=1000.0))
+
+        # Expired monotonic deadline in in-process path -> diskm_measure rc=124 -> retained as unmeasured
+        with patch.dict(os.environ, real_env, clear=True):
+            with patch.object(pas, "_session_measure_deadline_arg", return_value="0.000001"):
+                _, rc_timeout, _ = pas._measure_dir_in_process(sample)
+                self.assertEqual(rc_timeout, 124)
+                pruner = AsideSessionPruner(
+                    aside_dir=self.aside_dir,
+                    max_age_days=2,
+                    dry_run=False,
+                    dedup_assets=False,
+                )
+                stats = pruner.run()
+                self.assertEqual(stats["sessions_retained_unmeasured"], 1)
+                self.assertEqual(stats["sessions_pruned"], 0)
+                self.assertTrue(sample.exists())
 
         with patch.dict(os.environ, {"ACT_DEADLINE_AT": "0"}):
             with self.assertRaises(OSError):

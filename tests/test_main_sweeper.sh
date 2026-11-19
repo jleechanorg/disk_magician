@@ -195,7 +195,7 @@ out_t13="$(DISK_MAGICIAN_REPO_ROOT="$MOCK_REPO_T12" DISK_MAGICIAN_PRESSURE_FREE_
 rc_t13=$?
 set -e
 assert_eq "rc=75 lock-skip exits 0" "0" "$rc_t13"
-assert_contains "logs lock-held skip" "skipped (lock held, rc=75)" "$out_t13"
+assert_contains "logs lock-held/partial skip" "skipped/partial (lock held or budget target unmet, rc=75)" "$out_t13"
 active_t13=$(DISK_MAGICIAN_STATE_DIR="$TMP_STATE" python3 "$RECEIPT_HELPER" read --job main_sweeper --active 2>/dev/null || echo "")
 assert_eq "stale active receipt entries cleared after exclusive run" "[]" "$active_t13"
 

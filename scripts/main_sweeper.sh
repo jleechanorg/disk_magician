@@ -286,7 +286,7 @@ main() {
       step_rc=$?
     fi
     if [[ "$step_rc" -eq 75 ]]; then
-      log "INFO: $desc skipped (lock held, rc=75)"
+      log "INFO: $desc skipped/partial (lock held or budget target unmet, rc=75)"
       return 0
     fi
     if [[ "$step_rc" -eq 3 && "$desc" == *"cleanup_worktree_venvs"* ]]; then
@@ -336,8 +336,13 @@ main() {
       CODE_SIGN_CLONES_APPROVED=1 run_job_step "Phase 2: cleanup_code_sign_clones" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
     fi
     if [[ "${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}" =~ ^[1-9][0-9]?$ && -f "$REPO_ROOT/scripts/cleanup_scratch_top_level.sh" ]]; then
+      # Authority: CLAUDE.md:247 + operator decision 2026-11-18 ("yes permanently hands off")
       log "Running fast >=1 GiB Scratch LRU eviction (budget ${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT}%)..."
-      DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=25         DISK_MAGICIAN_SCRATCH_MIN_KB=1048576         DISK_MAGICIAN_SCRATCH_DETAIL=off         SCRATCH_TOP_LEVEL_APPROVED=1         run_job_step "Phase 2: scratch_prune --budget-pct" bash "$REPO_ROOT/scripts/cleanup_scratch_top_level.sh" "$CLEAN_ARG" --budget-pct "$DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT" || true
+      DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=25 \
+        DISK_MAGICIAN_SCRATCH_MIN_KB=1048576 \
+        DISK_MAGICIAN_SCRATCH_DETAIL=off \
+        SCRATCH_TOP_LEVEL_APPROVED=1 \
+        run_job_step "Phase 2: scratch_prune --budget-pct" bash "$REPO_ROOT/scripts/cleanup_scratch_top_level.sh" "$CLEAN_ARG" --budget-pct "$DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT" --budget-preserve-content-keeps || true
     fi
   else
     log "Phase 2: Disk space healthy (${current_free_gb:-unknown} GiB >= ${THRESHOLD_GB} GiB)."
@@ -402,7 +407,7 @@ main() {
       run_job_step "Tier 4: prune_aside_sessions" bash "$REPO_ROOT/scripts/prune_aside_sessions.sh" "$CLEAN_ARG" || true
       STEP_TIMEOUT="$_prev_step_timeout"
     fi
-    if [[ "${FILEPROVIDER_EVICT_APPROVED:-0}" == "1" && -f "$REPO_ROOT/scripts/evict_fileprovider.sh" ]]; then
+    if [[ "$OSTYPE" == darwin* && -d "$HOME/Library/CloudStorage/Dropbox/conversation-backups" && "${FILEPROVIDER_EVICT_APPROVED:-0}" == "1" && -f "$REPO_ROOT/scripts/evict_fileprovider.sh" ]]; then
       STEP_TIMEOUT=900
       run_job_step "Tier 4: evict_fileprovider" bash "$REPO_ROOT/scripts/evict_fileprovider.sh" "$CLEAN_ARG" || true
       STEP_TIMEOUT="$_prev_step_timeout"
@@ -429,8 +434,8 @@ main() {
     fi
 
     # Tier 6: Worktree slimming, venvs, deps, Claude state, and worktrees use the shared 48h default
-    # Candidates >= 90d (>3 months) are auto-approved without env vars; candidates < 90d require WORKTREE_APPROVED=1 / CLAUDE_STATE_APPROVED=1.
-    if [[ -f "$REPO_ROOT/scripts/slim_worktree_checkouts.sh" ]]; then
+    # slim_worktree_checkouts --clean requires WORKTREE_APPROVED=1; other Tier 6 cleaners auto-approve >= 90d (>3 months) and require WORKTREE_APPROVED=1 / CLAUDE_STATE_APPROVED=1 below 90d.
+    if [[ ( "$DRY_RUN" == true || "${WORKTREE_APPROVED:-0}" == "1" ) && -f "$REPO_ROOT/scripts/slim_worktree_checkouts.sh" ]]; then
       run_job_step "Tier 6: slim_worktree_checkouts" bash "$REPO_ROOT/scripts/slim_worktree_checkouts.sh" "$CLEAN_ARG" || true
     fi
     if [[ -f "$REPO_ROOT/scripts/cleanup_worktree_deps.sh" ]]; then

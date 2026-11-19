@@ -209,6 +209,30 @@ def main():
             return 0 if generic_scope(sys.argv[2], sys.argv[3]) else 3
         except OSError:
             return 1
+    if mode == "scope-batch":
+        if len(sys.argv) != 3:
+            return 2
+        scope_root = sys.argv[2]
+        raw = sys.stdin.buffer.read()
+        if raw and not raw.endswith(b"\0"):
+            return 1
+        candidates = raw[:-1].split(b"\0") if raw else []
+        accepted = []
+        try:
+            for cand_bytes in candidates:
+                if not cand_bytes:
+                    return 1
+                if generic_scope(scope_root, os.fsdecode(cand_bytes)):
+                    accepted.append(cand_bytes)
+        except (OSError, ValueError):
+            return 1
+        output = bytearray()
+        output.extend(MARKER + b"\0")
+        output.extend(str(len(accepted)).encode("ascii") + b"\0")
+        for cand_bytes in accepted:
+            output.extend(cand_bytes + b"\0")
+        sys.stdout.buffer.write(output)
+        return 0
     if mode == "stream-generic-leaves":
         if len(sys.argv) != 4:
             return 2

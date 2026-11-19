@@ -32,6 +32,7 @@ export DISK_MAGICIAN_STATE_DIR="$TMPROOT/state"
 export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$TMPROOT/ptmp"
 export DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$TMPROOT/utmp"
 mkdir -p "$HOME" "$DISK_MAGICIAN_STATE_DIR" "$TMPROOT/ptmp" "$TMPROOT/utmp" "$TMPROOT/bin"
+chmod 700 "$HOME"
 
 cat >"$TMPROOT/bin/lsof" <<'STUB'
 #!/bin/sh
@@ -113,8 +114,19 @@ mkdir -p "${LEASE_NON_AO%/*}"
 printf '{"path":"%s","owner":null}\n' "$WT_NON_AO" >"$LEASE_NON_AO"
 
 assert_eq "$(artifact_removal_verdict "$DD_OLD" --kind xcode-derived-data)" "remove" "owner:null ancestor worktree allows >=48h untracked xcode-derived-data"
+assert_eq "$(GIT_DIR="$TMPROOT/bogus-git-dir" bash "$REPO_ROOT/scripts/lib/artifact_verdict.sh" "$DD_OLD" --kind xcode-derived-data)" "remove" "ambient GIT_DIR ignored by _av_git on untracked xcode-derived-data"
 assert_eq "$(artifact_removal_verdict "$DD_TRACKED" --kind xcode-derived-data)" "kept:owner-unknown" "git-tracked xcode-derived-data under owner:null ancestor blocked"
 assert_eq "$(artifact_removal_verdict "$DD_YOUNG" --kind xcode-derived-data)" "kept:recent-activity" "<48h untracked xcode-derived-data blocked"
+
+SUBREPO="$WT_NON_AO/subrepo"
+mkdir -p "$SUBREPO"
+git -C "$SUBREPO" init -q -b main
+SUBREPO_DD="$SUBREPO/dd-tracked"
+mk_dd "$SUBREPO_DD"
+git -C "$SUBREPO" add dd-tracked
+git -C "$SUBREPO" commit -qm "nested repo tracked dd"
+backdate_tree "$SUBREPO" 72
+assert_eq "$(bash "$REPO_ROOT/scripts/lib/artifact_verdict.sh" "$SUBREPO_DD" --kind xcode-derived-data)" "kept:owner-unknown" "tracked DerivedData inside untracked nested git repo does not inherit worktree owner:null relaxation"
 
 WT_LIVE="$TMPROOT/worktrees/wt-live"
 git -C "$TMPROOT/repos/main" worktree add -q -b wt-live "$WT_LIVE"
@@ -212,42 +224,52 @@ python3 - "$REPO_ROOT" <<'PY'
 import pathlib, plistlib, sys
 root = pathlib.Path(sys.argv[1])
 
-sp = plistlib.loads((root / "launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template").read_bytes())
-sp_env = sp["EnvironmentVariables"]
-assert sp_env["DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT"] == "50", sp_env
-assert sp_env["DISK_MAGICIAN_SCRATCH_DETAIL"] == "off", sp_env
-assert sp_env["DISK_MAGICIAN_SCRATCH_MIN_KB"] == "262144", sp_env
-
-ms = plistlib.loads((root / "launchd/com.jleechanorg.disk-magician-main-sweeper.plist.template").read_bytes())
-ms_env = ms["EnvironmentVariables"]
-assert ms_env["SIM_UNLEASED_EPHEMERAL_APPROVED"] == "1", ms_env
-assert ms_env["FILEPROVIDER_EVICT_APPROVED"] == "1", ms_env
-assert ms_env["DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT"] == "50", ms_env
+for rel, checks in [
+    (
+        "launchd/com.jleechanorg.disk-magician-scratch-pressure.plist.template",
+        {"DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT": "50", "DISK_MAGICIAN_SCRATCH_DETAIL": "off", "DISK_MAGICIAN_SCRATCH_MIN_KB": "262144"},
+    ),
+    (
+        "launchd/com.jleechanorg.disk-magician-main-sweeper.plist.template",
+        {"SIM_UNLEASED_EPHEMERAL_APPROVED": "1", "FILEPROVIDER_EVICT_APPROVED": "1", "DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT": "50"},
+    ),
+]:
+    raw_txt = (root / rel).read_text(encoding="utf-8")
+    assert "Authority: operator decision 2026-11-18" in raw_txt, rel
+    for payload in (raw_txt.encode("utf-8"), raw_txt.replace("@HOME@", "/Users/test").encode("utf-8")):
+        parsed = plistlib.loads(payload)
+        env = parsed["EnvironmentVariables"]
+        for k, v in checks.items():
+            assert env[k] == v, (rel, k, env.get(k))
 print("PLIST_OK")
 PY
 if [[ $? -eq 0 ]]; then ok "launchd plist templates valid XML with required EnvironmentVariables"; else bad "plist template validation failed"; fi
 
 MOCK_MS="$TMPROOT/mock_ms"
-mkdir -p "$MOCK_MS/scripts" "$HOME/.hermes/cache/scratch"
+mkdir -p "$MOCK_MS/scripts" "$HOME/.hermes/cache/scratch" "$HOME/Library/CloudStorage/Dropbox/conversation-backups"
 CALL_LOG="$TMPROOT/ms_calls.log"
 for s in cleanup_scratch_top_level.sh cleanup_tmp.sh cleanup_pr_scratch.sh cleanup_llm_inspector.sh quarantine_reconcile.sh cleanup_dev_caches.sh prune_aside_sessions.sh evict_fileprovider.sh slim_worktree_checkouts.sh cleanup_worktree_deps.sh; do
   cat >"$MOCK_MS/scripts/$s" <<STUB
 #!/bin/sh
 echo "$s \$* | min_kb=\${DISK_MAGICIAN_SCRATCH_MIN_KB:-} detail=\${DISK_MAGICIAN_SCRATCH_DETAIL:-} approved=\${SCRATCH_TOP_LEVEL_APPROVED:-}" >> "$CALL_LOG"
+if [ "$s" = "cleanup_scratch_top_level.sh" ]; then exit 75; fi
 exit 0
 STUB
   chmod +x "$MOCK_MS/scripts/$s"
 done
 
-DISK_MAGICIAN_REPO_ROOT="$MOCK_MS"   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=10   DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50   FILEPROVIDER_EVICT_APPROVED=1   DISK_MAGICIAN_SKIP_CLONES=1   DISK_MAGICIAN_SKIP_TMP_LARGE=1   DISK_MAGICIAN_STATE_DIR="$TMPROOT/ms_state"   DISK_MAGICIAN_MAIN_SWEEPER_LOG="$TMPROOT/ms.log"   bash "$REPO_ROOT/scripts/main_sweeper.sh" --clean --skip-snapshot --skip-health >/dev/null 2>&1
+OSTYPE=darwin23   DISK_MAGICIAN_REPO_ROOT="$MOCK_MS"   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=10   DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50   FILEPROVIDER_EVICT_APPROVED=1   WORKTREE_APPROVED=1   DISK_MAGICIAN_SKIP_CLONES=1   DISK_MAGICIAN_SKIP_TMP_LARGE=1   DISK_MAGICIAN_STATE_DIR="$TMPROOT/ms_state"   DISK_MAGICIAN_MAIN_SWEEPER_LOG="$TMPROOT/ms.log"   bash "$REPO_ROOT/scripts/main_sweeper.sh" --clean --skip-snapshot --skip-health >/dev/null 2>&1
 ms_rc=$?
 [[ "$ms_rc" -eq 0 ]] || cat "$TMPROOT/ms.log" >&2
 assert_eq "$ms_rc" "0" "main_sweeper pressure + routine run exited 0"
 
+ms_log_txt="$(cat "$TMPROOT/ms.log")"
+[[ "$ms_log_txt" == *"skipped/partial (lock held or budget target unmet, rc=75)"* ]]   && ok "main_sweeper logs updated rc=75 skipped/partial message"   || bad "main_sweeper rc=75 message missing: $ms_log_txt"
+
 calls_txt="$(cat "$CALL_LOG")"
-[[ "$calls_txt" == *"cleanup_scratch_top_level.sh --clean --budget-pct 50 | min_kb=1048576 detail=off approved=1"* ]]   && ok "Phase 2 invokes scratch_prune --budget-pct 50 with MIN_KB=1048576 DETAIL=off APPROVED=1"   || bad "Phase 2 scratch_prune call missing/wrong: $calls_txt"
+[[ "$calls_txt" == *"cleanup_scratch_top_level.sh --clean --budget-pct 50 --budget-preserve-content-keeps | min_kb=1048576 detail=off approved=1"* ]]   && ok "Phase 2 invokes scratch_prune --budget-pct 50 --budget-preserve-content-keeps with MIN_KB=1048576 DETAIL=off APPROVED=1"   || bad "Phase 2 scratch_prune call missing/wrong: $calls_txt"
 [[ "$calls_txt" == *"cleanup_pr_scratch.sh --clean --tmp-dir $HOME/.hermes/cache/scratch --pattern *"* ]]   && ok "Tier 1 invokes cleanup_pr_scratch on ~/.hermes/cache/scratch"   || bad "Tier 1 hermes scratch call missing"
-[[ "$calls_txt" == *"evict_fileprovider.sh --clean"* ]]   && ok "Tier 4 invokes evict_fileprovider when FILEPROVIDER_EVICT_APPROVED=1"   || bad "Tier 4 evict_fileprovider missing"
+[[ "$calls_txt" == *"evict_fileprovider.sh --clean"* ]]   && ok "Tier 4 invokes evict_fileprovider on darwin when Dropbox root exists and FILEPROVIDER_EVICT_APPROVED=1"   || bad "Tier 4 evict_fileprovider missing"
 
 t1_tmp_ln="$(grep -n '^cleanup_tmp.sh ' "$CALL_LOG" | head -1 | cut -d: -f1)"
 t1_dev_ln="$(grep -n '^cleanup_dev_caches.sh ' "$CALL_LOG" | head -1 | cut -d: -f1)"
@@ -256,6 +278,107 @@ t6_deps_ln="$(grep -n '^cleanup_worktree_deps.sh ' "$CALL_LOG" | head -1 | cut -
 [[ -n "$t1_tmp_ln" && -n "$t1_dev_ln" && "$t1_tmp_ln" -lt "$t1_dev_ln" ]]   && ok "Tier 1 runs cleanup_dev_caches.sh AFTER cleanup_tmp.sh"   || bad "Tier 1 ordering invalid ($t1_tmp_ln vs $t1_dev_ln)"
 [[ -n "$t6_slim_ln" && -n "$t6_deps_ln" && "$t6_slim_ln" -lt "$t6_deps_ln" ]]   && ok "Tier 6 runs slim_worktree_checkouts.sh BEFORE cleanup_worktree_deps.sh"   || bad "Tier 6 ordering invalid ($t6_slim_ln vs $t6_deps_ln)"
 
+echo "== (e) Non-stubbed main_sweeper guards (evict_fileprovider missing Dropbox root + slim_worktree_checkouts WORKTREE_APPROVED=0) =="
+rmdir "$HOME/Library/CloudStorage/Dropbox/conversation-backups"
+REAL_GUARD_REPO="$TMPROOT/real_guard_repo"
+mkdir -p "$REAL_GUARD_REPO/scripts"
+ln -s "$REPO_ROOT/scripts/lib" "$REAL_GUARD_REPO/scripts/lib"
+ln -s "$REPO_ROOT/scripts/safety_lib.sh" "$REAL_GUARD_REPO/scripts/safety_lib.sh"
+ln -s "$REPO_ROOT/scripts/evict_fileprovider.sh" "$REAL_GUARD_REPO/scripts/evict_fileprovider.sh"
+ln -s "$REPO_ROOT/scripts/slim_worktree_checkouts.sh" "$REAL_GUARD_REPO/scripts/slim_worktree_checkouts.sh"
+
+OSTYPE=darwin23   DISK_MAGICIAN_REPO_ROOT="$REAL_GUARD_REPO"   DISK_MAGICIAN_PRESSURE_FREE_GB_OVERRIDE=200   FILEPROVIDER_EVICT_APPROVED=1   WORKTREE_APPROVED=0   DISK_MAGICIAN_STATE_DIR="$TMPROOT/ms_real_guard_state"   DISK_MAGICIAN_MAIN_SWEEPER_LOG="$TMPROOT/ms_real_guard.log"   bash "$REPO_ROOT/scripts/main_sweeper.sh" --clean --skip-snapshot --skip-health >/dev/null 2>&1
+guard_rc=$?
+guard_log="$(cat "$TMPROOT/ms_real_guard.log")"
+assert_eq "$guard_rc" "0" "non-stubbed main_sweeper --clean skips missing Dropbox root (FILEPROVIDER_EVICT_APPROVED=1) and unapproved slim_worktree_checkouts (WORKTREE_APPROVED=0) with rc=0"
+[[ "$guard_log" != *"WARN:"* ]]   && ok "non-stubbed main_sweeper --clean recorded zero step warnings/errors"   || bad "unexpected WARN in main_sweeper log: $guard_log"
+
+echo "== (f) Behavioral P0 test: real cleanup_scratch_top_level.sh --clean --budget-pct 50 --budget-preserve-content-keeps keeps secrets and dirty repos =="
+SCRATCH_BEHAV_ROOT="$TMPROOT/scratch_behav"
+mkdir -p "$SCRATCH_BEHAV_ROOT/secret-entry" "$SCRATCH_BEHAV_ROOT/dirty-repo"
+printf -- '-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n' >"$SCRATCH_BEHAV_ROOT/secret-entry/key.pem"
+head -c 65536 /dev/zero >"$SCRATCH_BEHAV_ROOT/secret-entry/pad.bin"
+backdate_tree "$SCRATCH_BEHAV_ROOT/secret-entry" 72
+
+git -C "$SCRATCH_BEHAV_ROOT/dirty-repo" init -q -b main
+printf 'base\n' >"$SCRATCH_BEHAV_ROOT/dirty-repo/file.txt"
+git -C "$SCRATCH_BEHAV_ROOT/dirty-repo" add file.txt
+git -C "$SCRATCH_BEHAV_ROOT/dirty-repo" commit -qm init
+printf 'uncommitted\n' >>"$SCRATCH_BEHAV_ROOT/dirty-repo/file.txt"
+head -c 65536 /dev/zero >"$SCRATCH_BEHAV_ROOT/dirty-repo/pad.bin"
+backdate_tree "$SCRATCH_BEHAV_ROOT/dirty-repo" 72
+
+FAKE_DISKM_BEHAV="$TMPROOT/bin/fake-diskm-behav"
+cat >"$FAKE_DISKM_BEHAV" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "volume verify-mount" ]]; then exit 0; fi
+if [[ "$1 $2" == "volume status" ]]; then
+  printf '{"volumes":[{"class":"scratch","allocated_bytes":900000,"quota_bytes":1000000}]}
+'
+  exit 0
+fi
+exit 2
+STUB
+chmod +x "$FAKE_DISKM_BEHAV"
+
+scratch_behav_out="$(
+  DISK_MAGICIAN_TEST_CONTEXT=1   DISK_MAGICIAN_TEST_SANDBOX="$TMPROOT"   DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="$SCRATCH_BEHAV_ROOT"   DISK_MAGICIAN_DISKM_BIN="$FAKE_DISKM_BEHAV"   DISK_MAGICIAN_STATE_DIR="$TMPROOT/scratch_behav_state"   DISK_MAGICIAN_DELETION_LOG="$TMPROOT/scratch_behav_del.log"   DISK_MAGICIAN_SCRATCH_MIN_KB=1   SCRATCH_TOP_LEVEL_APPROVED=1   bash "$REPO_ROOT/scripts/cleanup_scratch_top_level.sh" --clean --budget-pct 50 --budget-preserve-content-keeps 2>&1
+)"
+scratch_behav_rc=$?
+assert_eq "$scratch_behav_rc" "75" "real cleanup_scratch_top_level.sh --budget-preserve-content-keeps exits 75 when only protected candidates exist"
+[[ "$scratch_behav_out" == *"kept:secret-like $SCRATCH_BEHAV_ROOT/secret-entry"* ]]   && ok "real budget-preserve-content-keeps logs kept:secret-like for .pem entry"   || bad "missing kept:secret-like in: $scratch_behav_out"
+[[ "$scratch_behav_out" == *"kept:dirty $SCRATCH_BEHAV_ROOT/dirty-repo"* ]]   && ok "real budget-preserve-content-keeps logs kept:dirty for dirty git repo"   || bad "missing kept:dirty in: $scratch_behav_out"
+[[ -d "$SCRATCH_BEHAV_ROOT/secret-entry" && -d "$SCRATCH_BEHAV_ROOT/dirty-repo" ]]   && ok "both >=48h secret and dirty Scratch entries preserved on disk under SCRATCH_TOP_LEVEL_APPROVED=1"   || bad "secret or dirty Scratch entry was deleted!"
+
+echo "== (g) Behavioral P1 #2 test: slim_worktree_checkouts.sh skips active leased and open-file worktrees =="
+SLIM_REPO="$TMPROOT/slim_repo"
+SLIM_ROOTS="$TMPROOT/slim_roots"
+mkdir -p "$SLIM_REPO/docs" "$SLIM_REPO/src" "$SLIM_ROOTS"
+head -c 65536 /dev/zero >"$SLIM_REPO/docs/manual.bin"
+printf 'code\n' >"$SLIM_REPO/src/main.py"
+git -C "$SLIM_REPO" init -q -b main
+git -C "$SLIM_REPO" config extensions.worktreeConfig true
+git -C "$SLIM_REPO" add -A
+git -C "$SLIM_REPO" commit -qm init
+
+WT_SLIM_LEASED="$SLIM_ROOTS/wt-leased"
+WT_SLIM_OPEN="$SLIM_ROOTS/wt-open"
+WT_SLIM_OK="$SLIM_ROOTS/wt-ok"
+git -C "$SLIM_REPO" worktree add -q -b slim-leased "$WT_SLIM_LEASED"
+git -C "$SLIM_REPO" worktree add -q -b slim-open "$WT_SLIM_OPEN"
+git -C "$SLIM_REPO" worktree add -q -b slim-ok "$WT_SLIM_OK"
+for w in "$WT_SLIM_LEASED" "$WT_SLIM_OPEN" "$WT_SLIM_OK"; do
+  find "$w" -path "$w/.git" -prune -o -exec python3 -c 'import os,sys,time; t=time.time()-72*3600
+for p in sys.argv[1:]: os.utime(p,(t,t))' {} +
+done
+
+SLIM_LEASE_FILE="$(lease_path_for "$WT_SLIM_LEASED")"
+mkdir -p "${SLIM_LEASE_FILE%/*}"
+SLIM_LIVE_START="$(_lease_ps_lstart_epoch "$$")"
+printf '{"path":"%s","owner":{"pid":%s,"start_epoch":%s,"comm":"bash"}}
+' "$WT_SLIM_LEASED" "$$" "$SLIM_LIVE_START" >"$SLIM_LEASE_FILE"
+
+LSOF_OPEN_STUB="$TMPROOT/bin/lsof-slim-open"
+cat >"$LSOF_OPEN_STUB" <<STUB
+#!/bin/sh
+case " \$* " in
+  *" -d cwd "*) printf 'p1\nfcwd\nn/\n'; exit 0 ;;
+  *"$WT_SLIM_OPEN/docs"*) printf 'p999\nn%s/docs/manual.bin\n' "$WT_SLIM_OPEN"; exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$LSOF_OPEN_STUB"
+
+slim_out="$(
+  WORKTREE_APPROVED=1   DISK_MAGICIAN_LSOF_BIN="$LSOF_OPEN_STUB"   bash "$REPO_ROOT/scripts/slim_worktree_checkouts.sh" --clean --roots "$SLIM_ROOTS" 2>&1
+)"
+[[ "$slim_out" == *"LEASE-SKIP $WT_SLIM_LEASED (kept:lease-busy:"* ]]   && ok "slim_worktree_checkouts skips active live-PID worktree lease as kept:lease-busy"   || bad "missing LEASE-SKIP in: $slim_out"
+[[ "$slim_out" == *"OPEN-SKIP  $WT_SLIM_OPEN (kept:open-file"* ]]   && ok "slim_worktree_checkouts skips worktree with open file under excluded dir"   || bad "missing OPEN-SKIP in: $slim_out"
+[[ -f "$WT_SLIM_LEASED/docs/manual.bin" ]] && ok "leased worktree docs remain materialized" || bad "leased worktree docs were dematerialized"
+[[ -f "$WT_SLIM_OPEN/docs/manual.bin" ]] && ok "open-file worktree docs remain materialized" || bad "open-file worktree docs were dematerialized"
+[[ ! -e "$WT_SLIM_OK/docs/manual.bin" ]] && ok "unleased idle worktree without open files was slimmed" || bad "eligible worktree was not slimmed: $slim_out"
+
+echo "== (h) cleanup_xcode.sh sim prune timeout sanitization and degraded SIMCTL_STATUS =="
 MOCK_XCODE="$TMPROOT/mock_xcode"
 mkdir -p "$MOCK_XCODE/scripts"
 cp -R "$REPO_ROOT/scripts/." "$MOCK_XCODE/scripts/"
@@ -263,11 +386,11 @@ XCODE_DISKM_LOG="$TMPROOT/xcode_diskm.log"
 cat >"$MOCK_XCODE/disk_magician.sh" <<STUB
 #!/bin/sh
 echo "\$*" >> "$XCODE_DISKM_LOG"
-exit 0
+exit "\${MOCK_PRUNE_RC:-0}"
 STUB
 cat >"$TMPROOT/bin/xcrun" <<'STUB'
 #!/bin/sh
-exit 0
+exit "${MOCK_XCRUN_RC:-0}"
 STUB
 chmod +x "$MOCK_XCODE/disk_magician.sh" "$TMPROOT/bin/xcrun"
 
@@ -275,6 +398,18 @@ bash "$MOCK_XCODE/scripts/cleanup_xcode.sh" --dry-run >/dev/null 2>&1
 bash "$MOCK_XCODE/scripts/cleanup_xcode.sh" --clean >/dev/null 2>&1
 xcode_calls="$(cat "$XCODE_DISKM_LOG" 2>/dev/null || true)"
 [[ "$xcode_calls" == *"sim prune --dry-run"* && "$xcode_calls" == *"sim prune --clean"* ]]   && ok "cleanup_xcode.sh invokes bounded disk_magician.sh sim prune for --dry-run and --clean"   || bad "cleanup_xcode.sh sim prune calls missing: $xcode_calls"
+
+xcode_octal_out="$(MOCK_PRUNE_RC=124 DISK_MAGICIAN_SIM_PRUNE_TIMEOUT_SECONDS="08" bash "$MOCK_XCODE/scripts/cleanup_xcode.sh" --clean 2>&1)"
+[[ "$xcode_octal_out" == *"summary: simulator housekeeping degraded (sim prune timed out after 8s)"* ]]   && ok "cleanup_xcode.sh sanitizes octal 08 timeout and sets degraded SIMCTL_STATUS on rc=124"   || bad "octal/timeout SIMCTL_STATUS failed: $xcode_octal_out"
+
+xcode_bad_out="$(MOCK_PRUNE_RC=124 DISK_MAGICIAN_SIM_PRUNE_TIMEOUT_SECONDS="not-a-number" bash "$MOCK_XCODE/scripts/cleanup_xcode.sh" --clean 2>&1)"
+[[ "$xcode_bad_out" == *"summary: simulator housekeeping degraded (sim prune timed out after 120s)"* ]]   && ok "cleanup_xcode.sh falls back to 120s when DISK_MAGICIAN_SIM_PRUNE_TIMEOUT_SECONDS is invalid"   || bad "invalid timeout fallback failed: $xcode_bad_out"
+
+xcode_rc_out="$(MOCK_PRUNE_RC=24 bash "$MOCK_XCODE/scripts/cleanup_xcode.sh" --clean 2>&1)"
+[[ "$xcode_rc_out" == *"summary: simulator housekeeping degraded (sim prune rc=24)"* ]]   && ok "cleanup_xcode.sh sets degraded (sim prune rc=24) on non-zero sim prune exit"   || bad "non-zero sim prune SIMCTL_STATUS failed: $xcode_rc_out"
+
+xcode_no_downgrade="$(MOCK_XCRUN_RC=124 MOCK_PRUNE_RC=24 DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS="09" bash "$MOCK_XCODE/scripts/cleanup_xcode.sh" --clean 2>&1)"
+[[ "$xcode_no_downgrade" == *"summary: simulator housekeeping degraded (simctl timed out after 9s)"* ]]   && ok "cleanup_xcode.sh preserves prior degraded SIMCTL_STATUS without overwriting it"   || bad "degraded SIMCTL_STATUS was overwritten: $xcode_no_downgrade"
 
 echo
 echo "=== Result: $PASS passed, $FAIL failed ==="

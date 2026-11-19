@@ -55,7 +55,8 @@ c14_discover_repos() {
 _av_git() {
     python3 -c 'import os,signal,subprocess,sys
 t,*c=sys.argv[1:]
-p=subprocess.Popen(["git",*c],start_new_session=True)
+env={k:v for k,v in os.environ.items() if k not in ("GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_COMMON_DIR","GIT_OBJECT_DIRECTORY","GIT_CEILING_DIRECTORIES")}
+p=subprocess.Popen(["git",*c],env=env,start_new_session=True)
 try: sys.exit(p.wait(timeout=float(t)))
 except subprocess.TimeoutExpired:
  os.killpg(p.pid,signal.SIGKILL); p.wait(); sys.exit(124)' "${C14_GIT_TIMEOUT:-120}" "$@"
@@ -310,12 +311,16 @@ _av_rebuildable() (
 )
 
 # _av_simulator_release_proof <path>: a simulator device is a removal proof only
-# when this exact immediate CoreSimulator device child has a current-generation
-# release receipt older than the fixed 48 h floor, remains Shutdown in a fresh
-# simctl inventory, and has no simulator lease record. This kind lives in the
-# shared C14 gate, so callers cannot turn arbitrary content into a proof with a
-# caller-supplied boolean. Receipt, floor, inventory and lease semantics remain
-# owned by the simulator lifecycle helpers rather than being reimplemented here.
+# when this exact immediate CoreSimulator device child has no simulator lease
+# record, remains Shutdown in a fresh simctl inventory, and satisfies either:
+#   (a) a current-generation release receipt older than the fixed 48 h floor
+#       when managed (`gen/<udid>` exists), or
+#   (b) `SIM_UNLEASED_EPHEMERAL_APPROVED=1` for a never-managed (`! -e gen/<udid>`),
+#       non-`wai-shared-*`, unreserved Shutdown device whose content is >= 48 h idle.
+# This kind lives in the shared C14 gate, so callers cannot turn arbitrary
+# content into a proof with a caller-supplied boolean. Receipt, floor, inventory
+# and lease semantics remain owned by the simulator lifecycle helpers rather
+# than being reimplemented here.
 _av_simulator_release_proof() (
     local p="$1" root state udid generation receipt generation_value snap
     udid="${p##*/}"
@@ -342,6 +347,7 @@ _av_simulator_release_proof() (
         sim_released_and_idle "$udid" || return 1
         snap="$(sim_snapshot)" || return 1
         printf '%s\n' "$snap" | awk -F'\t' -v u="$udid" '$1==u {rows++; if($3=="Shutdown") shutdown++} END{exit rows==1 && shutdown==1 ? 0 : 1}'
+    # Authority: operator decision 2026-11-18 ("yes permanently hands off"), CLAUDE.md:237-265
     elif [[ "${SIM_UNLEASED_EPHEMERAL_APPROVED:-0}" == "1" ]]; then
         [[ ! -e "$state/sim_leases/$udid" && ! -L "$state/sim_leases/$udid" ]] || return 1
         # shellcheck source=scripts/sim_lifecycle.sh
@@ -608,6 +614,21 @@ _av_os_clone_proof() {
         "${parent_id##*:}" == "$uid" && "${root_id##*:}" == "$uid" ]]
 }
 
+# _av_untracked_in_enclosing_worktree <scope_path> <candidate_path>
+# Authority: CLAUDE.md:237,265 + operator decision 2026-11-18 ("yes permanently hands off")
+_av_untracked_in_enclosing_worktree() (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+    local scope_path="$1" p="$2" scope_real p_git_dir p_top p_top_real tracked_out
+    scope_real="$(cd "$scope_path" 2>/dev/null && pwd -P)" || return 1
+    p_git_dir="$p"
+    [[ -d "$p_git_dir" ]] || p_git_dir="$(dirname -- "$p")"
+    p_top="$(_av_git -C "$p_git_dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+    p_top_real="$(cd "$p_top" 2>/dev/null && pwd -P)" || return 1
+    [[ "$p_top_real" == "$scope_real" ]] || return 1
+    tracked_out="$(_av_git --literal-pathspecs -C "$scope_real" ls-files -- "$p" 2>/dev/null)" || return 1
+    [[ -z "$tracked_out" ]]
+)
+
 # _av_owner_null_relax_reason <worktree> <inventory> <min_idle_minutes>
 # Prints nothing when a linked worktree's own owner-null lease may be freed
 # without the T3 flag; otherwise kept:<token>. The idle floor is never below 60.
@@ -743,8 +764,8 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
                     relax_reason="$(_av_owner_null_relax_reason "$p" "$inv" "$min_idle")"
                     [[ -n "$relax_reason" ]] || continue
                 elif [[ ( "$kind" == xcode-derived-data || "$kind" == rebuildable ) && "$scope_path" != "$p" && "$p" == "$scope_path/"* && -f "$scope_path/.git" && ! -e "$p/.git" ]] &&
-                    [[ -z "$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR git -C "$scope_path" ls-files -- "$p" 2>/dev/null | head -1)" ]] &&
-                    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR git -C "$scope_path" ls-files -- "$p" >/dev/null 2>&1; then
+                    _av_untracked_in_enclosing_worktree "$scope_path" "$p"; then
+                    # Authority: CLAUDE.md:237,265 + operator decision 2026-11-18 ("yes permanently hands off")
                     relax_reason="$(_av_owner_null_relax_reason "$scope_path" "$inv" "$min_idle")"
                     [[ -n "$relax_reason" ]] || continue
                 fi

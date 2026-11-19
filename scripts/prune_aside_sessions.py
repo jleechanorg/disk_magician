@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 DEFAULT_MAX_AGE_DAYS = 2
 DEFAULT_MIN_DEDUP_SIZE = 1024  # 1 KB
+PER_SESSION_MEASURE_TIMEOUT_S = 300.0
 
 
 def format_size(bytes_val: int) -> str:
@@ -46,11 +47,30 @@ class _BinaryStdout:
         self.buffer = io.BytesIO()
 
 
+def _session_measure_deadline_arg(now_mono: Optional[float] = None) -> Optional[str]:
+    base = time.monotonic() if now_mono is None else now_mono
+    deadline_mono = base + PER_SESSION_MEASURE_TIMEOUT_S
+    raw_act_deadline = os.environ.get("ACT_DEADLINE_AT", "").strip()
+    if raw_act_deadline:
+        try:
+            act_deadline_mono = float(raw_act_deadline)
+        except ValueError:
+            return None
+        deadline_mono = min(deadline_mono, act_deadline_mono)
+    if deadline_mono <= 0.0:
+        deadline_mono = 1e-6
+    return f"{deadline_mono:.6f}"
+
+
 def _measure_dir_in_process(dir_path: Path) -> Tuple[bytes, int, str]:
     scripts_dir = str(Path(__file__).resolve().parent)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     import diskm_measure  # pylint: disable=import-outside-toplevel
+
+    deadline_arg = _session_measure_deadline_arg()
+    if deadline_arg is None:
+        return b"diskm-measure-leaves-v1\0", 2, "invalid ACT_DEADLINE_AT"
 
     fake_stdout = _BinaryStdout()
     fake_stderr = io.StringIO()
@@ -60,7 +80,7 @@ def _measure_dir_in_process(dir_path: Path) -> Tuple[bytes, int, str]:
         sys.stdout = fake_stdout  # type: ignore[assignment]
         sys.stderr = fake_stderr
         try:
-            diskm_measure.main([str(dir_path), "100", "", "--nul"])
+            diskm_measure.main([str(dir_path), "100", deadline_arg, "--nul"])
         except SystemExit as exc:
             if isinstance(exc.code, int):
                 returncode = exc.code

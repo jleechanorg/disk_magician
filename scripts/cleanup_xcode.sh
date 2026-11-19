@@ -616,7 +616,13 @@ if command -v xcrun >/dev/null 2>&1; then
         log "simulator prune skipped: no timeout(1)/gtimeout available to bound 'disk_magician.sh sim prune ${sim_prune_arg}'"
       else
         prune_timeout="${DISK_MAGICIAN_SIM_PRUNE_TIMEOUT_SECONDS:-120}"
-        if [[ -n "${DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS:-}" ]]; then
+        if [[ "$prune_timeout" =~ ^[0-9]+$ ]]; then
+          prune_timeout=$((10#$prune_timeout))
+        else
+          prune_timeout=120
+        fi
+        (( prune_timeout >= 1 )) || prune_timeout=120
+        if [[ -n "${DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS:-}" && -z "${DISK_MAGICIAN_SIM_PRUNE_TIMEOUT_SECONDS:-}" ]]; then
           prune_timeout="$SIMCTL_TIMEOUT_SECONDS"
         fi
         prune_rc=0
@@ -627,8 +633,10 @@ if command -v xcrun >/dev/null 2>&1; then
         fi
         if [[ "$prune_rc" -eq 124 || "$prune_rc" -eq 137 ]]; then
           log "WARN: simulator prune timed out after ${prune_timeout}s (non-fatal)"
+          [[ "$SIMCTL_STATUS" == degraded* ]] || SIMCTL_STATUS="degraded (sim prune timed out after ${prune_timeout}s)"
         elif [[ "$prune_rc" -ne 0 ]]; then
           log "WARN: simulator prune exited ${prune_rc} (non-fatal)"
+          [[ "$SIMCTL_STATUS" == degraded* ]] || SIMCTL_STATUS="degraded (sim prune rc=${prune_rc})"
         fi
       fi
     fi

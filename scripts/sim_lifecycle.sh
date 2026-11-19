@@ -6,10 +6,13 @@
 # Contract: ~/roadmap/sq-ios-simulator-lease-contract-2026-11-16.md
 #
 # Safety rules this module implements (all fail closed):
-#   * A device is reclaimable ONLY with a durable release receipt for its current
-#     lease generation. Age never substitutes for a release receipt, and device
-#     directory mtime / CoreSimulator logs / boot history are NOT proof of
-#     abandonment.
+#   * A managed device (`gen/<udid>` exists) is reclaimable ONLY with a durable
+#     release receipt for its current lease generation past the 48 h floor; device
+#     directory mtime / CoreSimulator logs / boot history never substitute for a
+#     receipt on a managed device.
+#   * A never-managed device (`! -e gen/<udid>` and no lease dir) is reclaimable
+#     ONLY when `SIM_UNLEASED_EPHEMERAL_APPROVED=1`, `Shutdown`, not `wai-shared-*`,
+#     unreserved, and its on-disk content is measurably >= 48 h idle.
 #   * A Booted device is never a prune candidate.
 #   * Unknown liveness or unmeasurable state preserves the device.
 #   * Release is fenced by an opaque per-generation token, never by UDID or PID.
@@ -554,6 +557,7 @@ PY
 # sim_unleased_ephemeral_idle <udid> — true only when SIM_UNLEASED_EPHEMERAL_APPROVED=1
 # for a never-leased (no gen/<udid> and no lease dir), non-shared (not wai-shared-*),
 # unreserved Shutdown simulator whose on-disk content is measurably >= 48 h idle.
+# Authority: operator decision 2026-11-18 ("yes permanently hands off"), CLAUDE.md:237-265
 sim_unleased_ephemeral_idle() {
   local udid="$1" gen_path snap _u _n _s _newest _rtk count=0 name="" state="" root="" target="" newest=""
   [[ "${SIM_UNLEASED_EPHEMERAL_APPROVED:-0}" == "1" ]] || return 1
@@ -605,12 +609,12 @@ sim_prune() {
     local lstate; lstate="$(sim_lease_state "$udid")"
     if [[ "$lstate" == "complete" ]]; then echo "keep:leased $name"; kept=$((kept+1)); continue; fi
     if [[ "$lstate" == "indeterminate" ]]; then echo "keep:lease-indeterminate $name"; kept=$((kept+1)); continue; fi
-    # 3. the only proof: a release receipt for the current generation, past the
-    # floor measured from the RECORDED RELEASE TIME (design: "the 48 h floor
-    # counted from the recorded release time"). A device mtime is NOT the basis,
-    # so an unmeasurable/absent `lastUsedAt` must not veto a valid receipt --
-    # otherwise a freshly created, never-booted device (lastUsedAt: null) could
-    # never be reclaimed. Found by the uslx live proof on 2026-11-17.
+    # 3. eligibility proof: either (a) a current-generation release receipt past
+    # the 48 h floor measured from the RECORDED RELEASE TIME (for `gen/<udid>`
+    # managed sims; absent `lastUsedAt` does not veto a valid receipt — uslx
+    # 2026-11-17), or (b) `SIM_UNLEASED_EPHEMERAL_APPROVED=1` for a never-managed
+    # (`! -e gen/<udid>`), non-`wai-shared-*`, unreserved `Shutdown` sim whose
+    # on-disk content is >= 48 h idle.
     if ! { sim_released_and_idle "$udid" || sim_unleased_ephemeral_idle "$udid"; }; then
       # No trustworthy receipt. If mtime is also unmeasurable, say so explicitly
       # rather than implying a receipt exists and is merely young.
