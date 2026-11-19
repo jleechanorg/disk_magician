@@ -8,13 +8,10 @@
 # is the operator's approval: LARGE_TMP_APPROVED / SCRATCH_TOP_LEVEL_APPROVED (and
 # WORKTREE_APPROVED with --include-worktrees) are set for the cleaner children only.
 #
-# Exit: 0 target met, 3 target_unmet (0 B freed never reads as success), 2 usage,
-# 75 scratch lock held.
+# Exit: 0 target met, 3 target_unmet (0 B freed never reads as success), 2 usage.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/lib/scratch_lock.sh
-source "$SCRIPT_DIR/lib/scratch_lock.sh"
 
 MIN_FLOOR_HOURS=2
 DEFAULT_TARGET_GB=40
@@ -22,13 +19,12 @@ TARGET_GB="$DEFAULT_TARGET_GB"
 MAX_AGE_HOURS=48
 DRY_RUN=false
 INCLUDE_WORKTREES=false
-ORIG_ARGS=("$@")
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--target-gb N] [--max-age-hours H] [--dry-run] [--include-worktrees]
 
-Emergency reclaim of tmp + Scratch under one lock hold. The age floor starts at
+Emergency reclaim of tmp + Scratch. The age floor starts at
 --max-age-hours (default 48 h; explicit minimum 2 h).
 Stops as soon as host free space reaches --target-gb (default ${DEFAULT_TARGET_GB}).
   --dry-run            Run the cleaners in dry-run mode; print projected bytes.
@@ -62,12 +58,6 @@ if [[ -n "${DISKM_EMERGENCY_CLEANER_DIR:-}" ]]; then
     exit 2
   fi
   CLEANER_DIR="$DISKM_EMERGENCY_CLEANER_DIR"
-fi
-
-# One lock hold for every lane. Dry-run mutates nothing and skips the lock, as the cleaners do.
-if [[ "$DRY_RUN" != true ]]; then
-  export DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS="${DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS:-120}"
-  scratch_lock_acquire "emergency" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} || exit $?
 fi
 
 # Floor steps: MAX_AGE_HOURS, then each of 12/6/2 strictly below it.
@@ -114,13 +104,11 @@ if ((host_free >= TARGET_BYTES)) && [[ "$DRY_RUN" != true ]]; then
   exit 0
 fi
 
-# run_cleaner LABEL CMD... — runs a cleaner as a child that may reuse this lock hold
-# (the lock guard accepts only the exact PID that inherited the descriptor), echoes
-# its output, and leaves the combined output in LAST_OUT.
+# run_cleaner LABEL CMD... — runs a cleaner and saves its output in LAST_OUT.
 LAST_OUT=""
 run_cleaner() {
   local label="$1"; shift
-  LAST_OUT="$(bash -c 'export DISK_MAGICIAN_SCRATCH_LOCK_PID=$$; exec "$@"' _ "$@" 2>&1)"
+  LAST_OUT="$("$@" 2>&1)"
   local rc=$?
   [[ -n "$LAST_OUT" ]] && sed "s/^/  [$label] /" <<<"$LAST_OUT"
   echo "  [$label] rc=$rc"
