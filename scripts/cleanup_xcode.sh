@@ -608,6 +608,30 @@ if command -v xcrun >/dev/null 2>&1; then
       log "running: xcrun simctl delete unavailable"
       run_simctl delete unavailable
     fi
+    sim_prune_arg="--dry-run"
+    [[ "$DRY_RUN" == false ]] && sim_prune_arg="--clean"
+    diskm_entry="$SCRIPT_DIR/../disk_magician.sh"
+    if [[ -f "$diskm_entry" ]]; then
+      if [[ -z "$TIMEOUT_CMD" ]]; then
+        log "simulator prune skipped: no timeout(1)/gtimeout available to bound 'disk_magician.sh sim prune ${sim_prune_arg}'"
+      else
+        prune_timeout="${DISK_MAGICIAN_SIM_PRUNE_TIMEOUT_SECONDS:-120}"
+        if [[ -n "${DISK_MAGICIAN_SIMCTL_TIMEOUT_SECONDS:-}" ]]; then
+          prune_timeout="$SIMCTL_TIMEOUT_SECONDS"
+        fi
+        prune_rc=0
+        if [[ "$TIMEOUT_KILL_AFTER_SUPPORTED" == true ]]; then
+          "$TIMEOUT_CMD" --kill-after="$SIMCTL_KILL_AFTER_S" "$prune_timeout" bash "$diskm_entry" sim prune "$sim_prune_arg" || prune_rc=$?
+        else
+          "$TIMEOUT_CMD" "$prune_timeout" bash "$diskm_entry" sim prune "$sim_prune_arg" || prune_rc=$?
+        fi
+        if [[ "$prune_rc" -eq 124 || "$prune_rc" -eq 137 ]]; then
+          log "WARN: simulator prune timed out after ${prune_timeout}s (non-fatal)"
+        elif [[ "$prune_rc" -ne 0 ]]; then
+          log "WARN: simulator prune exited ${prune_rc} (non-fatal)"
+        fi
+      fi
+    fi
   fi
 else
   log "xcrun not found; simulator cleanup skipped."

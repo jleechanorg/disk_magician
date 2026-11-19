@@ -231,9 +231,13 @@ c14_ephemeral_retention() {
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
+    if [[ "$rel" == "$p" ]]; then
+        local _h; _h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$_h" ]] && rel=${p#"$_h"/}
+    fi
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
     elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
     elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then safety_disposable_recency_floor_minutes
+    elif [[ "$rel" =~ ^\.hermes/cache/scratch/[^/]+$ ]]; then safety_disposable_recency_floor_minutes
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then safety_disposable_recency_floor_minutes
     else return 1; fi
 }
@@ -323,19 +327,29 @@ _av_simulator_release_proof() (
     state="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
     generation="$state/gen/$udid"
     receipt="$state/receipts/sim_release_receipts.jsonl"
-    [[ -d "$state/gen" && ! -L "$state/gen" && -f "$generation" && ! -L "$generation" &&
-       -f "$receipt" && ! -L "$receipt" && ! -e "$state/sim_leases/$udid" && ! -L "$state/sim_leases/$udid" ]] || return 1
-    generation_value="$(cat "$generation" 2>/dev/null)" || return 1
-    [[ "$generation_value" =~ ^[1-9][0-9]*$ ]] || return 1
-    # The lifecycle module only declares helpers; it does not source this file.
-    # Sourcing it in this subshell is therefore one-way and reuses the canonical
-    # generation, release-floor, inventory and tri-state lease implementation.
-    # shellcheck source=scripts/sim_lifecycle.sh
-    source "$_AV_DIR/../sim_lifecycle.sh" || return 1
-    [[ "$(sim_lease_state "$udid")" == absent ]] || return 1
-    sim_released_and_idle "$udid" || return 1
-    snap="$(sim_snapshot)" || return 1
-    printf '%s\n' "$snap" | awk -F'\t' -v u="$udid" '$1==u {rows++; if($3=="Shutdown") shutdown++} END{exit rows==1 && shutdown==1 ? 0 : 1}'
+    if [[ -e "$generation" || -L "$generation" ]]; then
+        [[ -d "$state/gen" && ! -L "$state/gen" && -f "$generation" && ! -L "$generation" &&
+           -f "$receipt" && ! -L "$receipt" && ! -e "$state/sim_leases/$udid" && ! -L "$state/sim_leases/$udid" ]] || return 1
+        generation_value="$(cat "$generation" 2>/dev/null)" || return 1
+        [[ "$generation_value" =~ ^[1-9][0-9]*$ ]] || return 1
+        # The lifecycle module only declares helpers; it does not source this file.
+        # Sourcing it in this subshell is therefore one-way and reuses the canonical
+        # generation, release-floor, inventory and tri-state lease implementation.
+        # shellcheck source=scripts/sim_lifecycle.sh
+        source "$_AV_DIR/../sim_lifecycle.sh" || return 1
+        [[ "$(sim_lease_state "$udid")" == absent ]] || return 1
+        sim_released_and_idle "$udid" || return 1
+        snap="$(sim_snapshot)" || return 1
+        printf '%s\n' "$snap" | awk -F'\t' -v u="$udid" '$1==u {rows++; if($3=="Shutdown") shutdown++} END{exit rows==1 && shutdown==1 ? 0 : 1}'
+    elif [[ "${SIM_UNLEASED_EPHEMERAL_APPROVED:-0}" == "1" ]]; then
+        [[ ! -e "$state/sim_leases/$udid" && ! -L "$state/sim_leases/$udid" ]] || return 1
+        # shellcheck source=scripts/sim_lifecycle.sh
+        source "$_AV_DIR/../sim_lifecycle.sh" || return 1
+        [[ "$(sim_lease_state "$udid")" == absent ]] || return 1
+        sim_unleased_ephemeral_idle "$udid"
+    else
+        return 1
+    fi
 )
 
 # _av_sparkle_installed_twin <bundle-name> <staged-path>: rc 0 when the same app is
@@ -625,7 +639,7 @@ _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
     # A caller-provided dry-run marker is an unconditional no-push boundary.
     [[ "${DRY_RUN:-}" != true ]] || C14_NO_RESCUE_PUSH=1
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 min_idle_explicit=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 min_idle_explicit=0 relax_reason='' q scope_path='' done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -689,6 +703,7 @@ if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kep
     candidate_lease="$(lease_path_for "$p")" || { echo kept:check-failed; return 0; }
     while IFS= read -r -d '' q; do  # a lease not dead or released keeps; absent only on ENOENT
         [[ "$q" == OK ]] && { done=1; continue; }
+        scope_path="$q"
         q="$(lease_path_for "$q")" || { echo kept:check-failed; return 0; }
         case "$(python3 -c 'import os,sys;d=os.path.dirname(sys.argv[1])
 try:os.stat(d);os.stat(sys.argv[1]);print("lease" if os.access(d,os.R_OK|os.X_OK) else "")
@@ -725,6 +740,11 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
                 relax_reason=kept:owner-unknown
                 if [[ -n "$candidate_lease" && "$q" == "$candidate_lease" && -f "$p/.git" ]]; then
                     relax_reason="$(_av_owner_null_relax_reason "$p" "$inv" "$min_idle")"
+                    [[ -n "$relax_reason" ]] || continue
+                elif [[ ( "$kind" == xcode-derived-data || "$kind" == rebuildable ) && "$scope_path" != "$p" && "$p" == "$scope_path/"* && -f "$scope_path/.git" && ! -e "$p/.git" ]] &&
+                    [[ -z "$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR git -C "$scope_path" ls-files -- "$p" 2>/dev/null | head -1)" ]] &&
+                    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR git -C "$scope_path" ls-files -- "$p" >/dev/null 2>&1; then
+                    relax_reason="$(_av_owner_null_relax_reason "$scope_path" "$inv" "$min_idle")"
                     [[ -n "$relax_reason" ]] || continue
                 fi
                 if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then
