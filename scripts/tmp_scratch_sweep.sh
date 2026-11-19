@@ -5,10 +5,9 @@
 # --dry-run; unattended deletions of ~/.claude/state remain strictly forbidden),
 # failure-continuing between steps but propagating a nonzero exit if either step
 # failed, so an unattended launchd job doesn't silently look healthy when a
-# step is broken. The 20-minute --scratch-only mode runs safe registered-volume
-# the available-floor volume reclaim pass before the slower Scratch prune, so
-# host sparse-image trim gets bounded time even when candidate itemization runs
-# to its deadline.
+# step is broken. In Scratch-only mode a configured LRU pass starts first.
+# The available-floor pass still runs first without an LRU budget, so sparse
+# image trim gets bounded time when automatic discovery uses the deadline.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/actuator_deadline.sh"
@@ -160,11 +159,8 @@ SCRATCH_PRUNE_OUTCOME="not-run"
 SCRATCH_PRUNE_REMOVED=0
 SCRATCH_PRUNE_SCANNED=0
 run_volume_reclaim_phase() {
-# Give the existing volume-reclaim phase first use of the shared deadline.
-# Scratch pruning can spend the entire 15-minute window itemising a large
-# candidate; volume reclaim owns the host sparse-image trim needed to return
-# freed Scratch blocks to the root filesystem. The established 300s phase cap
-# leaves the remainder for Scratch pruning.
+# Volume reclaim owns sparse-image trim and has its own cap within the
+# scheduler deadline.
 volume_args=(volume reclaim --available-floor)
 [[ "$clean_flag" == "--clean" ]] && volume_args+=(--clean)
 VOLUME_TIMEOUT_SEC="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
@@ -240,7 +236,8 @@ PY
 fi
 [[ -n "$VOLUME_OUTPUT" ]] && printf '%s\n' "$VOLUME_OUTPUT"
 }
-if [[ "$SWEEP_MODE" == scratch-only ]]; then
+SCRATCH_LRU_PCT="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
+if [[ "$SWEEP_MODE" == scratch-only && ! "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
   run_volume_reclaim_phase
 fi
 if [[ "$SWEEP_MODE" == scratch-only ]]; then
@@ -249,7 +246,6 @@ if [[ "$SWEEP_MODE" == scratch-only ]]; then
   # Opt-in LRU budget mode (walx, default off): DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=N
   # in the scheduler environment replaces the C14-only automatic pass with the
   # approved LRU eviction down to N% used. The variable is the operator approval.
-  SCRATCH_LRU_PCT="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
   if [[ "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
     scratch_args+=(--budget-pct "$SCRATCH_LRU_PCT" --budget-preserve-content-keeps)
     scratch_mode_env=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=0 SCRATCH_TOP_LEVEL_APPROVED=1)
@@ -257,7 +253,19 @@ if [[ "$SWEEP_MODE" == scratch-only ]]; then
     scratch_args+=(--available-floor)
     scratch_mode_env=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 SCRATCH_TOP_LEVEL_APPROVED=0)
   fi
-  SCRATCH_TIMEOUT_SEC="$(python3 - "$ACT_DEADLINE_AT" <<'PY'
+  SCRATCH_PHASE_DEADLINE_AT="$ACT_DEADLINE_AT"
+  if [[ "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ && "${DISK_MAGICIAN_OSTYPE:-$OSTYPE}" == linux* ]]; then
+    # A sparse image returns space to the host via trim after deletion.
+    # Keep the existing volume phase allowance when the overall budget fits it.
+    SCRATCH_PHASE_DEADLINE_AT="$(python3 - "$ACT_DEADLINE_AT" "${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}" <<'PY'
+import sys,time
+deadline=float(sys.argv[1])
+reserve=int(sys.argv[2]) if sys.argv[2].isascii() and sys.argv[2].isdigit() and sys.argv[2][0] != "0" else 300
+print(deadline-reserve if deadline-time.monotonic() > reserve else sys.argv[1])
+PY
+)"
+  fi
+  SCRATCH_TIMEOUT_SEC="$(python3 - "$SCRATCH_PHASE_DEADLINE_AT" <<'PY'
 import sys,time
 try: remaining=max(0.0,float(sys.argv[1])-time.monotonic())
 except (TypeError,ValueError): remaining=0.0
@@ -268,7 +276,7 @@ PY
     SCRATCH_PRUNE_OUTPUT="skipped:bounded-runtime-unavailable"
     SCRATCH_PRUNE_RC=124
   else
-    run_bounded_capture SCRATCH_PRUNE_OUTPUT env ACT_DEADLINE_AT="$ACT_DEADLINE_AT" ACT_CURSOR="$SCRATCH_CURSOR" \
+    run_bounded_capture SCRATCH_PRUNE_OUTPUT env ACT_DEADLINE_AT="$SCRATCH_PHASE_DEADLINE_AT" ACT_CURSOR="$SCRATCH_CURSOR" \
       DISK_MAGICIAN_TRIGGER="$CHILD_TRIGGER" "${scratch_mode_env[@]}" \
       DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE= \
       "$VOLUME_TIMEOUT_BIN" --signal=TERM --kill-after=2s "${SCRATCH_TIMEOUT_SEC}s" \
@@ -342,7 +350,7 @@ else
   fi
   "$SCRIPT_DIR/cleanup_claude_state.sh" --dry-run || rc=1
 fi
-if [[ "$SWEEP_MODE" == full ]]; then
+if [[ "$SWEEP_MODE" == full || "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
   run_volume_reclaim_phase
 fi
 # Same classification as the scratch-prune child: rc 75 with the lock helper's

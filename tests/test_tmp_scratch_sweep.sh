@@ -175,11 +175,31 @@ assert_receipt_field "volume reclaim result is retained when Scratch prune times
 
 echo "Test 0c: the LRU budget opt-in switches the Scratch pass to approved budget mode"
 : > "$INVOCATION_LOG"
+LRU_TEST_DEADLINE="$(python3 -c 'import time; print(time.monotonic()+60)')"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 \
-  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
+  DISK_MAGICIAN_OSTYPE=linux-gnu DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS=5 \
+  /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$LRU_TEST_DEADLINE" >/dev/null 2>&1 || true
 LRU_CALLS="$(cat "$INVOCATION_LOG")"
 assert_contains "opt-in passes --budget-pct to scratch-prune" "disk_magician scratch-prune --clean --budget-pct 50 --budget-preserve-content-keeps " "$LRU_CALLS"
 assert_contains "opt-in runs the approved non-automatic mode" "scratch_prune_mode automatic=0 approval=1" "$LRU_CALLS"
+LRU_PRUNE_LINE="$(grep -n '^disk_magician scratch-prune' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+LRU_VOLUME_LINE="$(grep -n '^disk_magician volume reclaim' "$INVOCATION_LOG" | head -1 | cut -d: -f1)"
+if [[ -n "$LRU_PRUNE_LINE" && -n "$LRU_VOLUME_LINE" && "$LRU_PRUNE_LINE" -lt "$LRU_VOLUME_LINE" ]]; then
+  echo "  PASS  scheduled LRU starts before volume reclaim can consume its budget"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  scheduled LRU starts before volume reclaim can consume its budget"
+  FAIL=$((FAIL+1))
+fi
+LRU_PHASE_DEADLINE="$(awk '/^disk_magician scratch-prune / {for(i=1;i<=NF;i++) if($i ~ /^deadline=/){print substr($i,10); exit}}' "$INVOCATION_LOG")"
+[[ -n "$LRU_PHASE_DEADLINE" ]]
+if python3 -c 'import sys; sys.exit(not (4.99 < float(sys.argv[1])-float(sys.argv[2]) < 5.01))' "$LRU_TEST_DEADLINE" "$LRU_PHASE_DEADLINE"; then
+  echo "  PASS  Linux LRU leaves the configured time for sparse-image trim"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  Linux LRU leaves the configured time for sparse-image trim"
+  FAIL=$((FAIL+1))
+fi
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=0 \
   /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
