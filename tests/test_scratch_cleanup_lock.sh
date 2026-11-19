@@ -7,7 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TMP_CLEANER="$REPO_ROOT/scripts/cleanup_tmp.sh"
 PR_CLEANER="$REPO_ROOT/scripts/cleanup_pr_scratch.sh"
-ROOT="$(mktemp -d "${TMPDIR:-/tmp}/test_scratch_nonblocking.XXXXXX")"
+TMP_PARENT="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+ROOT="$(mktemp -d "$TMP_PARENT/test_scratch_nonblocking.XXXXXX")"
 ROOT="$(cd "$ROOT" && pwd -P)"
 STATE="$ROOT/state"
 TMP="$ROOT/tmp"
@@ -34,7 +35,7 @@ cleanup() {
   if [[ -n "$HOLDER_PID" ]]; then
     wait "$HOLDER_PID" 2>/dev/null || true
   fi
-  python3 -c 'import shutil,sys; p=sys.argv[1]; assert p.startswith("/tmp/test_scratch_nonblocking."); shutil.rmtree(p)' "$ROOT"
+  python3 -c 'import os,shutil,sys; p=sys.argv[1]; assert os.path.dirname(p)==sys.argv[2] and os.path.basename(p).startswith("test_scratch_nonblocking."); shutil.rmtree(p)' "$ROOT" "$TMP_PARENT"
 }
 trap cleanup EXIT
 
