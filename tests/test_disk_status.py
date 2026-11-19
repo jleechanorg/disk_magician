@@ -563,6 +563,35 @@ class TestDiskStatus(unittest.TestCase):
         res = evaluator.evaluate_action_outcome()
         self.assertEqual(res["status"], "invalid")
 
+    def test_snapshot_action_outcome_degrades_for_partial_renderer(self):
+        run_id = self.store.begin("snapshot_commit", trigger="scheduled")
+        self.store.finish(
+            "snapshot_commit",
+            run_id=run_id,
+            outcome="success",
+            postcondition={"renderer_status": "partial"},
+        )
+
+        result = self.get_evaluator().evaluate_action_outcome()
+        detail = result["details"]["snapshot_commit"]
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(detail["status"], "degraded")
+        self.assertEqual(detail["reason"], "renderer_partial")
+        self.assertEqual(detail["latest_outcome"], "success")
+
+        run_id = self.store.begin("snapshot_commit", trigger="scheduled")
+        self.store.finish(
+            "snapshot_commit",
+            run_id=run_id,
+            outcome="success",
+            postcondition={"renderer_status": "unknown", "renderer_exit_code": 0},
+        )
+        result = self.get_evaluator().evaluate_action_outcome()
+        detail = result["details"]["snapshot_commit"]
+        self.assertEqual(detail["status"], "degraded")
+        self.assertEqual(detail["reason"], "renderer_unknown")
+
     def test_superseded_interrupted_records_serialized_jobs(self):
         evaluator = self.get_evaluator()
         for job in ("snapshot_commit", "pressure_sweep"):

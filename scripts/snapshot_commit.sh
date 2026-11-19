@@ -36,6 +36,13 @@ SNAP_BIN="${DISK_MAGICIAN_SNAPSHOT_BIN:-$SCRIPT_DIR/disk_snapshot.sh}"
 RECEIPT_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
 KEEP="${DISK_MAGICIAN_EVIDENCE_KEEP:-4}"
 log() { echo "[snapshot_commit] $*"; }
+file_identity() {
+  if [[ "$(uname -s)" == Darwin ]]; then
+    stat -f '%d:%i:%m:%z' "$1" 2>/dev/null
+  else
+    stat -c '%d:%i:%Y:%s' "$1" 2>/dev/null
+  fi
+}
 git_id() { git -C "$STATE_DIR" -c user.name=disk-magician -c user.email=disk-magician@localhost "$@"; }
 
 # Concurrency guard: Use receipt STATE dir for snapshot lock override, distinct from state repository dir.
@@ -290,17 +297,33 @@ if [[ -n "$CFG" && -f "$CFG" ]]; then
 fi
 
 # 4. Refresh the 5G ledger (fail-open) and evidence retention.
-python3 "$SCRIPT_DIR/render_topdown_ledger.py" --frontier "$FRONTIER" \
-  --out-dir "$STATE_DIR/ledger" 2>/dev/null || true
+RENDER_STATUS="unknown"
+RENDER_EXIT_CODE=0
+SIDECAR="$STATE_DIR/ledger/topdown-5g.status.json"
+SIDECAR_BEFORE="missing"
+if [[ -f "$SIDECAR" ]]; then
+  SIDECAR_BEFORE="$(file_identity "$SIDECAR" || echo unreadable)"
+fi
+if python3 "$SCRIPT_DIR/render_topdown_ledger.py" --frontier "$FRONTIER" \
+  --out-dir "$STATE_DIR/ledger"; then
+  :
+else
+  RENDER_EXIT_CODE=$?
+  RENDER_STATUS="error"
+  log "WARNING: topdown ledger renderer failed (exit=$RENDER_EXIT_CODE)"
+fi
 python3 "$SCRIPT_DIR/retain_evidence.py" --frontier "$FRONTIER" \
   --evidence-dir "$STATE_DIR/evidence" --keep "$KEEP" 2>/dev/null || true
 # Per-host reclaim ledger (fail-open; the `git add -A` below commits it).
 python3 "$SCRIPT_DIR/reclaim_ledger.py" --state-dir "$STATE_DIR" --no-commit >/dev/null 2>&1 || true
 
-# Capture actual snapshot and renderer publication status
-RENDER_STATUS="unknown"
-SIDECAR="$STATE_DIR/ledger/topdown-5g.status.json"
+# Read the renderer sidecar only when this run replaced it successfully.
+# A prior status must not disguise a failed or skipped renderer.
+SIDECAR_AFTER="missing"
 if [[ -f "$SIDECAR" ]]; then
+  SIDECAR_AFTER="$(file_identity "$SIDECAR" || echo unreadable)"
+fi
+if [[ "$RENDER_EXIT_CODE" -eq 0 && -f "$SIDECAR" && "$SIDECAR_BEFORE" != "$SIDECAR_AFTER" ]]; then
   RENDER_STATUS=$(python3 - "$SIDECAR" <<'EOF'
 import json, sys
 try:
@@ -311,6 +334,9 @@ except Exception:
     print("unknown")
 EOF
 )
+elif [[ "$RENDER_EXIT_CODE" -eq 0 ]]; then
+  RENDER_STATUS="unknown"
+  log "WARNING: topdown ledger renderer did not refresh its status sidecar"
 fi
 
 # 5. Commit.
@@ -369,7 +395,7 @@ else
   log "local-only (no remote)"
 fi
 
-POSTCONDITION="{\"renderer_status\": \"$RENDER_STATUS\", \"freed_bytes\": null}"
+POSTCONDITION="{\"renderer_status\": \"$RENDER_STATUS\", \"renderer_exit_code\": $RENDER_EXIT_CODE, \"freed_bytes\": null}"
 PUBLICATION="{\"committed\": true, \"pushed\": $PUSHED, \"status\": \"$PUSH_STATUS\"}"
 SAFETY='{"status": "not_applicable", "reason": "read_and_commit_only", "delegated": false}'
 

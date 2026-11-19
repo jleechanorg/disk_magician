@@ -31,6 +31,29 @@ run_sc() { # run_sc <home> <args...>
     /bin/bash "$SC" "${@:2}"
 }
 
+RENDER_FAIL_BIN="$TMP_ROOT/render-fail-bin"; mkdir -p "$RENDER_FAIL_BIN"
+cat > "$RENDER_FAIL_BIN/python3" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *render_topdown_ledger.py*)
+    case "${DISKM_TEST_RENDER_MODE:-fail}" in
+      fail) exit 23 ;;
+      noop) exit 0 ;;
+    esac
+    ;;
+esac
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$RENDER_FAIL_BIN/python3"
+run_sc_renderer_test() { # run_sc_renderer_test <home> <mode>
+  env -i HOME="$1" PATH="$RENDER_FAIL_BIN:/usr/bin:/bin" \
+    DISKM_TEST_RENDER_MODE="${2:-fail}" \
+    DISK_MAGICIAN_SNAPSHOT_BIN="$STUB_BIN/snap.sh" \
+    DISK_MAGICIAN_FRONTIER_JSON="$1/.disk_magician_state/frontier_last.json" \
+    DISK_MAGICIAN_STATE_DIR="$1/.disk_magician_state" \
+    /bin/bash "$SC"
+}
+
 run_selector() { # run_selector <root-frontier> <state-frontier>
   env -i HOME="$TMP_ROOT/selector-home" PATH="/usr/bin:/bin" \
     DISK_MAGICIAN_FRONTIER_JSON="${DISK_MAGICIAN_FRONTIER_JSON:-}" \
@@ -332,6 +355,43 @@ OUT15=$(env -i HOME="$H15" PATH="/usr/bin:/bin" TMPDIR="$H15/missing-tmp" \
 [[ $RC15 -ne 0 ]] && ok "pin allocation error exits nonzero" || bad "pin allocation rc" "$RC15"
 assert_receipt_field "$H15/.disk_magician_state/receipts/snapshot_commit.json" last_terminal.outcome error "pin allocation failure is recorded"
 [[ ! -d "$H15/.disk_magician_state/snapshot.lock" ]] && ok "pin failure releases lock" || bad "pin failure lock" "still present"
+
+echo "Test 16: renderer failure cannot reuse a stale partial sidecar"
+H16="$TMP_ROOT/h16"; mkdir -p "$H16"
+run_sc "$H16" >/dev/null 2>&1
+SD16="$H16/.local/state/disk-magician"
+mkdir -p "$SD16/ledger"
+printf '{"status":"partial"}\n' > "$SD16/ledger/topdown-5g.status.json"
+OUT16=$(run_sc_renderer_test "$H16" fail 2>&1); RC16=$?
+if [[ $RC16 -eq 0 ]]; then
+  ok "renderer failure remains fail-open for snapshot commit"
+else
+  bad "renderer failure rc" "$RC16: $OUT16"
+fi
+RF16="$H16/.disk_magician_state/receipts/snapshot_commit.json"
+assert_receipt_field "$RF16" "last_terminal.postcondition.renderer_status" "error" "renderer failure recorded instead of stale partial sidecar"
+assert_receipt_field "$RF16" "last_terminal.postcondition.renderer_exit_code" "23" "renderer exit code recorded"
+if [[ "$OUT16" == *"renderer failed"* ]]; then
+  ok "renderer failure logged"
+else
+  bad "renderer failure log" "$OUT16"
+fi
+
+echo "Test 17: renderer success without a fresh sidecar cannot reuse a prior published status"
+H17="$TMP_ROOT/h17"; mkdir -p "$H17"
+run_sc "$H17" >/dev/null 2>&1
+SD17="$H17/.local/state/disk-magician"
+mkdir -p "$SD17/ledger"
+printf '{"status":"published"}\n' > "$SD17/ledger/topdown-5g.status.json"
+OUT17=$(run_sc_renderer_test "$H17" noop 2>&1); RC17=$?
+if [[ $RC17 -eq 0 ]]; then
+  ok "missing renderer report leaves snapshot commit usable"
+else
+  bad "missing report rc" "$RC17: $OUT17"
+fi
+RF17="$H17/.disk_magician_state/receipts/snapshot_commit.json"
+assert_receipt_field "$RF17" "last_terminal.postcondition.renderer_status" "unknown" "old published sidecar not treated as fresh renderer result"
+assert_receipt_field "$RF17" "last_terminal.postcondition.renderer_exit_code" "0" "successful renderer exit retained"
 
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]
