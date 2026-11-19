@@ -60,7 +60,6 @@ artifact_batch_output_file=""
 artifact_blocked_file=""
 scratch_lock_set_traps
 
-ORIG_ARGS=("$@")
 act_parse_deadline_args "$@" || exit 2
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 

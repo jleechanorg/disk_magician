@@ -354,17 +354,26 @@ os.makedirs(directory, mode=0o700, exist_ok=True)
 fd=os.open(os.path.join(directory, "scratch_cleanup.lock"), os.O_CREAT | os.O_RDWR, 0o600)
 fcntl.flock(fd,fcntl.LOCK_EX)
 print("held",flush=True)
-time.sleep(30)
+time.sleep(120)
 PYH
 LOCK_HOLDER=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q held "$T/holder.out" 2>/dev/null && break; sleep 0.1; done
 BEFORE_STATUS_CALLS="$(wc -l <"$STATUS_COMMANDS_FILE" | tr -d ' ')"
-ROOT_DIR="$ROOT" "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/legacy-lock.out" 2>"$T/legacy-lock.err" || true
+legacy_rc=0
+DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/legacy-lock.out" 2>"$T/legacy-lock.err" || legacy_rc=$?
+holder_was_live=false
+kill -0 "$LOCK_HOLDER" 2>/dev/null && holder_was_live=true
 AFTER_STATUS_CALLS="$(wc -l <"$STATUS_COMMANDS_FILE" | tr -d ' ')"
 kill "$LOCK_HOLDER" 2>/dev/null || true; wait "$LOCK_HOLDER" 2>/dev/null || true
-[[ "$AFTER_STATUS_CALLS" -gt "$BEFORE_STATUS_CALLS" ]]
+[[ "$legacy_rc" -eq 0 && "$holder_was_live" == true && "$AFTER_STATUS_CALLS" -gt "$BEFORE_STATUS_CALLS" ]]
+[[ ! -e "$TEST_ROOT/repo/evidence/oldest" ]]
 ! grep -q 'scratch lock held' "$T/legacy-lock.err"
 echo 'legacy whole-job lock does not block volume reclaim'
+# The deadline case below needs its own eligible artifact and an empty log.
+mkdir -p "$TEST_ROOT/repo/evidence/oldest"
+printf x >"$TEST_ROOT/repo/evidence/oldest/content"
+python3 -c 'import os,sys,time; t=time.time()-72*3600; os.utime(sys.argv[1], (t,t)); os.utime(sys.argv[1]+"/content", (t,t))' "$TEST_ROOT/repo/evidence/oldest"
+: >"$DISK_MAGICIAN_DELETION_LOG"
 # A pre-expired governor deadline defers before any bounded scan starts: no
 # grace, no scan of any candidate (a wedged-mount find would hold the lock ~5s
 # per candidate), nothing removed, truthful deferral receipt.
