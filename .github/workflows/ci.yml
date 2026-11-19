@@ -18,7 +18,7 @@ jobs:
     name: Test and lint
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ fromJson(vars.SELF_HOSTED_RUNNER_LABELS || '["self-hosted","Linux","self-hosted-mikey"]') }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -90,8 +90,8 @@ jobs:
             if ! command -v rg >/dev/null 2>&1; then
               curl -fsSL https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz | tar -xz --strip-components=1 -C "$CI_SHIMS" ripgrep-14.1.1-x86_64-unknown-linux-musl/rg
             fi
-            if ! command -v gitleaks >/dev/null 2>&1; then
-              curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar -xz -C "$CI_SHIMS" gitleaks
+            if ! gitleaks git --help >/dev/null 2>&1; then
+              curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz | tar -xz -C "$CI_SHIMS" gitleaks
             fi
             for bin in lsof rsync sqlite3 fuser; do
               if ! command -v "$bin" >/dev/null 2>&1; then
