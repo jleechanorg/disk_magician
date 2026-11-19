@@ -35,11 +35,13 @@ class ScratchReceiptStatus(unittest.TestCase):
 args=sys.argv[1:]
 if args[0]=='begin': print('run')
 elif args[0]=='read':
-    marker=os.environ['CAPTURE']+'.read'
-    first=not os.path.exists(marker)
-    open(marker,'w').close()
-    if first or os.environ.get('MISSING_METRICS')=='1': print('{}')
-    else: print(json.dumps({'id':'child','trigger':'tmp_scratch_sweep:run', 'candidates':{'removed_count':0,'deferred_count':int(os.environ.get('DEFERRED','0')),'interrupted_count':0},'postcondition':{'df_delta_bytes':0}}))
+    job=args[args.index('--job')+1]
+    completed=[]
+    if job=='cleanup_tmp' and os.environ.get('MISSING_METRICS')!='1' and os.environ.get('CHILD_RC','0')!='75':
+        completed.append({'id':'child','trigger':'tmp_scratch_sweep:run',
+                          'candidates':{'removed_count':0,'deferred_count':int(os.environ.get('DEFERRED','0')),'interrupted_count':0},
+                          'postcondition':{'df_delta_bytes':0}})
+    print(json.dumps({'job':job,'active':[],'completed':completed}))
 else:
     data=dict(zip(args[1::2],args[2::2]))
     open(os.environ['CAPTURE'],'w').write(json.dumps(data))
