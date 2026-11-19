@@ -13,6 +13,22 @@ ARTIFACT_NAMES = {
     ".parcel-cache", "__pycache__", "DerivedData", "Pods",
 }
 
+# Unambiguous dependency/cache directories treated as atomic leaf candidates:
+# discovery stops descending into them so C14 evaluates the entire directory
+# in one pass instead of spawning thousands of inner-subdirectory checks.
+ATOMIC_DEP_DIR_NAMES = frozenset({
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".next",
+    ".turbo",
+    ".gradle",
+})
+
 def expired(deadline):
     return deadline is not None and time.monotonic() >= deadline
 
@@ -35,6 +51,11 @@ def has_git_marker(path: str) -> bool:
 def is_artifact_name(name: str) -> bool:
     return name in ARTIFACT_NAMES or fnmatch.fnmatchcase(name, "isolated-*")
 
+
+def is_atomic_dep_dir(name: str) -> bool:
+    return name in ATOMIC_DEP_DIR_NAMES
+
+
 def discover(root, max_depth, deadline):
     if not os.path.isdir(root) or os.path.islink(root):
         raise OSError("candidate is not a real directory")
@@ -55,7 +76,7 @@ def discover(root, max_depth, deadline):
                     continue
                 if not entry.name.startswith(".") and is_artifact_name(entry.name):
                     result.append(os.fsencode(child))
-                if depth < max_depth:
+                if depth < max_depth and not is_atomic_dep_dir(entry.name):
                     walk(child, depth + 1)
     walk(root, 1)
     return result
@@ -93,6 +114,10 @@ def discover_generic(root, deadline):
         path = pending.pop()
         if has_git_marker(path):
             continue
+        if is_atomic_dep_dir(os.path.basename(os.path.normpath(path))):
+            with os.scandir(path):
+                pass
+            continue
         children = []
         with os.scandir(path) as entries:
             for entry in entries:
@@ -103,11 +128,16 @@ def discover_generic(root, deadline):
                 info_child = entry.stat(follow_symlinks=False)
                 if not stat.S_ISDIR(info_child.st_mode) or info_child.st_dev != info.st_dev:
                     continue
-                # Whole repository units may still receive C14 checks, but
-                # never descend into their source, metadata, or generated files.
+                # Whole repository units and atomic dependency/cache directories
+                # may still receive C14 checks, but never descend into their
+                # internals.
                 result.append(os.fsencode(entry.path))
                 if not has_git_marker(entry.path):
-                    children.append(entry.path)
+                    if is_atomic_dep_dir(entry.name):
+                        with os.scandir(entry.path):
+                            pass
+                    else:
+                        children.append(entry.path)
         pending.extend(reversed(sorted(children)))
     return result
 
@@ -132,23 +162,28 @@ def stream_generic_leaves(root, deadline):
             had_error = True
             tainted = True
             is_git = True
+        is_atomic_dep = (
+            path != root
+            and is_atomic_dep_dir(os.path.basename(os.path.normpath(path)))
+        )
         if not is_git:
             try:
                 with os.scandir(path) as entries:
-                    for entry in entries:
-                        if expired(deadline):
-                            raise TimeoutError
-                        try:
-                            info = entry.stat(follow_symlinks=False)
-                        except (TimeoutError, BrokenPipeError):
-                            raise
-                        except OSError:
-                            had_error = True
-                            tainted = True
-                            continue
-                        if (not entry.name.startswith(".") and stat.S_ISDIR(info.st_mode)
-                                and info.st_dev == root_info.st_dev):
-                            children.append(entry.path)
+                    if not is_atomic_dep:
+                        for entry in entries:
+                            if expired(deadline):
+                                raise TimeoutError
+                            try:
+                                info = entry.stat(follow_symlinks=False)
+                            except (TimeoutError, BrokenPipeError):
+                                raise
+                            except OSError:
+                                had_error = True
+                                tainted = True
+                                continue
+                            if (not entry.name.startswith(".") and stat.S_ISDIR(info.st_mode)
+                                    and info.st_dev == root_info.st_dev):
+                                children.append(entry.path)
             except (TimeoutError, BrokenPipeError):
                 raise
             except OSError:
