@@ -30,7 +30,7 @@ def _strip_yaml_comment(line: str) -> str:
 
 
 def _parse_workflow_jobs(workflow_path: Path) -> dict[str, dict[str, str]]:
-    """Extract top-level job IDs and their `name` / `runs-on` fields using stdlib only."""
+    """Extract top-level job IDs and their `name` / `runs-on` / `if` / `timeout-minutes` fields."""
     jobs: dict[str, dict[str, str]] = {}
     in_jobs = False
     current_job: str | None = None
@@ -143,7 +143,11 @@ class TestCISelfHostedRunners(unittest.TestCase):
         workflow_paths = sorted(WORKFLOWS_DIR.glob("*.yml"))
         self.assertTrue(workflow_paths, f"No workflow files found in {WORKFLOWS_DIR}")
         for path in workflow_paths:
-            text = path.read_text(encoding="utf-8")
+            lines = [
+                _strip_yaml_comment(raw_line)
+                for raw_line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            text = "\n".join(lines)
             match = HOSTED_RUNNER_RE.search(text)
             self.assertIsNone(
                 match,
@@ -157,7 +161,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
                 f"{path} must not use sudo (ezgha containers enforce no-new-privileges)",
             )
 
-    def test_ci_test_and_lint_targets_native_macos(self) -> None:
+    def test_ci_test_and_lint_targets_self_hosted_linux(self) -> None:
         ci_path = WORKFLOWS_DIR / "ci.yml"
         jobs = _parse_workflow_jobs(ci_path)
         self.assertIn("test", jobs, f"Expected job 'test' in {ci_path}, got: {jobs}")
@@ -170,10 +174,38 @@ class TestCISelfHostedRunners(unittest.TestCase):
             f"Expected exactly one job with exact name 'Test and lint' in {ci_path}, got: {jobs}",
         )
         runs_on = matching[0].get("runs-on", "")
+        fallback_match = re.search(r"\|\|\s*'([^']+)'", runs_on)
+        self.assertIsNotNone(
+            fallback_match,
+            f"Expected JSON fallback label list in runs-on={runs_on!r}",
+        )
+        labels = json.loads(fallback_match.group(1))
+        self.assertEqual(
+            labels,
+            ["self-hosted", "Linux", "self-hosted-mikey"],
+            f"'Test and lint' default labels must pin self-hosted Linux, got {labels!r}",
+        )
+
+    def test_ci_native_macos_leg_gated_when_parked(self) -> None:
+        ci_path = WORKFLOWS_DIR / "ci.yml"
+        jobs = _parse_workflow_jobs(ci_path)
+        self.assertIn("test-macos", jobs, f"Expected job 'test-macos' in {ci_path}")
+        macos_job = jobs["test-macos"]
         self.assertIn(
             "self-hosted-native-macos",
-            runs_on,
-            f"'Test and lint' job must target self-hosted-native-macos, got runs-on={runs_on!r}",
+            macos_job.get("runs-on", ""),
+            "jobs.test-macos must target self-hosted-native-macos",
+        )
+        if_expr = macos_job.get("if", "")
+        self.assertIn(
+            "vars.EZGHA_NATIVE_MACOS_LEG == 'enabled'",
+            if_expr,
+            f"jobs.test-macos must be gated on EZGHA_NATIVE_MACOS_LEG while parked, got if={if_expr!r}",
+        )
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            if_expr,
+            f"jobs.test-macos must gate fork PRs, got if={if_expr!r}",
         )
 
     def test_ci_guards_untrusted_fork_prs(self) -> None:
@@ -192,120 +224,25 @@ class TestCISelfHostedRunners(unittest.TestCase):
             f"jobs.test in {ci_path} must allow non-PR events, got if={if_expr!r}",
         )
 
-    def test_ci_venv_path_precedence_and_explicit_venv_python(self) -> None:
-        ci_path = WORKFLOWS_DIR / "ci.yml"
-        lines = ci_path.read_text(encoding="utf-8").splitlines()
-        text = "\n".join(lines)
-
-        def _find_github_path_line(entry: str) -> int:
-            for idx, line in enumerate(lines):
-                if entry in line and "$GITHUB_PATH" in line:
-                    return idx
-            self.fail(f"Missing $GITHUB_PATH append for {entry!r} in {ci_path}")
-
-        homebrew_idx = _find_github_path_line("/opt/homebrew/bin")
-        home_bin_idx = _find_github_path_line("$HOME/bin")
-        local_bin_idx = _find_github_path_line("$HOME/.local/bin")
-        ci_shims_idx = _find_github_path_line("$CI_SHIMS")
-        venv_bin_idx = _find_github_path_line("$VENV_DIR/bin")
-
-        self.assertGreater(
-            venv_bin_idx,
-            homebrew_idx,
-            "$VENV_DIR/bin must be appended to $GITHUB_PATH after /opt/homebrew/bin",
-        )
-        self.assertGreater(
-            venv_bin_idx,
-            home_bin_idx,
-            "$VENV_DIR/bin must be appended to $GITHUB_PATH after $HOME/bin",
-        )
-        self.assertGreater(
-            venv_bin_idx,
-            local_bin_idx,
-            "$VENV_DIR/bin must be appended to $GITHUB_PATH after $HOME/.local/bin",
-        )
-        self.assertGreater(
-            venv_bin_idx,
-            ci_shims_idx,
-            "$VENV_DIR/bin must be appended to $GITHUB_PATH after $CI_SHIMS",
-        )
-
-        self.assertRegex(
-            text,
-            r'VENV_PYTHON=\$\{?VENV_DIR\}?/bin/python.*GITHUB_ENV',
-            f"{ci_path} must export VENV_PYTHON to $GITHUB_ENV",
-        )
-        self.assertIn(
-            "uv venv --seed",
-            text,
-            f"{ci_path} must seed pip inside uv venv for packaging tests",
-        )
-        self.assertNotIn(
-            "pytest-xdist",
-            text,
-            f"{ci_path} must not install pytest-xdist into diskm-ci-venv",
-        )
-        self.assertIn(
-            'pytest "PyYAML>=6.0"',
-            text,
-            f"{ci_path} must install pytest and PyYAML>=6.0 into diskm-ci-venv",
-        )
-        self.assertIn(
-            '"$VENV_PYTHON" -m pytest -q tests --ignore=tests/test_lease_recover_lock.py',
-            text,
-            f'{ci_path} must run serial pytest with "$VENV_PYTHON"',
-        )
-        self.assertIn(
-            '"$VENV_PYTHON" tests/test_lease_recover_lock.py',
-            text,
-            f'{ci_path} must run test_lease_recover_lock.py directly with "$VENV_PYTHON"',
-        )
-        self.assertIn(
-            '"$VENV_PYTHON" -m pytest -q',
-            text,
-            f'{ci_path} must run inventory pytest with "$VENV_PYTHON"',
-        )
-        self.assertNotIn("unittest discover", text)
-        self.assertNotIn("python3 -m unittest", text)
-        self.assertNotIn("python3 -m pytest", text)
-
-    def test_ci_isolates_home_git_config_and_serial_timing_suites(self) -> None:
+    def test_ci_linux_venv_isolation_and_rootless_tools(self) -> None:
         ci_path = WORKFLOWS_DIR / "ci.yml"
         steps = _parse_job_steps(ci_path, "test")
-
-        setup_body = steps.get("Set up isolated Python 3.13 venv and verify tools", "")
+        setup_body = steps.get(
+            "Set up isolated Python venv and rootless Linux CI tools", ""
+        )
         self.assertIn('CI_HOME="${RUNNER_TEMP}/ci-home"', setup_body)
         self.assertIn('CI_SHIMS="${RUNNER_TEMP}/ci-lowprio-shims"', setup_body)
         self.assertIn('GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"', setup_body)
+        self.assertIn('echo "VENV_PYTHON=${VENV_DIR}/bin/python" >> "$GITHUB_ENV"', setup_body)
         self.assertIn('echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"', setup_body)
-        self.assertIn('echo "CI_SHIMS=${CI_SHIMS}" >> "$GITHUB_ENV"', setup_body)
-        self.assertNotIn("DISK_MAGICIAN_LSOF_BIN", setup_body)
         self.assertIn('echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"', setup_body)
-        self.assertIn(
-            'echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"',
-            setup_body,
-        )
-        self.assertIn('echo "DISK_MAGICIAN_TEST_JOBS=8" >> "$GITHUB_ENV"', setup_body)
-        self.assertIn('git config --global user.name', setup_body)
-        self.assertIn('git config --global user.email', setup_body)
-        self.assertIn("$CI_HOME/.local/bin/diskm", setup_body)
-        self.assertIn("registry.json", setup_body)
-        self.assertIn("./scripts/resolve_config.py", setup_body)
-        self.assertIn("config.json.template", setup_body)
-        self.assertIn("$CI_SHIMS/taskpolicy", setup_body)
-        self.assertIn("$CI_SHIMS/nice", setup_body)
-        self.assertIn("$CI_SHIMS/git", setup_body)
-        self.assertIn("$CI_SHIMS/rm", setup_body)
-        self.assertIn("$CI_SHIMS/rsync", setup_body)
-        self.assertIn("$CI_SHIMS/lsof", setup_body)
-        self.assertIn("$CI_SHIMS/getconf", setup_body)
-        self.assertIn("ci-darwin-user-temp/T", setup_body)
-        self.assertIn("ci-darwin-user-temp/X", setup_body)
+        self.assertIn("shellcheck-py", setup_body)
+        self.assertNotIn("pytest-xdist", setup_body)
 
         for step_name in (
             "Run Python tests",
             "Run inventory integration tests",
-            "Run shell tests",
+            "Run Linux and cross-platform shell tests",
         ):
             step_body = steps.get(step_name, "")
             self.assertIn(
@@ -317,93 +254,6 @@ class TestCISelfHostedRunners(unittest.TestCase):
                 "unset BASH_ENV",
                 step_body,
                 f"Step {step_name!r} must unset BASH_ENV",
-            )
-
-        python_step = steps.get("Run Python tests", "")
-        self.assertNotIn(
-            "DISK_MAGICIAN_LSOF_BIN",
-            python_step,
-            "Run Python tests must not set DISK_MAGICIAN_LSOF_BIN",
-        )
-        self.assertNotIn(
-            "CI_DARWIN_USER_TEMP_DIR",
-            python_step,
-            "Run Python tests must not set CI_DARWIN_USER_TEMP_DIR",
-        )
-        self.assertNotIn(
-            "-n ",
-            python_step,
-            "Run Python tests must run serially without pytest-xdist -n workers",
-        )
-        self.assertIn(
-            '"$VENV_PYTHON" -m pytest -q tests --ignore=tests/test_lease_recover_lock.py',
-            python_step,
-        )
-        self.assertIn(
-            '"$VENV_PYTHON" tests/test_lease_recover_lock.py',
-            python_step,
-        )
-
-        shell_step = steps.get("Run shell tests", "")
-        self.assertIn(
-            "DISK_MAGICIAN_LSOF_BIN: ${{ env.CI_SHIMS }}/lsof",
-            shell_step,
-            "Run shell tests must set DISK_MAGICIAN_LSOF_BIN to the CI lsof shim",
-        )
-        self.assertIn(
-            'DISK_MAGICIAN_LSOF_CAP: "180"',
-            shell_step,
-            "Run shell tests must set DISK_MAGICIAN_LSOF_CAP=180",
-        )
-        self.assertIn(
-            "CI_DARWIN_USER_TEMP_DIR: ${{ runner.temp }}/ci-darwin-user-temp/T",
-            shell_step,
-            "Run shell tests must isolate DARWIN_USER_TEMP_DIR via CI_DARWIN_USER_TEMP_DIR",
-        )
-        self.assertIn(
-            'SNAPSHOT_TIMEOUT: "600"',
-            shell_step,
-            "Run shell tests must set SNAPSHOT_TIMEOUT=600",
-        )
-        self.assertIn(
-            "bash ./disk_magician.sh test-shell --timeout 5400",
-            shell_step,
-            "Run shell tests must pass --timeout 5400 to test-shell",
-        )
-
-        cleanup_body = steps.get("Clean up isolated CI venv", "")
-        self.assertIn("/ci-home", cleanup_body)
-        self.assertIn("/ci-lowprio-shims", cleanup_body)
-        self.assertIn("/gitconfig-ci", cleanup_body)
-        self.assertIn("/ci-darwin-user-temp", cleanup_body)
-
-    def test_ci_timeout_and_caffeinate_guard(self) -> None:
-        ci_path = WORKFLOWS_DIR / "ci.yml"
-        jobs = _parse_workflow_jobs(ci_path)
-        self.assertEqual(
-            jobs.get("test", {}).get("timeout-minutes"),
-            "300",
-            f"{ci_path} jobs.test must keep timeout-minutes: 300",
-        )
-        steps = _parse_job_steps(ci_path, "test")
-        guarded_steps = (
-            "Check shell syntax and ShellCheck errors",
-            "Run Python tests",
-            "Run inventory integration tests",
-            "Run shell tests",
-        )
-        for step_name in guarded_steps:
-            self.assertIn(step_name, steps, f"Missing step {step_name!r} in {ci_path}")
-            body = steps[step_name]
-            self.assertIn(
-                "-x /usr/bin/caffeinate",
-                body,
-                f"Step {step_name!r} must guard /usr/bin/caffeinate executability",
-            )
-            self.assertIn(
-                "/usr/bin/caffeinate -i",
-                body,
-                f"Step {step_name!r} must run under /usr/bin/caffeinate -i",
             )
 
     def test_evidence_gate_targets_self_hosted_mikey(self) -> None:
