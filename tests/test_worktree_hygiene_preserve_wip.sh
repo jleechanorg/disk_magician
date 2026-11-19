@@ -848,6 +848,8 @@ OUT="$(WORKTREE_APPROVED=1 run_hygiene "$R40" --push-wip --execute --preserve-wi
 assert_contains "$OUT" "rc=0" "run completes (no SIGPIPE abort)"
 assert_contains "$OUT" "WIP-RESTORED" "failure path restored HEAD"
 assert_true "[[ \"\$(git -C '$W40' symbolic-ref -q --short HEAD)\" != wip/* ]] && grep -q 'OUTPUT: 1' '$W40/many/f00000.nb'" "not stranded on wip branch; content intact"
+# Remove W40 once verified so W40B's repo scan does not re-run W40's 1000-file lossy clean filter.
+g -C "$R40" worktree remove --force "$W40"
 W40B="$(mk_wt "$R40" big40b)"
 g -C "$W40B" update-index --skip-worktree many/f00000.nb
 echo "edit" >>"$W40B/tracked.txt"
