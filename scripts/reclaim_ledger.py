@@ -46,6 +46,7 @@ TOP_C, TOP_D = 30, 15
 SAMPLE_HOURS = 3         # B1 history sampling interval
 SHARD_MAX_AGE_H = 24     # a sharded root older than this is not a complete reading
 SUSPECT_FLOOR_RATIO = 10  # now >= 10x floor => the floor was probably partial
+DEFAULT_LEDGER_STALE_HOURS = 48.0
 TOOL_STAGING = ("/_disk_magician_archive",)  # the tool's own staging target, not a producer
 EPHEMERAL_PREFIXES = ("/private/tmp", "/private/var/folders", "/tmp", "/var/folders")
 BROAD_CONTAINER_PREFIXES = (
@@ -697,11 +698,52 @@ def stamp_of(ts):
     return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
 
 
-def section_monitored(state_dir, mon, since, days, home):
+def _ledger_stale_hours():
+    try:
+        stale_hours = float(os.environ.get("DISK_MAGICIAN_LEDGER_STALE_HOURS", str(DEFAULT_LEDGER_STALE_HOURS)))
+        if not 0 < stale_hours < float("inf"):
+            raise ValueError
+        return stale_hours
+    except ValueError:
+        return DEFAULT_LEDGER_STALE_HOURS
+
+
+def canonical_ledger_staleness(fresh, state_dir, now, *, explicit_freshness=False):
+    """Return (is_stale, reason) for canonical full-disk ledger freshness."""
+    stale_hours = _ledger_stale_hours()
+    if not fresh.startswith("OK ") or "status=stale" in fresh or "canonical_publication=stale" in fresh:
+        return True, fresh
+    age_match = re.search(r"\bpublished_age_hours=([0-9]+(?:\.[0-9]+)?)\b", fresh)
+    if age_match and float(age_match.group(1)) > stale_hours:
+        return True, f"published_age_hours={age_match.group(1)} > {stale_hours:g}h ({fresh})"
+    if not explicit_freshness and (state_dir / ".git").exists():
+        r = subprocess.run(
+            ["git", "-C", str(state_dir), "log", "-1", "--format=%ct", "--", "ledger/topdown-5g.json"],
+            capture_output=True, text=True,
+        )
+        raw_ct = r.stdout.strip()
+        if not raw_ct:
+            return True, "no committed ledger/topdown-5g.json"
+        try:
+            commit_age_h = (now.timestamp() - int(raw_ct)) / 3600.0
+        except ValueError:
+            return True, "invalid committed ledger timestamp"
+        if commit_age_h > stale_hours:
+            return True, f"newest committed ledger is {commit_age_h:.1f}h old (> {stale_hours:g}h)"
+    return False, None
+
+
+def section_monitored(state_dir, mon, since, days, home, *, stale_reason=None):
     """Growth per monitored directory vs its lowest complete size in the window, gated per key."""
     out = [f"### B1. Monitored directories vs {days}-day floor (`monitored_dirs` x committed snapshot history)", ""]
     if mon is None:
         return out + [f"Unavailable: `{state_dir}/config/config.json` unreadable.", ""]
+    if stale_reason:
+        return out + [
+            f"Unavailable: `{stale_reason}` (no fresh full-disk ledger to compare). "
+            "Re-run after the next complete frontier scan.",
+            "",
+        ]
     hist = snapshot_history(state_dir, since)
     if not hist:
         return out + ["Unavailable: no committed snapshot in the window.", ""]
@@ -851,7 +893,9 @@ def render(args, state_dir, now):
     since = now - datetime.timedelta(days=args.days)
     roots, rows = load_deletions(args.deletions_log, since, home)
     fresh = " ".join(freshness_line(args.freshness_line, state_dir).split())[:240]
-    stale = not fresh.startswith("OK ") or "status=stale" in fresh
+    stale, stale_reason = canonical_ledger_staleness(
+        fresh, state_dir, now, explicit_freshness=args.freshness_line is not None
+    )
     host = socket.gethostname()
     marker = state_dir / "MACHINE"
     if marker.is_file():
@@ -885,7 +929,7 @@ def render(args, state_dir, now):
             "`config/sweeper_roots.txt`, not `monitored_dirs`).", ""]
     out += section_inventory(state_dir, home)
     out += section_c(roots, home, args.days, mon) + section_d(roots, home, args.days, mon)
-    out += section_monitored(state_dir, mon, since, args.days, home)
+    out += section_monitored(state_dir, mon, since, args.days, home, stale_reason=stale_reason)
     out += section_b(state_dir, args.days) + section_a(args.frontier, home, now)
     out += [REPORT_COMPLETE]
     return "\n".join(out).rstrip() + "\n"
@@ -940,12 +984,7 @@ def read_existing(state_dir):
         except ValueError:
             pass
     now = datetime.datetime.now(datetime.timezone.utc)
-    try:
-        stale_hours = float(os.environ.get("DISK_MAGICIAN_LEDGER_STALE_HOURS", "48"))
-        if not 0 < stale_hours < float("inf"):
-            raise ValueError
-    except ValueError:
-        stale_hours = 48.0
+    stale_hours = _ledger_stale_hours()
     if generated is None:
         print("UNKNOWN RECLAIM REPORT AGE; not evidence of no growth.")
     elif generated > now:
