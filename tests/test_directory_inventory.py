@@ -324,3 +324,60 @@ def test_merge_publication_uses_ordered_stream_without_compat_list_reader(tmp_pa
         state_dir=tmp_path, complete=True, merge_existing=True, merge_policy="incoming_wins")
     assert result["records_count"] == 3
     assert [item["canonical_path"] for item in codec.iter_current_records(tmp_path)] == ["/a", "/b", "/c"]
+
+
+def test_prune_tolerates_missing_identity_index_and_repeated_measurement_pruning(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from scripts.directory_inventory import prune_retained
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    old = publish_inventory([row("/old", 1)], state_dir=tmp_path, now=start.isoformat())
+    publish_inventory([row("/current", 2)], state_dir=tmp_path, now=(start + timedelta(days=25)).isoformat())
+    inv = tmp_path / "inventory"
+    missing_identity_index = inv / "indexes" / (old["manifest"]["identity_event_index_sha256"] + ".identity.json")
+    missing_identity_index.unlink()
+
+    # Day 25 (within both 35d and 90d retention): missing index entry must not crash --apply.
+    assert prune_retained(tmp_path, now=start + timedelta(days=25)) == []
+
+    # Day 36 (measurement expired, identity still retained): prunes measurement files cleanly.
+    removed_36 = prune_retained(tmp_path, now=start + timedelta(days=36))
+    assert str(inv / "objects" / (old["manifest"]["measurement_manifest_sha256"] + ".jsonl.gz")) in removed_36
+    assert str(inv / "indexes" / (old["manifest"]["measurement_index_sha256"] + ".json")) in removed_36
+
+    # Day 37 (repeated run with measurement dependencies already absent): must not raise FileNotFoundError.
+    assert prune_retained(tmp_path, now=start + timedelta(days=37)) == []
+
+    # Day 91 (identity expired): cleans up remaining identity object and expired manifest.
+    removed_91 = prune_retained(tmp_path, now=start + timedelta(days=91))
+    assert str(inv / "manifests" / (old["pointer"]["manifest_sha256"] + ".json")) in removed_91
+    assert not (inv / "manifests" / (old["pointer"]["manifest_sha256"] + ".json")).exists()
+
+
+def test_prune_still_rejects_broken_symlink_symlinked_dir_and_contained_traversal(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from scripts.directory_inventory import _contained_regular_file, prune_retained
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    old = publish_inventory([row("/old", 1)], state_dir=tmp_path, now=start.isoformat())
+    publish_inventory([row("/current", 2)], state_dir=tmp_path, now=(start + timedelta(days=25)).isoformat())
+    inv = tmp_path / "inventory"
+    idx_path = inv / "indexes" / (old["manifest"]["identity_event_index_sha256"] + ".identity.json")
+    idx_path.unlink()
+    idx_path.symlink_to(tmp_path / "does-not-exist-victim")
+    with pytest.raises(ValueError, match="symlink|escapes"):
+        prune_retained(tmp_path, now=start + timedelta(days=25))
+
+    # Restore clean non-symlink absence, then verify _contained_regular_file refuses outside-root paths.
+    idx_path.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    with pytest.raises(ValueError, match="symlink|escapes"):
+        _contained_regular_file(inv / "indexes" / ".." / ".." / "outside.json", inv / "indexes")
+
+    # Symlinked indexes directory must also be rejected.
+    real_indexes = inv / "indexes"
+    moved_indexes = tmp_path / "moved_indexes"
+    real_indexes.rename(moved_indexes)
+    real_indexes.symlink_to(moved_indexes)
+    with pytest.raises(ValueError, match="symlink|escapes"):
+        prune_retained(tmp_path, now=start + timedelta(days=25))
+
