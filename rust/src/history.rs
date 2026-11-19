@@ -142,13 +142,6 @@ fn empty_report(
     availability: HistoryAvailability,
     reason: &'static str,
 ) -> HistoryReport {
-    let coverage_status = if availability == HistoryAvailability::Available {
-        "observed_samples_only"
-    } else if candidates.is_empty() {
-        "none"
-    } else {
-        "incomplete"
-    };
     HistoryReport {
         source: LEDGER_PATH,
         requested_days: days,
