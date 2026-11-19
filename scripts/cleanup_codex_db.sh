@@ -20,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/safety_lib.sh"
 # shellcheck source=scripts/lib/actuator_receipt.sh
 source "$SCRIPT_DIR/lib/actuator_receipt.sh"
+# shellcheck source=scripts/lib/lsof_linux.sh
+source "$SCRIPT_DIR/lib/lsof_linux.sh"
 
 DRY_RUN=true
 BUSY_TIMEOUT_MS="${CODEX_DB_BUSY_TIMEOUT_MS:-5000}"
@@ -493,6 +495,16 @@ check_active_open_clients() {
   rc=$?
   set -e
 
+  if [[ -s "$lsof_err" ]]; then
+    local err_byte_status=0
+    lsof_stderr_byte_status "$lsof_err" || err_byte_status=$?
+    if (( err_byte_status != 0 )); then
+      log "WARNING: lsof inspection warning/error for $target (rc=$rc, stderr contains NUL or unreadable bytes) — fail-closed, skipping" >&2
+      rm -f "$lsof_out" "$lsof_err"
+      return 1
+    fi
+  fi
+
   local err_content=""
   err_content=$(cat "$lsof_err" 2>/dev/null || true)
   rm -f "$lsof_err"
@@ -503,8 +515,9 @@ check_active_open_clients() {
     # is printed for every invocation by an unprivileged user, with rc=0 and correct
     # PIDs. Treating that as a failure disabled vacuuming for state_5.sqlite (741M),
     # logs_2.sqlite (79M) and the memory/goal/queue DBs, and stopped the script from
-    # ever reaching its safe online path. Drop only that exact stanza; any other
-    # stderr still fails closed.
+    # ever reaching its safe online path. Drop only that exact stanza first so tracefs
+    # remains benign even when not mounted locally, then delegate any remaining stderr
+    # to lsof_stderr_incomplete_for_path against the target DB directory.
     local err_residual=""
     err_residual="$(printf '%s\n' "$err_content" | awk '
       /can.t stat\(\) tracefs|\/sys\/kernel\/debug\/tracing/ { skip_incomplete=1; next }
@@ -512,11 +525,18 @@ check_active_open_clients() {
       { skip_incomplete=0; print }
     ')"
     if [[ -n "$err_residual" ]]; then
-      log "WARNING: lsof inspection warning/error for $target (rc=$rc, stderr: $err_residual) — fail-closed, skipping" >&2
-      rm -f "$lsof_out"
-      return 1
+      local target_dir_real=""
+      target_dir_real="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P || true)"
+      if [[ -n "$target_dir_real" ]] && ! lsof_stderr_incomplete_for_path "$err_residual" "$target_dir_real"; then
+        log "lsof inspection for $target printed only unrelated mount stat warning(s); continuing" >&2
+      else
+        log "WARNING: lsof inspection warning/error for $target (rc=$rc, stderr: $err_residual) — fail-closed, skipping" >&2
+        rm -f "$lsof_out"
+        return 1
+      fi
+    else
+      log "lsof inspection for $target printed only the benign tracefs stat warning; continuing" >&2
     fi
-    log "lsof inspection for $target printed only the benign tracefs stat warning; continuing" >&2
   fi
 
   if [[ $rc -ne 0 && $rc -ne 1 ]]; then

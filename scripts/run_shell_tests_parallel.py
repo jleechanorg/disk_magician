@@ -25,7 +25,9 @@ HEAVY_PRIORITY: dict[str, tuple[int, int]] = {
     "tests/test_worktree_reap.sh": (1, 600),
     "tests/test_artifact_verdict.sh": (2, 900),
     "tests/test_verified_deleters_guards.sh": (2, 900),
-    "tests/test_worktree_hygiene_preserve_wip.sh": (3, 300),
+    # Grew past 40 cases + raw-byte checks since #218; timed out at 301.4s
+    # at case 40 under 3-wide contention on macos-15 (CI run 44380215159).
+    "tests/test_worktree_hygiene_preserve_wip.sh": (3, 600),
     "tests/test_cleanup_worktree_venvs.sh": (4, 600),
     "tests/test_cleanup_worktrees_single_age_walk.sh": (4, 600),
     # 347s measured locally (macOS, 2026-11-09) after the LRU-budget suite grew;
