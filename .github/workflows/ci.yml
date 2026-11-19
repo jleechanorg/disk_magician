@@ -128,8 +128,6 @@ jobs:
         run: bash ./disk_magician.sh check-version
 
       - name: Check shell syntax and ShellCheck errors
-        env:
-          GHCRTS: "-M512m -H32m"
         run: |
           while IFS= read -r -d '' candidate; do
             IFS= read -r first_line < "$candidate" || true
