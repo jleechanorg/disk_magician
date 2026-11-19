@@ -2,10 +2,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 DISPATCHER="${DISKM_TEST_DISPATCHER:-$ROOT/disk_magician.sh}"
-SCRATCH_TMP="$(diskm scratch-dir tmp)"
-case "$SCRATCH_TMP" in "$HOME"/Scratch/*) ;; *) echo "scratch-dir escaped Scratch" >&2; exit 2 ;; esac
-T="$(mktemp -d "$SCRATCH_TMP/quarantine-remove-scratch.XXXXXX")"
-case "$T" in "$HOME"/Scratch/*) echo "$T" >"$SCRATCH_TMP/.last-quarantine-test";; *) exit 2 ;; esac
+TMP_PARENT="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+T="$(mktemp -d "$TMP_PARENT/quarantine-remove-scratch.XXXXXX")"
+case "$T" in "$TMP_PARENT"/quarantine-remove-scratch.*) ;; *) exit 2 ;; esac
+TEST_REAL_PYTHON="$(command -v python3)"
+export TEST_REAL_PYTHON
 trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$T"' EXIT
 STATE="$T/state" BIN="$T/bin" VOL="$T/volume" OUTSIDE="$T/outside"
 CFG="$T/config.json" SAFE="$T/safety.local.json"
@@ -27,13 +28,13 @@ if [[ "${TEST_REPLACE_DURING_INVENTORY:-0}" == 1 && "${1##*/}" == c14_probe.py &
   mv "$TEST_RACE_TARGET" "$TEST_RACE_ORIGINAL"
   mkdir "$TEST_RACE_TARGET"
   printf replacement >"$TEST_RACE_TARGET/payload"
-  /usr/bin/python3 "$@"
+  "$TEST_REAL_PYTHON" "$@"
   result=$?
   mv "$TEST_RACE_TARGET" "$TEST_RACE_REPLACEMENT"
   mv "$TEST_RACE_ORIGINAL" "$TEST_RACE_TARGET"
   exit "$result"
 fi
-exec /usr/bin/python3 "$@"
+exec "$TEST_REAL_PYTHON" "$@"
 FAKE_PYTHON
 chmod +x "$BIN/diskm" "$BIN/python3"
 cli() {
@@ -42,9 +43,17 @@ cli() {
  DISK_MAGICIAN_SAFETY_FILE="$SAFE" TEST_SCRATCH_ROOT="$VOL" \
  bash "$DISPATCHER" quarantine remove-scratch "$@"
 }
-stale() { touch -d '10 days ago' "$1"; }
+set_age_hours() {
+  python3 -c '
+import os, sys, time
+mtime = time.time() - 3600 * int(sys.argv[1])
+for path in sys.argv[2:]:
+    os.utime(path, (mtime, mtime))
+' "$@"
+}
+stale() { set_age_hours 240 "$1"; }
 PASS=0 FAIL=0
-check() { LABEL="$1"; shift; if "$@"; then echo "PASS $LABEL"; PASS=$((PASS+1)); else echo "FAIL $LABEL"; FAIL=$((FAIL+1)); fi; }
+check() { LABEL="$1"; shift; if "$@"; then echo "PASS $LABEL"; PASS=$((PASS+1)); else printf 'FAIL %s (rc=%s, output=%s)\n' "$LABEL" "${RC:-}" "${OUT:-}"; FAIL=$((FAIL+1)); fi; }
 ENTRY="$VOL/isolated-entry"; mkdir "$ENTRY"; printf old >"$ENTRY/payload"; stale "$ENTRY/payload"; stale "$ENTRY"
 set +e
 OUT="$(cli "$ENTRY" 2>&1)"; RC=$?
@@ -93,7 +102,7 @@ OUT="$(TEST_SCRATCH_MOUNTED=0 cli "$BAD" --clean 2>&1)"; RC=$?
 set -e
 check "mount identity failure exits 75" test "$RC" -eq 75
 check "mount failure preserves candidate" test -f "$BAD/payload"
-FRESH="$VOL/recent-entry"; mkdir "$FRESH"; printf recent >"$FRESH/payload"; touch -d '30 hours ago' "$FRESH/payload"; touch -d '30 hours ago' "$FRESH"
+FRESH="$VOL/recent-entry"; mkdir "$FRESH"; printf recent >"$FRESH/payload"; set_age_hours 30 "$FRESH/payload" "$FRESH"
 set +e
 OUT="$(DISK_MAGICIAN_AGE_FLOOR_MINUTES=120 cli "$FRESH" --clean 2>&1)"; RC=$?
 set -e

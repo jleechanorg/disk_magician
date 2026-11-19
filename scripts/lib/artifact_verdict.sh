@@ -666,15 +666,9 @@ _av_frozen_identity_matches() {
     [[ "$actual" == "$expected" ]]
 }
 _av_frozen_entry_matches() {
-    local path="$1" expected="$2" parent_expected="$3" root_expected="$4"
+    local path="$1" expected="$2" parent_expected="$3"
     _av_frozen_identity_matches "$path" "$expected" || return 1
-    [[ -z "$parent_expected" ]] || _av_frozen_identity_matches "$(dirname "$path")" "$parent_expected" || return 1
-    # A Scratch entry is constrained to one direct child, so its verified
-    # parent and registered-volume identities refer to the same directory.
-    if [[ -n "$root_expected" && "$kind" == ephemeral ]]; then
-        _av_frozen_identity_matches "$(dirname "$path")" "$root_expected" || return 1
-    fi
-    return 0
+    [[ -z "$parent_expected" ]] || _av_frozen_identity_matches "$(dirname "$path")" "$parent_expected"
 }
 _av_frozen_inventory_matches() {
     local path="$1" inventory="$2" expected="$3"
@@ -736,7 +730,7 @@ _av_artifact_removal_verdict() (
         own_claim="$(cd "$(dirname "$own_claim")" 2>/dev/null && pwd -P)/${own_claim##*/}"
     fi
     p=${p%/} && [[ ! "${p##*/}" =~ ^\.{0,2}$ ]] && p="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)/${p##*/}" && [[ -e "$p" && ! -L "$p" ]] || { echo kept:check-failed; return 0; }
-    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:identity-mismatch; return 0; }
+    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" || { echo kept:identity-mismatch; return 0; }
     if [[ -n "$deadline" && ! "$deadline" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo kept:check-failed; return 0; fi
     "$_AV_DIR/../safety_check.sh" "$p" >/dev/null 2>&1 || { echo kept:protected; return 0; }
     q="$(python3 "$_AV_DIR/../resolve_config.py")" || { echo kept:volume-config; return 0; }
@@ -761,12 +755,12 @@ if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kep
     fi
     # Recheck immediately before capturing the C14 inventory. The quarantine
     # phase then verifies that inventory against the entry at rename time.
-    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" || { echo kept:identity-mismatch; return 0; }
+    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" || { echo kept:identity-mismatch; return 0; }
     inv=${C14_INVENTORY_FILE:-}
     [[ -n "$inv" ]] || { echo kept:check-failed; return 0; }
     st="$(python3 "$_AV_DIR/../c14_probe.py" inventory "$p" "$inv" ${deadline:+"$deadline"})"
     if [[ "$st" != ok ]]; then echo "${st:-kept:check-failed}"; return 0; fi
-    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" "$frozen_root_id" &&
+    _av_frozen_entry_matches "$p" "$frozen_id" "$frozen_parent_id" &&
         _av_frozen_inventory_matches "$p" "$inv" "$frozen_id" || { echo kept:identity-mismatch; return 0; }
     # The one lease file whose owner-null state T3 may free. Never an ancestor
     # or descendant: only this exact path's own lease can match $q below.

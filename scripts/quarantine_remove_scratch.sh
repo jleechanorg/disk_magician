@@ -14,6 +14,7 @@ usage() {
 
 [[ $# -ge 1 && "${1:-}" != --* ]] || usage
 TARGET="$1"
+while [[ "$TARGET" == */ && "$TARGET" != / ]]; do TARGET="${TARGET%/}"; done
 shift
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,22 +53,21 @@ import stat
 import sys
 
 root, target = sys.argv[1:]
-target_without_trailing_slash = target.rstrip("/")
 if not os.path.isabs(root) or not os.path.isabs(target):
     print("refused:target-must-be-absolute", file=sys.stderr)
     raise SystemExit(2)
 if os.path.realpath(root) != root or root == "/":
     print("refused:invalid-scratch-root", file=sys.stderr)
     raise SystemExit(2)
-if os.path.normpath(target) != target_without_trailing_slash:
+if os.path.normpath(target) != target:
     print("refused:target-must-be-normalized", file=sys.stderr)
     raise SystemExit(2)
-if os.path.dirname(target_without_trailing_slash) != root:
+if os.path.dirname(target) != root:
     print("refused:target-must-be-one-direct-child", file=sys.stderr)
     raise SystemExit(2)
 try:
     root_stat = os.lstat(root)
-    target_stat = os.lstat(target_without_trailing_slash)
+    target_stat = os.lstat(target)
 except OSError:
     print("refused:target-identity-unavailable", file=sys.stderr)
     raise SystemExit(2)
@@ -77,21 +77,20 @@ if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
 if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISDIR(target_stat.st_mode):
     print("refused:target-must-be-real-directory", file=sys.stderr)
     raise SystemExit(2)
-if target_stat.st_dev != root_stat.st_dev or os.path.realpath(os.path.dirname(target_without_trailing_slash)) != root:
+if target_stat.st_dev != root_stat.st_dev or os.path.realpath(os.path.dirname(target)) != root:
     print("refused:target-volume-mismatch", file=sys.stderr)
     raise SystemExit(2)
-parent_stat = os.lstat(os.path.dirname(target_without_trailing_slash))
 def identity(value):
     return str(value.st_dev) + ":" + str(value.st_ino) + ":" + str(value.st_uid)
-print("\t".join((target_without_trailing_slash, identity(root_stat), identity(parent_stat), identity(target_stat))))
+print("\t".join((identity(root_stat), identity(target_stat))))
 PY
 )" || exit $?
-IFS=$'\t' read -r TARGET ROOT_ID PARENT_ID TARGET_ID <<<"$IDENTITIES"
-[[ "$ROOT_ID" =~ ^[0-9]+:[0-9]+:[0-9]+$ && "$PARENT_ID" =~ ^[0-9]+:[0-9]+:[0-9]+$ && "$TARGET_ID" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || {
+IFS=$'\t' read -r ROOT_ID TARGET_ID <<<"$IDENTITIES"
+[[ "$ROOT_ID" =~ ^[0-9]+:[0-9]+:[0-9]+$ && "$TARGET_ID" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || {
   echo "kept:identity-unavailable" >&2
   exit 75
 }
-FROZEN_ARGS=(--frozen-identity "$TARGET_ID" --frozen-parent-identity "$PARENT_ID" --frozen-root-identity "$ROOT_ID")
+FROZEN_ARGS=(--frozen-identity "$TARGET_ID" --frozen-parent-identity "$ROOT_ID")
 
 # Recheck the registered volume immediately before the C14 verdict/removal.
 "$DISKM" volume verify-mount "$ROOT" >/dev/null 2>&1 || {
