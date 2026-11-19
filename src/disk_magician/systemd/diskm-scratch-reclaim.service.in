@@ -8,6 +8,13 @@ Environment=DISK_MAGICIAN_CONFIG=@CONFIG_PATH@
 Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
 Environment=DISK_MAGICIAN_TRIGGER=timer
 Environment=DISK_MAGICIAN_DELETION_LOG=@DELETION_LOG@
+# Operator-approved Scratch LRU budget eviction. Both are required together:
+# the PCT is the approval, the FLOOR_HOURS is the recency window that makes the
+# budget reachable at all. Without the floor the budget path inherits the 48h
+# shared default and can evict nothing on a volume whose content is younger
+# (measured 2026-11-19: Scratch at 96% with zero entries older than 48h).
+Environment=DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=@SCRATCH_LRU_BUDGET_PCT@
+Environment=DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS=@SCRATCH_BUDGET_FLOOR_HOURS@
 ExecStart=/usr/bin/bash @ORCHESTRATOR@ tmp-scratch-sweep --scratch-only --clean
 TimeoutStartSec=950
 Restart=no
