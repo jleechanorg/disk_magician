@@ -260,6 +260,12 @@ if [[ "$SWEEP_MODE" == scratch-only ]]; then
   # approved LRU eviction down to N% used. The variable is the operator approval.
   if [[ "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
     scratch_args+=(--budget-pct "$SCRATCH_LRU_PCT" --budget-preserve-content-keeps)
+    # Pass the operator's shorter budget window through to the pruner. Without
+    # this the budget path silently kept the 48h default and could never evict
+    # on a volume whose content is all younger than that (2026-11-19).
+    if [[ "${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{0,3}$ ]]; then
+      scratch_args+=(--budget-floor-minutes $(( 10#${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS} * 60 )))
+    fi
     scratch_mode_env=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=0 SCRATCH_TOP_LEVEL_APPROVED=1)
   else
     scratch_args+=(--available-floor)
