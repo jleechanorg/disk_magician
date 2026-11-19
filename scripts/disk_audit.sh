@@ -492,7 +492,13 @@ elif [[ "$SNAP_USABLE" == true ]]; then
         echo "  ⚠️  STALE SNAPSHOT WARNING: $SNAP_STALE_WARN"
     fi
     echo
-    sort -t"$(printf '\t')" -k2 -rn "$SNAP_CACHE" | head -20 | while IFS="$(printf '\t')" read -r key kb; do
+    # Bound the printed rows without truncating the writer. `sort … | head -20`
+    # closes the pipe after the twentieth row; when the sorted stream is larger
+    # than the pipe buffer, sort takes SIGPIPE and `set -o pipefail` reports 141
+    # for the whole script. That is how the nightly
+    # disk-magician-routine-clean unit died (status=141) with a complete table
+    # already printed. awk reads every row, so no writer is broken.
+    sort -t"$(printf '\t')" -k2 -rn "$SNAP_CACHE" | awk -F"$(printf '\t')" 'NR<=20' | while IFS="$(printf '\t')" read -r key kb; do
         [[ -n "$key" ]] || continue
         printf "    %-34s %8s\n" "$key" "$(fmt_size "$kb")"
     done
