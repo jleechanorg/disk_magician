@@ -106,7 +106,21 @@ MAX_GIB_SET=false
 [[ -n "${SCRATCH_PRUNE_MAX_GIB:-}" ]] && MAX_GIB_SET=true
 BUDGET_PCT=""
 BUDGET_PRESERVE_CONTENT_KEEPS=false
+# Budget-mode recency floor. The 48h shared default is right for interactive
+# runs, but an operator-approved scheduled budget eviction needs a shorter,
+# configurable window -- otherwise the budget path can never reach its target on
+# a volume whose content is all younger than 48h (measured 2026-11-19:
+# /Volumes/diskm-scratch max content age 2874 min vs a 2880 min floor, so
+# --budget-pct removed 0 entries at any percentage).
+#
+# DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS is the operator approval for that
+# shorter window. It is read ONLY in budget mode (--budget-pct), so the plain
+# C14-only pass keeps the full 48h floor; --budget-floor-minutes still wins when
+# passed explicitly, and the existing 60-minute minimum is still enforced below.
 BUDGET_FLOOR_MINUTES=$(safety_disposable_recency_floor_minutes)
+if [[ "${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{0,3}$ ]]; then
+  BUDGET_FLOOR_MINUTES=$(( 10#${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS} * 60 ))
+fi
 # Known content/provenance keeps budget mode may override; anything else keeps,
 # including remote-unverified (a failed ls-remote is an unknown, not a keep).
 BUDGET_OVERRIDABLE='kept:secret-like|kept:unproven-content|kept:no-proof|kept:not-pushed|kept:dirty|kept:git-unbaselined|kept:git-metadata|kept:unreachable-object|kept:ignored-data'
