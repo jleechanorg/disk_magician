@@ -764,7 +764,15 @@ def prune_retained(state_dir, *, now=None):
                         ("identity_sha256","objects",".identity.json"),
                         ("identity_index_sha256","indexes",".identity.json")):
                     dep = _validated_sha(chunk.get(key))
-                    dep_path = _contained_regular_file(inv/directory/(dep+suffix), inv/directory)
+                    dep_dir = inv / directory
+                    dep_path = dep_dir / (dep + suffix)
+                    if dep_dir.is_symlink() or dep_path.is_symlink():
+                        raise ValueError("inventory reference escapes trusted store or is a symlink")
+                    if dep_dir.resolve(strict=False) not in dep_path.resolve(strict=False).parents:
+                        raise ValueError("inventory reference escapes trusted store or is a symlink")
+                    if not dep_path.exists():
+                        continue
+                    dep_path = _contained_regular_file(dep_path, dep_dir)
                     if _sha(dep_path.read_bytes()) != dep:
                         raise ValueError("inventory reference hash mismatch: "+key)
             ms[digest]=manifest
@@ -785,12 +793,12 @@ def prune_retained(state_dir, *, now=None):
             for d,h,suf,keep in pairs:
                 h=_validated_sha(h)
                 path=inv/d/(h+suf)
-                if path.exists(): _contained_regular_file(path, inv/d)
+                if path.is_symlink() or path.exists(): _contained_regular_file(path, inv/d)
                 if h not in keep and path.exists(): _logged_remove(path); removed.append(str(path))
             if not x["identity_retained"] and sha!=cur and sha not in pins:
                 sha=_validated_sha(sha)
                 path=inv/"manifests"/(sha+".json")
-                if path.exists(): _contained_regular_file(path, inv/"manifests")
+                if path.is_symlink() or path.exists(): _contained_regular_file(path, inv/"manifests")
                 if path.exists(): _logged_remove(path); removed.append(str(path))
         referenced = {v for m in ms.values() for r in _manifest_chunk_refs(m) for v in (
             r["measurement_sha256"], r["measurement_index_sha256"],
@@ -799,14 +807,19 @@ def prune_retained(state_dir, *, now=None):
         suffixes = {"objects": (".jsonl.gz", ".identity.json"),
                     "indexes": (".json", ".identity.json")}
         for directory, endings in suffixes.items():
-            for path in (inv/directory).iterdir():
+            dep_dir = inv / directory
+            if dep_dir.is_symlink():
+                raise ValueError("untrusted symlink in inventory object store")
+            if not dep_dir.exists():
+                continue
+            for path in dep_dir.iterdir():
                 if path.is_symlink():
                     raise ValueError("untrusted symlink in inventory object store")
                 if not path.is_file() or not path.name.endswith(endings):
                     continue
                 digest = path.name.split(".", 1)[0]
                 _validated_sha(digest)
-                _contained_regular_file(path, inv/directory)
+                _contained_regular_file(path, dep_dir)
                 if digest in referenced or path.stat().st_mtime > cutoff:
                     continue
                 _logged_remove(path)
