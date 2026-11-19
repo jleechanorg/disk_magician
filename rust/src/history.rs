@@ -142,6 +142,13 @@ fn empty_report(
     availability: HistoryAvailability,
     reason: &'static str,
 ) -> HistoryReport {
+    let coverage_status = if availability == HistoryAvailability::Available {
+        "observed_samples_only"
+    } else if candidates.is_empty() {
+        "none"
+    } else {
+        "incomplete"
+    };
     HistoryReport {
         source: LEDGER_PATH,
         requested_days: days,
@@ -169,7 +176,7 @@ fn incomplete_report(days: u32, candidates: Vec<Candidate>) -> HistoryReport {
 fn report_from_candidates(
     days: u32,
     availability: HistoryAvailability,
-    mut candidates: Vec<Candidate>,
+    candidates: Vec<Candidate>,
     incompatible_samples: usize,
     reason: Option<&'static str>,
 ) -> HistoryReport {
@@ -199,6 +206,13 @@ fn report_from_candidates(
     } else {
         None
     };
+    let coverage_status = if availability == HistoryAvailability::Available {
+        "observed_samples_only"
+    } else if candidates.is_empty() {
+        "none"
+    } else {
+        "incomplete"
+    };
     HistoryReport {
         source: LEDGER_PATH,
         requested_days: days,
@@ -208,13 +222,7 @@ fn report_from_candidates(
         incompatible_samples,
         observed_dates,
         observed_span_days,
-        coverage_status: if availability == HistoryAvailability::Available {
-            "observed_samples_only"
-        } else if candidates.is_empty() {
-            "none"
-        } else {
-            "incomplete"
-        },
+        coverage_status,
         reason,
     }
 }

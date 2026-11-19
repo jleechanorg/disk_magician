@@ -105,6 +105,56 @@ fn low_coverage_snapshot_remains_partial_even_if_ledger_is_published() {
 }
 
 #[test]
+fn supports_nested_legacy_snapshot_timestamp_and_coverage() {
+    let temp = TempDir::new();
+    let state = state_dir(temp.path(), "published", "complete", 100.0);
+    fs::write(
+        state.join("snapshots/disk_snapshot.json"),
+        r#"{"snapshot_metadata":{"captured_at":"2026-11-19T00:00:00Z","coverage_pct":85.5}}"#,
+    )
+    .unwrap();
+
+    let report = status(Path::new("/"), Some(&state)).unwrap();
+
+    assert_eq!(report.snapshot.state, ObservationState::Fresh);
+    assert_eq!(
+        report.snapshot.sampled_at.as_deref(),
+        Some("2026-11-19T00:00:00Z")
+    );
+    assert_eq!(report.snapshot.coverage_pct, Some(85.5));
+}
+
+#[test]
+fn supports_fresh_coverage_alias_but_does_not_hide_invalid_current_value() {
+    let temp = TempDir::new();
+    let state = state_dir(temp.path(), "published", "complete", 100.0);
+    let snapshot = state.join("snapshots/disk_snapshot.json");
+    let timestamp = now_utc();
+    fs::write(
+        &snapshot,
+        format!(r#"{{"timestamp":"{timestamp}","coverage_fresh_pct":88.0}}"#),
+    )
+    .unwrap();
+    let alias_report = status(Path::new("/"), Some(&state)).unwrap();
+    assert_eq!(alias_report.snapshot.state, ObservationState.Fresh);
+    assert_eq!(alias_report.snapshot.coverage_pct, Some(88.0));
+
+    fs::write(
+        &snapshot,
+        format!(
+            r#"{{"timestamp":"{timestamp}","snapshot_coverage_pct":"invalid","snapshot_metadata":{{"coverage_pct":100.0}}}}"#
+        ),
+    )
+    .unwrap();
+    let invalid_report = status(Path::new("/"), Some(&state)).unwrap();
+    assert_eq!(invalid_report.snapshot.state, ObservationState::Unknown);
+    assert_eq!(
+        invalid_report.snapshot.reason.as_deref(),
+        Some("snapshot_coverage_invalid")
+    );
+}
+
+#[test]
 fn missing_or_unreadable_state_is_reported_without_creation() {
     let temp = TempDir::new();
     let missing = temp.path().join("missing");

@@ -149,30 +149,34 @@ fn read_snapshot(dir: &Path, now: u64) -> SnapshotReport {
         Ok(None) => return empty_snapshot(ObservationState::Absent, "snapshot_missing"),
         Err(reason) => return empty_snapshot(ObservationState::Unreadable, &reason),
     };
-    let sampled_at = text(&object, "timestamp");
+    let sampled_at = snapshot_timestamp(&object);
     let Some(epoch) = sampled_at.as_deref().and_then(parse_timestamp) else {
-        let reason = if sampled_at.is_some() {
-            "snapshot_timestamp_invalid"
-        } else {
-            "snapshot_timestamp_missing"
+        let reason = match sampled_at.as_deref() {
+            None => "snapshot_timestamp_missing",
+            Some(_) => "snapshot_timestamp_invalid",
         };
         return empty_snapshot(ObservationState::Unknown, reason);
     };
     let Some(age_seconds) = now.checked_sub(epoch) else {
         return empty_snapshot(ObservationState::Unknown, "snapshot_timestamp_in_future");
     };
-    let coverage_pct = number(&object, "snapshot_coverage_pct");
-    let state = match coverage_pct {
-        Some(pct) if pct < MIN_COVERAGE => ObservationState::Partial,
-        Some(_) if age_seconds > STALE_AFTER => ObservationState::Stale,
-        Some(_) => ObservationState::Fresh,
-        None => ObservationState::Unknown,
+    let (coverage_pct, coverage_error) = match snapshot_coverage(&object) {
+        Ok(coverage) => (coverage, None),
+        Err(reason) => (None, Some(reason)),
+    };
+    let state = match (age_seconds > STALE_AFTER, coverage_pct) {
+        (true, _) => ObservationState::Stale,
+        (false, Some(pct)) if pct < MIN_COVERAGE => ObservationState::Partial,
+        (false, Some(_)) => ObservationState::Fresh,
+        (false, None) => ObservationState::Unknown,
     };
     let reason = match state {
         ObservationState::Fresh => None,
         ObservationState::Partial => Some("coverage_below_70_percent".into()),
         ObservationState::Stale => Some("snapshot_older_than_36_hours".into()),
-        _ => Some("snapshot_coverage_unavailable".into()),
+        _ => coverage_error
+            .map(str::to_owned)
+            .or_else(|| Some("snapshot_coverage_unavailable".into())),
     };
     SnapshotReport {
         state,
@@ -184,6 +188,52 @@ fn read_snapshot(dir: &Path, now: u64) -> SnapshotReport {
         disk_used_gb: number(&object, "disk_used_gb"),
         disk_free_gb: number(&object, "disk_free_gb"),
     }
+}
+
+fn snapshot_timestamp(object: &Map<String, Value>) -> Option<String> {
+    if let Some(value) = object.get("timestamp") {
+        if !value.is_null() {
+            return value.as_str().map(str::to_owned);
+        }
+    }
+    object
+        .get("snapshot_metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| text(metadata, "captured_at"))
+}
+
+fn snapshot_coverage(object: &Map<String, Value>) -> Result<Option<f64>, &'static str> {
+    if let Some(value) = object.get("snapshot_coverage_pct") {
+        if !value.is_null() {
+            return checked_coverage(value)
+                .map(Some)
+                .ok_or("snapshot_coverage_invalid");
+        }
+    }
+    if let Some(value) = object
+        .get("snapshot_metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("coverage_pct"))
+    {
+        if !value.is_null() {
+            return checked_coverage(value)
+                .map(Some)
+                .ok_or("snapshot_coverage_invalid");
+        }
+    }
+    if let Some(value) = object.get("coverage_fresh_pct") {
+        if !value.is_null() {
+            return checked_coverage(value)
+                .map(Some)
+                .ok_or("snapshot_coverage_invalid");
+        }
+    }
+    Ok(None)
+}
+
+fn checked_coverage(value: &Value) -> Option<f64> {
+    let coverage = value.as_f64()?;
+    (coverage.is_finite() && (0.0..=100.0).contains(&coverage)).then_some(coverage)
 }
 
 fn read_ledger(dir: &Path, now: u64) -> LedgerReport {
