@@ -63,7 +63,131 @@ jobs:
           mkdir -p "$CI_SHIMS"
           printf '%s\n' '#!/usr/bin/env bash' '[[ "${1:-}" == "-b" ]] && shift' 'exec "$@"' > "$CI_SHIMS/taskpolicy"
           printf '%s\n' '#!/usr/bin/env bash' 'if [[ "${1:-}" == "-n" ]]; then shift 2; fi' 'exec "$@"' > "$CI_SHIMS/nice"
-          chmod +x "$CI_SHIMS/taskpolicy" "$CI_SHIMS/nice"
+          ln -sf "$( [ -x /opt/homebrew/bin/git ] && echo /opt/homebrew/bin/git || echo /usr/bin/git )" "$CI_SHIMS/git"
+          ln -sf /bin/rm "$CI_SHIMS/rm"
+          ln -sf /usr/bin/rsync "$CI_SHIMS/rsync"
+          cat > "$CI_SHIMS/lsof" <<'CI_LSOF_SHIM'
+          #!/usr/bin/env bash
+          shim_dir="$(cd "$(dirname "$0")" && pwd)"
+          IFS=':' read -ra _path_dirs <<< "${PATH:-}"
+          for _d in "${_path_dirs[@]}"; do
+            [ -n "$_d" ] || continue
+            if [ "$_d" = "$shim_dir" ]; then
+              break
+            fi
+            if [ "$_d" != "/usr/sbin" ] && [ -x "$_d/lsof" ]; then
+              exec "$_d/lsof" "$@"
+            fi
+          done
+          for _arg in "$@"; do
+            case "$_arg" in
+              -p|-p*|-h|-v|+L|+L*)
+                exec /usr/sbin/lsof "$@"
+                ;;
+            esac
+          done
+          PY_BIN="/usr/bin/python3"
+          [ -x "$PY_BIN" ] || PY_BIN="$(command -v python3)"
+          ci_pids="$(
+            "$PY_BIN" - "$$" <<'PY'
+          import os, subprocess, sys
+
+          wrapper_pid = int(sys.argv[1])
+          self_pid = os.getpid()
+          uid = str(os.getuid())
+
+          def parse_etime(s: str) -> int:
+              s = s.strip()
+              days = 0
+              if "-" in s:
+                  d, s = s.split("-", 1)
+                  days = int(d)
+              parts = [int(p) for p in s.split(":")]
+              if len(parts) == 3:
+                  return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+              if len(parts) == 2:
+                  return days * 86400 + parts[0] * 60 + parts[1]
+              return days * 86400 + parts[0]
+
+          out = subprocess.check_output(["/bin/ps", "-u", uid, "-o", "pid=,ppid=,etime=,command="], text=True)
+          children = {}
+          ppids = {}
+          etimes = {}
+          cmds = {}
+          for line in out.splitlines():
+              cols = line.strip().split(None, 3)
+              if len(cols) < 4:
+                  continue
+              pid, ppid, et, cmd = int(cols[0]), int(cols[1]), cols[2], cols[3]
+              ppids[pid] = ppid
+              etimes[pid] = et
+              cmds[pid] = cmd
+              children.setdefault(ppid, []).append(pid)
+
+          root_pid = None
+          fallback_root = None
+          cur = wrapper_pid
+          seen_anc = set()
+          while cur and cur in ppids and cur not in seen_anc:
+              seen_anc.add(cur)
+              cmd = cmds.get(cur, "")
+              if "tests/test_" in cmd and ("bash" in cmd or "sh " in cmd or cmd.endswith(".sh")):
+                  root_pid = cur
+              elif fallback_root is None and ("pytest" in cmd or "disk_magician.sh test-shell" in cmd or "Runner.Worker" in cmd):
+                  fallback_root = cur
+              cur = ppids.get(cur, 0)
+
+          target_root = root_pid or fallback_root
+          if target_root is None:
+              print("PASSTHROUGH")
+              sys.exit(0)
+
+          keep = set()
+          stack = [target_root]
+          while stack:
+              p = stack.pop()
+              if p in keep:
+                  continue
+              keep.add(p)
+              stack.extend(children.get(p, ()))
+
+          root_age = parse_etime(etimes.get(target_root, "00:00")) + 15
+          for pid, ppid in ppids.items():
+              if ppid == 1 and pid not in keep:
+                  try:
+                      if parse_etime(etimes[pid]) <= root_age:
+                          keep.add(pid)
+                  except ValueError:
+                      pass
+
+          keep.discard(wrapper_pid)
+          keep.discard(self_pid)
+          print(",".join(str(p) for p in sorted(keep)))
+          PY
+          )"
+          if [ "$ci_pids" = "PASSTHROUGH" ]; then
+            exec /usr/sbin/lsof "$@"
+          fi
+          if [ -z "$ci_pids" ]; then
+            exit 1
+          fi
+          tmp_out="$(mktemp "${TMPDIR:-/tmp}/ci-lsof.XXXXXX")"
+          rc=0
+          /usr/sbin/lsof -a -p "$ci_pids" "$@" >"$tmp_out" || rc=$?
+          if [ "$rc" -le 1 ]; then
+            if [ -s "$tmp_out" ]; then
+              cat "$tmp_out"
+              rm -f "$tmp_out"
+              exit 0
+            fi
+            rm -f "$tmp_out"
+            exit 1
+          fi
+          cat "$tmp_out"
+          rm -f "$tmp_out"
+          exit "$rc"
+          CI_LSOF_SHIM
+          chmod +x "$CI_SHIMS/taskpolicy" "$CI_SHIMS/nice" "$CI_SHIMS/lsof"
           GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"
           rm -f "$GIT_CONFIG_GLOBAL"
           GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.name "disk_magician CI"
@@ -75,6 +199,7 @@ jobs:
           echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
           echo "VENV_PYTHON=${VENV_DIR}/bin/python" >> "$GITHUB_ENV"
           echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"
+          echo "CI_SHIMS=${CI_SHIMS}" >> "$GITHUB_ENV"
           echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
           echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"
           echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"
@@ -148,6 +273,7 @@ jobs:
       - name: Run shell tests
         env:
           HOME: ${{ env.CI_HOME }}
+          DISK_MAGICIAN_LSOF_BIN: ${{ env.CI_SHIMS }}/lsof
         run: |
           unset BASH_ENV
           if [ -x /usr/bin/caffeinate ]; then

@@ -278,6 +278,8 @@ class TestCISelfHostedRunners(unittest.TestCase):
         self.assertIn('CI_SHIMS="${RUNNER_TEMP}/ci-lowprio-shims"', setup_body)
         self.assertIn('GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"', setup_body)
         self.assertIn('echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"', setup_body)
+        self.assertIn('echo "CI_SHIMS=${CI_SHIMS}" >> "$GITHUB_ENV"', setup_body)
+        self.assertNotIn("DISK_MAGICIAN_LSOF_BIN", setup_body)
         self.assertIn('echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"', setup_body)
         self.assertIn(
             'echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"',
@@ -292,6 +294,10 @@ class TestCISelfHostedRunners(unittest.TestCase):
         self.assertIn("config.json.template", setup_body)
         self.assertIn("$CI_SHIMS/taskpolicy", setup_body)
         self.assertIn("$CI_SHIMS/nice", setup_body)
+        self.assertIn("$CI_SHIMS/git", setup_body)
+        self.assertIn("$CI_SHIMS/rm", setup_body)
+        self.assertIn("$CI_SHIMS/rsync", setup_body)
+        self.assertIn("$CI_SHIMS/lsof", setup_body)
 
         for step_name in (
             "Run Python tests",
@@ -312,6 +318,11 @@ class TestCISelfHostedRunners(unittest.TestCase):
 
         python_step = steps.get("Run Python tests", "")
         self.assertNotIn(
+            "DISK_MAGICIAN_LSOF_BIN",
+            python_step,
+            "Run Python tests must not set DISK_MAGICIAN_LSOF_BIN",
+        )
+        self.assertNotIn(
             "-n ",
             python_step,
             "Run Python tests must run serially without pytest-xdist -n workers",
@@ -323,6 +334,13 @@ class TestCISelfHostedRunners(unittest.TestCase):
         self.assertIn(
             '"$VENV_PYTHON" tests/test_lease_recover_lock.py',
             python_step,
+        )
+
+        shell_step = steps.get("Run shell tests", "")
+        self.assertIn(
+            "DISK_MAGICIAN_LSOF_BIN: ${{ env.CI_SHIMS }}/lsof",
+            shell_step,
+            "Run shell tests must set DISK_MAGICIAN_LSOF_BIN to the CI lsof shim",
         )
 
         cleanup_body = steps.get("Clean up isolated CI venv", "")
