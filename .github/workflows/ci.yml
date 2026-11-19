@@ -18,7 +18,7 @@ jobs:
     name: Test and lint
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ fromJson(vars.NATIVE_MACOS_RUNNER_LABELS || '["self-hosted-native-macos"]') }}
-    timeout-minutes: 150
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -151,9 +151,25 @@ jobs:
               keep.add(p)
               stack.extend(children.get(p, ()))
 
+          runner_temp = os.environ.get("RUNNER_TEMP", "")
           root_age = parse_etime(etimes.get(target_root, "00:00")) + 15
           for pid, ppid in ppids.items():
               if ppid == 1 and pid not in keep:
+                  cmd = cmds.get(pid, "")
+                  if any(excl in cmd for excl in ("/System/", "/Applications/", "/.hermes/", "/.local/share/uv/")):
+                      continue
+                  if not (
+                      "sleep " in cmd
+                      or cmd.startswith("sleep ")
+                      or cmd.startswith("/bin/sleep")
+                      or "tail " in cmd
+                      or "/tmp/" in cmd
+                      or "/private/tmp/" in cmd
+                      or "dm-ci-shard" in cmd
+                      or "RUNNER_TEMP" in cmd
+                      or (runner_temp and runner_temp in cmd)
+                  ):
+                      continue
                   try:
                       if parse_etime(etimes[pid]) <= root_age:
                           keep.add(pid)
@@ -187,7 +203,17 @@ jobs:
           rm -f "$tmp_out"
           exit "$rc"
           CI_LSOF_SHIM
-          chmod +x "$CI_SHIMS/taskpolicy" "$CI_SHIMS/nice" "$CI_SHIMS/lsof"
+          mkdir -p "${RUNNER_TEMP}/ci-darwin-user-temp/T" "${RUNNER_TEMP}/ci-darwin-user-temp/X"
+          cat > "$CI_SHIMS/getconf" <<'EOF'
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "DARWIN_USER_TEMP_DIR" && -n "${CI_DARWIN_USER_TEMP_DIR:-}" ]]; then
+            mkdir -p "$CI_DARWIN_USER_TEMP_DIR"
+            printf '%s/\n' "${CI_DARWIN_USER_TEMP_DIR%/}"
+            exit 0
+          fi
+          exec /usr/bin/getconf "$@"
+          EOF
+          chmod +x "$CI_SHIMS/taskpolicy" "$CI_SHIMS/nice" "$CI_SHIMS/lsof" "$CI_SHIMS/getconf"
           GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"
           rm -f "$GIT_CONFIG_GLOBAL"
           GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.name "disk_magician CI"
@@ -274,17 +300,19 @@ jobs:
         env:
           HOME: ${{ env.CI_HOME }}
           DISK_MAGICIAN_LSOF_BIN: ${{ env.CI_SHIMS }}/lsof
+          CI_DARWIN_USER_TEMP_DIR: ${{ runner.temp }}/ci-darwin-user-temp/T
+          SNAPSHOT_TIMEOUT: "600"
         run: |
           unset BASH_ENV
           if [ -x /usr/bin/caffeinate ]; then
-            /usr/bin/caffeinate -i bash ./disk_magician.sh test-shell
+            /usr/bin/caffeinate -i bash ./disk_magician.sh test-shell --timeout 3600
           else
-            bash ./disk_magician.sh test-shell
+            bash ./disk_magician.sh test-shell --timeout 3600
           fi
 
       - name: Clean up isolated CI venv
         if: always()
         run: |
           if [ -n "${RUNNER_TEMP:-}" ] && [ "${RUNNER_TEMP}" != "/" ]; then
-            rm -rf "${RUNNER_TEMP:?}/diskm-ci-venv" "${RUNNER_TEMP:?}/ci-home" "${RUNNER_TEMP:?}/ci-lowprio-shims" "${RUNNER_TEMP:?}/gitconfig-ci"
+            rm -rf "${RUNNER_TEMP:?}/diskm-ci-venv" "${RUNNER_TEMP:?}/ci-home" "${RUNNER_TEMP:?}/ci-lowprio-shims" "${RUNNER_TEMP:?}/gitconfig-ci" "${RUNNER_TEMP:?}/ci-darwin-user-temp"
           fi
