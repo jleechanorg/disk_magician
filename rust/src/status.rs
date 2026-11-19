@@ -116,7 +116,7 @@ fn parse_df_output(output: &str) -> io::Result<CapacityReport> {
     if fields.len() < 6 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid df row"));
     }
-    let kib = |index, name| {
+    let kib = |index: usize, name: &str| {
         fields[index].parse::<u64>().map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -124,7 +124,7 @@ fn parse_df_output(output: &str) -> io::Result<CapacityReport> {
             )
         })
     };
-    let bytes = |index, name| {
+    let bytes = |index: usize, name: &str| {
         kib(index, name)?.checked_mul(1024).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, format!("df {name} overflow"))
         })
@@ -423,8 +423,16 @@ mod unit_tests {
 
     #[test]
     fn never_promotes_partial_publication() {
-        let partial = classify_ledger(Some("partial"), Some("partial"), 0);
-        assert_eq!(partial, ObservationState::Partial);
-        assert!(!ledger_report(partial, None, None, None, None, None, None).authoritative);
+        let partial = ledger_report(
+            ObservationState::Partial,
+            None,
+            None,
+            None,
+            Some("partial".to_owned()),
+            None,
+            None,
+        );
+        assert_eq!(partial.state, ObservationState::Partial);
+        assert!(!partial.authoritative);
     }
 }

@@ -173,12 +173,12 @@ fn report_from_candidates(
     incompatible_samples: usize,
     reason: Option<&'static str>,
 ) -> HistoryReport {
-    let mut dates: Vec<String> = candidates
+    let mut observed_dates: Vec<String> = candidates
         .iter()
         .map(|candidate| candidate.sample.captured_at[..10].to_owned())
         .collect();
-    dates.sort();
-    dates.dedup();
+    observed_dates.sort();
+    observed_dates.dedup();
     let observed_span_days = candidates
         .iter()
         .map(|candidate| candidate.captured_epoch)

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -241,17 +242,6 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
     let mut apparent_total = 0;
     let mut allocated_total = 0;
 
-    let mut finish_root_file = |kind: FileKind, metadata: &Metadata| -> io::Result<()> {
-        add_file(
-            &root,
-            metadata,
-            kind,
-            &mut files,
-            &mut seen_inodes,
-            &mut apparent_total,
-            &mut allocated_total,
-        )
-    };
     if expired(start, options.deadline) {
         gap(
             &mut gaps,
@@ -289,7 +279,23 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
         ));
     }
     if root_metadata.file_type().is_symlink() {
-        finish_root_file(FileKind::Symlink, &root_metadata)?;
+        if modified_epoch_seconds(&root_metadata).is_none() {
+            gap(
+                &mut gaps,
+                &root,
+                ScanGapKind::Metadata,
+                "modification time unavailable",
+            );
+        }
+        add_file(
+            &root,
+            &root_metadata,
+            FileKind::Symlink,
+            &mut files,
+            &mut seen_inodes,
+            &mut apparent_total,
+            &mut allocated_total,
+        )?;
         return Ok(report(
             root_wire,
             root_bytes_hex,
@@ -302,7 +308,23 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
         ));
     }
     if !root_metadata.is_dir() {
-        finish_root_file(file_kind(&root_metadata), &root_metadata)?;
+        if modified_epoch_seconds(&root_metadata).is_none() {
+            gap(
+                &mut gaps,
+                &root,
+                ScanGapKind::Metadata,
+                "modification time unavailable",
+            );
+        }
+        add_file(
+            &root,
+            &root_metadata,
+            file_kind(&root_metadata),
+            &mut files,
+            &mut seen_inodes,
+            &mut apparent_total,
+            &mut allocated_total,
+        )?;
         return Ok(report(
             root_wire,
             root_bytes_hex,
@@ -342,7 +364,12 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
             Ok(entries) => entries,
             Err(e) => {
                 nodes[parent].complete = false;
-                gap(&mut gaps, &parent_path, ScanGapKind::ReadDirectory, e);
+                gap(
+                    &mut gaps,
+                    &parent_path,
+                    ScanGapKind::ReadDirectory,
+                    e.to_string(),
+                );
                 continue;
             }
         };
@@ -361,7 +388,12 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
                 Ok(e) => e,
                 Err(e) => {
                     nodes[parent].complete = false;
-                    gap(&mut gaps, &parent_path, ScanGapKind::ReadDirectory, e);
+                    gap(
+                        &mut gaps,
+                        &parent_path,
+                        ScanGapKind::ReadDirectory,
+                        e.to_string(),
+                    );
                     continue;
                 }
             };
@@ -383,7 +415,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
                 Ok(m) => m,
                 Err(e) => {
                     nodes[parent].complete = false;
-                    gap(&mut gaps, &path, ScanGapKind::Metadata, e);
+                    gap(&mut gaps, &path, ScanGapKind::Metadata, e.to_string());
                     visited += 1;
                     continue;
                 }
@@ -409,7 +441,6 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
                 apparent: 0,
                 path_allocated: 0,
                 file_paths: 0,
-                inodes: HashSet::new(),
             });
             nodes[parent].children.push(index);
             if is_dir {
@@ -449,6 +480,15 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
             let kind = file_kind(&nodes[index].metadata);
             let path = nodes[index].path.clone();
             let metadata = nodes[index].metadata.clone();
+            if modified_epoch_seconds(&metadata).is_none() {
+                nodes[index].complete = false;
+                gap(
+                    &mut gaps,
+                    &path,
+                    ScanGapKind::Metadata,
+                    "modification time unavailable",
+                );
+            }
             add_file(
                 &path,
                 &metadata,

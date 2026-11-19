@@ -152,7 +152,6 @@ fn symlink_root_is_reported_without_canonicalizing_its_target() {
 #[cfg(unix)]
 #[test]
 fn special_files_are_counted_as_typed_leaves() {
-    let fixture = Fixture::new("special-file");
     use std::os::unix::net::UnixListener;
 
     let fixture = Fixture::new("special-file");
@@ -179,6 +178,8 @@ fn symlink_is_a_leaf_and_its_target_is_never_walked() {
     use std::os::unix::fs::symlink;
 
     let fixture = Fixture::new("symlink");
+    let scope = fixture.path().join("scope");
+    fs::create_dir(&scope).expect("create scan scope");
     let target = fixture.path().join("outside-target");
     fs::create_dir(&target).expect("create symlink target directory");
     let outside_file = target.join("private.bin");
@@ -186,10 +187,10 @@ fn symlink_is_a_leaf_and_its_target_is_never_walked() {
         .expect("create target file")
         .set_len(ITEMIZATION_THRESHOLD + 1)
         .expect("make target a traversal sentinel");
-    let link = fixture.path().join("link");
+    let link = scope.join("link");
     symlink(&target, &link).expect("create directory symlink");
 
-    let report = scan(fixture.path(), options(16)).expect("scan fixture");
+    let report = scan(&scope, options(16)).expect("scan fixture");
 
     assert!(report.complete, "gaps: {:?}", report.gaps);
     let link_entry = report
@@ -204,7 +205,7 @@ fn symlink_is_a_leaf_and_its_target_is_never_walked() {
     );
     assert_eq!(
         report.apparent_bytes,
-        fs::symlink_metadata(&link).unwrap().len() + ITEMIZATION_THRESHOLD + 1
+        fs::symlink_metadata(&link).unwrap().len()
     );
 }
 
@@ -279,6 +280,8 @@ fn unreadable_directory_is_a_gap_when_running_unprivileged() {
         .expect("make directory unreadable");
 
     let report = scan(fixture.path(), options(16)).expect("inaccessible child is reported");
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))
+        .expect("restore fixture permissions before cleanup");
 
     assert!(!report.complete);
     assert!(report.gaps.iter().any(|gap| {
