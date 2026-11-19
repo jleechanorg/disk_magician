@@ -201,9 +201,6 @@ BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
 # Hard floor (minutes): never evict anything younger than this, regardless
 # of budget pressure. Default 48h; explicit operator floors retain the 1h minimum.
 BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-$(safety_disposable_recency_floor_minutes)}"
-# The lock helper re-execs this script with its original arguments, including
-# governor flags, so preserve the complete argv before stripping those flags.
-SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
 act_parse_deadline_args "$@" || exit 2
 # Bash 3.2 with nounset treats an empty array expansion as an unbound
 # variable; keep the no-argument caller contract portable.
@@ -290,10 +287,6 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true && "$DRY_RUN" != true && "${OPENCODE_DY
   exit 0
 fi
 
-# Shared lock invariant: serialize destructive sweep against cleanup_pr_scratch.
-# Dry-run (--dry-run) is read-only and skips the lock.
-[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_tmp" ${SCRATCH_LOCK_ORIGINAL_ARGS[@]+"${SCRATCH_LOCK_ORIGINAL_ARGS[@]}"} || exit 1; }
-
 # Root list (bead disk_magician-d45): /private/tmp, /tmp, and the
 # canonicalized macOS per-user temp dir, all owned by scripts/lib/scratch_roots.sh
 # so the next scratch root only needs to be added in one place.
@@ -363,10 +356,7 @@ RECEIPT_FREE_BEFORE="$(cleanup_tmp_df_free_bytes)"
 RECEIPT_PRECONDITION='{}'
 [[ -n "$RECEIPT_FREE_BEFORE" ]] && RECEIPT_PRECONDITION="{\"free_bytes_before\":${RECEIPT_FREE_BEFORE}}"
 RECEIPT_TRIGGER="${DISK_MAGICIAN_RECEIPT_TRIGGER:-actuator}"
-RECEIPT_CLEAR_STALE_ARGS=()
-[[ "$DRY_RUN" == false ]] && RECEIPT_CLEAR_STALE_ARGS=(--clear-stale-active)
-RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp ${RECEIPT_CLEAR_STALE_ARGS[@]+"${RECEIPT_CLEAR_STALE_ARGS[@]}"} --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
-  log "ERROR: failed to record cleanup_tmp receipt begin"
+RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
   exit 1
 }
 RECEIPT_FINISHED=false

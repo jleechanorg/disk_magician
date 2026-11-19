@@ -1,22 +1,8 @@
 # shellcheck shell=bash
-# Shared kernel lock for destructive scratch cleanup passes.
-# Dry-run skips this helper; Python owns the inherited flock descriptor.
-SCRATCH_LOCK_FD="${DISK_MAGICIAN_SCRATCH_LOCK_FD:-}"
-
+# Compatibility hooks for formerly serialized cleanup entrypoints.
+# These jobs now run independently; scoped safety checks remain in the cleaners.
 scratch_lock_acquire() {
-  local caller="$1" script_path="${BASH_SOURCE[1]}"
-  local helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scratch_lock.py"
-
-  # This PID guard prevents accidental descendant reuse; same-user code can
-  # forge its environment, so the lock coordinates cooperating cleanup callers.
-  if [[ "$SCRATCH_LOCK_FD" =~ ^[0-9]+$ && "${DISK_MAGICIAN_SCRATCH_LOCK_PID:-}" == "${BASHPID:-$$}" ]] && \
-      python3 "$helper" verify --fd "$SCRATCH_LOCK_FD" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  unset DISK_MAGICIAN_SCRATCH_LOCK_FD DISK_MAGICIAN_SCRATCH_LOCK_PID
-  shift
-  exec python3 "$helper" run --caller "$caller" --script "$script_path" --args -- "$@"
+  return 0
 }
 
 # Shared scratch cleanup traps preserve handlers installed by the caller, then
