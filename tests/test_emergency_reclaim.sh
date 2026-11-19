@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for `diskm emergency` (scripts/emergency_reclaim.sh): floor descent, early stop,
-# target_unmet exit, single lock hold, dry-run, optional worktree step, dispatcher route.
+# target_unmet exit, legacy lock isolation, dry-run, optional worktree step, dispatcher route.
 # Cleaners and df are stubbed; nothing touches real /tmp or Scratch.
 set -uo pipefail
 
@@ -24,20 +24,15 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nstub 99999999
 EOF
 chmod +x "$W/bin/df"
 
-# Stub cleaner: logs its context, proves it can reuse the parent's lock hold, then frees
+# Stub cleaner: logs its context, then frees
 # the KiB the plan file lists for "<lane>:<floor-hours>".
 for lane in tmp:cleanup_tmp.sh scratch:cleanup_scratch_top_level.sh worktrees:cleanup_worktrees.sh; do
   name="${lane%%:*}"; file="${lane#*:}"
   cat >"$W/cleaners/$file" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
-source "$REPO_ROOT/scripts/lib/scratch_lock.sh"
 mode=clean; for a in "\$@"; do [[ "\$a" == --dry-run ]] && mode=dry; done
 hours=\$(( \${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-0} / 60 ))
-if [[ \$mode == clean ]]; then
-  # Reuses the held lock; would exec the lock helper (and report skipped) if it could not.
-  scratch_lock_acquire "$name-stub" "\$@" || exit \$?
-fi
 echo "$name mode=\$mode hours=\$hours lockfd=\${DISK_MAGICIAN_SCRATCH_LOCK_FD:-none} ltp=\${LARGE_TMP_APPROVED:-} stp=\${SCRATCH_TOP_LEVEL_APPROVED:-} wta=\${WORKTREE_APPROVED:-} args=\$*" >>"\$STUB_CALL_LOG"
 kb=\$(awk -F= -v k="$name:\$hours" '\$1==k {print \$2}' "\$STUB_PLAN" 2>/dev/null)
 kb=\${kb:-0}
@@ -75,8 +70,8 @@ check "freed-space receipt tracks tmp pass" '[[ "$OUT" == *"freed_so_far 5.00GiB
 check "receipt reports per-lane df bytes" '[[ "$OUT" == *"lane tmp=5.00GiB lane scratch=0.00GiB lane worktrees=0.00GiB"* ]]'
 check "approval vars reach cleaners only" 'grep -q "ltp=1" "$W/calls.log" && [[ -z "${LARGE_TMP_APPROVED:-}${SCRATCH_TOP_LEVEL_APPROVED:-}" ]]'
 check "48h floor passed to cleaner" 'grep -q "tmp mode=clean hours=48" "$W/calls.log"'
-check "one lock hold: every cleaner saw the same lock fd" \
-  '[[ $(grep -o "lockfd=[0-9]*" "$W/calls.log" | sort -u | wc -l) -eq 1 && "$(grep -o "lockfd=[a-z0-9]*" "$W/calls.log" | head -1)" != lockfd=none ]]'
+check "no shared Scratch lock is passed to cleaners" \
+  '! grep -q "lockfd=[0-9]" "$W/calls.log"'
 
 # 2. target_unmet at the default48h floor; lower age requires an explicit flag.
 run_emergency 5 -- --target-gb 50
@@ -111,17 +106,18 @@ check "--include-worktrees runs cleanup-worktrees last with WORKTREE_APPROVED=1"
 run_emergency 100 -- --target-gb 10 --include-worktrees
 check "worktrees skipped when the target is already met" '! grep -q "^worktrees" "$W/calls.log"'
 
-# 6. Lock contention exits 75 instead of reporting success.
+# 6. A legacy Scratch lock does not block an emergency reclaim pass.
 python3 -I - "$W/home" >"$W/holder.out" 2>&1 <<'PY' &
 import fcntl, os, sys, time
 d = os.path.join(sys.argv[1], ".disk_magician_locks"); os.makedirs(d, exist_ok=True)
 fd = os.open(os.path.join(d, "scratch_cleanup.lock"), os.O_CREAT | os.O_RDWR, 0o600)
-fcntl.flock(fd, fcntl.LOCK_EX); print("held", flush=True); time.sleep(8)
+fcntl.flock(fd, fcntl.LOCK_EX); print("held", flush=True); time.sleep(20)
 PY
 HOLDER=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q held "$W/holder.out" 2>/dev/null && break; sleep 0.3; done
-LOCK_WAIT=1 run_emergency 5 -- --target-gb 50
-check "lock held elsewhere -> exit 75, no cleaner ran" '[[ $RC -eq 75 && ! -s "$W/calls.log" ]]' "rc=$RC"
+LOCK_WAIT=1 run_emergency 5 "tmp:48=$((5 * GIB_KB))" -- --target-gb 10
+check "emergency meets its target while the legacy lock holder remains live" \
+  'kill -0 "$HOLDER" 2>/dev/null && [[ $RC -eq 0 && "$OUT" == *"result: target_met"* ]] && grep -q "^tmp mode=clean" "$W/calls.log"' "rc=$RC $OUT"
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
 
 # 7. Guards and routing.
