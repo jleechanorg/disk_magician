@@ -117,25 +117,49 @@ def stream_generic_leaves(root, deadline):
     if not stat.S_ISDIR(root_info.st_mode):
         raise OSError("candidate is not a real directory")
     pending = [root]
+    had_error = False
     while pending:
         if expired(deadline):
             raise TimeoutError
         path = pending.pop()
         children = []
-        if not has_git_marker(path):
-            with os.scandir(path) as entries:
-                for entry in entries:
-                    if expired(deadline):
-                        raise TimeoutError
-                    info = entry.stat(follow_symlinks=False)
-                    if (not entry.name.startswith(".") and stat.S_ISDIR(info.st_mode)
-                            and info.st_dev == root_info.st_dev):
-                        children.append(entry.path)
+        tainted = False
+        try:
+            is_git = has_git_marker(path)
+        except (TimeoutError, BrokenPipeError):
+            raise
+        except OSError:
+            had_error = True
+            tainted = True
+            is_git = True
+        if not is_git:
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        if expired(deadline):
+                            raise TimeoutError
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                        except (TimeoutError, BrokenPipeError):
+                            raise
+                        except OSError:
+                            had_error = True
+                            tainted = True
+                            continue
+                        if (not entry.name.startswith(".") and stat.S_ISDIR(info.st_mode)
+                                and info.st_dev == root_info.st_dev):
+                            children.append(entry.path)
+            except (TimeoutError, BrokenPipeError):
+                raise
+            except OSError:
+                had_error = True
+                tainted = True
         if children:
             pending.extend(reversed(sorted(children)))
-        elif path != root:
+        elif path != root and not tainted:
             sys.stdout.buffer.write(os.fsencode(path) + b"\0")
             sys.stdout.buffer.flush()
+    return 1 if had_error else 0
 
 
 def parse_deadline(value):
@@ -145,6 +169,34 @@ def parse_deadline(value):
     if not (result >= 0.0 and result < float("inf")):
         raise ValueError("invalid deadline")
     return result
+
+
+def parse_batch_args(args):
+    blocked_out = None
+    positional = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--blocked-out":
+            if blocked_out is not None or i + 1 >= len(args) or not args[i + 1]:
+                return None
+            blocked_out = args[i + 1]
+            i += 2
+        elif arg.startswith("--blocked-out="):
+            val = arg.split("=", 1)[1]
+            if blocked_out is not None or not val:
+                return None
+            blocked_out = val
+            i += 1
+        elif arg.startswith("--"):
+            return None
+        else:
+            positional.append(arg)
+            i += 1
+    if len(positional) != 2:
+        return None
+    return positional[0], positional[1], blocked_out
+
 
 def main():
     if len(sys.argv) < 3:
@@ -157,12 +209,12 @@ def main():
             return 0 if generic_scope(sys.argv[2], sys.argv[3]) else 3
         except OSError:
             return 1
-    deadline = parse_deadline(sys.argv[-1])
     if mode == "stream-generic-leaves":
         if len(sys.argv) != 4:
             return 2
+        deadline = parse_deadline(sys.argv[3])
         try:
-            stream_generic_leaves(sys.argv[2], deadline)
+            return stream_generic_leaves(sys.argv[2], deadline)
         except TimeoutError:
             return 124
         except BrokenPipeError:
@@ -177,12 +229,12 @@ def main():
             return 73
         except OSError:
             return 1
-        return 0
     if mode == "single":
         if len(sys.argv) != 5:
             return 2
         root = sys.argv[2]
         max_depth = int(sys.argv[3])
+        deadline = parse_deadline(sys.argv[4])
         try:
             children = discover(root, max_depth, deadline)
         except TimeoutError:
@@ -192,25 +244,48 @@ def main():
         sys.stdout.buffer.write(b"".join(child + b"\0" for child in children))
         return 0
     if mode in ("batch", "batch-generic"):
-        if len(sys.argv) != 4:
+        parsed = parse_batch_args(sys.argv[2:])
+        if parsed is None:
             return 2
-        max_depth = int(sys.argv[2])
+        max_depth_str, deadline_str, blocked_out = parsed
+        max_depth = int(max_depth_str)
+        deadline = parse_deadline(deadline_str)
         raw = sys.stdin.buffer.read()
         if raw and not raw.endswith(b"\0"):
             return 1
         roots = raw[:-1].split(b"\0") if raw else []
         records = []
+        blocked_roots = []
         try:
             for root_bytes in roots:
                 if not root_bytes:
                     return 1
                 root = os.fsdecode(root_bytes)
-                for child in (discover_generic(root, deadline) if mode == "batch-generic" else discover(root, max_depth, deadline)):
+                try:
+                    children = (
+                        discover_generic(root, deadline)
+                        if mode == "batch-generic"
+                        else discover(root, max_depth, deadline)
+                    )
+                except TimeoutError:
+                    raise
+                except OSError:
+                    if blocked_out is None:
+                        return 1
+                    blocked_roots.append(root_bytes)
+                    continue
+                for child in children:
                     records.append((root_bytes, child))
         except TimeoutError:
             return 124
-        except (OSError, ValueError):
+        except ValueError:
             return 1
+        if blocked_out is not None:
+            try:
+                with open(blocked_out, "wb") as f:
+                    f.write(b"".join(r + b"\0" for r in blocked_roots))
+            except OSError:
+                return 1
         output = bytearray()
         output.extend(MARKER + b"\0")
         output.extend(str(len(records)).encode("ascii") + b"\0")

@@ -592,15 +592,20 @@ scratch_budget_artifact_children() {
   python3 "$script_dir/scratch_budget_artifact_children.py" single "$dir" "$max_depth" "$deadline"
 }
 
-# scratch_budget_artifact_children_batch <max_depth> < NUL-delimited paths
+# scratch_budget_artifact_children_batch <max_depth> [mode] [blocked_out] < NUL-delimited paths
 # Emits an all-or-nothing versioned NUL protocol: marker, pair count, then
-# candidate/child pairs. A deadline or unreadable path returns nonzero with no
-# partial stdout, so callers must never treat failure as an empty result.
+# candidate/child pairs. When blocked_out is set, per-candidate OSError
+# failures are written NUL-delimited to blocked_out instead of aborting the
+# whole batch; a deadline or framing error still returns nonzero with no partial stdout.
 scratch_budget_artifact_children_batch() {
-  local max_depth="${1:-3}" mode="${2:-batch}" script_dir
+  local max_depth="${1:-3}" mode="${2:-batch}" blocked_out="${3:-}" script_dir
   [[ "$max_depth" =~ ^[0-9]+$ ]] || max_depth=3
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  python3 "$script_dir/scratch_budget_artifact_children.py" "$mode" "$max_depth" "${ACT_DEADLINE_AT:-}"
+  if [[ -n "$blocked_out" ]]; then
+    python3 "$script_dir/scratch_budget_artifact_children.py" "$mode" "$max_depth" "${ACT_DEADLINE_AT:-}" --blocked-out "$blocked_out"
+  else
+    python3 "$script_dir/scratch_budget_artifact_children.py" "$mode" "$max_depth" "${ACT_DEADLINE_AT:-}"
+  fi
 }
 
 # scratch_budget_measure_files <path> [threshold_mib]

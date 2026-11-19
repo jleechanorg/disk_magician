@@ -41,6 +41,7 @@ scratch_lock_trap_handler() {
   trap - EXIT HUP INT TERM
   [[ -n "${dylib_candidate_file:-}" ]] && rm -f "$dylib_candidate_file"
   [[ -n "${artifact_batch_output_file:-}" ]] && rm -f "$artifact_batch_output_file"
+  [[ -n "${artifact_blocked_file:-}" ]] && rm -f "$artifact_blocked_file"
   case "$sig" in
     0) previous="$SCRATCH_LOCK_PREVIOUS_EXIT_TRAP"; scratch_lock_run_saved_trap "$previous" EXIT || true; exit "$rc" ;;
     1) previous="$SCRATCH_LOCK_PREVIOUS_HUP_TRAP"; signal_name=HUP ;;

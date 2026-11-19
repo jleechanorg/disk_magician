@@ -83,6 +83,9 @@ if [[ "$1" == "scratch-prune" ]]; then
   exit "${SCRATCH_PRUNE_MOCK_EXIT:-0}"
 fi
 if [[ "$*" == "volume ballast recover scratch" ]]; then exit "${VOLUME_MOCK_ENSURE_RC:-0}"; fi
+if [[ -n "${VOLUME_MOCK_LARGE_BYTES:-}" ]]; then
+  python3 -c 'import sys; n=int(sys.argv[1]); line="measurement_method=file-summed-apparent threshold_mib=100 flags=A:directory,F:file,L:link,E:unfinished path=/tmp/fake/unit\n"; sys.stdout.write((line * ((n // len(line)) + 1))[:n])' "$VOLUME_MOCK_LARGE_BYTES"
+fi
 [[ "${VOLUME_MOCK_SLEEP:-0}" == 0 ]] || sleep "$VOLUME_MOCK_SLEEP"
 if [[ "${VOLUME_MOCK_MODE:-receipt}" == lock ]]; then
   echo "[volume_reclaim] skipped, scratch lock held after waiting 20s" >&2
@@ -502,6 +505,60 @@ else
   FAIL=$(( FAIL + 1 ))
 fi
 
+echo "Test 11d: summarized measurement-unfinished rc 75 records partial with preserved removal count"
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  SCRATCH_PRUNE_MOCK_LINE=$'scanned=5 kept=1 removable=2 removed=2 eligible_estimate=2 candidate_size_estimate_kb=0 deletion_size_estimate_kb=0 deferred_candidates=1 data_free_before_bytes=0 data_free_after_bytes=0 data_free_interval_delta_bytes=0\ndeferred:measurement-unfinished' \
+  VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+UNFINISHED_75_RC=$?
+set -e
+if [[ "$UNFINISHED_75_RC" -eq 0 ]]; then
+  echo "  PASS  summarized measurement-unfinished rc 75 exits 0"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  summarized measurement-unfinished rc 75 exited $UNFINISHED_75_RC (expected 0)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "measurement-unfinished rc 75 records parent partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "measurement-unfinished rc 75 records scratch_prune partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_outcome')" "partial"
+assert_receipt_field "measurement-unfinished rc 75 preserves scratch_prune_removed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_removed'))" "2"
+assert_receipt_field "measurement-unfinished rc 75 records deferred_count 1" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('deferred_count'))" "1"
+
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  SCRATCH_PRUNE_MOCK_LINE=$'scanned=5 kept=1 removable=2 removed=2 eligible_estimate=2 candidate_size_estimate_kb=0 deletion_size_estimate_kb=0 deferred_candidates=1 data_free_before_bytes=0 data_free_after_bytes=0 data_free_interval_delta_bytes=0\ndeferred:budget-result-unmeasurable reason=incomplete-measurement-unfinished' \
+  VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+UNMEASURABLE_BUDGET_75_RC=$?
+set -e
+if [[ "$UNMEASURABLE_BUDGET_75_RC" -eq 0 ]]; then
+  echo "  PASS  summarized budget-result-unmeasurable rc 75 exits 0"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  summarized budget-result-unmeasurable rc 75 exited $UNMEASURABLE_BUDGET_75_RC (expected 0)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "budget-result-unmeasurable rc 75 records parent partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "partial"
+assert_receipt_field "budget-result-unmeasurable rc 75 records scratch_prune partial" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_outcome')" "partial"
+assert_receipt_field "budget-result-unmeasurable rc 75 preserves scratch_prune_removed" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "str(d.get('last_terminal', {}).get('candidates', {}).get('scratch_prune_removed'))" "2"
+
+: > "$INVOCATION_LOG"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=75 \
+  SCRATCH_PRUNE_MOCK_LINE="deferred:measurement-unfinished" \
+  VOLUME_MOCK_MODE=skip /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1
+UNSUMMARIZED_75_RC=$?
+set -e
+if [[ "$UNSUMMARIZED_75_RC" -ne 0 ]]; then
+  echo "  PASS  unsummarized measurement-unfinished rc 75 remains nonzero error"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  unsummarized measurement-unfinished rc 75 exited 0 (expected nonzero)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "unsummarized measurement-unfinished rc 75 records error" "$STATE_DIR/receipts/tmp_scratch_sweep.json" "d.get('last_terminal', {}).get('outcome')" "error"
+
 echo "Test 11a: volume-only lock contention after a scratch-prune no-op is skipped_lock, not available-floor"
 : > "$INVOCATION_LOG"
 set +e
@@ -540,6 +597,56 @@ assert_receipt_field "missing terminal receipt leaves reclaimed bytes unknown" "
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" SCRATCH_PRUNE_MOCK_EXIT=124 VOLUME_MOCK_REMOVED=0 /bin/bash "$SCRIPT" --scratch-only --clean >/dev/null 2>&1 || true
 assert_receipt_field "timed out prune leaves removal count unknown" "$R" "str(d['last_terminal']['candidates']['scratch_prune_removed'])" "None"
 assert_receipt_field "timed out prune leaves reclaimed bytes unknown" "$R" "str(d['last_terminal']['postcondition']['freed_bytes'])" "None"
+
+echo "Test 14: >200 KiB VOLUME_OUTPUT avoids Argument list too long (E2BIG)"
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_LARGE_BYTES=250000 \
+  /bin/bash "$SCRIPT" --scratch-only --clean >"$TMP_ROOT/large-vol.out" 2>&1
+LARGE_VOL_RC=$?
+set -e
+if [[ "$LARGE_VOL_RC" -eq 0 ]]; then
+  echo "  PASS  >200 KiB VOLUME_OUTPUT completes without E2BIG"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  >200 KiB VOLUME_OUTPUT failed (rc=$LARGE_VOL_RC): $(tail -n 5 "$TMP_ROOT/large-vol.out")"
+  FAIL=$(( FAIL + 1 ))
+fi
+if grep -q 'Argument list too long' "$TMP_ROOT/large-vol.out"; then
+  echo "  FAIL  Argument list too long appeared on large VOLUME_OUTPUT"
+  FAIL=$(( FAIL + 1 ))
+else
+  echo "  PASS  no Argument list too long on large VOLUME_OUTPUT"
+  PASS=$(( PASS + 1 ))
+fi
+assert_receipt_field "large VOLUME_OUTPUT preserves volume_removed" "$R" "str(d.get('last_terminal', {}).get('candidates', {}).get('volume_removed'))" "2"
+assert_receipt_field "large VOLUME_OUTPUT records success" "$R" "d.get('last_terminal', {}).get('outcome')" "success"
+
+set +e
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" VOLUME_MOCK_LARGE_BYTES=250000 \
+  VOLUME_MOCK_SLEEP=6 DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS=1 \
+  /bin/bash "$SCRIPT" --clean >"$TMP_ROOT/large-vol-timeout.out" 2>&1
+LARGE_VOL_TO_RC=$?
+set -e
+if [[ "$LARGE_VOL_TO_RC" -ne 0 ]] && ! grep -q 'Argument list too long' "$TMP_ROOT/large-vol-timeout.out"; then
+  echo "  PASS  >200 KiB VOLUME_OUTPUT timeout avoids E2BIG"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  >200 KiB VOLUME_OUTPUT timeout hit E2BIG or exited 0 (rc=$LARGE_VOL_TO_RC)"
+  FAIL=$(( FAIL + 1 ))
+fi
+assert_receipt_field "large VOLUME_OUTPUT timeout records volume timeout" "$STATE_DIR/receipts/volume_reclaim.json" "d.get('last_terminal', {}).get('outcome')" "timeout"
+if python3 - "$STATE_DIR/receipts/volume_reclaim.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))["last_terminal"]
+assert len(r["reason"]) <= 600, len(r["reason"])
+PY
+then
+  echo "  PASS  large VOLUME_OUTPUT timeout reason is bounded"
+  PASS=$(( PASS + 1 ))
+else
+  echo "  FAIL  large VOLUME_OUTPUT timeout reason exceeded bound"
+  FAIL=$(( FAIL + 1 ))
+fi
 
 echo "Results: $PASS passed, $FAIL failed"
 if (( FAIL > 0 )); then

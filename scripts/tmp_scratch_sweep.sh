@@ -210,7 +210,8 @@ else
     "${volume_command[@]}" || VOLUME_RC=$?
 fi
 if (( SCHEDULER_SIGNAL == 0 && (VOLUME_RC == 124 || VOLUME_RC == 137 || VOLUME_RC == 143) )); then
-  VOLUME_TIMEOUT_REASON="${VOLUME_OUTPUT:-volume reclaim exceeded bounded runtime}"
+  VOLUME_TIMEOUT_REASON="$(awk 'NF { last = $0 } END { if (length(last) > 512) last = substr(last, length(last) - 511); print last }' <<<"${VOLUME_OUTPUT:-}")"
+  [[ -n "$VOLUME_TIMEOUT_REASON" ]] || VOLUME_TIMEOUT_REASON="volume reclaim exceeded bounded runtime"
   VOLUME_OUTPUT="${VOLUME_OUTPUT:+$VOLUME_OUTPUT$'\n'}skipped:runtime-timeout"
   VOLUME_BALLAST_FAILURES=0
   if [[ "$clean_flag" == "--clean" && "$VOLUME_COMMAND_STARTED" == true ]]; then
@@ -290,7 +291,7 @@ PY
   elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && { grep -q '\[scratch_prune\] skipped, scratch lock held' <<<"$SCRATCH_PRUNE_OUTPUT" || grep -q '^skipped:lease-busy' <<<"$SCRATCH_PRUNE_OUTPUT"; }; then
     SCRATCH_PRUNE_LOCK_SKIPPED=true
     SCRATCH_PRUNE_OUTCOME=skipped_lock
-  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && grep -q '^partial:budget-target-unmet' <<<"$SCRATCH_PRUNE_OUTPUT"; then
+  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && { grep -q '^partial:budget-target-unmet' <<<"$SCRATCH_PRUNE_OUTPUT" || { [[ -n "$SCRATCH_PRUNE_SUMMARY" ]] && grep -qE '^deferred:(measurement-unfinished|budget-result-unmeasurable)' <<<"$SCRATCH_PRUNE_OUTPUT"; }; }; then
     SCRATCH_PRUNE_OUTCOME=partial
   elif [[ "$SCRATCH_PRUNE_RC" == 75 ]]; then
     SCRATCH_PRUNE_OUTCOME=error
@@ -360,30 +361,40 @@ if [[ $VOLUME_RC -ne 0 ]]; then
   echo "[tmp_scratch_sweep] ERROR: volume reclaim failed" >&2
   rc=1
 fi
-VOLUME_RECEIPT="$(python3 "$RECEIPT_HELPER" read --job volume_reclaim --last 2>/dev/null || true)"
-VOLUME_METRICS="$(python3 - "$VOLUME_RECEIPT" "$OLD_VOLUME_ID" "$CHILD_TRIGGER" "$VOLUME_OUTPUT" "$clean_flag" <<'PYV'
+volume_receipt_file="$(mktemp "${TMPDIR:-/tmp}/dm-sweep-vol-receipt.XXXXXX")" || exit 1
+volume_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sweep-vol-output.XXXXXX")" || { rm -f "$volume_receipt_file"; exit 1; }
+trap 'rm -f "${volume_receipt_file:-}" "${volume_output_file:-}"' EXIT
+python3 "$RECEIPT_HELPER" read --job volume_reclaim --last >"$volume_receipt_file" 2>/dev/null || true
+printf '%s' "$VOLUME_OUTPUT" >"$volume_output_file"
+VOLUME_METRICS="$(python3 - "$volume_receipt_file" "$OLD_VOLUME_ID" "$CHILD_TRIGGER" "$volume_output_file" "$clean_flag" <<'PYV'
 import json,sys
-try: r=json.loads(sys.argv[1])
+from pathlib import Path
+try: r=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"))
 except Exception: r={}
+volume_output=Path(sys.argv[4]).read_text(encoding="utf-8", errors="replace")
+stripped_output=volume_output.strip()
 if isinstance(r,dict) and r.get("id")!=sys.argv[2] and r.get("trigger")==sys.argv[3]:
  c=r.get("candidates") or {}; p=r.get("postcondition") or {}
  print(json.dumps({"valid":True,"outcome":r.get("outcome"),"aged_scanned":c.get("aged_scanned"),"removed":c.get("removed"),"target_reached":(p.get("target_reached") if sys.argv[5]=="--clean" else None),"top_kept_reason":c.get("top_kept_reason"),"ballast_restore_failures":c.get("ballast_restore_failures",0)},separators=(",",":")))
-elif sys.argv[4].strip() == "skipped:measurement-unavailable":
+elif stripped_output == "skipped:measurement-unavailable":
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"measurement-unavailable"},separators=(",",":")))
-elif sys.argv[4].strip() == "skipped:unavailable" or sys.argv[4].strip().startswith("skipped:below-trigger:"):
- print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":sys.argv[4].strip(),"aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":None},separators=(",",":")))
-elif "scratch lock held" in sys.argv[4]:
+elif stripped_output == "skipped:unavailable" or stripped_output.startswith("skipped:below-trigger:"):
+ print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":stripped_output,"aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":None},separators=(",",":")))
+elif "scratch lock held" in volume_output:
  print(json.dumps({"valid":True,"outcome":"skipped_lock","skip_reason":"scratch-lock-held","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scratch-lock-held"},separators=(",",":")))
-elif sys.argv[4].strip() == "skipped:scheduler-interrupted":
+elif stripped_output == "skipped:scheduler-interrupted":
  print(json.dumps({"valid":True,"outcome":"timeout","skip_reason":"scheduler-interrupted","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scheduler-interrupted"},separators=(",",":")))
-elif sys.argv[4].strip() == "skipped:deadline-before-volume-reclaim":
+elif stripped_output == "skipped:deadline-before-volume-reclaim":
  print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":"deadline-before-volume-reclaim","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"deadline-before-volume-reclaim"},separators=(",",":")))
-elif sys.argv[4].strip() == "skipped:deadline-after-deferred":
+elif stripped_output == "skipped:deadline-after-deferred":
  print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":"deadline-after-deferred","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"deadline-after-deferred"},separators=(",",":")))
 else:
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"bound-receipt-unavailable"},separators=(",",":")))
 PYV
 )"
+rm -f "$volume_receipt_file" "$volume_output_file"
+volume_receipt_file=""
+volume_output_file=""
 read -r VOLUME_VALID VOLUME_OUTCOME VOLUME_AGED VOLUME_REMOVED VOLUME_TARGET VOLUME_BALLAST_FAILURES VOLUME_REASON <<<"$(python3 - "$VOLUME_METRICS" <<'PYV'
 import json,sys
 try: x=json.loads(sys.argv[1])
