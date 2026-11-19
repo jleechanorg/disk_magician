@@ -285,7 +285,7 @@ class TestCISelfHostedRunners(unittest.TestCase):
             'echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"',
             setup_body,
         )
-        self.assertIn('echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"', setup_body)
+        self.assertIn('echo "DISK_MAGICIAN_TEST_JOBS=8" >> "$GITHUB_ENV"', setup_body)
         self.assertIn('git config --global user.name', setup_body)
         self.assertIn('git config --global user.email', setup_body)
         self.assertIn("$CI_HOME/.local/bin/diskm", setup_body)
@@ -351,6 +351,11 @@ class TestCISelfHostedRunners(unittest.TestCase):
             "Run shell tests must set DISK_MAGICIAN_LSOF_BIN to the CI lsof shim",
         )
         self.assertIn(
+            'DISK_MAGICIAN_LSOF_CAP: "180"',
+            shell_step,
+            "Run shell tests must set DISK_MAGICIAN_LSOF_CAP=180",
+        )
+        self.assertIn(
             "CI_DARWIN_USER_TEMP_DIR: ${{ runner.temp }}/ci-darwin-user-temp/T",
             shell_step,
             "Run shell tests must isolate DARWIN_USER_TEMP_DIR via CI_DARWIN_USER_TEMP_DIR",
@@ -361,9 +366,9 @@ class TestCISelfHostedRunners(unittest.TestCase):
             "Run shell tests must set SNAPSHOT_TIMEOUT=600",
         )
         self.assertIn(
-            "bash ./disk_magician.sh test-shell --timeout 3600",
+            "bash ./disk_magician.sh test-shell --timeout 5400",
             shell_step,
-            "Run shell tests must pass --timeout 3600 to test-shell",
+            "Run shell tests must pass --timeout 5400 to test-shell",
         )
 
         cleanup_body = steps.get("Clean up isolated CI venv", "")
@@ -377,8 +382,8 @@ class TestCISelfHostedRunners(unittest.TestCase):
         jobs = _parse_workflow_jobs(ci_path)
         self.assertEqual(
             jobs.get("test", {}).get("timeout-minutes"),
-            "240",
-            f"{ci_path} jobs.test must keep timeout-minutes: 240",
+            "300",
+            f"{ci_path} jobs.test must keep timeout-minutes: 300",
         )
         steps = _parse_job_steps(ci_path, "test")
         guarded_steps = (

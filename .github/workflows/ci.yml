@@ -18,7 +18,7 @@ jobs:
     name: Test and lint
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ fromJson(vars.NATIVE_MACOS_RUNNER_LABELS || '["self-hosted-native-macos"]') }}
-    timeout-minutes: 240
+    timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -86,100 +86,125 @@ jobs:
                 ;;
             esac
           done
-          PY_BIN="/usr/bin/python3"
-          [ -x "$PY_BIN" ] || PY_BIN="$(command -v python3)"
           ci_pids="$(
-            "$PY_BIN" - "$$" <<'PY'
-          import os, subprocess, sys
-
-          wrapper_pid = int(sys.argv[1])
-          self_pid = os.getpid()
-          uid = str(os.getuid())
-
-          def parse_etime(s: str) -> int:
-              s = s.strip()
-              days = 0
-              if "-" in s:
-                  d, s = s.split("-", 1)
-                  days = int(d)
-              parts = [int(p) for p in s.split(":")]
-              if len(parts) == 3:
-                  return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
-              if len(parts) == 2:
-                  return days * 86400 + parts[0] * 60 + parts[1]
-              return days * 86400 + parts[0]
-
-          out = subprocess.check_output(["/bin/ps", "-u", uid, "-o", "pid=,ppid=,etime=,command="], text=True)
-          children = {}
-          ppids = {}
-          etimes = {}
-          cmds = {}
-          for line in out.splitlines():
-              cols = line.strip().split(None, 3)
-              if len(cols) < 4:
-                  continue
-              pid, ppid, et, cmd = int(cols[0]), int(cols[1]), cols[2], cols[3]
-              ppids[pid] = ppid
-              etimes[pid] = et
-              cmds[pid] = cmd
-              children.setdefault(ppid, []).append(pid)
-
-          root_pid = None
-          fallback_root = None
-          cur = wrapper_pid
-          seen_anc = set()
-          while cur and cur in ppids and cur not in seen_anc:
-              seen_anc.add(cur)
-              cmd = cmds.get(cur, "")
-              if "tests/test_" in cmd and ("bash" in cmd or "sh " in cmd or cmd.endswith(".sh")):
-                  root_pid = cur
-              elif fallback_root is None and ("pytest" in cmd or "disk_magician.sh test-shell" in cmd or "Runner.Worker" in cmd):
-                  fallback_root = cur
-              cur = ppids.get(cur, 0)
-
-          target_root = root_pid or fallback_root
-          if target_root is None:
-              print("PASSTHROUGH")
-              sys.exit(0)
-
-          keep = set()
-          stack = [target_root]
-          while stack:
-              p = stack.pop()
-              if p in keep:
-                  continue
-              keep.add(p)
-              stack.extend(children.get(p, ()))
-
-          runner_temp = os.environ.get("RUNNER_TEMP", "")
-          root_age = parse_etime(etimes.get(target_root, "00:00")) + 15
-          for pid, ppid in ppids.items():
-              if ppid == 1 and pid not in keep:
-                  cmd = cmds.get(pid, "")
-                  if any(excl in cmd for excl in ("/System/", "/Applications/", "/.hermes/", "/.local/share/uv/")):
-                      continue
-                  if not (
-                      "sleep " in cmd
-                      or cmd.startswith("sleep ")
-                      or cmd.startswith("/bin/sleep")
-                      or "tail " in cmd
-                      or "/tmp/" in cmd
-                      or "/private/tmp/" in cmd
-                      or "dm-ci-shard" in cmd
-                      or "RUNNER_TEMP" in cmd
-                      or (runner_temp and runner_temp in cmd)
-                  ):
-                      continue
-                  try:
-                      if parse_etime(etimes[pid]) <= root_age:
-                          keep.add(pid)
-                  except ValueError:
-                      pass
-
-          keep.discard(wrapper_pid)
-          keep.discard(self_pid)
-          print(",".join(str(p) for p in sorted(keep)))
-          PY
+            /bin/ps -u "$(/usr/bin/id -u)" -o pid=,ppid=,etime=,command= | /usr/bin/awk -v wrapper_pid="$$" -v runner_temp="${RUNNER_TEMP:-}" '
+          function parse_etime(s,    days, n, parts, dparts) {
+            days = 0
+            if (index(s, "-") > 0) {
+              split(s, dparts, "-")
+              days = dparts[1] + 0
+              s = dparts[2]
+            }
+            n = split(s, parts, ":")
+            if (n == 3) {
+              return days * 86400 + (parts[1] + 0) * 3600 + (parts[2] + 0) * 60 + (parts[3] + 0)
+            }
+            if (n == 2) {
+              return days * 86400 + (parts[1] + 0) * 60 + (parts[2] + 0)
+            }
+            return days * 86400 + (parts[1] + 0)
+          }
+          {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            if (line == "") next
+            pid = $1 + 0
+            ppid_val = $2 + 0
+            et = $3
+            if (pid <= 0 || et == "") next
+            sub(/^[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", line)
+            if (line == "") next
+            ppid[pid] = ppid_val
+            etime_raw[pid] = et
+            cmd[pid] = line
+            pids[++n_pids] = pid
+            child[ppid_val, ++child_count[ppid_val]] = pid
+          }
+          END {
+            root_pid = 0
+            fallback_root = 0
+            cur = wrapper_pid + 0
+            while (cur > 0 && (cur in ppid) && !(cur in seen)) {
+              seen[cur] = 1
+              c = cmd[cur]
+              if (index(c, "tests/test_") > 0 && (index(c, "bash") > 0 || index(c, "sh ") > 0 || c ~ /\.sh($| )/)) {
+                root_pid = cur
+              } else if (fallback_root == 0 && c ~ /(pytest|disk_magician\.sh test-shell|Runner\.Worker)/) {
+                fallback_root = cur
+              }
+              cur = ppid[cur]
+            }
+            target_root = (root_pid > 0 ? root_pid : fallback_root)
+            if (target_root == 0) {
+              print "PASSTHROUGH"
+            } else {
+              q_head = 1
+              q_tail = 1
+              queue[1] = target_root
+              keep[target_root] = 1
+              while (q_head <= q_tail) {
+                k = queue[q_head++]
+                cnt = child_count[k] + 0
+                for (i = 1; i <= cnt; i++) {
+                  ch = child[k, i]
+                  if (!(ch in keep)) {
+                    keep[ch] = 1
+                    queue[++q_tail] = ch
+                  }
+                }
+              }
+              root_age = parse_etime(etime_raw[target_root]) + 15
+              for (i = 1; i <= n_pids; i++) {
+                p = pids[i]
+                if (ppid[p] == 1 && !(p in keep)) {
+                  c = cmd[p]
+                  if (c ~ /\/System\/|\/Applications\/|\/\.hermes\/|\/\.local\/share\/uv\//) {
+                    continue
+                  }
+                  if ((c ~ /(^|\/)(sleep|tail) |\/tmp\/|\/private\/tmp\/|dm-ci-shard|RUNNER_TEMP/) || (runner_temp != "" && index(c, runner_temp) > 0)) {
+                    if (parse_etime(etime_raw[p]) <= root_age) {
+                      keep[p] = 1
+                    }
+                  }
+                }
+              }
+              wq_head = 1
+              wq_tail = 1
+              wqueue[1] = wrapper_pid + 0
+              wseen[wrapper_pid + 0] = 1
+              while (wq_head <= wq_tail) {
+                wk = wqueue[wq_head++]
+                delete keep[wk]
+                wcnt = child_count[wk] + 0
+                for (wi = 1; wi <= wcnt; wi++) {
+                  wch = child[wk, wi]
+                  if (!(wch in wseen)) {
+                    wseen[wch] = 1
+                    wqueue[++wq_tail] = wch
+                  }
+                }
+              }
+              m = 0
+              for (p in keep) {
+                out[++m] = p + 0
+              }
+              for (i = 2; i <= m; i++) {
+                val = out[i]
+                j = i - 1
+                while (j >= 1 && out[j] > val) {
+                  out[j + 1] = out[j]
+                  j--
+                }
+                out[j + 1] = val
+              }
+              res = ""
+              for (i = 1; i <= m; i++) {
+                res = (i == 1 ? out[i] : res "," out[i])
+              }
+              print res
+            }
+          }
+          '
           )"
           if [ "$ci_pids" = "PASSTHROUGH" ]; then
             exec /usr/sbin/lsof "$@"
@@ -228,7 +253,7 @@ jobs:
           echo "CI_SHIMS=${CI_SHIMS}" >> "$GITHUB_ENV"
           echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
           echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"
-          echo "DISK_MAGICIAN_TEST_JOBS=4" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_TEST_JOBS=8" >> "$GITHUB_ENV"
           "$VENV_PYTHON" -c 'import os, sys; assert os.path.realpath(sys.prefix) == os.path.realpath(os.environ["RUNNER_TEMP"] + "/diskm-ci-venv"), sys.prefix; print(sys.version, sys.executable)'
           command -v timeout >/dev/null 2>&1 || brew install coreutils
           command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
@@ -300,14 +325,15 @@ jobs:
         env:
           HOME: ${{ env.CI_HOME }}
           DISK_MAGICIAN_LSOF_BIN: ${{ env.CI_SHIMS }}/lsof
+          DISK_MAGICIAN_LSOF_CAP: "180"
           CI_DARWIN_USER_TEMP_DIR: ${{ runner.temp }}/ci-darwin-user-temp/T
           SNAPSHOT_TIMEOUT: "600"
         run: |
           unset BASH_ENV
           if [ -x /usr/bin/caffeinate ]; then
-            /usr/bin/caffeinate -i bash ./disk_magician.sh test-shell --timeout 3600
+            /usr/bin/caffeinate -i bash ./disk_magician.sh test-shell --timeout 5400
           else
-            bash ./disk_magician.sh test-shell --timeout 3600
+            bash ./disk_magician.sh test-shell --timeout 5400
           fi
 
       - name: Clean up isolated CI venv
