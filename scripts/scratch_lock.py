@@ -109,6 +109,74 @@ def disable_implicit_git_fsmonitor() -> None:
     os.environ["GIT_CONFIG_COUNT"] = str(count + 1)
 
 
+def holder_path() -> Path:
+    """Sidecar record naming the live lock holder, for staleness diagnosis."""
+    return lock_path().with_suffix(".holder")
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by someone else
+    return True
+
+
+def write_holder(fd: int) -> None:
+    """Best-effort holder record. Never fail the run because of it."""
+    try:
+        path = holder_path()
+        tmp = path.with_suffix(f".holder.{os.getpid()}")
+        tmp.write_text(f"pid={os.getpid()}\nsince={int(time.time())}\nfd_locked=1\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def clear_holder() -> None:
+    try:
+        holder_path().unlink()
+    except OSError:
+        pass
+
+
+def stale_holder_report() -> str:
+    """Human-readable diagnosis when the lock is held.
+
+    Reports whether the recorded holder is still alive. This is diagnostic only:
+    it never breaks a live lock, because a kernel flock is authoritative and a
+    dead holder releases it automatically. What it removes is the silent case
+    where a WEDGED-but-alive holder (a stalled child, not a dead process) holds
+    the lock for hours with nothing explaining why -- measured 2026-11-19: a
+    frozen cleanup held this lock 8h+ with orphaned children and every later
+    cleanup reported only "scratch lock held".
+    """
+    try:
+        raw = holder_path().read_text()
+    except OSError:
+        return "holder=unknown (no holder record)"
+    info = {}
+    for line in raw.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            info[k.strip()] = v.strip()
+    pid_raw = info.get("pid", "")
+    if not pid_raw.isdigit():
+        return "holder=unknown (malformed holder record)"
+    pid = int(pid_raw)
+    since = info.get("since", "")
+    age = ""
+    if since.isdigit():
+        age = f" held_s={int(time.time()) - int(since)}"
+    if _pid_alive(pid):
+        return f"holder=pid {pid} alive{age}"
+    return f"holder=pid {pid} DEAD (stale record; flock must have been released){age}"
+
+
 def run(caller: str, script: str, args: list[str]) -> int:
     path = lock_path()
     try:
@@ -130,11 +198,15 @@ def run(caller: str, script: str, args: list[str]) -> int:
             os.close(fd)
             if isinstance(exc, BlockingIOError):
                 note = f"after waiting {wait:g}s" if wait > 0 else "— not queuing"
-                print(f"[{caller}] skipped, scratch lock held {note}", file=sys.stderr)
+                print(
+                    f"[{caller}] skipped, scratch lock held {note}; {stale_holder_report()}",
+                    file=sys.stderr,
+                )
                 return EXIT_LOCK_HELD
             print(f"[{caller}] failed to acquire scratch lock {path}: {exc}", file=sys.stderr)
             return 1
 
+    write_holder(fd)
     os.set_inheritable(fd, True)
     os.environ[ENV_FD] = str(fd)
     os.environ[ENV_PID] = str(os.getpid())
