@@ -37,6 +37,7 @@ pub struct SnapshotReport {
     pub sampled_at: Option<String>,
     pub age_seconds: Option<u64>,
     pub coverage_pct: Option<f64>,
+    pub measurement_status: Option<String>,
     pub disk_total_gb: Option<f64>,
     pub disk_used_gb: Option<f64>,
     pub disk_free_gb: Option<f64>,
@@ -164,19 +165,37 @@ fn read_snapshot(dir: &Path, now: u64) -> SnapshotReport {
         Ok(coverage) => (coverage, None),
         Err(reason) => (None, Some(reason)),
     };
-    let state = match (age_seconds > STALE_AFTER, coverage_pct) {
-        (true, _) => ObservationState::Stale,
-        (false, Some(pct)) if pct < MIN_COVERAGE => ObservationState::Partial,
-        (false, Some(_)) => ObservationState::Fresh,
-        (false, None) => ObservationState::Unknown,
+    let (measurement_status, measurement_error) = match snapshot_measurement_status(&object) {
+        Ok(value) => (value, None),
+        Err(reason) => (None, Some(reason)),
+    };
+    let state = if age_seconds > STALE_AFTER {
+        ObservationState::Stale
+    } else if measurement_error.is_some() || coverage_error.is_some() || coverage_pct.is_none() {
+        ObservationState::Unknown
+    } else if coverage_pct.is_some_and(|coverage| coverage < MIN_COVERAGE)
+        || measurement_status
+            .as_deref()
+            .is_some_and(|measurement| measurement != "complete")
+    {
+        ObservationState::Partial
+    } else {
+        ObservationState::Fresh
     };
     let reason = match state {
         ObservationState::Fresh => None,
-        ObservationState::Partial => Some("coverage_below_70_percent".into()),
+        ObservationState::Partial if coverage_pct.is_some_and(|pct| pct < MIN_COVERAGE) => {
+            Some("coverage_below_70_percent".into())
+        }
+        ObservationState::Partial => measurement_status
+            .as_deref()
+            .map(|measurement| format!("measurement_status_{measurement}")),
         ObservationState::Stale => Some("snapshot_older_than_36_hours".into()),
-        _ => coverage_error
+        ObservationState::Unknown => measurement_error
             .map(str::to_owned)
+            .or_else(|| coverage_error.map(str::to_owned))
             .or_else(|| Some("snapshot_coverage_unavailable".into())),
+        ObservationState::Absent | ObservationState::Unreadable => unreachable!(),
     };
     SnapshotReport {
         state,
@@ -184,6 +203,7 @@ fn read_snapshot(dir: &Path, now: u64) -> SnapshotReport {
         sampled_at,
         age_seconds: Some(age_seconds),
         coverage_pct,
+        measurement_status,
         disk_total_gb: number(&object, "disk_total_gb"),
         disk_used_gb: number(&object, "disk_used_gb"),
         disk_free_gb: number(&object, "disk_free_gb"),
@@ -229,6 +249,30 @@ fn snapshot_coverage(object: &Map<String, Value>) -> Result<Option<f64>, &'stati
         }
     }
     Ok(None)
+}
+
+fn snapshot_measurement_status(
+    object: &Map<String, Value>,
+) -> Result<Option<String>, &'static str> {
+    let nested = object
+        .get("snapshot_metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("measurement_status"));
+    let raw = nested
+        .filter(|value| !value.is_null())
+        .or_else(|| object.get("measurement_status"))
+        .filter(|value| !value.is_null());
+
+    let Some(raw) = raw else {
+        // Older snapshot schemas do not include this field. Preserve the
+        // previous coverage-only classification for those snapshots.
+        return Ok(None);
+    };
+
+    match raw.as_str() {
+        Some("complete" | "partial" | "timeout" | "empty") => Ok(raw.as_str().map(str::to_owned)),
+        _ => Err("measurement_status_invalid"),
+    }
 }
 
 fn checked_coverage(value: &Value) -> Option<f64> {
@@ -343,6 +387,7 @@ fn empty_snapshot(state: ObservationState, reason: &str) -> SnapshotReport {
         sampled_at: None,
         age_seconds: None,
         coverage_pct: None,
+        measurement_status: None,
         disk_total_gb: None,
         disk_used_gb: None,
         disk_free_gb: None,
@@ -426,7 +471,7 @@ fn parse_timestamp(value: &str) -> Option<u64> {
     }
     let mut y = i64::from(year);
     let m = i64::from(month);
-    y -= i64::from(m <= 2);
+    y -= if m <= 2 { 1 } else { 0 };
     let era = (if y >= 0 { y } else { y - 399 }) / 400;
     let yoe = y - era * 400;
     let mp = m + if m > 2 { -3 } else { 9 };

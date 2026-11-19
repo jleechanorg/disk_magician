@@ -276,7 +276,7 @@ fn unreadable_directory_is_a_gap_when_running_unprivileged() {
     let fixture = Fixture::new("unreadable");
     let blocked = fixture.path().join("blocked");
     fs::create_dir(&blocked).expect("create blocked directory");
-    fs::set_permissions(&blocked, fs::Permissions::from_mode(0))
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
         .expect("make directory unreadable");
 
     let report = scan(fixture.path(), options(16)).expect("inaccessible child is reported");

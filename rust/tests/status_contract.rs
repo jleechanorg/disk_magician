@@ -44,7 +44,7 @@ fn now_utc() -> String {
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = mp + if mp < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
+    year += if month <= 2 { 1 } else { 0 };
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
         tod / 3600,
@@ -83,6 +83,7 @@ fn reads_capacity_and_keeps_partial_ledger_distinct() {
     assert!(report.capacity.used_bytes > 0);
     assert!(report.capacity.available_bytes > 0);
     assert_eq!(report.snapshot.state, ObservationState::Fresh);
+    assert_eq!(report.snapshot.measurement_status, None);
     assert_eq!(report.ledger.state, ObservationState::Partial);
     assert!(!report.ledger.authoritative);
     assert_eq!(report.ledger.measured_roots, Some(17));
@@ -108,9 +109,10 @@ fn low_coverage_snapshot_remains_partial_even_if_ledger_is_published() {
 fn supports_nested_legacy_snapshot_timestamp_and_coverage() {
     let temp = TempDir::new();
     let state = state_dir(temp.path(), "published", "complete", 100.0);
+    let captured_at = now_utc();
     fs::write(
         state.join("snapshots/disk_snapshot.json"),
-        r#"{"snapshot_metadata":{"captured_at":"2026-11-19T00:00:00Z","coverage_pct":85.5}}"#,
+        format!(r#"{{"snapshot_metadata":{{"captured_at":"{captured_at}","coverage_pct":85.5}}}}"#),
     )
     .unwrap();
 
@@ -119,7 +121,7 @@ fn supports_nested_legacy_snapshot_timestamp_and_coverage() {
     assert_eq!(report.snapshot.state, ObservationState::Fresh);
     assert_eq!(
         report.snapshot.sampled_at.as_deref(),
-        Some("2026-11-19T00:00:00Z")
+        Some(captured_at.as_str())
     );
     assert_eq!(report.snapshot.coverage_pct, Some(85.5));
 }
@@ -136,7 +138,7 @@ fn supports_fresh_coverage_alias_but_does_not_hide_invalid_current_value() {
     )
     .unwrap();
     let alias_report = status(Path::new("/"), Some(&state)).unwrap();
-    assert_eq!(alias_report.snapshot.state, ObservationState.Fresh);
+    assert_eq!(alias_report.snapshot.state, ObservationState::Fresh);
     assert_eq!(alias_report.snapshot.coverage_pct, Some(88.0));
 
     fs::write(
@@ -151,6 +153,67 @@ fn supports_fresh_coverage_alias_but_does_not_hide_invalid_current_value() {
     assert_eq!(
         invalid_report.snapshot.reason.as_deref(),
         Some("snapshot_coverage_invalid")
+    );
+}
+
+#[test]
+fn non_complete_measurement_status_never_looks_fresh_at_high_coverage() {
+    let temp = TempDir::new();
+    let state = state_dir(temp.path(), "published", "complete", 100.0);
+    let snapshot = state.join("snapshots/disk_snapshot.json");
+
+    for measurement_status in ["partial", "timeout", "empty"] {
+        fs::write(
+            &snapshot,
+            format!(
+                r#"{{"timestamp":"{}","snapshot_coverage_pct":92.0,"measurement_status":"complete","snapshot_metadata":{{"measurement_status":"{measurement_status}"}}}}"#,
+                now_utc()
+            ),
+        )
+        .unwrap();
+        let report = status(Path::new("/"), Some(&state)).unwrap();
+        assert_eq!(report.snapshot.state, ObservationState::Partial);
+        assert_eq!(
+            report.snapshot.measurement_status.as_deref(),
+            Some(measurement_status)
+        );
+        assert!(!report.snapshot.reason.as_deref().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn measurement_status_uses_top_level_fallback_and_preserves_unknown_values() {
+    let temp = TempDir::new();
+    let state = state_dir(temp.path(), "published", "complete", 100.0);
+    let snapshot = state.join("snapshots/disk_snapshot.json");
+    fs::write(
+        &snapshot,
+        format!(
+            r#"{{"timestamp":"{}","snapshot_coverage_pct":90.0,"measurement_status":"timeout"}}"#,
+            now_utc()
+        ),
+    )
+    .unwrap();
+    let fallback = status(Path::new("/"), Some(&state)).unwrap();
+    assert_eq!(fallback.snapshot.state, ObservationState::Partial);
+    assert_eq!(
+        fallback.snapshot.measurement_status.as_deref(),
+        Some("timeout")
+    );
+
+    fs::write(
+        &snapshot,
+        format!(
+            r#"{{"timestamp":"{}","snapshot_coverage_pct":90.0,"measurement_status":"complete","snapshot_metadata":{{"measurement_status":"broken"}}}}"#,
+            now_utc()
+        ),
+    )
+    .unwrap();
+    let invalid = status(Path::new("/"), Some(&state)).unwrap();
+    assert_eq!(invalid.snapshot.state, ObservationState::Unknown);
+    assert_eq!(
+        invalid.snapshot.reason.as_deref(),
+        Some("measurement_status_invalid")
     );
 }
 
