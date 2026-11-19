@@ -160,9 +160,15 @@ install_plist() {
     return 1
   fi
   dst="$DEST/${label}.plist"
+  # @SCRATCH_BUDGET_FLOOR_HOURS@ is an operator-approved tunable, not a path.
+  # Default 6h (the operator directive of 2026-11-19); override per host with
+  # DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS and reinstall.
+  local scratch_floor_h="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS:-6}"
+  [[ "$scratch_floor_h" =~ ^[1-9][0-9]{0,3}$ ]] || scratch_floor_h=6
   sed -e "s|@REPO_ROOT@|$REPO_ROOT|g" \
       -e "s|@HOME@|$HOME|g" \
       -e "s|@BASH@|$BASH_BIN|g" \
+      -e "s|@SCRATCH_BUDGET_FLOOR_HOURS@|$scratch_floor_h|g" \
       "$src" > "$dst"
   # Preflight (disk_magician-zwb): plutil -lint alone does NOT catch a plist
   # truncated to a top-level <array> with no <dict> wrapper -- that's
