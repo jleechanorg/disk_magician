@@ -1385,9 +1385,27 @@ class DiskStatusEvaluator:
                 continue
 
             if term_outcome in ("success", "success_noop"):
-                job_statuses[job] = {
-                    "status": STATUS_HEALTHY,
-                    "reason": f"terminal_{term_outcome}",
+                job_status = STATUS_HEALTHY
+                job_reason = f"terminal_{term_outcome}"
+                renderer_status = None
+                if job == "snapshot_commit":
+                    postcondition = last_term.get("postcondition")
+                    if isinstance(postcondition, dict):
+                        renderer_status = postcondition.get("renderer_status")
+                    if renderer_status in ("partial", "stale", "error") or (
+                        renderer_status == "unknown"
+                        and isinstance(postcondition, dict)
+                        and "renderer_exit_code" in postcondition
+                    ):
+                        job_status = STATUS_DEGRADED
+                        job_reason = f"renderer_{renderer_status}"
+                        if overall_status != STATUS_INVALID:
+                            overall_status = STATUS_DEGRADED
+                        degraded_reasons.append(f"{job}: {job_reason}")
+
+                job_detail = {
+                    "status": job_status,
+                    "reason": job_reason,
                     "latest_outcome": term_outcome,
                     "ended_at": ended_at_str,
                     "latest_attempt": last_term,
@@ -1396,6 +1414,9 @@ class DiskStatusEvaluator:
                     "last_success": last_succ,
                     "last_skipped": last_skip,
                 }
+                if renderer_status is not None:
+                    job_detail["renderer_status"] = renderer_status
+                job_statuses[job] = job_detail
                 continue
 
             # Unhandled outcome
