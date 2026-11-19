@@ -568,5 +568,22 @@ exit 0
         self.assertEqual(format_size(1073741824), "1.00 GB")
 
 
+    def test_get_dir_size_uses_in_process_by_default_and_falls_back_on_deadline(self):
+        """get_dir_size measures in-process without subprocess unless ACT_DEADLINE_AT or stub requires it."""
+        from unittest.mock import patch
+
+        sample = self.u0_sessions / "inproc_session"
+        sample.mkdir(parents=True)
+        (sample / "payload.json").write_bytes(b"a" * 2048)
+
+        real_env = {k: v for k, v in os.environ.items() if k != "ACT_DEADLINE_AT"}
+        with patch.dict(os.environ, real_env, clear=True):
+            self.assertEqual(get_dir_size(sample), 2048)
+
+        with patch.dict(os.environ, {"ACT_DEADLINE_AT": "0"}):
+            with self.assertRaises(OSError):
+                get_dir_size(sample)
+
+
 if __name__ == "__main__":
     unittest.main()

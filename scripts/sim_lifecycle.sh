@@ -551,6 +551,35 @@ sys.exit(0)
 PY
 }
 
+# sim_unleased_ephemeral_idle <udid> — true only when SIM_UNLEASED_EPHEMERAL_APPROVED=1
+# for a never-leased (no gen/<udid> and no lease dir), non-shared (not wai-shared-*),
+# unreserved Shutdown simulator whose on-disk content is measurably >= 48 h idle.
+sim_unleased_ephemeral_idle() {
+  local udid="$1" gen_path snap _u _n _s _newest _rtk count=0 name="" state="" root="" target="" newest=""
+  [[ "${SIM_UNLEASED_EPHEMERAL_APPROVED:-0}" == "1" ]] || return 1
+  gen_path="$(sim_generation_path "$udid")"
+  [[ ! -e "$gen_path" && ! -L "$gen_path" ]] || return 1
+  [[ "$(sim_lease_state "$udid")" == "absent" ]] || return 1
+  snap="$(sim_snapshot)" || return 1
+  while IFS=$'\t' read -r _u _n _s _newest _rtk; do
+    if [[ "$_u" == "$udid" ]]; then
+      count=$((count + 1))
+      name="$_n"
+      state="$_s"
+    fi
+  done <<<"$snap"
+  [[ "$count" -eq 1 && "$state" == "Shutdown" && ! "$name" =~ ^wai-shared- ]] || return 1
+  sim_name_reserved "$udid" "$name" && return 1
+  root="$(sim_device_root)"
+  [[ -n "$root" && "$root" == /* && -d "$root" && ! -L "$root" ]] || return 1
+  root="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
+  target="${root%/}/${udid}"
+  [[ -d "$target" && ! -L "$target" ]] || return 1
+  newest="$(sim_newest_mtime "$target")"
+  [[ "$newest" =~ ^[0-9]+$ ]] || return 1
+  (( $(sim_now) - newest >= $(sim_floor_minutes) * 60 ))
+}
+
 sim_prune() {
   local dry=true
   while [[ $# -gt 0 ]]; do
@@ -582,7 +611,7 @@ sim_prune() {
     # so an unmeasurable/absent `lastUsedAt` must not veto a valid receipt --
     # otherwise a freshly created, never-booted device (lastUsedAt: null) could
     # never be reclaimed. Found by the uslx live proof on 2026-11-17.
-    if ! sim_released_and_idle "$udid"; then
+    if ! { sim_released_and_idle "$udid" || sim_unleased_ephemeral_idle "$udid"; }; then
       # No trustworthy receipt. If mtime is also unmeasurable, say so explicitly
       # rather than implying a receipt exists and is merely young.
       if [[ ! "$newest" =~ ^[0-9]+$ ]]; then
@@ -623,7 +652,7 @@ sim_prune() {
         echo "keep:state-changed $name"
         kept=$((kept+1)); continue
       fi
-      if ! sim_released_and_idle "$udid"; then
+      if ! { sim_released_and_idle "$udid" || sim_unleased_ephemeral_idle "$udid"; }; then
         sim_lock_drop "$plock"
         echo "keep:receipt-stale-under-lock $name"
         kept=$((kept+1)); continue

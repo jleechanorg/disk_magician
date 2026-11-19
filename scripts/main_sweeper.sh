@@ -174,7 +174,7 @@ acquire_lock() {
   fi
   local held_pid age now lock_mtime is_alive=0
   held_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-  lock_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || date +%s)
+  lock_mtime=$(stat -c '%Y' "$LOCK_DIR" 2>/dev/null || stat -f '%m' "$LOCK_DIR" 2>/dev/null || date +%s)
   now=$(date +%s)
   age=$(( now - lock_mtime ))
   if [[ -n "$held_pid" && "$held_pid" =~ ^[0-9]+$ ]]; then
@@ -187,7 +187,7 @@ acquire_lock() {
     if mkdir "$reclaim_gate" 2>/dev/null; then
       local recheck_pid recheck_mtime recheck_alive=0
       recheck_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
-      recheck_mtime=$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || echo 0)
+      recheck_mtime=$(stat -c '%Y' "$LOCK_DIR" 2>/dev/null || stat -f '%m' "$LOCK_DIR" 2>/dev/null || echo 0)
       if [[ -n "$recheck_pid" && "$recheck_pid" =~ ^[0-9]+$ ]]; then
         if ps -p "$recheck_pid" -o pid= >/dev/null 2>&1; then
           recheck_alive=1
@@ -232,7 +232,7 @@ should_run_heavy_task() {
     return 0
   fi
   local last_mtime now age
-  last_mtime=$(stat -f '%m' "$marker_file" 2>/dev/null || stat -c '%Y' "$marker_file" 2>/dev/null || echo 0)
+  last_mtime=$(stat -c '%Y' "$marker_file" 2>/dev/null || stat -f '%m' "$marker_file" 2>/dev/null || echo 0)
   now=$(date +%s)
   age=$(( now - last_mtime ))
   if [[ "$age" -ge "$interval_sec" ]]; then
@@ -335,6 +335,10 @@ main() {
       log "Cleaning detached browser code_sign_clones..."
       CODE_SIGN_CLONES_APPROVED=1 run_job_step "Phase 2: cleanup_code_sign_clones" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
     fi
+    if [[ "${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}" =~ ^[1-9][0-9]?$ && -f "$REPO_ROOT/scripts/cleanup_scratch_top_level.sh" ]]; then
+      log "Running fast >=1 GiB Scratch LRU eviction (budget ${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT}%)..."
+      DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=25         DISK_MAGICIAN_SCRATCH_MIN_KB=1048576         DISK_MAGICIAN_SCRATCH_DETAIL=off         SCRATCH_TOP_LEVEL_APPROVED=1         run_job_step "Phase 2: scratch_prune --budget-pct" bash "$REPO_ROOT/scripts/cleanup_scratch_top_level.sh" "$CLEAN_ARG" --budget-pct "$DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT" || true
+    fi
   else
     log "Phase 2: Disk space healthy (${current_free_gb:-unknown} GiB >= ${THRESHOLD_GB} GiB)."
   fi
@@ -345,12 +349,15 @@ main() {
   else
     log "Phase 3: Executing canonical 6-tier routine maintenance stack..."
 
-    # Tier 1: Dev caches, temp, PR scratch, LLM inspector
-    [[ -f "$REPO_ROOT/scripts/cleanup_dev_caches.sh" ]] && run_job_step "Tier 1: cleanup_dev_caches" bash "$REPO_ROOT/scripts/cleanup_dev_caches.sh" "$CLEAN_ARG" || true
+    # Tier 1: Temp, PR/Hermes scratch, LLM inspector, quarantine reconcile, dev caches last (reuse-lock hygiene)
     [[ -f "$REPO_ROOT/scripts/cleanup_tmp.sh" ]] && run_job_step "Tier 1: cleanup_tmp" bash "$REPO_ROOT/scripts/cleanup_tmp.sh" "$CLEAN_ARG" || true
     [[ -f "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" ]] && run_job_step "Tier 1: cleanup_pr_scratch" bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" "$CLEAN_ARG" || true
+    if [[ -d "$HOME/.hermes/cache/scratch" && -f "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" ]]; then
+      run_job_step "Tier 1: cleanup_hermes_scratch" bash "$REPO_ROOT/scripts/cleanup_pr_scratch.sh" "$CLEAN_ARG" --tmp-dir "$HOME/.hermes/cache/scratch" --pattern "*" || true
+    fi
     [[ -f "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" ]] && run_job_step "Tier 1: cleanup_llm_inspector" bash "$REPO_ROOT/scripts/cleanup_llm_inspector.sh" "$CLEAN_ARG" || true
     [[ -f "$REPO_ROOT/scripts/quarantine_reconcile.sh" ]] && run_job_step "Tier 1: quarantine_reconcile" bash "$REPO_ROOT/scripts/quarantine_reconcile.sh" "$CLEAN_ARG" --deadline-seconds 300 || true
+    [[ -f "$REPO_ROOT/scripts/cleanup_dev_caches.sh" ]] && run_job_step "Tier 1: cleanup_dev_caches" bash "$REPO_ROOT/scripts/cleanup_dev_caches.sh" "$CLEAN_ARG" || true
 
     # Tier 2: Xcode DerivedData & simulator caches (debounced to 24h when healthy)
     if should_run_heavy_task "$STATE_DIR/last_xcode_clean" 86400; then
@@ -388,8 +395,18 @@ main() {
       fi
     fi
 
-    # Tier 4: Browser Sessions & Assets
-    [[ -f "$REPO_ROOT/scripts/prune_aside_sessions.sh" ]] && run_job_step "Tier 4: prune_aside_sessions" bash "$REPO_ROOT/scripts/prune_aside_sessions.sh" "$CLEAN_ARG" || true
+    # Tier 4: Browser Sessions, Assets & Cloud FileProvider Eviction
+    local _prev_step_timeout="$STEP_TIMEOUT"
+    if [[ -f "$REPO_ROOT/scripts/prune_aside_sessions.sh" ]]; then
+      STEP_TIMEOUT=1200
+      run_job_step "Tier 4: prune_aside_sessions" bash "$REPO_ROOT/scripts/prune_aside_sessions.sh" "$CLEAN_ARG" || true
+      STEP_TIMEOUT="$_prev_step_timeout"
+    fi
+    if [[ "${FILEPROVIDER_EVICT_APPROVED:-0}" == "1" && -f "$REPO_ROOT/scripts/evict_fileprovider.sh" ]]; then
+      STEP_TIMEOUT=900
+      run_job_step "Tier 4: evict_fileprovider" bash "$REPO_ROOT/scripts/evict_fileprovider.sh" "$CLEAN_ARG" || true
+      STEP_TIMEOUT="$_prev_step_timeout"
+    fi
 
     # Tier 5: Agent State Compaction & Rotated Logs (Codex vacuum debounced to 24h when healthy)
     [[ -f "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" ]] && run_job_step "Tier 5: cleanup_antigravity_brain" bash "$REPO_ROOT/scripts/cleanup_antigravity_brain.sh" "$CLEAN_ARG" || true
@@ -411,8 +428,11 @@ main() {
       CODE_SIGN_CLONES_APPROVED=1 run_job_step "Tier 5: cleanup_code_sign_clones" bash "$REPO_ROOT/scripts/cleanup_code_sign_clones.sh" "$CLEAN_ARG" || true
     fi
 
-    # Tier 6: Worktree venvs, deps, Claude state, and worktrees use the shared 48h default
+    # Tier 6: Worktree slimming, venvs, deps, Claude state, and worktrees use the shared 48h default
     # Candidates >= 90d (>3 months) are auto-approved without env vars; candidates < 90d require WORKTREE_APPROVED=1 / CLAUDE_STATE_APPROVED=1.
+    if [[ -f "$REPO_ROOT/scripts/slim_worktree_checkouts.sh" ]]; then
+      run_job_step "Tier 6: slim_worktree_checkouts" bash "$REPO_ROOT/scripts/slim_worktree_checkouts.sh" "$CLEAN_ARG" || true
+    fi
     if [[ -f "$REPO_ROOT/scripts/cleanup_worktree_deps.sh" ]]; then
       run_job_step "Tier 6: cleanup_worktree_deps" bash "$REPO_ROOT/scripts/cleanup_worktree_deps.sh" "$CLEAN_ARG" || true
     fi
