@@ -154,5 +154,17 @@ scratch_budget_artifact_children_batch 3 <"$unterminated_batch" >"$T/unterminate
 rc=$?
 [[ "$rc" == 1 && ! -s "$T/unterminated-output.bin" ]] && ok "unterminated input fails with no partial output" || bad "unterminated input not rejected (rc=$rc)"
 
+# 17. Unambiguous dependency directories stop descent in bounded discovery too.
+mkdir -p "$B/app/node_modules/@expo/build" "$B/app/dist"
+echo old >"$B/app/node_modules/@expo/build/blob"
+echo old >"$B/app/dist/blob"
+dep_stop_output="$T/dep-stop.bin"
+scratch_budget_artifact_children "$B/app" 3 >"$dep_stop_output" 2>/dev/null
+dep_stop_out="$(tr '\0' '\n' <"$dep_stop_output")"
+grep -q 'app/node_modules/@expo/build$' <<<"$dep_stop_out" \
+  && bad "descended into node_modules for nested build dir" || ok "bounded discovery stops descending into node_modules"
+grep -q 'app/dist$' <<<"$dep_stop_out" \
+  && ok "sibling dist dir still enumerated" || bad "sibling dist dir missed"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
