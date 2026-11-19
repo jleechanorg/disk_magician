@@ -581,6 +581,7 @@ fi
 _artifact_discovery_blocked=()
 if (( ${#candidates[@]} )); then
   candidate_dirs=()
+  _raw_candidate_dirs=()
   for _candidate in ${candidates[@]+"${candidates[@]}"}; do
     [[ -d "$_candidate" && ! -L "$_candidate" ]] || continue
     # The discovery helper fails closed for the entire batch when ANY candidate
@@ -592,17 +593,43 @@ if (( ${#candidates[@]} )); then
     # and /Volumes/diskm-scratch/.Spotlight-V100 did the same on macOS.
     # Skip candidates this process cannot read and keep the batch contract.
     [[ -r "$_candidate" && -x "$_candidate" ]] || continue
-    if [[ "$root_registered" == true ]]; then
-      python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope "$root" "$_candidate"
-      _scope_rc=$?
-      case "$_scope_rc" in
-        0) ;;
-        3) continue ;;
-        *) emit_discovery_deferred_summary unmeasurable-scope; exit 75 ;;
-      esac
-    fi
-    candidate_dirs+=("$_candidate")
+    _raw_candidate_dirs+=("$_candidate")
   done
+  if (( ${#_raw_candidate_dirs[@]} )); then
+    if [[ "$root_registered" == true ]]; then
+      artifact_batch_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-scope.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable-scope; exit 75; }
+      printf '%s\0' "${_raw_candidate_dirs[@]}" | python3 "$SCRIPT_DIR/lib/scratch_budget_artifact_children.py" scope-batch "$root" >"$artifact_batch_output_file"
+      _scope_rc=$?
+      if (( _scope_rc != 0 )); then
+        rm -f "$artifact_batch_output_file"
+        artifact_batch_output_file=""
+        emit_discovery_deferred_summary unmeasurable-scope
+        exit 75
+      fi
+      _scope_fields=()
+      _scope_field=""
+      while IFS= read -r -d '' _scope_field; do
+        _scope_fields+=("$_scope_field")
+      done <"$artifact_batch_output_file"
+      _scope_tail="$_scope_field"
+      rm -f "$artifact_batch_output_file"
+      artifact_batch_output_file=""
+      if [[ -n "$_scope_tail" || ${#_scope_fields[@]} -lt 2 || "${_scope_fields[0]}" != diskm-artifact-children-v1 || ! "${_scope_fields[1]}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+        emit_discovery_deferred_summary unmeasurable-scope
+        exit 75
+      fi
+      _scope_expected_count=$(( ${#_scope_fields[@]} - 2 ))
+      if [[ "${_scope_fields[1]}" != "$_scope_expected_count" ]]; then
+        emit_discovery_deferred_summary unmeasurable-scope
+        exit 75
+      fi
+      for ((_scope_i=2; _scope_i<${#_scope_fields[@]}; _scope_i++)); do
+        candidate_dirs+=("${_scope_fields[_scope_i]}")
+      done
+    else
+      candidate_dirs=("${_raw_candidate_dirs[@]}")
+    fi
+  fi
   _artifact_extra=()
   if (( ${#candidate_dirs[@]} )); then
     artifact_batch_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-artifacts.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable; exit 75; }

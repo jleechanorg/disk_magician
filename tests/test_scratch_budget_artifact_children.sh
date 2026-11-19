@@ -154,5 +154,34 @@ scratch_budget_artifact_children_batch 3 <"$unterminated_batch" >"$T/unterminate
 rc=$?
 [[ "$rc" == 1 && ! -s "$T/unterminated-output.bin" ]] && ok "unterminated input fails with no partial output" || bad "unterminated input not rejected (rc=$rc)"
 
+# scope-batch validates all candidates in a single invocation with NUL framing.
+SCOPE_HELPER="$ROOT/scripts/lib/scratch_budget_artifact_children.py"
+SR="$T/scope-root"
+mkdir -p "$SR/ok-top" "$SR/tmp/ok-$'sub\nname'" "$SR/.hidden-dir" "$SR/_disk_magician_archive_1" "$SR/system-reserved" "$SR/git-parent/.git" "$SR/git-parent/nested"
+scope_in="$T/scope-in.bin"
+scope_out="$T/scope-out.bin"
+scope_expected="$T/scope-expected.bin"
+printf '%s\0' "$SR/ok-top" "$SR/tmp/ok-$'sub\nname'" "$SR/.hidden-dir" "$SR/_disk_magician_archive_1" "$SR/system-reserved" "$SR/git-parent/nested" >"$scope_in"
+python3 "$SCOPE_HELPER" scope-batch "$SR" <"$scope_in" >"$scope_out"
+rc=$?
+printf 'diskm-artifact-children-v1\0' >"$scope_expected"
+printf '2\0%s\0%s\0' "$SR/ok-top" "$SR/tmp/ok-$'sub\nname'" >>"$scope_expected"
+[[ "$rc" == 0 ]] && cmp -s "$scope_out" "$scope_expected" && ok "scope-batch accepts valid dirs, preserves newline paths, and filters out-of-scope entries" || bad "scope-batch mismatch (rc=$rc)"
+
+scope_empty="$T/scope-empty.bin"
+scope_empty_expected="$T/scope-empty-expected.bin"
+python3 "$SCOPE_HELPER" scope-batch "$SR" </dev/null >"$scope_empty"
+printf 'diskm-artifact-children-v1\0' >"$scope_empty_expected"
+printf '0\0' >>"$scope_empty_expected"
+cmp -s "$scope_empty" "$scope_empty_expected" && ok "scope-batch empty input emits valid zero-count header" || bad "scope-batch empty framing mismatch"
+
+printf '%s' "$SR/ok-top" | python3 "$SCOPE_HELPER" scope-batch "$SR" >"$T/scope-unterm.bin" 2>/dev/null
+rc=$?
+[[ "$rc" == 1 && ! -s "$T/scope-unterm.bin" ]] && ok "scope-batch rejects unterminated NUL input with no partial output" || bad "scope-batch unterminated input not rejected (rc=$rc)"
+
+printf '%s\0' "$SR/does-not-exist" | python3 "$SCOPE_HELPER" scope-batch "$SR" >"$T/scope-oserr.bin" 2>/dev/null
+rc=$?
+[[ "$rc" == 1 && ! -s "$T/scope-oserr.bin" ]] && ok "scope-batch exits 1 on OSError with no partial output" || bad "scope-batch OSError not rejected (rc=$rc)"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

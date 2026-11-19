@@ -14,6 +14,7 @@ Defaults to dry-run (pass --clean or --apply to execute).
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -26,6 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 DEFAULT_MAX_AGE_DAYS = 2
 DEFAULT_MIN_DEDUP_SIZE = 1024  # 1 KB
+PER_SESSION_MEASURE_TIMEOUT_S = 300.0
 
 
 def format_size(bytes_val: int) -> str:
@@ -38,20 +40,83 @@ def format_size(bytes_val: int) -> str:
     return f"{v:.2f} TB"
 
 
+class _BinaryStdout:
+    """In-process stdout buffer adapter for diskm_measure --nul output."""
+
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+
+
+def _session_measure_deadline_arg(now_mono: Optional[float] = None) -> Optional[str]:
+    base = time.monotonic() if now_mono is None else now_mono
+    deadline_mono = base + PER_SESSION_MEASURE_TIMEOUT_S
+    raw_act_deadline = os.environ.get("ACT_DEADLINE_AT", "").strip()
+    if raw_act_deadline:
+        try:
+            act_deadline_mono = float(raw_act_deadline)
+        except ValueError:
+            return None
+        deadline_mono = min(deadline_mono, act_deadline_mono)
+    if deadline_mono <= 0.0:
+        deadline_mono = 1e-6
+    return f"{deadline_mono:.6f}"
+
+
+def _measure_dir_in_process(dir_path: Path) -> Tuple[bytes, int, str]:
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import diskm_measure  # pylint: disable=import-outside-toplevel
+
+    deadline_arg = _session_measure_deadline_arg()
+    if deadline_arg is None:
+        return b"diskm-measure-leaves-v1\0", 2, "invalid ACT_DEADLINE_AT"
+
+    fake_stdout = _BinaryStdout()
+    fake_stderr = io.StringIO()
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    returncode = 0
+    try:
+        sys.stdout = fake_stdout  # type: ignore[assignment]
+        sys.stderr = fake_stderr
+        try:
+            diskm_measure.main([str(dir_path), "100", deadline_arg, "--nul"])
+        except SystemExit as exc:
+            if isinstance(exc.code, int):
+                returncode = exc.code
+            elif exc.code:
+                returncode = 1
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+    return b"diskm-measure-leaves-v1\0" + fake_stdout.buffer.getvalue(), returncode, fake_stderr.getvalue()
+
+
 def get_dir_size(dir_path: Path) -> int:
     """Return unique apparent bytes from the shared metadata walker.
 
     A Git or unreadable boundary has unknown size; do not replace that unknown
     with zero or follow links to report their targets.
     """
-    lib = Path(__file__).resolve().parent / "lib" / "scratch_budget.sh"
-    command = ["bash", "-c", 'source "$1"; scratch_budget_measure_files "$2" 100 --nul',
-               "_", str(lib), str(dir_path)]
-    try:
-        result = subprocess.run(command, capture_output=True, timeout=300, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise OSError(f"size measurement unavailable for {dir_path}: {exc}") from exc
-    fields = result.stdout.split(b"\0")
+    use_subprocess = bool(os.environ.get("ACT_DEADLINE_AT")) or (
+        getattr(subprocess.run, "__module__", "") != "subprocess"
+    )
+    if use_subprocess:
+        lib = Path(__file__).resolve().parent / "lib" / "scratch_budget.sh"
+        command = ["bash", "-c", 'source "$1"; scratch_budget_measure_files "$2" 100 --nul',
+                   "_", str(lib), str(dir_path)]
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=300, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OSError(f"size measurement unavailable for {dir_path}: {exc}") from exc
+        raw_stdout = result.stdout
+        returncode = result.returncode
+        stderr_text = result.stderr.decode(errors="replace")[:512]
+    else:
+        raw_stdout, returncode, stderr_text = _measure_dir_in_process(dir_path)
+        stderr_text = stderr_text[:512]
+
+    fields = raw_stdout.split(b"\0")
     if not fields or fields[0] != b"diskm-measure-leaves-v1":
         raise OSError(f"size measurement protocol missing for {dir_path}")
     fields = fields[1:]
@@ -60,8 +125,8 @@ def get_dir_size(dir_path: Path) -> int:
     if len(fields) % 6:
         raise OSError(f"size measurement record incomplete for {dir_path}")
     total = 0
-    incomplete = result.returncode != 0
-    incomplete_reason = result.stderr.decode(errors="replace")[:512]
+    incomplete = returncode != 0
+    incomplete_reason = stderr_text
     print(f"measurement_method=inode-deduplicated-file-summed-apparent threshold_mib=100 path={dir_path}", file=sys.stderr)
     for offset in range(0, len(fields), 6):
         size, files, newest, flag, path, apparent = fields[offset:offset + 6]
@@ -86,7 +151,7 @@ def get_dir_size(dir_path: Path) -> int:
             continue
         print(f"detail:{flag.decode('ascii')} bytes={unique_bytes} files={files.decode('ascii')} newest={newest.decode('ascii')} size_method=inode-deduplicated-file-summed-apparent threshold_mib=100 apparent_bytes={apparent_bytes} unique_bytes={unique_bytes} {decoded_path}", file=sys.stderr)
     if incomplete:
-        rc = result.returncode or 1
+        rc = returncode or 1
         print(f"measurement_status=incomplete rc={rc} path={dir_path}", file=sys.stderr)
         if incomplete_reason:
             print(f"measurement_error={incomplete_reason}", file=sys.stderr)

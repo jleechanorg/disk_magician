@@ -20,6 +20,13 @@
     <string>scratch-pressure-timer</string>
     <key>HOME</key>
     <string>@HOME@</string>
+    <!-- Authority: operator decision 2026-11-18 ("yes permanently hands off"), CLAUDE.md:237-265 -->
+    <key>DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT</key>
+    <string>50</string>
+    <key>DISK_MAGICIAN_SCRATCH_DETAIL</key>
+    <string>off</string>
+    <key>DISK_MAGICIAN_SCRATCH_MIN_KB</key>
+    <string>262144</string>
   </dict>
   <key>StartInterval</key>
   <integer>1200</integer>

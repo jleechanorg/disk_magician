@@ -55,7 +55,8 @@ c14_discover_repos() {
 _av_git() {
     python3 -c 'import os,signal,subprocess,sys
 t,*c=sys.argv[1:]
-p=subprocess.Popen(["git",*c],start_new_session=True)
+env={k:v for k,v in os.environ.items() if k not in ("GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_COMMON_DIR","GIT_OBJECT_DIRECTORY","GIT_CEILING_DIRECTORIES")}
+p=subprocess.Popen(["git",*c],env=env,start_new_session=True)
 try: sys.exit(p.wait(timeout=float(t)))
 except subprocess.TimeoutExpired:
  os.killpg(p.pid,signal.SIGKILL); p.wait(); sys.exit(124)' "${C14_GIT_TIMEOUT:-120}" "$@"
@@ -232,9 +233,13 @@ c14_ephemeral_retention() {
     done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
     [[ "$archive_origin" != --archive-origin ]] || return 1
     rel=${p#"$HOME"/}
+    if [[ "$rel" == "$p" ]]; then
+        local _h; _h="$(cd "$HOME" 2>/dev/null && pwd -P)" && [[ -n "$_h" ]] && rel=${p#"$_h"/}
+    fi
     if [[ "$rel" =~ ^\.gemini/antigravity/(brain|implicit)\.backup$ ]]; then echo 43200
     elif [[ "$rel" =~ ^\.gemini/antigravity(-cli)?/brain/[^/]+$ ]]; then echo 30240
     elif [[ "$rel" =~ ^\.aside/u/[^/]+/sessions/[^/]+$ || "$rel" =~ ^\.claude/supervisor/cmux-codex-launchd\.[0-9]{8}T[0-9]{6}\.log$ ]]; then safety_disposable_recency_floor_minutes
+    elif [[ "$rel" =~ ^\.hermes/cache/scratch/[^/]+$ ]]; then safety_disposable_recency_floor_minutes
     elif [[ "$rel" =~ ^\.llm-inspector/captures/(capture-[^/]*\.json|[^/]*\.summary\.json)$ ]]; then safety_disposable_recency_floor_minutes
     else return 1; fi
 }
@@ -306,12 +311,16 @@ _av_rebuildable() (
 )
 
 # _av_simulator_release_proof <path>: a simulator device is a removal proof only
-# when this exact immediate CoreSimulator device child has a current-generation
-# release receipt older than the fixed 48 h floor, remains Shutdown in a fresh
-# simctl inventory, and has no simulator lease record. This kind lives in the
-# shared C14 gate, so callers cannot turn arbitrary content into a proof with a
-# caller-supplied boolean. Receipt, floor, inventory and lease semantics remain
-# owned by the simulator lifecycle helpers rather than being reimplemented here.
+# when this exact immediate CoreSimulator device child has no simulator lease
+# record, remains Shutdown in a fresh simctl inventory, and satisfies either:
+#   (a) a current-generation release receipt older than the fixed 48 h floor
+#       when managed (`gen/<udid>` exists), or
+#   (b) `SIM_UNLEASED_EPHEMERAL_APPROVED=1` for a never-managed (`! -e gen/<udid>`),
+#       non-`wai-shared-*`, unreserved Shutdown device whose content is >= 48 h idle.
+# This kind lives in the shared C14 gate, so callers cannot turn arbitrary
+# content into a proof with a caller-supplied boolean. Receipt, floor, inventory
+# and lease semantics remain owned by the simulator lifecycle helpers rather
+# than being reimplemented here.
 _av_simulator_release_proof() (
     local p="$1" root state udid generation receipt generation_value snap
     udid="${p##*/}"
@@ -324,19 +333,30 @@ _av_simulator_release_proof() (
     state="${DISK_MAGICIAN_STATE_DIR:-$HOME/.disk_magician_state}"
     generation="$state/gen/$udid"
     receipt="$state/receipts/sim_release_receipts.jsonl"
-    [[ -d "$state/gen" && ! -L "$state/gen" && -f "$generation" && ! -L "$generation" &&
-       -f "$receipt" && ! -L "$receipt" && ! -e "$state/sim_leases/$udid" && ! -L "$state/sim_leases/$udid" ]] || return 1
-    generation_value="$(cat "$generation" 2>/dev/null)" || return 1
-    [[ "$generation_value" =~ ^[1-9][0-9]*$ ]] || return 1
-    # The lifecycle module only declares helpers; it does not source this file.
-    # Sourcing it in this subshell is therefore one-way and reuses the canonical
-    # generation, release-floor, inventory and tri-state lease implementation.
-    # shellcheck source=scripts/sim_lifecycle.sh
-    source "$_AV_DIR/../sim_lifecycle.sh" || return 1
-    [[ "$(sim_lease_state "$udid")" == absent ]] || return 1
-    sim_released_and_idle "$udid" || return 1
-    snap="$(sim_snapshot)" || return 1
-    printf '%s\n' "$snap" | awk -F'\t' -v u="$udid" '$1==u {rows++; if($3=="Shutdown") shutdown++} END{exit rows==1 && shutdown==1 ? 0 : 1}'
+    if [[ -e "$generation" || -L "$generation" ]]; then
+        [[ -d "$state/gen" && ! -L "$state/gen" && -f "$generation" && ! -L "$generation" &&
+           -f "$receipt" && ! -L "$receipt" && ! -e "$state/sim_leases/$udid" && ! -L "$state/sim_leases/$udid" ]] || return 1
+        generation_value="$(cat "$generation" 2>/dev/null)" || return 1
+        [[ "$generation_value" =~ ^[1-9][0-9]*$ ]] || return 1
+        # The lifecycle module only declares helpers; it does not source this file.
+        # Sourcing it in this subshell is therefore one-way and reuses the canonical
+        # generation, release-floor, inventory and tri-state lease implementation.
+        # shellcheck source=scripts/sim_lifecycle.sh
+        source "$_AV_DIR/../sim_lifecycle.sh" || return 1
+        [[ "$(sim_lease_state "$udid")" == absent ]] || return 1
+        sim_released_and_idle "$udid" || return 1
+        snap="$(sim_snapshot)" || return 1
+        printf '%s\n' "$snap" | awk -F'\t' -v u="$udid" '$1==u {rows++; if($3=="Shutdown") shutdown++} END{exit rows==1 && shutdown==1 ? 0 : 1}'
+    # Authority: operator decision 2026-11-18 ("yes permanently hands off"), CLAUDE.md:237-265
+    elif [[ "${SIM_UNLEASED_EPHEMERAL_APPROVED:-0}" == "1" ]]; then
+        [[ ! -e "$state/sim_leases/$udid" && ! -L "$state/sim_leases/$udid" ]] || return 1
+        # shellcheck source=scripts/sim_lifecycle.sh
+        source "$_AV_DIR/../sim_lifecycle.sh" || return 1
+        [[ "$(sim_lease_state "$udid")" == absent ]] || return 1
+        sim_unleased_ephemeral_idle "$udid"
+    else
+        return 1
+    fi
 )
 
 # _av_sparkle_installed_twin <bundle-name> <staged-path>: rc 0 when the same app is
@@ -594,6 +614,21 @@ _av_os_clone_proof() {
         "${parent_id##*:}" == "$uid" && "${root_id##*:}" == "$uid" ]]
 }
 
+# _av_untracked_in_enclosing_worktree <scope_path> <candidate_path>
+# Authority: CLAUDE.md:237,265 + operator decision 2026-11-18 ("yes permanently hands off")
+_av_untracked_in_enclosing_worktree() (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_CEILING_DIRECTORIES
+    local scope_path="$1" p="$2" scope_real p_git_dir p_top p_top_real tracked_out
+    scope_real="$(cd "$scope_path" 2>/dev/null && pwd -P)" || return 1
+    p_git_dir="$p"
+    [[ -d "$p_git_dir" ]] || p_git_dir="$(dirname -- "$p")"
+    p_top="$(_av_git -C "$p_git_dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+    p_top_real="$(cd "$p_top" 2>/dev/null && pwd -P)" || return 1
+    [[ "$p_top_real" == "$scope_real" ]] || return 1
+    tracked_out="$(_av_git --literal-pathspecs -C "$scope_real" ls-files -- "$p" 2>/dev/null)" || return 1
+    [[ -z "$tracked_out" ]]
+)
+
 # _av_owner_null_relax_reason <worktree> <inventory> <min_idle_minutes>
 # Prints nothing when a linked worktree's own owner-null lease may be freed
 # without the T3 flag; otherwise kept:<token>. The idle floor is never below 60.
@@ -626,7 +661,7 @@ _av_artifact_removal_verdict() (
     [[ "${1:-}" == --self-test ]] && { echo incomplete; return 0; }
     # A caller-provided dry-run marker is an unconditional no-push boundary.
     [[ "${DRY_RUN:-}" != true ]] || C14_NO_RESCUE_PUSH=1
-    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 min_idle_explicit=0 relax_reason='' q done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
+    local p=${1:-} kind='' deadline='' inventory_out='' own_claim='' t3_owner_null=0 min_idle=0 min_idle_explicit=0 relax_reason='' q scope_path='' done='' st newest ret frozen_id='' frozen_parent_id='' frozen_root_id='' inv admin_source='' admin_filter='' candidate_lease='' released=0 reb=0 proofs='' newest='' floor_class=''
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -690,6 +725,7 @@ if "volumes" in d: volume.config()' "$q" "$_AV_DIR/.." 2>/dev/null || { echo kep
     candidate_lease="$(lease_path_for "$p")" || { echo kept:check-failed; return 0; }
     while IFS= read -r -d '' q; do  # a lease not dead or released keeps; absent only on ENOENT
         [[ "$q" == OK ]] && { done=1; continue; }
+        scope_path="$q"
         q="$(lease_path_for "$q")" || { echo kept:check-failed; return 0; }
         case "$(python3 -c 'import os,sys;d=os.path.dirname(sys.argv[1])
 try:os.stat(d);os.stat(sys.argv[1]);print("lease" if os.access(d,os.R_OK|os.X_OK) else "")
@@ -726,6 +762,11 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
                 relax_reason=kept:owner-unknown
                 if [[ -n "$candidate_lease" && "$q" == "$candidate_lease" && -f "$p/.git" ]]; then
                     relax_reason="$(_av_owner_null_relax_reason "$p" "$inv" "$min_idle")"
+                    [[ -n "$relax_reason" ]] || continue
+                elif [[ ( "$kind" == xcode-derived-data || "$kind" == rebuildable ) && "$scope_path" != "$p" && "$p" == "$scope_path/"* && -f "$scope_path/.git" && ! -e "$p/.git" ]] &&
+                    _av_untracked_in_enclosing_worktree "$scope_path" "$p"; then
+                    # Authority: CLAUDE.md:237,265 + operator decision 2026-11-18 ("yes permanently hands off")
+                    relax_reason="$(_av_owner_null_relax_reason "$scope_path" "$inv" "$min_idle")"
                     [[ -n "$relax_reason" ]] || continue
                 fi
                 if [[ "$t3_owner_null" != 1 || -z "$candidate_lease" || "$q" != "$candidate_lease" ]]; then

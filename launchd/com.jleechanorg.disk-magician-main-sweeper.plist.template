@@ -35,6 +35,13 @@
     <string>1</string>
     <key>CLAUDE_STATE_APPROVED</key>
     <string>1</string>
+    <!-- Authority: operator decision 2026-11-18 ("yes permanently hands off"), CLAUDE.md:237-265 -->
+    <key>SIM_UNLEASED_EPHEMERAL_APPROVED</key>
+    <string>1</string>
+    <key>FILEPROVIDER_EVICT_APPROVED</key>
+    <string>1</string>
+    <key>DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT</key>
+    <string>50</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

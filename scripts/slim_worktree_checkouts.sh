@@ -42,6 +42,8 @@ source "$SCRIPT_DIR/lib/lsof_linux.sh"
 source "$SCRIPT_DIR/lib/sparse_excludes.sh"
 # shellcheck source=lib/ao_worktree_config.sh
 source "$SCRIPT_DIR/lib/ao_worktree_config.sh" 2>/dev/null || true
+# shellcheck source=lib/worktree_lease.sh
+source "$SCRIPT_DIR/lib/worktree_lease.sh"
 
 DRY_RUN=true
 MIN_AGE_DAYS="${SLIM_MIN_AGE_DAYS:-}"
@@ -113,6 +115,23 @@ is_live() {
   return 1
 }
 
+# Authority: CLAUDE.md:265 + operator decision 2026-11-18 ("yes permanently hands off")
+lease_blocks_slim() {
+  local wt="$1" lease state
+  lease="$(lease_path_for "$wt")"
+  [[ -e "$lease" || -L "$lease" ]] || return 1
+  state="$(lease_owner_state "$lease" 2>/dev/null)" || state="unreadable"
+  case "$state" in
+    dead|released|none) return 1 ;;
+    '')
+      echo "  LEASE-SKIP $wt (kept:lease-busy: unreadable)"
+      return 0 ;;
+    *)
+      echo "  LEASE-SKIP $wt (kept:lease-busy: $state)"
+      return 0 ;;
+  esac
+}
+
 is_ao_owned() {
   local wt="$1" d real_wt
   # The live AO worktree roots are <container>/.ao/data/worktrees/<project>/<wt>;
@@ -151,6 +170,8 @@ skipped_ao=0
 skipped_dirty=0
 skipped_sparse=0
 skipped_safety=0
+skipped_lease=0
+skipped_open=0
 seen="|"
 
 mode="DRY-RUN"; [[ "$DRY_RUN" == false ]] && mode="APPLY"
@@ -190,6 +211,17 @@ for root in "${ROOTS[@]}"; do
     if worktree_is_recently_active_minutes "$wt" "$MIN_AGE_MIN" "$now"; then skipped_recent=$((skipped_recent+1)); continue; fi
     if is_live "$wt"; then skipped_live=$((skipped_live+1)); continue; fi
     if ! _reason="$(safety_gate "$wt" 2>/dev/null)"; then skipped_safety=$((skipped_safety+1)); echo "  SAFETY-SKIP $wt ($_reason)"; continue; fi
+    # Authority: CLAUDE.md:265 + operator decision 2026-11-18 ("yes permanently hands off")
+    if ! lease_registry_mutation_lock_enter; then
+      skipped_lease=$((skipped_lease+1))
+      echo "  LEASE-SKIP $wt (kept:lease-busy: registry-lock-busy)"
+      continue
+    fi
+    if lease_blocks_slim "$wt"; then
+      skipped_lease=$((skipped_lease+1))
+      lease_registry_mutation_lock_exit || true
+      continue
+    fi
 
     # Any locally modified file under an excluded path means the exclusion would
     # hide uncommitted work. Untracked files are unaffected by sparse-checkout.
@@ -200,14 +232,38 @@ for root in "${ROOTS[@]}"; do
         break
       fi
     done
-    if [[ -n "$dirty_hit" ]]; then skipped_dirty=$((skipped_dirty+1)); echo "  DIRTY-SKIP $wt (local changes under $dirty_hit)"; continue; fi
+    if [[ -n "$dirty_hit" ]]; then
+      skipped_dirty=$((skipped_dirty+1))
+      echo "  DIRTY-SKIP $wt (local changes under $dirty_hit)"
+      lease_registry_mutation_lock_exit || true
+      continue
+    fi
+
+    open_hit=""
+    for ex in ${WT_EXCLUDES[@]+"${WT_EXCLUDES[@]}"}; do
+      [[ -e "$wt/$ex" || -L "$wt/$ex" ]] || continue
+      open_st="$(python3 "$SCRIPT_DIR/c14_probe.py" open-file "$wt/$ex" 2>/dev/null || echo kept:check-failed)"
+      if [[ "$open_st" != "no" ]]; then
+        open_hit="$ex ($open_st)"
+        break
+      fi
+    done
+    if [[ -n "$open_hit" ]]; then
+      skipped_open=$((skipped_open+1))
+      echo "  OPEN-SKIP  $wt (kept:open-file under $open_hit)"
+      lease_registry_mutation_lock_exit || true
+      continue
+    fi
 
     kb=0
     for ex in ${WT_EXCLUDES[@]+"${WT_EXCLUDES[@]}"}; do
       e=$(du -sk "$wt/$ex" 2>/dev/null | awk '{print $1}')
       [[ "$e" =~ ^[0-9]+$ ]] && kb=$((kb + e))
     done
-    [[ "$kb" -gt 0 ]] || continue
+    if [[ ! "$kb" -gt 0 ]]; then
+      lease_registry_mutation_lock_exit || true
+      continue
+    fi
 
     if [[ "$DRY_RUN" == true ]]; then
       echo "  WOULD-SLIM ${kb}KB $wt"
@@ -223,9 +279,12 @@ for root in "${ROOTS[@]}"; do
         echo "  SLIMMED    ${kb}KB $wt"
         deletion_log "$(basename "$0")" slim "$kb" "$wt"
       else
-        echo "  FAILED     $wt"; continue
+        echo "  FAILED     $wt"
+        lease_registry_mutation_lock_exit || true
+        continue
       fi
     fi
+    lease_registry_mutation_lock_exit || true
     total_kb=$((total_kb + kb))
     count=$((count + 1))
   done
@@ -239,6 +298,8 @@ echo "  Skipped (live cwd):     $skipped_live"
 echo "  Skipped (ao-owned):     $skipped_ao"
 echo "  Skipped (already sparse): $skipped_sparse"
 echo "  Skipped (local changes): $skipped_dirty"
+echo "  Skipped (lease busy):   $skipped_lease"
+echo "  Skipped (open files):   $skipped_open"
 echo "  Skipped (safety gate):  $skipped_safety"
 if [[ "$DRY_RUN" == true ]]; then
   echo "  DRY-RUN: re-run with WORKTREE_APPROVED=1 $(basename "$0") --clean to apply"
