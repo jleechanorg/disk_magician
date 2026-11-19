@@ -233,7 +233,6 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
     let start = Instant::now();
     let root = root.to_path_buf();
     let root_metadata = fs::symlink_metadata(&root)?;
-    let (root_wire, root_bytes_hex) = path_parts(&root);
     let root_device = device(&root_metadata);
     let mut files = Vec::new();
     let mut directories = Vec::new();
@@ -250,8 +249,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
             "deadline before root inspection",
         );
         return Ok(report(
-            root_wire,
-            root_bytes_hex,
+            &root,
             false,
             apparent_total,
             allocated_total,
@@ -268,8 +266,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
             "entry limit is zero",
         );
         return Ok(report(
-            root_wire,
-            root_bytes_hex,
+            &root,
             false,
             apparent_total,
             allocated_total,
@@ -297,8 +294,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
             &mut allocated_total,
         )?;
         return Ok(report(
-            root_wire,
-            root_bytes_hex,
+            &root,
             true,
             apparent_total,
             allocated_total,
@@ -326,8 +322,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
             &mut allocated_total,
         )?;
         return Ok(report(
-            root_wire,
-            root_bytes_hex,
+            &root,
             true,
             apparent_total,
             allocated_total,
@@ -509,8 +504,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
     directories.sort_by(|a, b| a.path.cmp(&b.path));
     gaps.sort_by(|a, b| (&a.path, a.kind).cmp(&(&b.path, b.kind)));
     Ok(report(
-        root_wire,
-        root_bytes_hex,
+        &root,
         all_complete,
         apparent_total,
         allocated_total,
@@ -549,8 +543,7 @@ fn add_file(
 }
 
 fn report(
-    root: String,
-    root_bytes_hex: Option<String>,
+    root_path: &Path,
     complete: bool,
     apparent_bytes: u64,
     allocated_bytes: u64,
@@ -558,6 +551,7 @@ fn report(
     directories: Vec<DirectoryMeasurement>,
     gaps: Vec<ScanGap>,
 ) -> ScanReport {
+    let (root, root_bytes_hex) = path_parts(root_path);
     ScanReport {
         root,
         root_bytes_hex,

@@ -432,7 +432,7 @@ fn small_directory_leaves(ledger: &Value) -> bool {
                         .and_then(Value::as_u64)
                         .and_then(|kb| kb.checked_mul(1024))
                 });
-            if !bytes.is_some_and(|bytes| bytes < 100 * 1024 * 1024) {
+            if bytes.is_none_or(|bytes| bytes >= 100 * 1024 * 1024) {
                 return false;
             }
         }
