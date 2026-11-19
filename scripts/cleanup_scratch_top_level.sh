@@ -184,6 +184,17 @@ if [[ -n "$BUDGET_PCT" ]]; then
 fi
 MAX_KB=$(( MAX_GIB * 1024 * 1024 ))
 
+# Wall-clock slice reserved for eviction when the ordering pass runs out of
+# budget. Ordering measures every candidate with a full content-mtime walk, so on
+# a large volume it consumes the whole deadline; discarding the measured set at
+# that point meant the eviction stage never ran at all (measured 2026-11-18:
+# 90,548 verdicts over 5 h and zero removals on a 190 GiB volume).
+LRU_EVICT_RESERVE_SECONDS="${DISK_MAGICIAN_LRU_EVICT_RESERVE_SECONDS:-60}"
+[[ "$LRU_EVICT_RESERVE_SECONDS" =~ ^[0-9]+$ ]] || LRU_EVICT_RESERVE_SECONDS=60
+LRU_EVICT_RESERVE_SECONDS=$((10#$LRU_EVICT_RESERVE_SECONDS))
+(( LRU_EVICT_RESERVE_SECONDS < 5 )) && LRU_EVICT_RESERVE_SECONDS=5
+(( LRU_EVICT_RESERVE_SECONDS > 600 )) && LRU_EVICT_RESERVE_SECONDS=600
+
 if [[ "$DRY_RUN" != true && "$SCRATCH_AUTOMATIC" == 1 && "${SCRATCH_TOP_LEVEL_APPROVED:-0}" == 1 ]]; then
   echo "Refusing automatic mode with SCRATCH_TOP_LEVEL_APPROVED=1; automatic mode never overrides C14 keeps." >&2
   exit 2
@@ -799,11 +810,18 @@ sys.stderr.write(f"{below}\n")
     done <"$_lru_keep_file"
     rm -f "$_lru_keep_file" "${_lru_keep_file}.cnt"
   fi
+  lru_order=complete
   for entry in ${_lru_candidates[@]+"${_lru_candidates[@]}"}; do
     if deadline_exceeded; then
-      rm -f "$LRU_LIST"
-      echo "deferred:deadline (LRU ordering incomplete; nothing evicted)"
-      exit 0
+      # The expired budget belongs to ORDERING, not to the whole pass. Evict the
+      # subset that was ordered inside the reserved slice instead of discarding
+      # it: an all-or-nothing ordering meant a large volume reclaimed nothing.
+      lru_order=partial
+      if [[ -n "${ACT_DEADLINE_AT:-}" ]]; then
+        ACT_DEADLINE_AT="$(python3 -c 'import sys,time; print(f"{time.monotonic()+float(sys.argv[1]):.6f}")' "$LRU_EVICT_RESERVE_SECONDS" 2>/dev/null)" || ACT_DEADLINE_AT=""
+        export ACT_DEADLINE_AT
+      fi
+      break
     fi
     if [[ -L "$entry" ]]; then echo "kept:symlink $entry"; kept=$(( kept + 1 )); continue; fi
     [[ -d "$entry" ]] || continue
@@ -1059,7 +1077,7 @@ if [[ -n "$BUDGET_PCT" ]]; then
   ((_estimated_gap_bytes < 0)) && _estimated_gap_bytes=0
   if [[ "$DRY_RUN" == true ]]; then
     echo "budget_unmet=not-run projected_budget_unmet=unknown projected_gap_bytes=${_estimated_gap_bytes} (candidate-size estimate; physical allocation may be shared)"
-    echo "lru: stop=${budget_stop:-preview-complete} would_evict=$removable"
+    echo "lru: stop=${budget_stop:-preview-complete} would_evict=$removable order=${lru_order:-complete}"
   else
     budget_pair_after="$(scratch_usage_pair 2>/dev/null)" || budget_pair_after=""
     if [[ "$budget_pair_after" =~ ^[0-9]+\ [0-9]+$ ]]; then
@@ -1087,7 +1105,7 @@ if [[ -n "$BUDGET_PCT" ]]; then
       budget_gap_after_bytes=unknown
     fi
     echo "budget_unmet=${budget_unmet_status} projected_budget_unmet=not-applicable target_reached=$([[ "$budget_unmet_status" == 0 ]] && echo true || echo false) reason=${budget_reason} budget_gap_before_bytes=${budget_gap_before_bytes} budget_gap_after_bytes=${budget_gap_after_bytes:-unknown}"
-    echo "lru: stop=${budget_reason} evicted=$removed not_pushed_or_dirty=$(printf '%s' "$lru_priors" | grep -cE 'kept:(not-pushed|dirty)')"
+    echo "lru: stop=${budget_reason} evicted=$removed not_pushed_or_dirty=$(printf '%s' "$lru_priors" | grep -cE 'kept:(not-pushed|dirty)') order=${lru_order:-complete}"
     printf '%s' "$lru_priors" | sort | uniq -c | sed -E 's/^ *([0-9]+) (.*)$/lru: prior_verdict \2=\1/'
     if [[ "$budget_unmet_status" == unknown ]]; then
       echo "deferred:budget-result-unmeasurable reason=${budget_reason}"

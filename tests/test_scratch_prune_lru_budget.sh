@@ -403,6 +403,40 @@ chmod +x "$FAKE_AUTO_DISKM"
 out_auto="$(run env DISK_MAGICIAN_SCRATCH_ROOT_OVERRIDE="" DISK_MAGICIAN_DISKM_BIN="$FAKE_AUTO_DISKM" DISK_MAGICIAN_SCRATCH_AUTOMATIC=1 DISK_MAGICIAN_SCRATCH_DETAIL=off bash "$SCRIPT" --dry-run 2>&1)"
 [[ "$out_auto" == *"detail-summary:"* ]] && ok "automatic mode ignores detail=off" || bad "automatic mode ignores detail=off" "$out_auto"
 
+echo "Test 15: an ordering deadline evicts the units already ordered (partial LRU)"
+# Regression (measured 2026-11-18): the ordering pass measured every candidate with
+# a full content-mtime walk and, on deadline, threw the measured set away and
+# exited with "nothing evicted". On a 190 GiB volume that meant 5 h and 90,548
+# verdicts for zero removals - the eviction stage never ran at all. The ordered
+# subset must be evicted inside a reserved slice instead of being discarded.
+use_root
+for n in o1 o2 o3 o4 o5 o6; do make_tree "$n" $(( 4000 - ${n#o} * 100 )); done
+SLOWSHIM="$T/slowshim"
+mkdir -p "$SLOWSHIM"
+for tool in find stat; do
+  real="$(command -v "$tool")"
+  cat >"$SLOWSHIM/$tool" <<EOF
+#!/usr/bin/env bash
+# Every content-mtime probe costs 1s, so a 3s ordering budget cannot finish six
+# candidates: the pass must evict what it already ordered.
+sleep 1
+exec "$real" "\$@"
+EOF
+  chmod +x "$SLOWSHIM/$tool"
+done
+ordering_deadline="$(python3 -c 'import time; print(time.monotonic()+3)' )"
+out="$(RUN_PATH="$SLOWSHIM:/usr/bin:/bin:/usr/sbin" legacy_budget env DISK_MAGICIAN_LRU_EVICT_RESERVE_SECONDS=25 \
+  bash "$SCRIPT" --dry-run --budget-pct 1 --deadline-at "$ordering_deadline" 2>&1)"; rc=$?
+[[ "$rc" == 0 ]] && ok "partial-ordering run exits 0" || bad "partial-ordering run exits 0" "rc=$rc"
+check "partial ordering is reported" "order=partial" "$out"
+[[ "$out" != *"nothing evicted"* ]] && ok "ordered units are not discarded" || bad "ordered units are not discarded" "$out"
+check "an already-ordered unit is still previewed" "would-remove:" "$out"
+
+use_root
+make_tree old-deadline 3000
+out="$(legacy_budget bash "$SCRIPT" --dry-run --budget-pct 1 2>&1)"; rc=$?
+check "a complete ordering pass is still labelled complete" "order=complete" "$out"
+
 echo
 echo "test_scratch_prune_lru_budget: $PASS passed, $FAIL failed"
 [[ "$FAIL" == 0 ]]
