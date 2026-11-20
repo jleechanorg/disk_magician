@@ -64,8 +64,8 @@ fn ledger_paths(state_dir: &Path, root: &Path) -> io::Result<Vec<(PathBuf, Strin
     Ok(paths)
 }
 
-fn registered_scratch() -> io::Result<(PathBuf, u64)> {
-    let output = Command::new("diskm")
+pub(crate) fn registered_scratch() -> io::Result<(PathBuf, u64)> {
+    let output = Command::new(crate::LEGACY_CLI)
         .args(["volume", "path", "scratch"])
         .output()?;
     if !output.status.success() {
@@ -115,7 +115,7 @@ fn current_verdict(path: &Path, min_hours: u32) -> String {
             r#"
 import os, signal, subprocess, sys, time
 window = int(sys.argv[1])
-argv = ["diskm", "quarantine", "verdict", sys.argv[2], "--kind", "ephemeral",
+argv = [sys.argv[3], "quarantine", "verdict", sys.argv[2], "--kind", "ephemeral",
         "--deadline-at", str(time.monotonic() + window)]
 child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
 try:
@@ -133,6 +133,7 @@ else:
         ])
         .arg(CHECK_WINDOW_SECONDS.to_string())
         .arg(path)
+        .arg(crate::LEGACY_CLI)
         .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")
         .env_remove("DISK_MAGICIAN_OPERATOR_TARGETS");
     if min_hours == 6 {
@@ -163,14 +164,19 @@ fn checked_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> Str
     check_path(root, path, device).map_or(verdict, str::to_owned)
 }
 
-pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Report> {
+pub fn preview(
+    state_dir: &Path,
+    min_hours: u32,
+    limit: usize,
+    scan_deadline: Duration,
+) -> io::Result<Report> {
     let (root, device) = registered_scratch()?;
     let paths = match ledger_paths(state_dir, &root) {
         Err(error) if min_hours == 6 && error.kind() == io::ErrorKind::NotFound => Vec::new(),
         result => result?,
     };
     if min_hours == 6 {
-        return live_preview(root, device, paths, min_hours, limit, true);
+        return live_preview(root, device, paths, min_hours, limit, true, scan_deadline);
     }
     let recorded_paths = paths.len();
     let mut complete = true;
@@ -257,11 +263,12 @@ fn live_preview(
     min_hours: u32,
     limit: usize,
     scratch_verdicts: bool,
+    scan_deadline: Duration,
 ) -> io::Result<Report> {
     let measured = scan(
         &root,
         ScanOptions {
-            deadline: Duration::MAX,
+            deadline: scan_deadline,
             max_entries: usize::MAX,
         },
     )?;
@@ -432,12 +439,15 @@ pub fn scope_report(
     state_dir: Option<&Path>,
     min_hours: u32,
     limit: usize,
+    scan_deadline: Duration,
 ) -> io::Result<Value> {
     let required_state =
         || state_dir.ok_or_else(|| io::Error::other("this scope requires --state-dir"));
     match scope {
-        "scratch" => serde_json::to_value(preview(required_state()?, min_hours, limit)?)
-            .map_err(io::Error::other),
+        "scratch" => {
+            serde_json::to_value(preview(required_state()?, min_hours, limit, scan_deadline)?)
+                .map_err(io::Error::other)
+        }
         "tmp" => {
             let scopes = preview_scopes::resolve_host_temp_scopes()?;
             let mut reports = Vec::new();
@@ -447,7 +457,15 @@ pub fn scope_report(
                     let history = state_dir
                         .and_then(|state| ledger_paths(state, &temp.path).ok())
                         .unwrap_or_default();
-                    live_preview(temp.path.clone(), device, history, min_hours, limit, false)
+                    live_preview(
+                        temp.path.clone(),
+                        device,
+                        history,
+                        min_hours,
+                        limit,
+                        false,
+                        Duration::MAX,
+                    )
                 })();
                 reports.push(match result {
                     Ok(inventory) => json!({"source": temp.source, "inventory": inventory}),
@@ -473,7 +491,7 @@ pub fn scope_report(
         "all" => {
             let mut reports = serde_json::Map::new();
             for name in ["scratch", "tmp", "worktrees", "ledger"] {
-                let report = scope_report(name, state_dir, min_hours, limit)
+                let report = scope_report(name, state_dir, min_hours, limit, scan_deadline)
                     .unwrap_or_else(|error| json!({"error": error.to_string()}));
                 reports.insert(name.into(), report);
             }

@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::process::{Command, Output};
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_diskm-rust"))
+    Command::new(env!("CARGO_BIN_EXE_diskm"))
         .args(args)
         .output()
         .expect("candidate executable starts")
@@ -13,7 +13,7 @@ fn help_names_the_separate_read_only_executable() {
     let output = run(&["--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("diskm-rust"));
+    assert!(help.starts_with("diskm "));
     assert!(help.contains("status"));
     assert!(help.contains("scan"));
     assert!(help.contains("history"));
@@ -52,6 +52,58 @@ fn invalid_options_and_mutating_commands_fail_as_usage_errors() {
         &["status", ".", "--max-entries", "1"],
         &["history", "--days", "10", "--state-dir", "."],
         &["reclaim", ".", "--apply"],
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+    }
+}
+
+#[test]
+fn preview_deadline_is_restricted_to_six_hour_scratch() {
+    for args in [
+        &[
+            "preview",
+            "--scope",
+            "tmp",
+            "--min-hours",
+            "6",
+            "--deadline-ms",
+            "250",
+        ][..],
+        &[
+            "preview",
+            "--scope",
+            "all",
+            "--min-hours",
+            "6",
+            "--state-dir",
+            ".",
+            "--deadline-ms",
+            "250",
+        ],
+        &[
+            "preview",
+            "--scope",
+            "scratch",
+            "--min-hours",
+            "48",
+            "--state-dir",
+            ".",
+            "--deadline-ms",
+            "250",
+        ],
+        &[
+            "preview",
+            "--scope",
+            "scratch",
+            "--min-hours",
+            "6",
+            "--state-dir",
+            ".",
+            "--deadline-ms",
+            "0",
+        ],
     ] {
         let output = run(args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");

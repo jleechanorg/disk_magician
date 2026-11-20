@@ -10,7 +10,7 @@ for name in ("WORKTREE_APPROVED", "MANUAL_DISCARD", "MANUAL_INCLUDE_LIVE",
              "DISK_MAGICIAN_WORKTREE_FLOOR_HOURS", "DISK_MAGICIAN_AGE_FLOOR_MINUTES",
              "DISK_MAGICIAN_OPERATOR_TARGETS"):
     env.pop(name, None)
-cmd = ["diskm", "cleanup-worktrees", "--dry-run"]
+cmd = [sys.argv[2], "cleanup-worktrees", "--dry-run"]
 child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          env=env, start_new_session=True)
 try:
@@ -162,7 +162,12 @@ fn parse_ledger_line(line: &str) -> Option<WorktreeCandidate> {
 
 pub fn preview_worktrees() -> io::Result<WorktreePreviewReport> {
     let output = Command::new("python3")
-        .args(["-c", PREVIEW_RUNNER, &TIMEOUT_SECONDS.to_string()])
+        .args([
+            "-c",
+            PREVIEW_RUNNER,
+            &TIMEOUT_SECONDS.to_string(),
+            crate::LEGACY_CLI,
+        ])
         .env_remove("WORKTREE_APPROVED")
         .env_remove("MANUAL_DISCARD")
         .env_remove("MANUAL_INCLUDE_LIVE")

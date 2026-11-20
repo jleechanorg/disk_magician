@@ -21,7 +21,7 @@ fn preview_ledger_reports_known_locations_without_qualifying_them() {
         json!({"rows":[{"row_type":"cleanup_root","canonical_path":known_root}]}).to_string(),
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_diskm-rust"))
+    let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
         .args(["preview", "--scope", "ledger", "--state-dir"])
         .arg(&tree)
         .arg("--dry-run")
@@ -40,7 +40,7 @@ fn preview_ledger_reports_known_locations_without_qualifying_them() {
 
 #[test]
 fn preview_scope_accepts_named_places_rather_than_arbitrary_paths() {
-    let output = Command::new(env!("CARGO_BIN_EXE_diskm-rust"))
+    let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
         .args(["preview", "--scope", "/"])
         .output()
         .unwrap();

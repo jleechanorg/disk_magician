@@ -10,7 +10,7 @@ name = "diskm_shadow"
 path = "src/lib.rs"
 
 [[bin]]
-name = "diskm-rust"
+name = "diskm"
 path = "src/main.rs"
 
 [dependencies]

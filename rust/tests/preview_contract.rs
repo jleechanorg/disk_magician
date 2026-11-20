@@ -1,3 +1,4 @@
+use diskm_shadow::preview;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
@@ -5,9 +6,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     root: PathBuf,
@@ -51,7 +54,7 @@ impl Fixture {
     }
 
     fn install_diskm(&self) {
-        let executable = self.bin.join("diskm");
+        let executable = self.bin.join("disk-magician");
         fs::write(
             &executable,
             r##"#!/bin/sh
@@ -84,7 +87,8 @@ exit 64
     }
 
     fn run(&self, extra: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_diskm-rust"))
+        let _env_guard = PROCESS_ENV_LOCK.lock().unwrap();
+        Command::new(env!("CARGO_BIN_EXE_diskm"))
             .args(["preview", "--state-dir"])
             .arg(&self.state)
             .args(extra)
@@ -100,6 +104,25 @@ exit 64
             .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")
             .output()
             .expect("candidate executable starts")
+    }
+
+    fn report_with_scan_deadline(&self, deadline: Duration) -> Value {
+        let _env_guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let original_path = std::env::var_os("PATH");
+        let original_call_log = std::env::var_os("CALL_LOG");
+        let original_scratch = std::env::var_os("FAKE_SCRATCH_ROOT");
+        let path = std::env::join_paths(std::iter::once(self.bin.clone()).chain(
+            std::env::split_paths(&original_path.clone().unwrap_or_default()),
+        ))
+        .unwrap();
+        std::env::set_var("PATH", path);
+        std::env::set_var("CALL_LOG", &self.calls);
+        std::env::set_var("FAKE_SCRATCH_ROOT", &self.scratch);
+        let result = preview::scope_report("scratch", Some(&self.state), 6, 10, deadline);
+        restore_env("PATH", original_path);
+        restore_env("CALL_LOG", original_call_log);
+        restore_env("FAKE_SCRATCH_ROOT", original_scratch);
+        serde_json::to_value(result.unwrap()).unwrap()
     }
 
     fn calls(&self) -> String {
@@ -124,6 +147,14 @@ exit 64
 impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.root).expect("remove owned preview fixture");
+    }
+}
+
+fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
+    if let Some(value) = value {
+        std::env::set_var(name, value);
+    } else {
+        std::env::remove_var(name);
     }
 }
 
@@ -248,7 +279,7 @@ fn malformed_history_and_unavailable_scratch_fail_closed() {
     assert!(malformed.stdout.is_empty());
 
     fixture.write_ledger(json!([]));
-    let diskm = fixture.bin.join("diskm");
+    let diskm = fixture.bin.join("disk-magician");
     fs::write(
         &diskm,
         "#!/bin/sh\nif [ \"$1\" = volume ]; then exit 75; fi\nexit 64\n",
@@ -464,6 +495,60 @@ fn preview_verifies_allocated_space_before_sparse_apparent_size() {
         sparse_candidate["allocated_bytes"].as_u64().unwrap()
             < sparse_candidate["apparent_bytes"].as_u64().unwrap()
     );
+}
+
+#[test]
+fn six_hour_scratch_preview_accepts_an_explicit_scan_deadline() {
+    let fixture = Fixture::new();
+    let candidate = fixture.scratch_path("removable-old-cache");
+    Fixture::mark_old(&candidate);
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6", "--deadline-ms", "1000"]));
+
+    assert_eq!(result["min_hours"], 6);
+    assert_eq!(result["complete"], true);
+}
+
+#[test]
+fn incomplete_scan_reports_and_checks_only_the_measured_frontier() {
+    let fixture = Fixture::new();
+    let eligible = fixture.scratch_path("removable-old-cache");
+    let held = fixture.scratch_path("held-unknown-cache");
+    Fixture::mark_old(&eligible);
+    Fixture::mark_old(&held);
+    let frontier = fixture.scratch.join("unvisited-directory");
+    fs::create_dir(&frontier).unwrap();
+    for index in 0..50_000 {
+        fs::write(frontier.join(format!("filler-{index}")), b"x").unwrap();
+    }
+    fixture.install_diskm();
+
+    let result = fixture.report_with_scan_deadline(Duration::from_millis(20));
+    let candidates = result["candidates"].as_array().unwrap();
+
+    assert_eq!(result["complete"], false);
+    assert_eq!(result["discovery"]["complete"], false);
+    assert!(result["discovery"]["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| {
+            gap["kind"] == "deadline" && gap["path"] == frontier.to_string_lossy().as_ref()
+        }));
+    let eligible_row = candidates
+        .iter()
+        .find(|row| row["path"] == eligible.to_string_lossy().as_ref())
+        .unwrap();
+    assert_eq!(eligible_row["verdict"], "remove");
+    assert_eq!(eligible_row["eligible"], true);
+    let held_row = candidates
+        .iter()
+        .find(|row| row["path"] == held.to_string_lossy().as_ref())
+        .unwrap();
+    assert_eq!(held_row["verdict"], "kept:owner-unknown");
+    assert_eq!(held_row["eligible"], false);
+    assert!(!fixture.calls().contains(frontier.to_str().unwrap()));
 }
 
 #[test]

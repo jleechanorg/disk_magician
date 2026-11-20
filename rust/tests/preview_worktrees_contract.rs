@@ -31,7 +31,7 @@ impl Fixture {
     }
 
     fn diskm(&self, body: &str) {
-        let script = self.bin.join("diskm");
+        let script = self.bin.join("disk-magician");
         fs::write(
             &script,
             format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n{body}\n"),
@@ -47,7 +47,7 @@ impl Fixture {
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
         ))
         .unwrap();
-        Command::new(env!("CARGO_BIN_EXE_diskm-rust"))
+        Command::new(env!("CARGO_BIN_EXE_diskm"))
             .args(["preview", "--scope", "worktrees", "--dry-run"])
             .env("PATH", path)
             .env("CALLS", &self.calls)
