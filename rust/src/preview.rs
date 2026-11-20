@@ -327,9 +327,9 @@ fn live_preview(
             || dir.must_itemize != Some(false)
             || protected_scope(&root, path)
             || evidence_containers.contains(path)
-            || !dir
+            || dir
                 .newest_content_epoch_seconds
-                .is_some_and(|epoch| epoch <= cutoff)
+                .is_none_or(|epoch| epoch > cutoff)
         {
             continue;
         }

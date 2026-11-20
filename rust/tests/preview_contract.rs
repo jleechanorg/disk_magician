@@ -402,3 +402,23 @@ fn six_hour_discovery_never_marks_symlinks_or_nested_git_content_eligible() {
         .calls()
         .contains(tracked_looking_content.to_str().unwrap()));
 }
+
+#[test]
+fn whole_scratch_discovery_outlives_an_explicit_verdict_limit() {
+    let fixture = Fixture::new();
+    let first = fixture.scratch_path("removable-a.cache");
+    let second = fixture.scratch_path("removable-b.cache");
+    Fixture::mark_old(&first);
+    Fixture::mark_old(&second);
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6", "--max-candidates", "1"]));
+    assert_eq!(result["discovery"]["complete"], true);
+    assert_eq!(result["discovery"]["files_measured"], 2);
+    assert_eq!(result["complete"], false);
+    let candidates = result["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0]["verdict"], "remove");
+    assert_eq!(candidates[1]["verdict"], "deferred:verification-limit");
+    assert!(!fixture.calls().contains(second.to_str().unwrap()));
+}
