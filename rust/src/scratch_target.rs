@@ -273,12 +273,13 @@ pub fn apply(
     let resume_name = resume_path
         .file_name()
         .ok_or_else(|| io::Error::other("resume state needs a filename"))?;
-    let resume_path = fs::canonicalize(resume_parent)?.join(resume_name);
+    let canonical_resume = fs::canonicalize(resume_parent)?.join(resume_name);
+    let resume_path = canonical_resume.as_path();
     let manifest = read_manifest(manifest_path, digest)?;
     if resume_path.starts_with(&manifest.root.path) {
         return Err(io::Error::other("resume state must be outside Scratch"));
     }
-    if fs::canonicalize(manifest_path)? == resume_path {
+    if fs::canonicalize(manifest_path)?.as_path() == resume_path {
         return Err(io::Error::other("resume state cannot replace the manifest"));
     }
     let existing_state = if resume_path.exists() {
