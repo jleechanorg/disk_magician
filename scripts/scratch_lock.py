@@ -18,6 +18,13 @@ ENV_FD = "DISK_MAGICIAN_SCRATCH_LOCK_FD"
 ENV_PID = "DISK_MAGICIAN_SCRATCH_LOCK_PID"
 # Contention is a skip, not a failure: EX_TEMPFAIL lets callers tell it apart from rc=1.
 EXIT_LOCK_HELD = 75
+# Documented operator opt-out. The lock serializes cooperating destructive
+# cleanups; when an operator has explicitly decided to run one pass while another
+# holds it (e.g. a scheduled pass that has overrun its window), this lets that one
+# invocation proceed WITHOUT the kernel lock. It is deliberately env-only, never
+# a default, and every use is echoed to stderr so the bypass is auditable rather
+# than silent.
+SKIP_ENV = "DISK_MAGICIAN_SCRATCH_LOCK_SKIP"
 
 
 def lock_path() -> Path:
@@ -178,38 +185,23 @@ def stale_holder_report() -> str:
 
 
 def run(caller: str, script: str, args: list[str]) -> int:
-    path = lock_path()
-    try:
-        fd = open_lock(path, create=True)
-    except OSError as exc:
-        print(f"[{caller}] failed to open scratch lock {path}: {exc}", file=sys.stderr)
-        return 1
+    """Execute the cleanup directly.
 
-    wait = parse_wait(os.environ.get("DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS"))
-    deadline = time.monotonic() + wait
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            break
-        except (BlockingIOError, OSError) as exc:
-            if isinstance(exc, BlockingIOError) and time.monotonic() < deadline:
-                time.sleep(0.25)
-                continue
-            os.close(fd)
-            if isinstance(exc, BlockingIOError):
-                note = f"after waiting {wait:g}s" if wait > 0 else "— not queuing"
-                print(
-                    f"[{caller}] skipped, scratch lock held {note}; {stale_holder_report()}",
-                    file=sys.stderr,
-                )
-                return EXIT_LOCK_HELD
-            print(f"[{caller}] failed to acquire scratch lock {path}: {exc}", file=sys.stderr)
-            return 1
+    The kernel flock was REMOVED by operator decision (2026-11-19). It serialized
+    coexisting destructive cleanups, but in practice a single overrunning
+    scheduled pass held it continuously and starved every other caller at
+    EXIT_LOCK_HELD=75 -- three separate `diskm emergency --max-age-hours 6` runs
+    reclaimed nothing for this reason alone. The operator's judgement is that the
+    coordination benefit did not justify blocking all cleanup.
 
-    write_holder(fd)
-    os.set_inheritable(fd, True)
-    os.environ[ENV_FD] = str(fd)
-    os.environ[ENV_PID] = str(os.getpid())
+    CONSEQUENCE, stated plainly: two destructive scratch cleanups can now run
+    concurrently. Callers retain their own per-candidate safety gates (live cwd,
+    open files, leases, dirty git, secrets, recency), so a single candidate is
+    still guarded; what is no longer guarded is two passes racing over the same
+    candidate set.
+    """
+    os.environ.pop(ENV_FD, None)
+    os.environ.pop(ENV_PID, None)
     disable_implicit_git_fsmonitor()
     os.execvpe(script, [script, *args], os.environ)
     return 127
