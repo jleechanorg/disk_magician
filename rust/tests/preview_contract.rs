@@ -1,9 +1,10 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -106,6 +107,14 @@ exit 64
         fs::write(&path, b"fixture").unwrap();
         path
     }
+
+    fn mark_old(path: &Path) {
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        fs::File::open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+    }
 }
 
 impl Drop for Fixture {
@@ -175,6 +184,7 @@ fn preview_reads_history_and_only_current_remove_verdicts_are_eligible() {
 fn explicit_six_hour_preview_passes_scoped_age_to_each_verdict() {
     let fixture = Fixture::new();
     let candidate = fixture.scratch_path("removable-old-cache");
+    Fixture::mark_old(&candidate);
     fixture.write_ledger(json!([
         {"row_type":"cleanup_event", "canonical_path":candidate}
     ]));
@@ -291,7 +301,11 @@ fn six_hour_preview_leaves_nested_repositories_to_the_worktree_route() {
     let container = fixture.scratch.join("old-container");
     let repository = container.join("checkout");
     fs::create_dir_all(&repository).unwrap();
-    fs::write(repository.join(".git"), "gitdir: /unavailable/admin").unwrap();
+    let git_marker = repository.join(".git");
+    fs::write(&git_marker, "gitdir: /unavailable/admin").unwrap();
+    Fixture::mark_old(&git_marker);
+    Fixture::mark_old(&repository);
+    Fixture::mark_old(&container);
     fixture.write_ledger(json!([
         {"row_type":"cleanup_event", "canonical_path":container}
     ]));
@@ -304,4 +318,95 @@ fn six_hour_preview_leaves_nested_repositories_to_the_worktree_route() {
     );
     assert_eq!(result["candidates"][0]["eligible"], false);
     assert!(!fixture.calls().contains("\tquarantine\tverdict"));
+}
+
+#[test]
+fn six_hour_preview_discovers_old_scratch_artifacts_without_ledger_rows() {
+    let fixture = Fixture::new();
+    let old_file = fixture.scratch_path("removable-old-file.cache");
+    Fixture::mark_old(&old_file);
+
+    let old_directory = fixture.scratch.join("removable-old-directory");
+    fs::create_dir(&old_directory).unwrap();
+    let directory_payload = old_directory.join("payload.cache");
+    fs::write(&directory_payload, b"old generated content").unwrap();
+    Fixture::mark_old(&directory_payload);
+    Fixture::mark_old(&old_directory);
+
+    let mixed_directory = fixture.scratch.join("mixed-siblings");
+    fs::create_dir(&mixed_directory).unwrap();
+    let stale_sibling = mixed_directory.join("removable-stale-sibling.cache");
+    fs::write(&stale_sibling, b"old generated content").unwrap();
+    Fixture::mark_old(&stale_sibling);
+    let recent_sibling = mixed_directory.join("recent-sibling.cache");
+    fs::write(&recent_sibling, b"recent generated content").unwrap();
+
+    fixture.write_ledger(json!([]));
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6"]));
+    assert_eq!(result["min_hours"], 6);
+    assert_eq!(result["complete"], true);
+    let candidates = result["candidates"].as_array().unwrap();
+    for path in [&old_file, &old_directory, &stale_sibling] {
+        let candidate = candidates
+            .iter()
+            .find(|entry| entry["path"] == path.to_string_lossy().as_ref())
+            .unwrap_or_else(|| panic!("missing discovered candidate {}", path.display()));
+        assert_eq!(candidate["eligible"], true, "{}", path.display());
+        assert_eq!(candidate["verdict"], "remove", "{}", path.display());
+    }
+    assert!(!candidates
+        .iter()
+        .any(|entry| entry["path"] == recent_sibling.to_string_lossy().as_ref()));
+
+    let discovered_files = result["discovery"]["file_paths"].as_array().unwrap();
+    assert!(discovered_files
+        .iter()
+        .any(|path| path == old_file.to_string_lossy().as_ref()));
+    assert!(discovered_files
+        .iter()
+        .any(|path| path == stale_sibling.to_string_lossy().as_ref()));
+    assert!(!discovered_files
+        .iter()
+        .any(|path| path == recent_sibling.to_string_lossy().as_ref()));
+    assert!(!fixture.calls().contains(recent_sibling.to_str().unwrap()));
+}
+
+#[test]
+fn six_hour_discovery_never_marks_symlinks_or_nested_git_content_eligible() {
+    let fixture = Fixture::new();
+    let symlink_target = fixture.scratch_path("removable-symlink-target.cache");
+    Fixture::mark_old(&symlink_target);
+    let symlink = fixture.scratch.join("removable-old-symlink.cache");
+    std::os::unix::fs::symlink(&symlink_target, &symlink).unwrap();
+
+    let repository = fixture.scratch.join("removable-old-repository");
+    fs::create_dir_all(&repository).unwrap();
+    fs::write(repository.join(".git"), "gitdir: /unavailable/admin").unwrap();
+    let tracked_looking_content = repository.join("removable-inside-repository.cache");
+    fs::write(&tracked_looking_content, b"repository content").unwrap();
+    Fixture::mark_old(&tracked_looking_content);
+    Fixture::mark_old(&repository);
+
+    fixture.write_ledger(json!([]));
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6"]));
+    let candidates = result["candidates"].as_array().unwrap();
+    assert!(!candidates
+        .iter()
+        .any(|entry| entry["path"] == symlink.to_string_lossy().as_ref()));
+    assert!(!candidates.iter().any(|entry| {
+        entry["path"] == tracked_looking_content.to_string_lossy().as_ref()
+            && entry["eligible"] == true
+    }));
+    assert!(!candidates.iter().any(|entry| {
+        entry["path"] == repository.to_string_lossy().as_ref() && entry["eligible"] == true
+    }));
+    assert!(!fixture.calls().contains(symlink.to_str().unwrap()));
+    assert!(!fixture.calls().contains(repository.to_str().unwrap()));
+    assert!(!fixture
+        .calls()
+        .contains(tracked_looking_content.to_str().unwrap()));
 }
