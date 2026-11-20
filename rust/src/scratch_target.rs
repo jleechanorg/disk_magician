@@ -7,6 +7,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -142,11 +143,6 @@ fn acquire_scratch_lock() -> io::Result<ResumeLock> {
             "Scratch cleanup is already in progress",
         ));
     }
-    let fd = file.as_raw_fd();
-    let descriptor_flags = unsafe { fcntl(fd, F_GETFD) };
-    if descriptor_flags < 0 || unsafe { fcntl(fd, F_SETFD, descriptor_flags & !FD_CLOEXEC) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
     Ok(ResumeLock(file))
 }
 
@@ -243,13 +239,23 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
 }
 
 fn legacy_apply(manifest: &Path, digest: &str, relative: &str, lock_fd: i32) -> io::Result<String> {
-    let output = Command::new(LEGACY)
+    let mut command = Command::new(LEGACY);
+    command
         .args(["quarantine", "scratch-apply", "--manifest"])
         .arg(manifest)
-        .args(["--manifest-sha256", digest, "--path", relative])
-        .env("DISK_MAGICIAN_SCRATCH_LOCK_FD", lock_fd.to_string())
-        .env_remove("DISK_MAGICIAN_SCRATCH_LOCK_PID")
-        .output()?;
+        .args(["--manifest-sha256", digest, "--path", relative]);
+    // Keep the writer alive across an interrupted parent only in the actuator.
+    // Metadata and volume probes have no need to inherit the descriptor.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = fcntl(lock_fd, F_GETFD);
+            if flags < 0 || fcntl(lock_fd, F_SETFD, flags & !FD_CLOEXEC) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output()?;
     if !output.status.success() {
         return Err(io::Error::other("exact manifest apply failed"));
     }
@@ -284,14 +290,16 @@ pub fn apply(
     let resume_name = resume_path
         .file_name()
         .ok_or_else(|| io::Error::other("resume state needs a filename"))?;
-    let resume_path = fs::canonicalize(resume_parent)?.join(resume_name);
+    let canonical_resume = fs::canonicalize(resume_parent)?.join(resume_name);
+    let resume_path = canonical_resume.as_path();
     let manifest = read_manifest(manifest_path, digest)?;
     if resume_path.starts_with(&manifest.root.path) {
         return Err(io::Error::other("resume state must be outside Scratch"));
     }
-    if fs::canonicalize(manifest_path)? == resume_path {
+    if fs::canonicalize(manifest_path)?.as_path() == resume_path {
         return Err(io::Error::other("resume state cannot replace the manifest"));
     }
+    let writer = acquire_scratch_lock();
     let existing_state = if resume_path.exists() {
         let meta = fs::symlink_metadata(resume_path)?;
         if !meta.is_file() {
@@ -329,7 +337,7 @@ pub fn apply(
     } else {
         None
     };
-    let _lock = match acquire_scratch_lock() {
+    let lock = match writer {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             if let Some(state) = existing_state.as_ref() {
@@ -446,7 +454,7 @@ pub fn apply(
         state.status = format!("applying:{path}");
         state.used_after_bytes = Some(used_before);
         write_state(resume_path, &state)?;
-        let result = match legacy_apply(manifest_path, digest, &path, _lock.0.as_raw_fd()) {
+        let result = match legacy_apply(manifest_path, digest, &path, lock.0.as_raw_fd()) {
             Ok(result) => result,
             Err(_) => return Ok(report_recovery_required(&state)),
         };
