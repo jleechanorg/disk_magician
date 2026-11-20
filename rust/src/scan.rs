@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, Metadata};
 use std::io;
@@ -22,7 +22,7 @@ pub enum FileKind {
     Special,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanGapKind {
     ReadDirectory,
@@ -74,7 +74,7 @@ pub struct DirectoryMeasurement {
     pub complete: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScanGap {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +170,10 @@ fn path_parts(path: &Path) -> (String, Option<String>) {
 #[cfg(not(unix))]
 fn path_parts(path: &Path) -> (String, Option<String>) {
     (path.to_string_lossy().into_owned(), None)
+}
+
+pub(crate) fn path_parts_for_report(path: &Path) -> (String, Option<String>) {
+    path_parts(path)
 }
 
 fn file_kind(metadata: &Metadata) -> FileKind {

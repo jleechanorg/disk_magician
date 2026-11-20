@@ -106,23 +106,14 @@ exit 64
             .expect("candidate executable starts")
     }
 
-    fn report_with_scan_deadline(&self, deadline: Duration) -> Value {
-        let _env_guard = PROCESS_ENV_LOCK.lock().unwrap();
-        let original_path = std::env::var_os("PATH");
-        let original_call_log = std::env::var_os("CALL_LOG");
-        let original_scratch = std::env::var_os("FAKE_SCRATCH_ROOT");
-        let path = std::env::join_paths(std::iter::once(self.bin.clone()).chain(
-            std::env::split_paths(&original_path.clone().unwrap_or_default()),
-        ))
-        .unwrap();
-        std::env::set_var("PATH", path);
-        std::env::set_var("CALL_LOG", &self.calls);
-        std::env::set_var("FAKE_SCRATCH_ROOT", &self.scratch);
-        let result = preview::scope_report("scratch", Some(&self.state), 6, 10, deadline);
-        restore_env("PATH", original_path);
-        restore_env("CALL_LOG", original_call_log);
-        restore_env("FAKE_SCRATCH_ROOT", original_scratch);
-        serde_json::to_value(result.unwrap()).unwrap()
+    fn report_with_checkpoint(&self, deadline: Duration, checkpoint: &Path) -> Value {
+        let deadline_ms = deadline.as_millis().to_string();
+        report(&self.run(&[
+            "--deadline-ms",
+            &deadline_ms,
+            "--resume-state",
+            checkpoint.to_str().unwrap(),
+        ]))
     }
 
     fn calls(&self) -> String {
@@ -524,17 +515,23 @@ fn incomplete_scan_reports_and_checks_only_the_measured_frontier() {
     }
     fixture.install_diskm();
 
-    let result = fixture.report_with_scan_deadline(Duration::from_millis(20));
+    let checkpoint = fixture.root.join("scratch-resume.json");
+    let result = fixture.report_with_checkpoint(Duration::from_millis(20), &checkpoint);
+    assert_eq!(result["min_hours"], 48);
     let candidates = result["candidates"].as_array().unwrap();
 
     assert_eq!(result["complete"], false);
     assert_eq!(result["discovery"]["complete"], false);
-    assert!(result["discovery"]["gaps"]
+    assert!(checkpoint.is_file());
+    let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    assert_eq!(saved["complete"], false);
+    assert!(saved["unfinished_scan_paths"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|gap| {
-            gap["kind"] == "deadline" && gap["path"] == frontier.to_string_lossy().as_ref()
+        .any(|row| {
+            row["path"] == frontier.to_string_lossy().as_ref()
+                || row["path"] == fixture.scratch.to_string_lossy().as_ref()
         }));
     let eligible_row = candidates
         .iter()
@@ -549,6 +546,31 @@ fn incomplete_scan_reports_and_checks_only_the_measured_frontier() {
     assert_eq!(held_row["verdict"], "kept:owner-unknown");
     assert_eq!(held_row["eligible"], false);
     assert!(!fixture.calls().contains(frontier.to_str().unwrap()));
+
+    let resumed = fixture.report_with_checkpoint(Duration::from_secs(10), &checkpoint);
+    assert_eq!(resumed["complete"], true);
+    assert_eq!(
+        resumed["resumable"]["unfinished_scan_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let resumed_candidates = resumed["candidates"].as_array().unwrap();
+    assert_eq!(
+        resumed_candidates
+            .iter()
+            .filter(|row| row["path"] == eligible.to_string_lossy().as_ref())
+            .count(),
+        1
+    );
+    assert_eq!(
+        resumed_candidates
+            .iter()
+            .filter(|row| row["path"] == held.to_string_lossy().as_ref())
+            .count(),
+        1
+    );
 }
 
 #[test]

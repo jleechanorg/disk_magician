@@ -7,16 +7,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-const USAGE: &str = "diskm — read-only Disk Magician candidate; output is JSON
+const USAGE: &str = "diskm — Disk Magician migration candidate; output is JSON
 
   diskm status [PATH] [--state-dir DIR] [--json]
   diskm scan PATH [--deadline-ms N] [--max-entries N] [--json]
   diskm history --state-dir DIR [--days 7|30] [--json]
   diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_FILE [--path ...] | --paths-from FILE
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all]
-  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--dry-run]
+  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--dry-run]
 
-Preview --deadline-ms bounds only the six-hour Scratch discovery scan. Verdict
+Preview --deadline-ms bounds Scratch discovery. With --resume-state, it supports
+48-hour and six-hour live inventory. Verdict
 checks run afterward, up to 12 seconds per candidate, and the default scan is unlimited.
 
 Status defaults to the current directory. Scan defaults to 30 seconds and
@@ -58,6 +59,7 @@ enum Operation {
         min_hours: u32,
         max_candidates: usize,
         scan_deadline: Option<Duration>,
+        resume_state: Option<PathBuf>,
     },
 }
 
@@ -105,6 +107,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     let mut min_hours = 48;
     let mut max_candidates = None;
     let mut preview_deadline_ms = None;
+    let mut preview_resume_state = None;
     let mut positional_only = false;
 
     while let Some(arg) = args.next() {
@@ -138,6 +141,10 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             }
             Some("--deadline-ms") if command == "preview" => {
                 preview_deadline_ms = Some(positive(&mut args, "--deadline-ms")?);
+            }
+            Some("--resume-state") if command == "preview" && preview_resume_state.is_none() => {
+                preview_resume_state =
+                    Some(PathBuf::from(required_value(&mut args, "--resume-state")?));
             }
             Some("--state-dir") if command != "scan" && state_dir.is_none() => {
                 state_dir = Some(PathBuf::from(required_value(&mut args, "--state-dir")?));
@@ -183,9 +190,15 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             days,
         }),
         "preview" => {
-            if preview_deadline_ms.is_some() && (preview_scope != "scratch" || min_hours != 6) {
+            if preview_resume_state.is_some() && preview_scope != "scratch" {
+                return Err("preview --resume-state requires --scope scratch".into());
+            }
+            if preview_deadline_ms.is_some()
+                && (preview_scope != "scratch"
+                    || (min_hours != 6 && preview_resume_state.is_none()))
+            {
                 return Err(
-                    "preview --deadline-ms is only supported for --scope scratch --min-hours 6"
+                    "preview --deadline-ms requires Scratch with --min-hours 6 or --resume-state"
                         .into(),
                 );
             }
@@ -198,6 +211,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
                 min_hours,
                 max_candidates: max_candidates.unwrap_or(20),
                 scan_deadline: preview_deadline_ms.map(Duration::from_millis),
+                resume_state: preview_resume_state,
             })
         }
         _ => unreachable!("command already validated"),
@@ -350,14 +364,27 @@ fn run(operation: Operation) -> io::Result<u8> {
             min_hours,
             max_candidates,
             scan_deadline,
+            resume_state,
         } => {
-            print_json(&preview::scope_report(
-                scope,
-                state_dir.as_deref(),
-                min_hours,
-                max_candidates,
-                scan_deadline.unwrap_or(Duration::MAX),
-            )?)?;
+            let report = if let Some(checkpoint) = resume_state.as_deref() {
+                preview::scope_report_resumable(
+                    scope,
+                    state_dir.as_deref(),
+                    min_hours,
+                    max_candidates,
+                    scan_deadline.unwrap_or(Duration::MAX),
+                    checkpoint,
+                )?
+            } else {
+                preview::scope_report(
+                    scope,
+                    state_dir.as_deref(),
+                    min_hours,
+                    max_candidates,
+                    scan_deadline.unwrap_or(Duration::MAX),
+                )?
+            };
+            print_json(&report)?;
         }
     }
     Ok(0)
