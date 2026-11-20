@@ -113,7 +113,7 @@ FAIL=0
 
 assert_contains() {
   local name="$1" needle="$2" haystack="$3"
-  if grep -qF "$needle" <<<"$haystack"; then
+  if grep -qF -- "$needle" <<<"$haystack"; then
     echo "  PASS  $name"
     PASS=$(( PASS + 1 ))
   else
@@ -175,10 +175,11 @@ assert_receipt_field "volume reclaim result is retained when Scratch prune times
 
 echo "Test 0c: the LRU budget opt-in switches the Scratch pass to approved budget mode"
 : > "$INVOCATION_LOG"
-INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 \
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS=6 \
   /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
 LRU_CALLS="$(cat "$INVOCATION_LOG")"
 assert_contains "opt-in passes --budget-pct to scratch-prune" "disk_magician scratch-prune --clean --budget-pct 50 --budget-preserve-content-keeps " "$LRU_CALLS"
+assert_contains "scheduled Scratch retains 48h even with the old 6h override" "--budget-floor-minutes 2880" "$LRU_CALLS"
 assert_contains "opt-in runs the approved non-automatic mode" "scratch_prune_mode automatic=0 approval=1" "$LRU_CALLS"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=0 \

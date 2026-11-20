@@ -18,9 +18,7 @@
   <dict>
     <key>DISK_MAGICIAN_TRIGGER</key>
     <string>scratch-pressure-timer</string>
-    <!-- Budget-mode recency floor, operator-approved. Without this the budget
-         pass inherits the 48h shared default and can never evict on a volume
-         whose content is all younger than that (measured 2026-11-19). -->
+    <!-- Scheduled Scratch keeps at least 48 hours of content inactivity. -->
     <key>DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS</key>
     <string>@SCRATCH_BUDGET_FLOOR_HOURS@</string>
     <key>HOME</key>

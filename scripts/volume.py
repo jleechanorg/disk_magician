@@ -2038,17 +2038,13 @@ def linux_scheduler_install_cmd(name: str, interval: int | None = None,
             return 75
         if production and any(runtime.is_relative_to(path.resolve()) for path in (Path("/tmp"), Path("/var/tmp"))):
             return 75
-        # Operator-approved Scratch LRU budget. The PCT is the approval; the
-        # FLOOR_HOURS is the recency window that makes the budget reachable at
-        # all (without it the pruner inherits the 48h shared default and can
-        # evict nothing on a volume whose content is younger -- measured
-        # 2026-11-19: Scratch 96% used, zero entries older than 48h).
+        # Operator decision 2026-11-20: scheduled Scratch keeps at least 48h.
         scratch_lru_pct = os.environ.get("DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT", "50")
         if not re.fullmatch(r"[1-9][0-9]?", scratch_lru_pct):
             scratch_lru_pct = "50"
-        scratch_floor_h = os.environ.get("DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS", "6")
-        if not re.fullmatch(r"[1-9][0-9]{0,3}", scratch_floor_h):
-            scratch_floor_h = "6"
+        scratch_floor_h = os.environ.get("DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS", "48")
+        if not re.fullmatch(r"[1-9][0-9]{0,3}", scratch_floor_h) or int(scratch_floor_h) < 48:
+            scratch_floor_h = "48"
         values = {"@ORCHESTRATOR@": str(runtime / "disk_magician.sh"),
                   "@CONFIG_PATH@": str(config_path), "@STATE_PATH@": str(state_root().resolve()),
                   "@DELETION_LOG@": str(state_root().resolve() / "deletions.log"),
