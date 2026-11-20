@@ -30,27 +30,12 @@ impl Drop for TempDir {
 }
 
 fn now_utc() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    let days = seconds.div_euclid(86_400);
-    let tod = seconds.rem_euclid(86_400);
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let doe = days - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += if month <= 2 { 1 } else { 0 };
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        tod / 3600,
-        (tod % 3600) / 60,
-        tod % 60
-    )
+    let time = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .expect("read fixture capture time");
+    assert!(time.status.success());
+    String::from_utf8(time.stdout).unwrap().trim().to_owned()
 }
 
 fn state_dir(root: &Path, status: &str, mode: &str, coverage: f64) -> PathBuf {
@@ -239,8 +224,7 @@ fn missing_or_unreadable_state_is_reported_without_creation() {
 #[test]
 fn stale_observations_are_not_promoted_to_fresh() {
     let temp = TempDir::new();
-    let state = temp.path().join("state");
-    state_dir(&state, "published", "complete", 100.0);
+    let state = state_dir(temp.path(), "published", "complete", 100.0);
     fs::write(
         state.join("ledger/topdown-5g.status.json"),
         r#"{"status":"stale","reason":"fixture_stale","captured_at":"2000-01-01T00:00:00Z","mode":"complete"}"#,
