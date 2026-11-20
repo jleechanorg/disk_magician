@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::io;
 use std::process::Command;
-use std::time::Duration;
 
 const TIMEOUT_SECONDS: u64 = 45;
 const PREVIEW_RUNNER: &str = r#"

@@ -1,9 +1,9 @@
-use disk_magician::preview_scopes::{
+use diskm_shadow::preview_scopes::{
     canonical_temp_scopes, read_ledger, temp_policy_preview_command, RootScope, RootSource,
 };
 use serde_json::json;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -135,7 +135,7 @@ fn temp_policy_preview_runs_only_the_canonical_dry_run_and_bounds_output() {
     let executable = fixture.executable(
         "diskm",
         &format!(
-            "#!/usr/bin/python3\nimport os,sys\nopen({:?},'w').write('|'.join(sys.argv[1:])+'|'+os.environ.get('DISK_MAGICIAN_AGE_FLOOR_MINUTES','unset')+'|'+os.environ.get('DISK_MAGICIAN_RECEIPT_TRIGGER','unset'))\nsys.stdout.write('x'*300000)\n",
+            "#!/usr/bin/env python3\nimport os,sys\nopen({:?},'w').write('|'.join(sys.argv[1:])+'|'+os.environ.get('DISK_MAGICIAN_AGE_FLOOR_MINUTES','unset')+'|'+os.environ.get('DISK_MAGICIAN_RECEIPT_TRIGGER','unset'))\nsys.stdout.write('x'*300000)\n",
             log.display().to_string()
         ),
     );
