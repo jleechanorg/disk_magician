@@ -13,10 +13,8 @@ dispatch, safety gates, and outcomes; never invent an ad-hoc runner, parallel
 workflow, or separately operated script. Existing scripts are implementation
 helpers behind the CLI, not additional interfaces agents must discover.
 
-The desired public name is `diskm`. The current packaged executable is
-`disk-magician` (`disk_magician.cli:main`); use that verified entry point until
-`diskm` is registered as another name for the same implementation. Do not add
-a second dispatcher or a shell-only alias that scheduled jobs cannot use.
+Use `diskm`. Both `diskm` and `disk-magician` are packaged entry points for
+`disk_magician.cli:main`. Keep scheduled jobs on that shared dispatcher.
 New operational commands and scheduler integrations must use this shared
 dispatch. Migrate legacy direct-script schedules with behavior and safety
 checks; their current existence is not permission to add more. Build, package,
@@ -31,21 +29,16 @@ When the user invokes `/diskm`, asks why disk space is low, or requests a disk c
    - `diskm check-launchd-fleet` (macOS fleet liveness)
    - `diskm reclaim-ledger --read-existing` (instant pre-computed per-host reclaim ledger; never `--stdout` first)
    - `diskm history growth-top10 --days 7` (instant 7-day floor + top-10 growing buckets from git-backed snapshot history)
-2. **Step 2 (Immediate Parallel `flash` Subagent Cleanup)**:
-   - Do **not** run all 22 categories serially in one foreground shell when reclaiming large space (`100–300+ GiB`), and do **not** start with `cleanup_dev_caches.sh` (which walks `~/Library/Caches` while holding `.owner-mutation.reuse-lock`).
-   - Instead, dispatch **parallel `flash` subagents** across non-contending high-yield lanes:
-     - **Lane A (Scratch Volume, 20–150+ GiB)**: `diskm scratch-prune --clean` (`scripts/cleanup_scratch_top_level.sh --clean`)
-     - **Lane B (Worktree Slimming -> Deps -> Dormant Worktrees, 30–180+ GiB)**:
-       1. `WORKTREE_APPROVED=1 diskm slim-worktrees --clean` (`scripts/slim_worktree_checkouts.sh --clean`)
-       2. `WORKTREE_APPROVED=1 diskm cleanup-worktree-deps --clean` (`scripts/cleanup_worktree_deps.sh --clean`)
-       3. `WORKTREE_APPROVED=1 diskm cleanup-worktrees --clean` (`scripts/cleanup_worktrees.sh --clean`; shard across `--repos` when >200 worktrees)
-       4. `WORKTREE_APPROVED=1 diskm cleanup-worktree-venvs --clean`
-     - **Lane C (Containers, Browser Clones & Cloud Caches, 20–80+ GiB)**:
-       - `diskm cleanup-colima --clean`, `diskm cleanup-xcode --clean`, `diskm prune-aside-sessions --clean`
-       - `CODE_SIGN_CLONES_APPROVED=1 diskm cleanup-code-sign-clones --clean`
-       - `FILEPROVIDER_EVICT_APPROVED=1 diskm evict-fileprovider --clean`
-     - **Lane D (Agent State & SQLite Vacuum, 5–20 GiB)**:
-       - `diskm vacuum-hermes-state --clean`, `diskm cleanup-codex-db --clean`, `diskm cleanup-antigravity-brain --clean`, `diskm cleanup-tmp --clean`
+2. **Step 2 (Parallel Cleanup Qualification)**:
+   - Preview non-contending lanes in parallel when host resources allow. Use the
+     matching dry run with the same roots, filters, and age settings as the
+     intended cleanup. Apply only verified paths within the operator’s scope,
+     with the command’s required approvals. If a cleaner cannot apply that
+     exact scope, keep its results in the preview.
+   - Start with Scratch (`diskm scratch-prune --dry-run`) and the relevant
+     worktree previews (`diskm slim-worktrees`, `diskm cleanup-worktree-deps`,
+     `diskm cleanup-worktrees`, then `diskm cleanup-worktree-venvs`). Preview
+     other approved scopes using the matching commands in the tier list below.
 3. **Step 3 (Zero-Reclaim / Silent-Preservation Diagnostic Rule)**:
    - Never report *"canonical stack is exhausted"* when free space is still below target. If a cleaner exits `0` with `0 B` reclaimed, inspect the skip breakdown (`kept:lease-busy`, `ao-owned-or-unknown`, `kept:admin-unknown`, `kept:recent-activity`, `dirty-or-untracked`) and verify `~/.disk_magician_state/worktree_leases/.owner-mutation.reuse-lock` is not wedged before concluding nothing is reclaimable.
 
@@ -71,9 +64,10 @@ Users and operators setting up a workstation or CI host are encouraged to
 optionally partition/provision a dedicated Scratch volume via
 `diskm setup --scratch [--quota-gb 200]` (or interactively during `diskm setup`).
 This isolates disposable agent and CI artifacts so they cannot exhaust host free
-space. Scratch volumes are automatically trimmed from 70% down to 50% usage
-while strictly preserving a 64 MiB `.diskm-ballast` emergency reserve and
-48-hour content recency, live-PID, and active-lease protections for automatic Scratch pruning.
+space. The automatic Scratch quota defaults trigger at 70% usage and aim for
+50%. Conservative cleanup and safety holds can leave usage above the target.
+Automatic pruning preserves the 64 MiB `.diskm-ballast` emergency reserve,
+48-hour content recency, live-PID, and active-lease protections.
 
 Use the returned artifact directory rather than inventing paths under
 `/Volumes/diskm-scratch` or `~/Scratch`. A registered but unavailable, full or
@@ -164,14 +158,14 @@ underestimated cumulative-reservoir growth):
     (`config/config.json`, the one list of directories to check), not a second
     list: add roots it flags as not-monitored to `monitored_dirs`.
 
-1. **Find the last-week floor** before proposing anything. The floor is
-   the **lowest `df used` in the most recent ~14 daily snapshots** (NOT
-   proxies, NOT a single fresh `du`, NOT current df). Pull it from the
-   git-backed ledger in `~/.disk_magician_backup/ledger/topdown-5g.json`
-   via `git -C ~/.disk_magician_backup log -- ledger/topdown-5g.json | head`
-   then `git show <sha>:ledger/topdown-5g.json`. State the floor date +
-   value and the gap (current used − floor used) before any other
-   measurement. **The gap-to-floor grounds every proposal.**
+1. **Find the seven-day floor** before proposing anything. Use the lowest
+   observed `df used` within the last seven days and report the 30-day window
+   separately. Start with `diskm history diff --days 7` and
+   `diskm history diff --days 30`. For direct Git inspection, get the host’s
+   state repo from `diskm state status`, then use
+   `git -C <state-repo> log -- ledger/topdown-5g.json` and
+   `git -C <state-repo> show <sha>:ledger/topdown-5g.json`.
+   Report each floor date, value, and gap from current used space.
    **Coverage gate (hard):** never treat `disk_snapshot.json`'s
    `disk_used_gb` as a floor when `snapshot_coverage_pct` (or
    `snapshot_metadata.coverage_pct`) is **< 70%** — low-coverage mins
@@ -179,7 +173,7 @@ underestimated cumulative-reservoir growth):
    `ledger/topdown-5g.json` has a commit within **48h**; if the ledger is
    older, say so and do not invent bucket deltas from stale ledger HEAD.
    Live snapshot path:
-   `~/.disk_magician_backup/snapshots/disk_snapshot.json` (legacy
+   `<state-repo>/snapshots/disk_snapshot.json` (legacy
    `backup/<host>/` is frozen — bead `disk_magician-q9x`).
 
 2. **Pull per-directory granularity buckets** from that same ledger (the
