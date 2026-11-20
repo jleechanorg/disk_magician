@@ -69,6 +69,8 @@ pub struct DirectoryMeasurement {
     pub file_paths: u64,
     /// Unknown if traversal was incomplete. Exactly 100 MiB requires itemization.
     pub must_itemize: Option<bool>,
+    pub newest_content_epoch_seconds: Option<i64>,
+    pub contains_git: bool,
     pub complete: bool,
 }
 
@@ -111,6 +113,10 @@ struct Node {
     apparent: u64,
     path_allocated: u64,
     file_paths: u64,
+    has_content: bool,
+    newest_leaf_epoch: Option<i64>,
+    empty_tree_epoch: Option<i64>,
+    contains_git: bool,
 }
 
 #[cfg(unix)]
@@ -225,6 +231,18 @@ fn gap(gaps: &mut Vec<ScanGap>, path: &Path, kind: ScanGapKind, message: impl In
         message: message.into(),
     });
 }
+fn is_git_name(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == ".git")
+}
+
+fn max_epoch(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 fn expired(start: Instant, budget: Duration) -> bool {
     start.elapsed() >= budget
 }
@@ -295,7 +313,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
         )?;
         return Ok(report(
             &root,
-            true,
+            gaps.is_empty(),
             apparent_total,
             allocated_total,
             files,
@@ -323,7 +341,7 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
         )?;
         return Ok(report(
             &root,
-            true,
+            gaps.is_empty(),
             apparent_total,
             allocated_total,
             files,
@@ -332,6 +350,8 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
         ));
     }
 
+    let root_empty_tree_epoch = modified_epoch_seconds(&root_metadata);
+    let root_contains_git = is_git_name(&root);
     let mut nodes = vec![Node {
         path: root.clone(),
         metadata: root_metadata,
@@ -340,6 +360,10 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
         apparent: 0,
         path_allocated: 0,
         file_paths: 0,
+        has_content: false,
+        newest_leaf_epoch: None,
+        empty_tree_epoch: root_empty_tree_epoch,
+        contains_git: root_contains_git,
     }];
     let mut pending = vec![0_usize];
     let mut visited = 1_usize;
@@ -428,6 +452,12 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
             }
             let index = nodes.len();
             let is_dir = metadata.is_dir();
+            let empty_tree_epoch = if is_dir {
+                modified_epoch_seconds(&metadata)
+            } else {
+                None
+            };
+            let contains_git = is_git_name(&path);
             nodes.push(Node {
                 path,
                 metadata,
@@ -436,6 +466,10 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
                 apparent: 0,
                 path_allocated: 0,
                 file_paths: 0,
+                has_content: false,
+                newest_leaf_epoch: None,
+                empty_tree_epoch,
+                contains_git,
             });
             nodes[parent].children.push(index);
             if is_dir {
@@ -453,10 +487,30 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
                 let child_allocated = nodes[child_index].path_allocated;
                 let child_paths = nodes[child_index].file_paths;
                 let child_complete = nodes[child_index].complete;
+                let child_has_content = nodes[child_index].has_content;
+                let child_newest_leaf = nodes[child_index].newest_leaf_epoch;
+                let child_empty_tree = nodes[child_index].empty_tree_epoch;
+                let child_contains_git = nodes[child_index].contains_git;
                 nodes[index].apparent = add(nodes[index].apparent, child_apparent)?;
                 nodes[index].path_allocated = add(nodes[index].path_allocated, child_allocated)?;
                 nodes[index].file_paths = add(nodes[index].file_paths, child_paths)?;
                 nodes[index].complete &= child_complete;
+                nodes[index].has_content |= child_has_content;
+                nodes[index].newest_leaf_epoch =
+                    max_epoch(nodes[index].newest_leaf_epoch, child_newest_leaf);
+                nodes[index].empty_tree_epoch =
+                    max_epoch(nodes[index].empty_tree_epoch, child_empty_tree);
+                nodes[index].contains_git |= child_contains_git;
+            }
+            if !nodes[index].has_content && nodes[index].empty_tree_epoch.is_none() {
+                nodes[index].complete = false;
+                let missing_time_path = nodes[index].path.clone();
+                gap(
+                    &mut gaps,
+                    &missing_time_path,
+                    ScanGapKind::Metadata,
+                    "empty directory modification time unavailable",
+                );
             }
             let node = &nodes[index];
             let (path, path_bytes_hex) = path_parts(&node.path);
@@ -469,6 +523,12 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
                 must_itemize: node
                     .complete
                     .then_some(node.apparent >= ITEMIZATION_THRESHOLD_BYTES),
+                newest_content_epoch_seconds: if node.has_content {
+                    node.newest_leaf_epoch
+                } else {
+                    node.empty_tree_epoch
+                },
+                contains_git: node.contains_git,
                 complete: node.complete,
             });
         } else {
@@ -496,6 +556,9 @@ pub fn scan(root: &Path, options: ScanOptions) -> io::Result<ScanReport> {
             nodes[index].apparent = metadata.len();
             nodes[index].path_allocated = allocated_bytes(&metadata);
             nodes[index].file_paths = 1;
+            nodes[index].has_content = true;
+            nodes[index].newest_leaf_epoch = modified_epoch_seconds(&metadata);
+            nodes[index].contains_git = is_git_name(&path);
         }
         all_complete &= nodes[index].complete;
     }

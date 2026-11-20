@@ -25,10 +25,20 @@ The candidate has no reclaim, lease, provisioning or scheduling operations. Befo
 
 ### Scratch cleanup preview
 
-`diskm-rust preview --state-dir DIR [--min-hours 6|48] [--max-candidates N] [--dry-run]`
-reads the per-host `reclaim/directory-ledger.json` and checks recorded paths under
-the registered Scratch volume. Results record the current C14 verdict from
-`diskm quarantine verdict`. History supplies leads. The reported `eligible`
-field means C14 returned `remove` at check time. Any lane or PR evidence holds
-outside C14 still apply. The report covers known exact paths within its candidate
-and deadline bounds. It does not inventory the volume or project physical savings.
+`diskm-rust preview --state-dir DIR --min-hours 6 --dry-run` inventories the
+registered Scratch filesystem without an entry or scan deadline cap. Old
+regular files and complete artifact directories below 100 MiB are considered
+independently of newer siblings. Larger trees are itemized. Historical paths
+supply provenance, and live discovery works when the ledger is absent.
+
+The report separates discovery coverage and its filesystem gaps from verdicts.
+Each proposed path gets its own deadline with `diskm quarantine verdict`.
+An optional `--max-candidates N` limits verdict calls; the report still includes
+all discovered candidates and marks unchecked paths deferred. Only a current
+C14 `remove` verdict is labeled eligible. Ownership and PR evidence holds
+outside C14 still apply. Apparent sizes are file-summed and do not project
+physical reclaim.
+
+The default 48-hour preview reads prior cleanup paths from the supplied state
+directory. The separate six-hour scan does not alter that policy, run cleanup,
+or change worktree retention.

@@ -80,7 +80,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     let mut max_entries = 100_000;
     let mut days = 7;
     let mut min_hours = 48;
-    let mut max_candidates = 20;
+    let mut max_candidates = None;
     let mut positional_only = false;
 
     while let Some(arg) = args.next() {
@@ -98,13 +98,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
                 };
             }
             Some("--max-candidates") if command == "preview" => {
-                max_candidates = positive(&mut args, "--max-candidates")?;
-                if max_candidates > preview::MAX_CANDIDATES {
-                    return Err(format!(
-                        "--max-candidates must be <= {}",
-                        preview::MAX_CANDIDATES
-                    ));
-                }
+                max_candidates = Some(positive(&mut args, "--max-candidates")?);
             }
             Some("--state-dir") if command != "scan" && state_dir.is_none() => {
                 state_dir = Some(PathBuf::from(required_value(&mut args, "--state-dir")?));
@@ -152,7 +146,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         "preview" => Ok(Operation::Preview {
             state_dir: state_dir.ok_or("preview requires --state-dir")?,
             min_hours,
-            max_candidates,
+            max_candidates: max_candidates.unwrap_or(if min_hours == 6 { usize::MAX } else { 20 }),
         }),
         _ => unreachable!("command already validated"),
     }

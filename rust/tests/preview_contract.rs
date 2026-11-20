@@ -360,16 +360,8 @@ fn six_hour_preview_discovers_old_scratch_artifacts_without_ledger_rows() {
         .iter()
         .any(|entry| entry["path"] == recent_sibling.to_string_lossy().as_ref()));
 
-    let discovered_files = result["discovery"]["file_paths"].as_array().unwrap();
-    assert!(discovered_files
-        .iter()
-        .any(|path| path == old_file.to_string_lossy().as_ref()));
-    assert!(discovered_files
-        .iter()
-        .any(|path| path == stale_sibling.to_string_lossy().as_ref()));
-    assert!(!discovered_files
-        .iter()
-        .any(|path| path == recent_sibling.to_string_lossy().as_ref()));
+    assert_eq!(result["discovery"]["complete"], true);
+    assert_eq!(result["discovery"]["files_measured"], 4);
     assert!(!fixture.calls().contains(recent_sibling.to_str().unwrap()));
 }
 
