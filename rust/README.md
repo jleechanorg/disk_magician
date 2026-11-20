@@ -1,6 +1,6 @@
 # Disk Magician Rust candidate
 
-The standalone Cargo package builds a read-only candidate named `diskm`. Run it by its build path. Temporary preview calls use the installed legacy `disk-magician` executable by name. Keep the installed production entry points and jobs until parity and rollback are verified.
+The standalone Cargo package builds a migration candidate named `diskm`. Run it by its build path. Preview and target apply use the installed legacy `disk-magician` executable by name. Keep the installed production entry points and jobs until parity and rollback are verified.
 
 From the repository root:
 
@@ -21,7 +21,7 @@ diskm history --state-dir DIR [--days 7|30]
 
 All reports are JSON. Status measures filesystem capacity without crawling. Its optional state directory is read for existing snapshot and ledger metadata. A scan returns apparent file sizes and an allocation estimate with explicit coverage gaps. It reports symlinks as leaves and marks filesystem boundaries as incomplete. The scan uses path-based metadata and directory reads. On a concurrently changing tree, the result is a best-effort observation and cannot be used to authorize mutation. The deadline is cooperative between filesystem calls, so a blocked filesystem call may run past it. Incomplete scans emit a report and exit 75. History reads compatible, complete committed records from the supplied state repository. The candidate accepts a conservative subset of legacy complete ledger records. It groups observations by recorded host and root path. That identity cannot distinguish remounts at the same path. A report without comparable records has no authoritative floor.
 
-The candidate has no reclaim, lease, provisioning or scheduling operations. Before a default switch, compare retained commands on macOS and Linux, prove state transfer and safe apply on each in-use backend, and rehearse rollback with live leases and interrupted recovery. See the repository's legacy CLI and tests for current behavior.
+Target apply uses the legacy quarantine actuator. Native lease, provisioning, scheduled cleanup, and recovery parity remain migration work. Before a default switch, compare retained commands on macOS and Linux, prove state transfer and safe apply on each in-use backend, and rehearse rollback with live leases and interrupted recovery. See the repository's legacy CLI and tests for current behavior.
 
 ### Scratch cleanup preview
 
@@ -90,3 +90,23 @@ existing Scratch. Managed dated runs are reclaimed as lease-backed units.
 Files with path characters the canonical deletion log cannot represent
 remain in place. Both staged executables are required until the Rust
 quarantine and recovery port is complete.
+
+### Checkpointed Scratch preview and target apply
+
+Use `diskm preview --state-dir DIR --resume-state ABSOLUTE_FILE --deadline-ms N`
+to scan Scratch against the default 48-hour age floor. Repeat the command
+with the same checkpoint to process unfinished paths and deferred verdicts.
+A prior remove verdict is retained as `historical:remove` until a fresh
+check qualifies the path. Discovery and allocation figures describe a scan
+pass. Allocated bytes estimate reclaim.
+
+Use `diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA
+--resume-state FILE --target-used-bytes N` with an explicit initial
+`--path RELATIVE_FILE` selection or `--all` for a reviewed manifest.
+The resume file lives outside the Scratch volume. Repeat the same command
+without selection flags to use its saved queue. The candidate measures the
+verified mount before applying and after each completed entry. It saves
+the remaining queue when usage reaches the target or measurement is unavailable.
+An interrupted mutation reports `recovery_required` and leaves the in-flight
+entry in the checkpoint. The existing legacy writer lock returns immediately
+under contention.

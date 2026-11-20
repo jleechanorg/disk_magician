@@ -315,6 +315,26 @@ fn protected_scope(root: &Path, path: &Path) -> bool {
             .any(|part| part.as_os_str() == "evidence")
 }
 
+fn live_candidate_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> String {
+    if protected_scope(root, path) {
+        return "kept:protected-scratch-scope".into();
+    }
+    if let Some(reason) = check_path(root, path, device) {
+        return reason.into();
+    }
+    for ancestor in path.ancestors().skip(1).take_while(|p| p.starts_with(root)) {
+        match fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => return "kept:repository-use-worktree-route".into(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return "deferred:metadata".into(),
+        }
+        if ancestor.join("HEAD").is_file() && ancestor.join("objects").is_dir() {
+            return "kept:repository-use-worktree-route".into();
+        }
+    }
+    checked_verdict(root, path, device, min_hours)
+}
+
 fn live_preview(
     root: PathBuf,
     device: u64,
@@ -493,7 +513,7 @@ fn live_preview_from_measurement(
             } else if index >= limit {
                 "deferred:verification-limit".into()
             } else {
-                checked_verdict(&root, path, device, min_hours)
+                live_candidate_verdict(&root, path, device, min_hours)
             };
             complete &= !verdict.starts_with("deferred:");
             candidate(path, apparent_bytes, allocated_bytes, verdict)
@@ -772,6 +792,8 @@ pub fn scope_report_resumable(
         .map(|checkpoint| std::mem::take(&mut checkpoint.candidates))
         .unwrap_or_default();
 
+    // Retain the checkpoint observation without presenting a prior verdict as current.
+    mark_prior_verdicts(&mut prior_candidates);
     // Previously unchecked exact paths receive the next available verdict slots.
     for candidate in prior_candidates.iter_mut().filter(|candidate| {
         candidate.verdict.starts_with("deferred:verification-limit")
@@ -783,7 +805,7 @@ pub fn scope_report_resumable(
         if remaining_limit == 0 {
             break;
         }
-        candidate.verdict = checked_verdict(&root, &candidate.path, device, min_hours);
+        candidate.verdict = live_candidate_verdict(&root, &candidate.path, device, min_hours);
         candidate.eligible = candidate.verdict == "remove";
         remaining_limit -= 1;
     }
@@ -911,7 +933,17 @@ pub fn scope_report_resumable(
     serde_json::to_value(report).map_err(io::Error::other)
 }
 
-fn report_from_checkpoint(path: &Path, saved: ResumeCheckpoint) -> Report {
+fn mark_prior_verdicts(candidates: &mut [Candidate]) {
+    for candidate in candidates {
+        if candidate.verdict == "remove" {
+            candidate.verdict = "historical:remove".into();
+            candidate.eligible = false;
+        }
+    }
+}
+
+fn report_from_checkpoint(path: &Path, mut saved: ResumeCheckpoint) -> Report {
+    mark_prior_verdicts(&mut saved.candidates);
     let pending_verdict_paths = saved
         .candidates
         .iter()

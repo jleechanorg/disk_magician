@@ -14,6 +14,9 @@ const LEGACY: &str = crate::LEGACY_CLI;
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
+const F_GETFD: i32 = 1;
+const F_SETFD: i32 = 2;
+const FD_CLOEXEC: i32 = 1;
 #[cfg(target_os = "linux")]
 const O_NOFOLLOW: i32 = 0o400000;
 #[cfg(target_os = "macos")]
@@ -21,6 +24,7 @@ const O_NOFOLLOW: i32 = 0x100;
 
 unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
+    fn fcntl(fd: i32, command: i32, ...) -> i32;
     fn geteuid() -> u32;
 }
 
@@ -138,6 +142,11 @@ fn acquire_scratch_lock() -> io::Result<ResumeLock> {
             "Scratch cleanup is already in progress",
         ));
     }
+    let fd = file.as_raw_fd();
+    let descriptor_flags = unsafe { fcntl(fd, F_GETFD) };
+    if descriptor_flags < 0 || unsafe { fcntl(fd, F_SETFD, descriptor_flags & !FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(ResumeLock(file))
 }
 
@@ -233,11 +242,13 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
-fn legacy_apply(manifest: &Path, digest: &str, relative: &str) -> io::Result<String> {
+fn legacy_apply(manifest: &Path, digest: &str, relative: &str, lock_fd: i32) -> io::Result<String> {
     let output = Command::new(LEGACY)
         .args(["quarantine", "scratch-apply", "--manifest"])
         .arg(manifest)
         .args(["--manifest-sha256", digest, "--path", relative])
+        .env("DISK_MAGICIAN_SCRATCH_LOCK_FD", lock_fd.to_string())
+        .env_remove("DISK_MAGICIAN_SCRATCH_LOCK_PID")
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other("exact manifest apply failed"));
@@ -273,13 +284,12 @@ pub fn apply(
     let resume_name = resume_path
         .file_name()
         .ok_or_else(|| io::Error::other("resume state needs a filename"))?;
-    let canonical_resume = fs::canonicalize(resume_parent)?.join(resume_name);
-    let resume_path = canonical_resume.as_path();
+    let resume_path = fs::canonicalize(resume_parent)?.join(resume_name);
     let manifest = read_manifest(manifest_path, digest)?;
     if resume_path.starts_with(&manifest.root.path) {
         return Err(io::Error::other("resume state must be outside Scratch"));
     }
-    if fs::canonicalize(manifest_path)?.as_path() == resume_path {
+    if fs::canonicalize(manifest_path)? == resume_path {
         return Err(io::Error::other("resume state cannot replace the manifest"));
     }
     let existing_state = if resume_path.exists() {
@@ -436,7 +446,7 @@ pub fn apply(
         state.status = format!("applying:{path}");
         state.used_after_bytes = Some(used_before);
         write_state(resume_path, &state)?;
-        let result = match legacy_apply(manifest_path, digest, &path) {
+        let result = match legacy_apply(manifest_path, digest, &path, _lock.0.as_raw_fd()) {
             Ok(result) => result,
             Err(_) => return Ok(report_recovery_required(&state)),
         };
@@ -511,16 +521,20 @@ fn selected_manifest_paths(
     } else {
         selected.to_vec()
     };
-    let manifest_paths: std::collections::HashSet<_> = manifest
-        .entries
-        .iter()
-        .map(|entry| entry.path.as_str())
-        .collect();
+    let mut manifest_paths = std::collections::HashMap::new();
+    for entry in &manifest.entries {
+        if manifest_paths
+            .insert(entry.path.as_str(), entry.kind.as_str())
+            .is_some()
+        {
+            return Err(io::Error::other("duplicate manifest entry"));
+        }
+    }
     if paths.is_empty()
         || paths.iter().collect::<std::collections::HashSet<_>>().len() != paths.len()
         || paths
             .iter()
-            .any(|path| !manifest_paths.contains(path.as_str()))
+            .any(|path| manifest_paths.get(path.as_str()).copied() != Some("regular_file"))
     {
         return Err(io::Error::other(
             "select unique paths present in the manifest",

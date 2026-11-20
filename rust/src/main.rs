@@ -296,9 +296,6 @@ fn parse_scratch_target_apply(
             _ => return Err("invalid scratch-target-apply options".into()),
         }
     }
-    if !all_entries && paths.is_empty() {
-        return Err("scratch-target-apply requires --all or one or more --path values".into());
-    }
     Ok(Operation::ScratchTargetApply {
         manifest: manifest.ok_or("--manifest is required")?,
         digest: digest.ok_or("--manifest-sha256 is required")?,

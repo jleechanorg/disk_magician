@@ -1,4 +1,3 @@
-use diskm_shadow::preview;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
@@ -138,14 +137,6 @@ exit 64
 impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.root).expect("remove owned preview fixture");
-    }
-}
-
-fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-    if let Some(value) = value {
-        std::env::set_var(name, value);
-    } else {
-        std::env::remove_var(name);
     }
 }
 
@@ -571,6 +562,27 @@ fn incomplete_scan_reports_and_checks_only_the_measured_frontier() {
             .count(),
         1
     );
+}
+
+#[test]
+fn completed_checkpoint_reports_prior_remove_as_historical_after_replacement() {
+    let fixture = Fixture::new();
+    let path = fixture.scratch_path("removable-prior.cache");
+    Fixture::mark_old(&path);
+    fixture.install_diskm();
+    let checkpoint = fixture.root.join("completed-checkpoint.json");
+
+    let first = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(first["complete"], true);
+    assert_eq!(first["candidates"][0]["eligible"], true);
+    fs::write(&path, b"replacement content").unwrap();
+    let resumed = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(
+        resumed["candidates"][0]["path"],
+        path.to_string_lossy().as_ref()
+    );
+    assert_eq!(resumed["candidates"][0]["verdict"], "historical:remove");
+    assert_eq!(resumed["candidates"][0]["eligible"], false);
 }
 
 #[test]
