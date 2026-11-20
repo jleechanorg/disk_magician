@@ -1,31 +1,22 @@
 use crate::scan::{scan, FileKind, ScanGap, ScanOptions};
-use serde::{Deserialize, Serialize};
+use crate::{preview_scopes, preview_worktrees};
+use serde::Serialize;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const LEDGER: &str = "reclaim/directory-ledger.json";
-const MAX_LEDGER_BYTES: u64 = 32 * 1024 * 1024;
 const CHECK_WINDOW_SECONDS: u64 = 12;
-
-#[derive(Deserialize)]
-struct Ledger {
-    rows: Vec<HistoryRow>,
-}
-
-#[derive(Deserialize)]
-struct HistoryRow {
-    row_type: String,
-    canonical_path: Option<PathBuf>,
-}
 
 #[derive(Serialize)]
 pub struct Report {
-    scratch_root: PathBuf,
+    root: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scratch_root: Option<PathBuf>,
     min_hours: u32,
     pub complete: bool,
     recorded_paths: usize,
@@ -46,26 +37,7 @@ struct Candidate {
 }
 
 fn ledger_paths(state_dir: &Path, root: &Path) -> io::Result<Vec<(PathBuf, String)>> {
-    let mut bytes = Vec::new();
-    let path = state_dir.join(LEDGER);
-    if !fs::symlink_metadata(&path)?.is_file() {
-        return Err(io::Error::other(
-            "the reclaim ledger must be a regular file",
-        ));
-    }
-    let file = File::open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::other(
-            "the reclaim ledger must be a regular file",
-        ));
-    }
-    file.take(MAX_LEDGER_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_LEDGER_BYTES {
-        return Err(io::Error::other(
-            "the reclaim ledger exceeds the preview size limit",
-        ));
-    }
-    let ledger: Ledger = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let ledger = preview_scopes::read_ledger(state_dir)?;
     let mut seen = HashSet::new();
     let mut paths = Vec::new();
     for source in ["cleanup_event", "cleanup_root"] {
@@ -196,7 +168,7 @@ pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Rep
         result => result?,
     };
     if min_hours == 6 {
-        return live_preview(root, device, paths, limit);
+        return live_preview(root, device, paths, min_hours, limit, true);
     }
     let recorded_paths = paths.len();
     let mut complete = true;
@@ -238,7 +210,8 @@ pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Rep
     }
     candidates.extend(missing.into_iter().take(limit - candidates.len()));
     Ok(Report {
-        scratch_root: root,
+        scratch_root: Some(root.clone()),
+        root,
         min_hours,
         complete,
         recorded_paths,
@@ -276,7 +249,9 @@ fn live_preview(
     root: PathBuf,
     device: u64,
     history: Vec<(PathBuf, String)>,
+    min_hours: u32,
     limit: usize,
+    scratch_verdicts: bool,
 ) -> io::Result<Report> {
     let measured = scan(
         &root,
@@ -292,7 +267,7 @@ fn live_preview(
             .as_secs(),
     )
     .map_err(io::Error::other)?
-        - 6 * 3600;
+        - i64::from(min_hours) * 3600;
     let recorded_paths = history.len();
     let history: HashMap<_, _> = history.into_iter().collect();
     let missing_paths = history
@@ -407,10 +382,12 @@ fn live_preview(
         .into_iter()
         .enumerate()
         .map(|(index, (path, bytes))| {
-            let verdict = if index >= limit {
+            let verdict = if !scratch_verdicts {
+                "deferred:temp-policy".into()
+            } else if index >= limit {
                 "deferred:verification-limit".into()
             } else {
-                checked_verdict(&root, path, device, 6)
+                checked_verdict(&root, path, device, min_hours)
             };
             complete &= !verdict.starts_with("deferred:");
             candidate(path, bytes, verdict)
@@ -422,8 +399,9 @@ fn live_preview(
             .map(|(path, bytes, reason)| candidate(path, bytes, reason.into())),
     );
     Ok(Report {
-        scratch_root: root,
-        min_hours: 6,
+        scratch_root: scratch_verdicts.then(|| root.clone()),
+        root,
+        min_hours,
         complete,
         recorded_paths,
         missing_paths,
@@ -437,4 +415,60 @@ fn live_preview(
             gaps: measured.gaps,
         }),
     })
+}
+
+pub fn scope_report(
+    scope: &str,
+    state_dir: Option<&Path>,
+    min_hours: u32,
+    limit: usize,
+) -> io::Result<Value> {
+    let required_state =
+        || state_dir.ok_or_else(|| io::Error::other("this scope requires --state-dir"));
+    match scope {
+        "scratch" => serde_json::to_value(preview(required_state()?, min_hours, limit)?)
+            .map_err(io::Error::other),
+        "tmp" => {
+            let scopes = preview_scopes::resolve_host_temp_scopes()?;
+            let mut reports = Vec::new();
+            for temp in scopes.roots {
+                let result = (|| {
+                    let device = fs::symlink_metadata(&temp.path)?.dev();
+                    let history = state_dir
+                        .and_then(|state| ledger_paths(state, &temp.path).ok())
+                        .unwrap_or_default();
+                    live_preview(temp.path.clone(), device, history, min_hours, limit, false)
+                })();
+                reports.push(match result {
+                    Ok(inventory) => json!({"source": temp.source, "inventory": inventory}),
+                    Err(error) => json!({"root": temp.path, "source": temp.source, "error": error.to_string()}),
+                });
+            }
+            let policy = match preview_scopes::temp_policy_preview() {
+                Ok(report) => serde_json::to_value(report).map_err(io::Error::other)?,
+                Err(error) => json!({"error": error.to_string()}),
+            };
+            Ok(json!({
+                "scope": "tmp",
+                "roots": reports,
+                "scratch_scope_availability": scopes.scratch_scope_availability,
+                "policy_preview": policy
+            }))
+        }
+        "worktrees" => {
+            serde_json::to_value(preview_worktrees::preview_worktrees()?).map_err(io::Error::other)
+        }
+        "ledger" => serde_json::to_value(preview_scopes::read_ledger(required_state()?)?)
+            .map_err(io::Error::other),
+        "all" => {
+            let mut reports = serde_json::Map::new();
+            for name in ["scratch", "tmp", "worktrees", "ledger"] {
+                let report = scope_report(name, state_dir, min_hours, limit)
+                    .unwrap_or_else(|error| json!({"error": error.to_string()}));
+                reports.insert(name.into(), report);
+            }
+            Ok(Value::Object(reports))
+        }
+        _ => Err(io::Error::other("unknown preview scope")),
+    }
 }

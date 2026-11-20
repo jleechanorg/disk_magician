@@ -43,3 +43,20 @@ physical reclaim.
 The default 48-hour preview reads prior cleanup paths from the supplied state
 directory. The separate six-hour scan does not alter that policy, run cleanup,
 or change worktree retention.
+
+### Other cleanup locations
+
+Use `--scope tmp` to inventory canonical host temporary roots, including
+`/private/tmp` on macOS. The requested age filters discovery. The separate
+`diskm cleanup-tmp --dry-run` output applies the installed cleaner's policy.
+Inventory rows remain unqualified until that policy can establish eligibility.
+
+Use `--scope worktrees` to run the installed worktree dry run against its
+standard roots, including `~/.worktrees`. Its eligible rows are preliminary.
+The worktree cleaner applies its own retention policy and revalidates Git state,
+ownership, and safety before removal.
+
+Use `--scope ledger --state-dir DIR` to read known cleanup paths and patterns.
+Ledger rows are historical leads. With `--scope all --state-dir DIR`, the JSON
+includes the Scratch, temp, worktree, and ledger views. A failed view is reported
+under its own scope.

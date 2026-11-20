@@ -12,10 +12,11 @@ const USAGE: &str = "diskm-rust — read-only Disk Magician candidate; output is
   diskm-rust status [PATH] [--state-dir DIR] [--json]
   diskm-rust scan PATH [--deadline-ms N] [--max-entries N] [--json]
   diskm-rust history --state-dir DIR [--days 7|30] [--json]
-  diskm-rust preview --state-dir DIR [--min-hours 6|48] [--max-candidates N] [--dry-run]
+  diskm-rust preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--dry-run]
 
 Status defaults to the current directory. Scan defaults to 30 seconds and
-100,000 visited paths. An incomplete scan emits a report and exits 75.";
+100,000 visited paths. An incomplete scan emits a report and exits 75.
+Preview defaults to the Scratch scope. Use --scope all for all supported locations.";
 
 const TEMPORARY_FAILURE: u8 = 75;
 const USAGE_ERROR: u8 = 2;
@@ -35,7 +36,8 @@ enum Operation {
         days: u32,
     },
     Preview {
-        state_dir: PathBuf,
+        scope: &'static str,
+        state_dir: Option<PathBuf>,
         min_hours: u32,
         max_candidates: usize,
     },
@@ -79,6 +81,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     let mut deadline_ms = 30_000;
     let mut max_entries = 100_000;
     let mut days = 7;
+    let mut preview_scope = "scratch";
     let mut min_hours = 48;
     let mut max_candidates = None;
     let mut positional_only = false;
@@ -90,6 +93,18 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             Some("--") => positional_only = true,
             Some("--json") => {}
             Some("--dry-run") if command == "preview" => {}
+            Some("--scope") if command == "preview" => {
+                preview_scope = match required_value(&mut args, "--scope")?.to_str() {
+                    Some("scratch") => "scratch",
+                    Some("tmp") => "tmp",
+                    Some("worktrees") => "worktrees",
+                    Some("ledger") => "ledger",
+                    Some("all") => "all",
+                    _ => {
+                        return Err("--scope must be scratch, tmp, worktrees, ledger, or all".into())
+                    }
+                };
+            }
             Some("--min-hours") if command == "preview" => {
                 min_hours = match required_value(&mut args, "--min-hours")?.to_str() {
                     Some("6") => 6,
@@ -143,11 +158,17 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             state_dir: state_dir.ok_or("history requires --state-dir")?,
             days,
         }),
-        "preview" => Ok(Operation::Preview {
-            state_dir: state_dir.ok_or("preview requires --state-dir")?,
-            min_hours,
-            max_candidates: max_candidates.unwrap_or(20),
-        }),
+        "preview" => {
+            if state_dir.is_none() && matches!(preview_scope, "scratch" | "ledger") {
+                return Err("this preview scope requires --state-dir".into());
+            }
+            Ok(Operation::Preview {
+                scope: preview_scope,
+                state_dir,
+                min_hours,
+                max_candidates: max_candidates.unwrap_or(20),
+            })
+        }
         _ => unreachable!("command already validated"),
     }
 }
@@ -177,11 +198,17 @@ fn run(operation: Operation) -> io::Result<u8> {
             print_json(&history::history(&state_dir, days)?)?;
         }
         Operation::Preview {
+            scope,
             state_dir,
             min_hours,
             max_candidates,
         } => {
-            print_json(&preview::preview(&state_dir, min_hours, max_candidates)?)?;
+            print_json(&preview::scope_report(
+                scope,
+                state_dir.as_deref(),
+                min_hours,
+                max_candidates,
+            )?)?;
         }
     }
     Ok(0)
