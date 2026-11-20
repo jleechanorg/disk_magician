@@ -32,7 +32,10 @@ def check_entry(path, encoded):
 
 
 def scratch_root():
-    dispatcher = shutil.which("disk-magician") or str(Path(__file__).resolve().parent.parent / "disk_magician.sh")
+    dispatcher = os.environ.get("DISKM_LEGACY_COMPAT_CLI")
+    if dispatcher is not None and not os.path.isabs(dispatcher):
+        raise ValueError("legacy compatibility path must be absolute")
+    dispatcher = dispatcher or shutil.which("disk-magician") or str(Path(__file__).resolve().parent.parent / "disk_magician.sh")
     result = subprocess.run([dispatcher, "volume", "path", "scratch"], capture_output=True, text=True)
     if result.returncode:
         raise ValueError(f"registered Scratch volume unavailable ({dispatcher} rc={result.returncode}, stderr={result.stderr.strip()[:120]!r}, stdout={result.stdout.strip()[:120]!r})")

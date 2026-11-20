@@ -364,6 +364,29 @@ fn native_worktree_preview_uses_the_same_selected_legacy_backend() {
 }
 
 #[test]
+fn legacy_dispatch_can_make_a_distinct_nested_diskm_call() {
+    let fixture = LegacyFixture::new(
+        "#!/bin/sh\ncase \"$1\" in\n snapshot) exec \"$RUST_DISKM\" volume path scratch ;;\n volume) printf \"nested volume\\n\" ;;\nesac\n",
+    );
+    let output = run_os(
+        &["snapshot".into()],
+        &[
+            ("DISKM_LEGACY_COMPAT_CLI", fixture.backend.as_os_str()),
+            (
+                "RUST_DISKM",
+                std::ffi::OsStr::new(env!("CARGO_BIN_EXE_diskm")),
+            ),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"nested volume\n");
+}
+
+#[test]
 fn legacy_compat_rejects_self_recursion_and_preserves_signal_exit() {
     let self_path = PathBuf::from(env!("CARGO_BIN_EXE_diskm"));
     let recursive = Command::new(&self_path)

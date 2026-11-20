@@ -118,6 +118,20 @@ class ScratchManifestApplyTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIn(self.target.as_posix(), rows[0])
 
+    def test_exact_apply_uses_selected_backend_for_nested_volume_checks(self):
+        from_path = self.bin / "disk-magician"
+        selected_backend = self.temp_root / "legacy-backend"
+        from_path.rename(selected_backend)
+        from_path.write_text("#!/bin/sh\nexit 91\n")
+        from_path.chmod(0o755)
+        result = self.run_apply(
+            self.selected.as_posix(),
+            extra_env={"DISKM_LEGACY_COMPAT_CLI": str(selected_backend)},
+        )
+        self.assertIsInstance(result, dict, getattr(result, "stderr", ""))
+        self.assertTrue(result["results"][0]["result"].startswith("removed:"))
+        self.assertFalse(self.target.exists())
+
     def test_explicit_batch_keeps_changed_member_and_removes_unchanged_member(self):
         with tempfile.TemporaryDirectory(prefix="dm-batch-", dir=self.scratch_root) as temp:
             changed = pathlib.Path(temp) / "changed"
