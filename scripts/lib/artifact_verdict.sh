@@ -219,8 +219,31 @@ c14_ephemeral_retention() {
     while IFS= read -r r; do
         r="$(cd "$r" 2>/dev/null && pwd -P)" && rel=${p#"$r"/} && [[ "$rel" != "$p" ]] || continue
         [[ "$archive_origin" != --archive-origin ]] || return 1
+        # Dated allocator runs are one unit, not the shared day or repo
+        # container. scratch-new creates this owned marker in the repo parent
+        # before handing the per-run directory to its producer.
+        if [[ "$rel" =~ ^runs/([0-9]{8})/([^./][^/]*)/([a-z0-9-]{1,40})-([0-9]{8}T[0-9]{6}Z)-([0-9]+)-([0-9]+)$ && -d "$content" && ! -L "$p" ]]; then
+            local run_day="${BASH_REMATCH[1]}" run_stamp="${BASH_REMATCH[4]}" run_stamp_day
+            local run_parent="${p%/*}" day_parent runs_parent marker normalized marker_owner_mode
+            run_stamp_day="${run_stamp:0:8}"
+            run_parent="${p%/*}"
+            day_parent="${run_parent%/*}"
+            runs_parent="${day_parent%/*}"
+            marker="$run_parent/.dm-quarantine"
+            [[ "$run_stamp_day" == "$run_day" && "${runs_parent##*/}" == runs && "${day_parent##*/}" == "$run_day" && -d "$marker" && ! -L "$marker" ]] || continue
+            normalized="$(date -j -f %Y%m%d "$run_day" +%Y%m%d 2>/dev/null || date -d "$run_day" +%Y%m%d 2>/dev/null || true)"
+            [[ "$normalized" == "$run_day" ]] || continue
+            marker_owner_mode="$(stat -c %u:%a "$marker" 2>/dev/null || stat -f %u:%Lp "$marker" 2>/dev/null || true)"
+            if [[ "$marker_owner_mode" == "$(id -u):700" ]]; then
+                echo 2880
+                return 0
+            fi
+        fi
         if [[ "$rel" =~ ^[^./][^/]*/(evidence|build)/[^./][^/]*$ ]]; then echo 1440; return 0; fi
         if [[ "$rel" =~ ^[^./][^/]*$ && ( -d "$content/.git" || -f "$content/.git" ) ]]; then echo 1440; return 0; fi
+        # The dated namespace and its date/repo containers are never cleanup
+        # units. Only an exact, marker-backed run identity above receives E9.
+        [[ "$rel" == runs || "$rel" == runs/* ]] && continue
         # E8: a direct child of the registered scratch-VOLUME root is ephemeral
         # at 1440 min whatever its name. Name shapes cannot enumerate agent
         # scratch, and the volume's own class already declares its contents
@@ -793,7 +816,16 @@ except Exception:print("n")' "$q" 2>/dev/null)" == y ]] && continue
         ephemeral) ret="$(c14_archive_origin "$p" "$inv")"
             if [[ "$ret" == ok ]]; then proofs+=" age"
             elif [[ "$ret" != none ]]; then echo "$ret"; return 0; fi
-            floor_class="$(c14_ephemeral_retention "$p")" || floor_class='' ;;
+            floor_class="$(c14_ephemeral_retention "$p")" || floor_class=''
+            # Dated Scratch namespace containers are never removal units.
+            # Only the allocator's exact run path has a declared retention row.
+            local volume_root
+            while IFS= read -r volume_root; do
+                if [[ "$p" == "$volume_root/runs" || "$p" == "$volume_root/runs/"* ]]; then
+                    [[ "$floor_class" =~ ^[0-9]+$ ]] || { echo kept:unproven-content; return 0; }
+                fi
+            done < <(scratch_roots_get_volumes "${DISK_MAGICIAN_CONFIG:-}" scratch)
+            ;;
         rebuildable) ret="$(_av_rebuildable "$p" "$deadline" "$min_idle" "$min_idle_explicit")" && reb=1 || {
             case "$ret" in
                 deferred:*|kept:*) echo "$ret"; return 0 ;;

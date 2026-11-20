@@ -50,9 +50,12 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
   list includes `~/.codex/sessions*`, `~/.codex/state*.sqlite`,
   `~/.codex/log`, and `~/.claude/projects`. Never replace a mutable tool
   state root with a symlink to another live state root.
-- Allocate worktrees via `diskm worktree-new` and disposable workspaces via
-  `diskm scratch-new` or `diskm scratch-dir`. Keep producer leases and use
-  the registered volume. Preserve `.diskm-ballast`. Follow the playbook's
+- Allocate worktrees via `diskm worktree-new`. Use
+  `diskm scratch-new <repo> <purpose> --kind build` for disposable run output
+  and retain the returned producer lease until the run finishes. Publish
+  evidence that must survive cleanup through the durable evidence route.
+  Use `diskm scratch-dir` for ad hoc scratch paths. Keep writes on the
+  registered volume and preserve `.diskm-ballast`. Follow the playbook's
   pressure and LRU rules only for the requested scope. A usage target supplies
   neither approval nor an exception to the applicable safety checks.
 

@@ -5,6 +5,8 @@ import os
 import stat
 import sys
 import time
+import datetime
+import re
 
 MARKER = b"diskm-artifact-children-v1"
 ARTIFACT_NAMES = {
@@ -34,6 +36,34 @@ def has_git_marker(path: str) -> bool:
 
 def is_artifact_name(name: str) -> bool:
     return name in ARTIFACT_NAMES or fnmatch.fnmatchcase(name, "isolated-*")
+
+def is_managed_run(root: str, path: str) -> bool:
+    """Identify one scratch-new dated build/evidence run, never its parents."""
+    parts = os.path.relpath(path, root).split(os.sep)
+    if parts and parts[0] == "runs":
+        parts = parts[1:]
+    if len(parts) != 3 or len(parts[0]) != 8 or not parts[0].isdigit():
+        return False
+    if any(not part or part.startswith(".") for part in parts[1:]):
+        return False
+    run_id = re.fullmatch(r"([a-z0-9-]{1,40})-(\d{8}T\d{6}Z)-(\d+)-(\d+)", parts[2])
+    if run_id is None or run_id.group(2)[:8] != parts[0]:
+        return False
+    try:
+        datetime.datetime.strptime(parts[0], "%Y%m%d")
+        run_info = os.lstat(path)
+        marker = os.path.join(os.path.dirname(path), ".dm-quarantine")
+        marker_info = os.lstat(marker)
+    except (OSError, ValueError):
+        return False
+    return (
+        stat.S_ISDIR(run_info.st_mode)
+        and stat.S_ISDIR(marker_info.st_mode)
+        and marker_info.st_uid == os.geteuid()
+        and stat.S_IMODE(marker_info.st_mode) == 0o700
+        and not os.path.islink(path)
+        and not os.path.islink(marker)
+    )
 
 def discover(root, max_depth, deadline):
     if not os.path.isdir(root) or os.path.islink(root):
@@ -106,7 +136,9 @@ def discover_generic(root, deadline):
                 # Whole repository units may still receive C14 checks, but
                 # never descend into their source, metadata, or generated files.
                 result.append(os.fsencode(entry.path))
-                if not has_git_marker(entry.path):
+                # A managed dated run is the cleanup unit; its contents remain
+                # covered by the run lease and are never separate candidates.
+                if not has_git_marker(entry.path) and not is_managed_run(root, entry.path):
                     children.append(entry.path)
         pending.extend(reversed(sorted(children)))
     return result
@@ -122,6 +154,12 @@ def stream_generic_leaves(root, deadline):
         if expired(deadline):
             raise TimeoutError
         path = pending.pop()
+        # A managed run is the cleanup unit; its own children remain under its
+        # producer lease and must not be emitted as independent candidates.
+        if path != root and is_managed_run(root, path):
+            sys.stdout.buffer.write(os.fsencode(path) + b"\0")
+            sys.stdout.buffer.flush()
+            continue
         children = []
         tainted = False
         try:
