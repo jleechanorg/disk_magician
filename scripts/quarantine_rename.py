@@ -340,7 +340,16 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
         return "" if canon_inventory(visit(qfd, qid, ".", [], deadline)) == canon_inventory(rec["inventory"]) else "rehash-mismatch"
     except DeadlineExceeded: return "deferred:deadline"
     except Exception: return "check-failed"
-def phase1(path, inv_file, binding_file, deadline=None):
+def parse_expected_root_identity(raw):
+    if raw is None: return None
+    try: values = tuple(int(part, 10) for part in raw.split(","))
+    except (AttributeError, ValueError): return False
+    if len(values) != 5 or any(type(value) is not int for value in values): return False
+    if any(value < 0 for value in values[:3]): return False
+    return values
+def root_identity(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+def phase1(path, inv_file, binding_file, deadline=None, expected_identity=None):
     if deadline is not None and time.monotonic() >= deadline: return "deferred:deadline-before-phase1"
     path = os.path.abspath(path)
     parent, base = os.path.dirname(path), os.path.basename(path)
@@ -371,6 +380,11 @@ def phase1(path, inv_file, binding_file, deadline=None):
         pfd = os.open(parent, DIRFL)
         bound_parent = os.fstat(pfd)
         if (bound_parent.st_dev, bound_parent.st_ino) != parent_id: return "kept:parent-identity-mismatch"
+        if expected_identity is not None:
+            initial = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+            if root_identity(initial) != expected_identity:
+                os.close(pfd)
+                return "kept:identity-mismatch"
         quarantine_created = False
         try:
             os.mkdir(".dm-quarantine", 0o700, dir_fd=pfd)
@@ -379,6 +393,13 @@ def phase1(path, inv_file, binding_file, deadline=None):
         qpath_st = os.stat(".dm-quarantine", dir_fd=pfd, follow_symlinks=False)
         if not stat.S_ISDIR(qpath_st.st_mode): return "kept:quarantine-dir-unsafe"
         qfd = os.open(".dm-quarantine", DIRFL, dir_fd=pfd); q = os.fstat(qfd); st = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        if expected_identity is not None and root_identity(st) != expected_identity:
+            os.close(qfd)
+            if quarantine_created:
+                try: os.rmdir(".dm-quarantine", dir_fd=pfd)
+                except OSError: pass
+            os.close(pfd)
+            return "kept:identity-mismatch"
         if not stat.S_ISDIR(q.st_mode) or q.st_uid != os.getuid() or q.st_mode & 0o777 != 0o700: return "kept:quarantine-dir-unsafe"
         if not same_entry(pfd, ".dm-quarantine", q): return "kept:quarantine-dir-unsafe"
         if [(st.st_dev, st.st_ino)] != [(e.get("dev"), e.get("ino")) for e in inv if e.get("path") == "."]: return "kept:identity-mismatch"
@@ -448,7 +469,13 @@ def phase1(path, inv_file, binding_file, deadline=None):
         return "deferred:deadline"
     hook("DISK_MAGICIAN_TEST_BEFORE_QUARANTINE_RENAME", path, dest)
     if not same_entry(pfd, ".dm-quarantine", q): return f"quarantine_conflict:{qid}"
-    if not same_entry(pfd, base, st):
+    changed = not same_entry(pfd, base, st)
+    if not changed and expected_identity is not None:
+        try:
+            changed = root_identity(os.stat(base, dir_fd=pfd, follow_symlinks=False)) != expected_identity
+        except OSError:
+            changed = True
+    if changed:
         if not finish_sidecar(qfd, qid, "original"): return f"quarantine_conflict:{qid}:index-cleanup-failed"
         return "kept:identity-mismatch"
     try: renamex(pfd, base, qfd, qid)  # commit point; both directory bindings stay pinned
@@ -1003,9 +1030,9 @@ def parse_deadline(raw):
     try: value = float(raw)
     except (TypeError, ValueError): return None
     return value if math.isfinite(value) and value >= 0 else None
-def combined_remove(path, inv_file, binding_file, deadline=None):
+def combined_remove(path, inv_file, binding_file, deadline=None, expected_identity=None):
     """Phase 1 + phase 2 for one candidate under the caller's single operation lock."""
-    verdict = phase1(path, inv_file, binding_file, deadline)
+    verdict = phase1(path, inv_file, binding_file, deadline, expected_identity)
     if not verdict.startswith("quarantined:"): return verdict
     qid = verdict.split(":", 1)[1]
     result = phase2(binding_file, qid, deadline)
@@ -1035,14 +1062,24 @@ if __name__ == "__main__":
         if lock is None: print("deferred:operation-lock"); sys.exit(0)
         try: print(phase2(args[1], args[2], deadline))
         finally: operation_unlock(lock)
-    elif args[:1] == ["remove"] and len(args) in (4, 6):
+    elif args[:1] == ["remove"] and len(args) >= 4:
         deadline = None
-        if len(args) == 6 and args[4] == "--deadline-at":
-            deadline = parse_deadline(args[5])
-            if deadline is None: print("kept:check-failed"); sys.exit(0)
+        expected_identity = None
+        tail = args[4:]
+        while tail:
+            if len(tail) >= 2 and tail[0] == "--deadline-at" and deadline is None:
+                deadline = parse_deadline(tail[1])
+                if deadline is None: print("kept:check-failed"); sys.exit(0)
+                tail = tail[2:]
+            elif len(tail) >= 2 and tail[0] == "--expected-root-identity" and expected_identity is None:
+                expected_identity = parse_expected_root_identity(tail[1])
+                if expected_identity is False: print("kept:check-failed"); sys.exit(0)
+                tail = tail[2:]
+            else:
+                print("kept:check-failed"); sys.exit(0)
         lock = operation_lock(deadline)
         if lock is None: print("deferred:operation-lock"); sys.exit(0)
-        try: print(combined_remove(args[1], args[2], args[3], deadline))
+        try: print(combined_remove(args[1], args[2], args[3], deadline, expected_identity))
         finally: operation_unlock(lock)
     elif args[:1] == ["restore"] and len(args) == 2:
         lock = operation_lock()

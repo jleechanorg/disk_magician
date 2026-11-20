@@ -81,3 +81,12 @@ The cutoff is exclusive. Outside paths, symlinks, nonregular entries, duplicate
 paths and files at or after the cutoff are rejected. A manifest records selected
 file identities and is read-only. The applying cleaner must recheck every entry
 and evaluate live protection and cleanup policy before removing anything.
+
+The compatibility apply route is `disk-magician quarantine scratch-apply
+--manifest FILE --manifest-sha256 SHA --path RELATIVE_FILE`. Repeat
+`--path` for an exact subset, or explicitly use `--all` for all rows in
+the referenced digest. This first apply slice targets regular files in
+existing Scratch. Managed dated runs are reclaimed as lease-backed units.
+Files with path characters the canonical deletion log cannot represent
+remain in place. Both staged executables are required until the Rust
+quarantine and recovery port is complete.
