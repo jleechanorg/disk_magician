@@ -110,3 +110,20 @@ the remaining queue when usage reaches the target or measurement is unavailable.
 An interrupted mutation reports `recovery_required` and leaves the in-flight
 entry in the checkpoint. The existing legacy writer lock returns immediately
 under contention.
+
+### Legacy command bridge
+
+An installer may opt into an absolute compatibility executable with
+`DISKM_LEGACY_COMPAT_CLI`. Unsupported commands, plus ambiguous `status`,
+`history`, help, and empty invocations, exec that exact path with the original
+arguments. Rust-native `preview`, `scan`, and Scratch manifest commands stay
+native, while their volume, temp-policy, worktree-policy, and exact-apply calls
+resolve through the same compatibility setting. A self-path check and
+`DISKM_LEGACY_COMPAT_ACTIVE` guard prevent fallback recursion. Without the
+setting, unknown commands remain usage errors.
+
+The retained legacy `tmp-scratch-sweep` and `volume_reclaim` scripts default
+their nested volume calls to the adjacent `disk_magician.sh` dispatcher through
+`DISK_MAGICIAN_DISKM_BIN`. This keeps those nested calls on the legacy handler
+during the pilot. Scheduler transfer remains pending until their command,
+state, receipt, and rollback contracts have Rust implementations.

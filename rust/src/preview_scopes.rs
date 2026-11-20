@@ -73,7 +73,7 @@ struct Ledger {
 /// All returned paths are canonical and unique. Roots sharing Scratch's device
 /// are omitted because this list is specifically for host temp observations.
 pub fn resolve_host_temp_scopes() -> io::Result<HostTempScopes> {
-    let scratch_path = Command::new(crate::LEGACY_CLI)
+    let scratch_path = Command::new(crate::legacy_cli()?)
         .args(["volume", "path", "scratch"])
         .output()?;
     let (scratch_device, scratch_scope_availability) = if scratch_path.status.success() {
@@ -224,7 +224,7 @@ pub fn read_ledger(state_dir: &Path) -> io::Result<LedgerSummary> {
 
 /// Ask the canonical temp cleaner for its default dry-run selection. The cleaner writes a run receipt, which is flagged in the result.
 pub fn temp_policy_preview() -> io::Result<TempPolicyPreview> {
-    temp_policy_preview_command(Path::new(crate::LEGACY_CLI))
+    temp_policy_preview_command(&crate::legacy_cli()?)
 }
 
 pub fn temp_policy_preview_command(executable: &Path) -> io::Result<TempPolicyPreview> {

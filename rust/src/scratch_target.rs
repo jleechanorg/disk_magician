@@ -11,7 +11,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const LEGACY: &str = crate::LEGACY_CLI;
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
@@ -169,7 +168,7 @@ fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
 }
 
 fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String, u64)> {
-    let output = Command::new(LEGACY)
+    let output = Command::new(crate::legacy_cli()?)
         .args(["volume", "status", "--snapshot"])
         .output()?;
     if !output.status.success() {
@@ -193,7 +192,7 @@ fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String
     if filesystem_id.is_some_and(|expected| expected != observed_filesystem_id) {
         return Err(io::Error::other("Scratch filesystem identity changed"));
     }
-    let verify = Command::new(LEGACY)
+    let verify = Command::new(crate::legacy_cli()?)
         .args(["volume", "verify-mount", current_path])
         .output()?;
     if !verify.status.success() {
@@ -239,7 +238,7 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
 }
 
 fn legacy_apply(manifest: &Path, digest: &str, relative: &str, lock_fd: i32) -> io::Result<String> {
-    let mut command = Command::new(LEGACY);
+    let mut command = Command::new(crate::legacy_cli()?);
     command
         .args(["quarantine", "scratch-apply", "--manifest"])
         .arg(manifest)

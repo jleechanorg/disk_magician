@@ -161,13 +161,10 @@ fn parse_ledger_line(line: &str) -> Option<WorktreeCandidate> {
 }
 
 pub fn preview_worktrees() -> io::Result<WorktreePreviewReport> {
+    let legacy = crate::legacy_cli()?;
     let output = Command::new("python3")
-        .args([
-            "-c",
-            PREVIEW_RUNNER,
-            &TIMEOUT_SECONDS.to_string(),
-            crate::LEGACY_CLI,
-        ])
+        .args(["-c", PREVIEW_RUNNER, &TIMEOUT_SECONDS.to_string()])
+        .arg(legacy)
         .env_remove("WORKTREE_APPROVED")
         .env_remove("MANUAL_DISCARD")
         .env_remove("MANUAL_INCLUDE_LIVE")
