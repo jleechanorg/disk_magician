@@ -3,10 +3,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,6 +21,7 @@ const O_NOFOLLOW: i32 = 0x100;
 
 unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
+    fn geteuid() -> u32;
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +62,7 @@ struct ResumeState {
     pending_paths: VecDeque<String>,
     receipts: Vec<Receipt>,
     status: String,
-    used_before_bytes: u64,
+    used_before_bytes: Option<u64>,
     used_after_bytes: Option<u64>,
 }
 
@@ -86,30 +87,55 @@ impl Drop for ResumeLock {
     }
 }
 
-fn acquire_lock(resume_path: &Path) -> io::Result<ResumeLock> {
-    let parent = resume_path.parent().unwrap_or_else(|| Path::new("."));
-    let name = resume_path
-        .file_name()
-        .ok_or_else(|| io::Error::other("resume state needs a filename"))?;
-    let mut lock_name = name.to_os_string();
-    lock_name.push(".lock");
-    let lock_path = parent.join(lock_name);
+fn acquire_scratch_lock() -> io::Result<ResumeLock> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| io::Error::other("HOME unavailable for Scratch lock"))?;
+    let home_meta = fs::symlink_metadata(&home)?;
+    if !home_meta.is_dir()
+        || home_meta.uid() != unsafe { geteuid() }
+        || home_meta.mode() & 0o022 != 0
+    {
+        return Err(io::Error::other("unsafe HOME for Scratch lock"));
+    }
+    let lock_dir = home.join(".disk_magician_locks");
+    match DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&lock_dir)
+    {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let dir_meta = fs::symlink_metadata(&lock_dir)?;
+    if !dir_meta.is_dir() || dir_meta.uid() != home_meta.uid() || dir_meta.mode() & 0o077 != 0 {
+        return Err(io::Error::other("unsafe Scratch lock directory"));
+    }
+    let lock_path = lock_dir.join("scratch_cleanup.lock");
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .mode(0o600)
         .custom_flags(O_NOFOLLOW)
-        .open(lock_path)?;
+        .open(&lock_path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::other("resume lock is not a regular file"));
+    let current = fs::symlink_metadata(&lock_path)?;
+    if !metadata.is_file()
+        || metadata.uid() != home_meta.uid()
+        || metadata.mode() & 0o077 != 0
+        || metadata.dev() != current.dev()
+        || metadata.ino() != current.ino()
+    {
+        return Err(io::Error::other("unsafe Scratch cleanup lock"));
     }
     let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
     if result != 0 {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            "resume state is already in use",
+            "Scratch cleanup is already in progress",
         ));
     }
     Ok(ResumeLock(file))
@@ -255,7 +281,6 @@ pub fn apply(
     if fs::canonicalize(manifest_path)? == resume_path {
         return Err(io::Error::other("resume state cannot replace the manifest"));
     }
-    let _lock = acquire_lock(&resume_path)?;
     let existing_state = if resume_path.exists() {
         let meta = fs::symlink_metadata(resume_path)?;
         if !meta.is_file() {
@@ -293,11 +318,40 @@ pub fn apply(
     } else {
         None
     };
+    let _lock = match acquire_scratch_lock() {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            if let Some(state) = existing_state.as_ref() {
+                return Ok(Report {
+                    status: "deferred:scratch-cleanup-in-progress".into(),
+                    complete: false,
+                    target_reached: false,
+                    target_used_bytes,
+                    used_before_bytes: state.used_before_bytes,
+                    used_after_bytes: state.used_after_bytes,
+                    pending_paths: state.pending_paths.iter().cloned().collect(),
+                    receipts: state.receipts.clone(),
+                });
+            }
+            return Ok(Report {
+                status: "deferred:scratch-cleanup-in-progress".into(),
+                complete: false,
+                target_reached: false,
+                target_used_bytes,
+                used_before_bytes: None,
+                used_after_bytes: None,
+                pending_paths: initial_paths.clone().unwrap_or_default(),
+                receipts: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let measured = mounted_usage(
         &manifest.root,
         existing_state
             .as_ref()
-            .map(|state| state.filesystem_id.as_str()),
+            .map(|state| state.filesystem_id.as_str())
+            .filter(|id| !id.is_empty()),
     );
     let (filesystem_id, start_used) = match measured {
         Ok(usage) => usage,
@@ -308,21 +362,30 @@ pub fn apply(
                 write_state(resume_path, &state)?;
                 return Ok(report(state));
             }
-            return Ok(Report {
-                status: format!("deferred:{}", error),
-                complete: false,
-                target_reached: false,
+            let state = ResumeState {
+                version: 1,
+                manifest_sha256: digest.to_owned(),
                 target_used_bytes,
+                root: manifest.root,
+                filesystem_id: String::new(),
+                pending_paths: initial_paths.unwrap_or_default().into(),
+                receipts: Vec::new(),
+                status: format!("deferred:{}", error),
                 used_before_bytes: None,
                 used_after_bytes: None,
-                pending_paths: initial_paths.unwrap_or_default(),
-                receipts: Vec::new(),
-            });
+            };
+            write_state(resume_path, &state)?;
+            return Ok(report(state));
         }
     };
     let mut state = if let Some(state) = existing_state {
-        if state.filesystem_id != filesystem_id {
+        if !state.filesystem_id.is_empty() && state.filesystem_id != filesystem_id {
             return Err(io::Error::other("resume Scratch identity changed"));
+        }
+        let mut state = state;
+        state.filesystem_id = filesystem_id;
+        if state.used_before_bytes.is_none() {
+            state.used_before_bytes = Some(start_used);
         }
         state
     } else {
@@ -336,7 +399,7 @@ pub fn apply(
             pending_paths: paths.into(),
             receipts: Vec::new(),
             status: "in_progress".into(),
-            used_before_bytes: start_used,
+            used_before_bytes: Some(start_used),
             used_after_bytes: Some(start_used),
         }
     };
@@ -347,14 +410,7 @@ pub fn apply(
         .last()
         .is_some_and(|receipt| receipt.used_after_bytes.is_none())
     {
-        let measured = match mounted_usage(&state.root, Some(&state.filesystem_id)) {
-            Ok(measured) => measured,
-            Err(error) => {
-                state.status = format!("deferred:{}", error);
-                return Ok(report(state));
-            }
-        };
-        current_used = measured.1;
+        current_used = start_used;
         if let Some(receipt) = state.receipts.last_mut() {
             receipt.used_after_bytes = Some(current_used);
         }
@@ -369,22 +425,7 @@ pub fn apply(
         write_state(resume_path, &state)?;
     }
     while let Some(path) = state.pending_paths.front().cloned() {
-        let (observed_id, used_before) =
-            match mounted_usage(&state.root, Some(&state.filesystem_id)) {
-                Ok(observation) => observation,
-                Err(error) => {
-                    state.status = format!("deferred:{}", error);
-                    state.used_after_bytes = None;
-                    write_state(resume_path, &state)?;
-                    return Ok(report(state));
-                }
-            };
-        if observed_id != state.filesystem_id {
-            state.status = "deferred:Scratch filesystem identity changed".into();
-            write_state(resume_path, &state)?;
-            return Ok(report(state));
-        }
-        current_used = used_before;
+        let used_before = current_used;
         if used_before <= target_used_bytes {
             state.status = "target_reached".into();
             state.used_after_bytes = Some(used_before);
@@ -396,16 +437,18 @@ pub fn apply(
         write_state(resume_path, &state)?;
         let result = match legacy_apply(manifest_path, digest, &path) {
             Ok(result) => result,
-            Err(error) => {
-                state.status = format!("deferred:{}", error);
+            Err(_) => return Ok(report_recovery_required(&state)),
+        };
+        if result.starts_with("deferred:") {
+            if result == "deferred:operation-lock" {
+                state.status = result;
                 write_state(resume_path, &state)?;
                 return Ok(report(state));
             }
-        };
-        if result.starts_with("deferred:") {
-            state.status = result;
-            write_state(resume_path, &state)?;
-            return Ok(report(state));
+            return Ok(report_recovery_required(&state));
+        }
+        if result.starts_with("kept:quarantine_partial_kept") {
+            return Ok(report_recovery_required(&state));
         }
         state.pending_paths.pop_front();
         state.receipts.push(Receipt {
@@ -493,7 +536,7 @@ fn report(state: ResumeState) -> Report {
         complete,
         target_reached,
         target_used_bytes: state.target_used_bytes,
-        used_before_bytes: Some(state.used_before_bytes),
+        used_before_bytes: state.used_before_bytes,
         used_after_bytes: state.used_after_bytes,
         pending_paths: state.pending_paths.into_iter().collect(),
         receipts: state.receipts,
@@ -506,9 +549,9 @@ fn report_recovery_required(state: &ResumeState) -> Report {
         complete: false,
         target_reached: false,
         target_used_bytes: state.target_used_bytes,
-        used_before_bytes: Some(state.used_before_bytes),
+        used_before_bytes: state.used_before_bytes,
         used_after_bytes: state.used_after_bytes,
-        pending_paths: state.pending_paths.clone(),
+        pending_paths: state.pending_paths.iter().cloned().collect(),
         receipts: state.receipts.clone(),
     }
 }

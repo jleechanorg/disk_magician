@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,6 +82,7 @@ if [[ "$1" == volume && "$2" == path && "$3" == scratch ]]; then
 elif [[ "$1" == volume && "$2" == verify-mount ]]; then
   [[ "$3" == "$FAKE_SCRATCH_ROOT" ]]
 elif [[ "$1" == volume && "$2" == status ]]; then
+  [[ "${FAKE_STATUS_FAIL:-0}" == 0 ]] || exit 75
   index=0
   [[ ! -f "$STATUS_INDEX" ]] || index="$(cat "$STATUS_INDEX")"
   index=$((index+1))
@@ -103,7 +105,7 @@ elif [[ "$1" == quarantine && "$2" == scratch-apply ]]; then
     esac
   done
   printf '%s\n' "$selected" >> "$APPLIES"
-  printf '{"results":[{"path":"%s","result":"removed:fixture"}]}\n' "$selected"
+  printf '{"results":[{"path":"%s","result":"%s"}]}\n' "$selected" "${FAKE_APPLY_RESULT:-removed:fixture}"
 else
   exit 64
 fi
@@ -128,6 +130,21 @@ fi
     }
 
     fn run(&self, used: &[u64], ids: &[&str], extra: &[&str]) -> Output {
+        self.run_env(used, ids, extra, "removed:fixture", false)
+    }
+
+    fn run_result(&self, used: &[u64], ids: &[&str], extra: &[&str], result: &str) -> Output {
+        self.run_env(used, ids, extra, result, false)
+    }
+
+    fn run_env(
+        &self,
+        used: &[u64],
+        ids: &[&str],
+        extra: &[&str],
+        result: &str,
+        status_failure: bool,
+    ) -> Output {
         let _ = fs::remove_file(&self.status_index);
         let sequence = used
             .iter()
@@ -154,11 +171,14 @@ fi
             ])
             .args(extra)
             .env("PATH", search_path)
+            .env("HOME", &self.root)
             .env("FAKE_SCRATCH_ROOT", &self.scratch)
             .env("STATUS_INDEX", &self.status_index)
             .env("APPLIES", &self.applies)
             .env("FAKE_USED_SEQUENCE", sequence)
             .env("FAKE_ID_SEQUENCE", id_sequence)
+            .env("FAKE_APPLY_RESULT", result)
+            .env("FAKE_STATUS_FAIL", if status_failure { "1" } else { "0" })
             .output()
             .expect("target apply executable starts")
     }
@@ -182,11 +202,7 @@ fn report(output: &Output) -> Value {
 #[test]
 fn stops_at_target_and_checkpoints_the_exact_remaining_selection() {
     let fixture = Fixture::new(2);
-    let output = fixture.run(
-        &[101 * GIB, 101 * GIB, 100 * GIB],
-        &["volume-a"; 3],
-        &["--all"],
-    );
+    let output = fixture.run(&[101 * GIB, 100 * GIB], &["volume-a"; 2], &["--all"]);
     let result = report(&output);
     assert_eq!(result["status"], "target_reached");
     assert_eq!(result["target_reached"], true);
@@ -204,13 +220,9 @@ fn stops_at_target_and_checkpoints_the_exact_remaining_selection() {
 #[test]
 fn resume_keeps_the_digest_bound_selection_and_reaches_target_on_next_batch() {
     let fixture = Fixture::new(2);
-    let first = fixture.run(
-        &[101 * GIB, 101 * GIB, 100 * GIB],
-        &["volume-a"; 3],
-        &["--all"],
-    );
+    let first = fixture.run(&[101 * GIB, 100 * GIB], &["volume-a"; 2], &["--all"]);
     assert_eq!(report(&first)["pending_paths"], json!([fixture.entries[1]]));
-    let second = fixture.run(&[101 * GIB, 101 * GIB, 100 * GIB], &["volume-a"; 3], &[]);
+    let second = fixture.run(&[101 * GIB, 100 * GIB], &["volume-a"; 2], &[]);
     let result = report(&second);
     assert_eq!(result["target_reached"], true);
     assert!(result["pending_paths"].as_array().unwrap().is_empty());
@@ -221,8 +233,8 @@ fn resume_keeps_the_digest_bound_selection_and_reaches_target_on_next_batch() {
 fn volume_identity_change_stops_before_the_next_manifest_entry() {
     let fixture = Fixture::new(2);
     let output = fixture.run(
-        &[101 * GIB, 101 * GIB, 101 * GIB],
-        &["volume-a", "volume-a", "volume-b"],
+        &[101 * GIB, 101 * GIB],
+        &["volume-a", "volume-b"],
         &["--all"],
     );
     let result = report(&output);
@@ -235,13 +247,88 @@ fn volume_identity_change_stops_before_the_next_manifest_entry() {
 }
 
 #[test]
+fn partial_quarantine_requires_recovery_and_keeps_the_in_flight_path() {
+    let fixture = Fixture::new(2);
+    let output = fixture.run_result(
+        &[101 * GIB],
+        &["volume-a"],
+        &["--all"],
+        "kept:quarantine_partial_kept:deadbeefdeadbeef",
+    );
+    let result = report(&output);
+    assert!(result["status"]
+        .as_str()
+        .unwrap()
+        .starts_with("recovery_required:"));
+    assert_eq!(
+        result["pending_paths"],
+        json!([fixture.entries[0], fixture.entries[1]])
+    );
+    let apply_calls = fs::read_to_string(&fixture.applies).unwrap();
+    assert_eq!(apply_calls, format!("{}\n", fixture.entries[0]));
+
+    let resumed = fixture.run(&[101 * GIB], &["volume-a"], &[]);
+    assert!(report(&resumed)["status"]
+        .as_str()
+        .unwrap()
+        .starts_with("recovery_required:"));
+    assert_eq!(fs::read_to_string(&fixture.applies).unwrap(), apply_calls);
+}
+
+#[test]
+fn unavailable_first_volume_read_persists_the_exact_queue_for_resume() {
+    let fixture = Fixture::new(2);
+    let blocked = fixture.run_env(&[], &[], &["--all"], "removed:fixture", true);
+    let blocked = report(&blocked);
+    assert!(blocked["status"].as_str().unwrap().starts_with("deferred:"));
+    assert_eq!(blocked["pending_paths"], json!(fixture.entries));
+    let saved: Value = serde_json::from_slice(&fs::read(&fixture.resume).unwrap()).unwrap();
+    assert_eq!(saved["filesystem_id"], "");
+
+    let resumed = fixture.run(&[101 * GIB, 100 * GIB], &["volume-a"; 2], &[]);
+    let resumed = report(&resumed);
+    assert_eq!(resumed["target_reached"], true);
+    assert_eq!(resumed["pending_paths"], json!([fixture.entries[1]]));
+}
+
+#[test]
+fn existing_scratch_cleanup_lock_defers_without_touching_the_queue() {
+    let fixture = Fixture::new(2);
+    let lock_dir = fixture.root.join(".disk_magician_locks");
+    fs::create_dir(&lock_dir).unwrap();
+    fs::set_permissions(&lock_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let lock_path = lock_dir.join("scratch_cleanup.lock");
+    let ready = fixture.root.join("lock-ready");
+    let mut holder = Command::new("python3")
+        .args([
+            "-c",
+            "import fcntl,os,sys,time; fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600); fcntl.flock(fd,fcntl.LOCK_EX); open(sys.argv[2], 'w').close(); time.sleep(20)",
+        ])
+        .arg(&lock_path)
+        .arg(&ready)
+        .env("HOME", &fixture.root)
+        .spawn()
+        .expect("start isolated lock holder");
+    let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !ready.exists() && std::time::Instant::now() < wait_until {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(ready.exists(), "lock holder acquired the fixture lock");
+
+    let output = fixture.run(&[101 * GIB], &["volume-a"], &["--all"]);
+    let result = report(&output);
+    assert_eq!(result["status"], "deferred:scratch-cleanup-in-progress");
+    assert_eq!(result["pending_paths"], json!(fixture.entries));
+    assert!(!fixture.applies.exists());
+
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+}
+
+#[test]
 fn interrupted_in_flight_quarantine_requires_exact_recovery_without_global_reconcile() {
     let fixture = Fixture::new(2);
-    let first = fixture.run(
-        &[101 * GIB, 101 * GIB, 100 * GIB],
-        &["volume-a"; 3],
-        &["--all"],
-    );
+    let first = fixture.run(&[101 * GIB, 100 * GIB], &["volume-a"; 2], &["--all"]);
     assert_eq!(report(&first)["pending_paths"], json!([fixture.entries[1]]));
     let mut state: Value = serde_json::from_slice(&fs::read(&fixture.resume).unwrap()).unwrap();
     state["status"] = json!(format!("applying:{}", fixture.entries[1]));
