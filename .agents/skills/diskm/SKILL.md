@@ -5,9 +5,11 @@ description: Use for any disk space request — "clean disk", "reclaim N GiB", "
 
 # diskm — reclaim disk, in the order that actually works
 
-**Canonical owner of this procedure.** `/diskm` resolves here. Cross-references:
-`~/.claude/skills/disk-root-cause/SKILL.md` (measurement rule),
-`../../AGENTS.md` (tool contract), `~/.claude/skills/scratch-space/SKILL.md`.
+**Canonical owner of this procedure.** `/diskm` resolves here. Read the
+[repository instructions](../../../AGENTS.md) for cleanup scope and reporting,
+[disk-root-cause](../../../skills/disk-root-cause/SKILL.md) for measurement,
+and the [operator playbook](../../../docs/operator-playbook.md) for machine
+safety checks, age overrides, and scheduler details.
 
 Everything below was measured on 2026-11-13 on macOS + jeff-ubuntu. Steps 1–2
 produced ~108 of ~250 GiB and are the only **structural** wins (they stop regrowth).
@@ -142,11 +144,11 @@ after deleting inside the image is a **false** reading.
 
 ---
 
-## Step 3 — Lock discipline (the #1 self-inflicted failure)
+## Step 3 — Check contention and scheduler receipts
 
-`scratch_cleanup.lock` is shared by the tmp cleaner, the scratch cleaner **and**
-the scheduled sweeper. Default wait is **20 s**, after which the run prints
-`skipped, scratch lock held` and **exits 0**.
+Some installed versions can return a zero exit code when a Scratch lock
+prevents a scheduled child from running. Read the installed version's
+receipt and check the live holder before deciding what happened.
 
 Measured: five of my own background runs held it, so `diskm-scratch-reclaim` emitted
 
@@ -161,19 +163,19 @@ diagnosing downstream "gate defects" caused by my own concurrency.
 ```bash
 pgrep -af 'cleanup_scratch_top_level|cleanup_tmp\.sh'   # BEFORE theorising
 lsof ~/.disk_magician_locks/scratch_cleanup.lock
-DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=1800 diskm ...  # queue instead of losing
 ```
 
-**One scratch cleaner at a time. Never restart a budget-mode run mid-flight** —
-budget mode completes a full LRU ordering pass before the first eviction, so a
-restart discards all progress (observed 9.9 → 36 → 44 → 154 GiB with long
-plateaus then cliffs).
+Keep other cleanup lanes moving during Scratch contention. When the receipt
+reports `skipped_lock`, report the skipped run and the owner if verified.
+Budget mode can spend time ordering candidates before its first eviction.
+Check progress before restarting that work.
 
 ---
 
-## Step 4 — The diskm stack, serially
+## Step 4 — Choose the matching cleanup commands
 
-They contend on the same lock; run one at a time.
+Use the matching dry run first. Apply only the operator-authorized scope and
+run independent lanes in parallel when the host has capacity.
 
 ```bash
 diskm cleanup-xcode --clean                 # macOS: DerivedData + simulator caches
