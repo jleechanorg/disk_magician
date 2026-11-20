@@ -252,12 +252,14 @@ if [[ "$SWEEP_MODE" == scratch-only ]]; then
   SCRATCH_LRU_PCT="${DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT:-}"
   if [[ "$SCRATCH_LRU_PCT" =~ ^[1-9][0-9]?$ ]]; then
     scratch_args+=(--budget-pct "$SCRATCH_LRU_PCT" --budget-preserve-content-keeps)
-    # Pass the operator's shorter budget window through to the pruner. Without
-    # this the budget path silently kept the 48h default and could never evict
-    # on a volume whose content is all younger than that (2026-11-19).
-    if [[ "${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS:-}" =~ ^[1-9][0-9]{0,3}$ ]]; then
-      scratch_args+=(--budget-floor-minutes $(( 10#${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS} * 60 )))
+    # Operator decision 2026-11-20: scheduled Scratch keeps at least 48h.
+    # Clamp persisted scheduler overrides while preserving longer retention.
+    scratch_floor_hours=48
+    configured_floor="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS:-}"
+    if [[ "$configured_floor" =~ ^[1-9][0-9]{0,3}$ ]] && (( 10#$configured_floor > scratch_floor_hours )); then
+      scratch_floor_hours=$((10#$configured_floor))
     fi
+    scratch_args+=(--budget-floor-minutes "$((scratch_floor_hours * 60))")
     scratch_mode_env=(DISK_MAGICIAN_SCRATCH_AUTOMATIC=0 SCRATCH_TOP_LEVEL_APPROVED=1)
   else
     scratch_args+=(--available-floor)

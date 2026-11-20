@@ -318,6 +318,13 @@ class LinuxScratchTest(VolumeTestBase):
             with mock.patch.object(volume, '__file__', str(current / 'scripts/volume.py')):
                 yield previous, current, service, timer, dropin, cadence, cmd, command
 
+    def test_scheduler_deployed_install_defaults_to_48_hours(self):
+        with self.scheduler_deployed_fixture() as fixture, mock.patch.dict(os.environ):
+            previous, _, service, *_ = fixture
+            os.environ.pop("DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS", None)
+            self.assertEqual(volume.linux_scheduler_install_cmd("scratch", upgrade_from=str(previous)), 0)
+            self.assertIn("Environment=DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS=\"48\"\n", service.read_text())
+
     def test_scheduler_deployed_upgrade_migrates_known_dropin(self):
         with self.scheduler_deployed_fixture() as (previous, current, service, timer, dropin, cadence, cmd, command):
             old_dropin = dropin.read_text()
