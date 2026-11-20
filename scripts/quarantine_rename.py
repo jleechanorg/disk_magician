@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """C14 quarantine phase 1: bind the parent before verdict, then `phase1 <path> <inventory.json> <parent-binding.json>`."""
-import ctypes, errno, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, time
+import contextlib, ctypes, errno, fcntl, hashlib, json, math, os, re, secrets, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 ENV, KEYS, DIRFL = os.environ, ("path", "type", "dev", "ino", "size", "sha256", "target"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 UPDATE_COUNT = 0
@@ -325,16 +325,21 @@ def verify(pfd, qfd, qentry, qid, rec, qdir, deadline=None):  # "" = identity, l
         timeout = remaining_seconds(deadline)
         if timeout is not None and timeout <= 0: return "deferred:deadline"
         target = os.path.join(qdir, qid)
+        probe = subprocess.Popen(["lsof", "-nP", "-Fn", "+D" if stat.S_ISDIR(d.st_mode) else "--", target], stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
-            lsof = subprocess.run(["lsof", "-nP", "-Fn", "+D" if stat.S_ISDIR(d.st_mode) else "--", target], capture_output=True, timeout=120 if timeout is None else timeout)  # +D is dirs-only
+            stdout, stderr = probe.communicate(timeout=120 if timeout is None else timeout)
         except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(probe.pid, 9)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                probe.wait(timeout=0.1)
             return "deferred:deadline"
-        has_user = bool(lsof.stdout) and not (
-            lsof.returncode in (0, 1) and stat.S_ISDIR(d.st_mode)
-            and not lsof_stderr_incomplete(lsof.stderr, target)
-            and _hardlink_only_false_positive(target, lsof.stdout, 120 if timeout is None else max(0.1, remaining_seconds(deadline) or 0.1))
+        has_user = bool(stdout) and not (
+            probe.returncode in (0, 1) and stat.S_ISDIR(d.st_mode)
+            and not lsof_stderr_incomplete(stderr, target)
+            and _hardlink_only_false_positive(target, stdout, 120 if timeout is None else max(0.1, remaining_seconds(deadline) or 0.1))
         )
-        if has_user or (not lsof.stdout and lsof.returncode != 1) or lsof_stderr_incomplete(lsof.stderr, target): return "live-user" if has_user or not lsof.returncode else "check-failed"
+        if has_user or (not stdout and probe.returncode != 1) or lsof_stderr_incomplete(stderr, target): return "live-user" if has_user or not probe.returncode else "check-failed"
         if not same_entry(pfd, ".dm-quarantine", qentry): return "quarantine-dir-changed"
         if not same_entry(qfd, qid, d): return "identity-mismatch"
         return "" if canon_inventory(visit(qfd, qid, ".", [], deadline)) == canon_inventory(rec["inventory"]) else "rehash-mismatch"
