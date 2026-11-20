@@ -61,7 +61,7 @@ if [ "$#" -eq 3 ] && [ "$1" = volume ] && [ "$2" = path ] && [ "$3" = scratch ];
   exit 0
 fi
 if [ "$#" -eq 7 ] && [ "$1" = quarantine ] && [ "$2" = verdict ] && [ "$4" = --kind ] && [ "$5" = ephemeral ] && [ "$6" = --deadline-at ]; then
-  case "$(basename "$3")" in
+  case "${3##*/}" in
     removable*) printf 'remove\n' ;;
     *) printf 'kept:recent-activity\n' ;;
   esac
@@ -82,7 +82,13 @@ exit 64
             .args(["preview", "--state-dir"])
             .arg(&self.state)
             .args(extra)
-            .env("PATH", &self.bin)
+            .env(
+                "PATH",
+                std::env::join_paths(std::iter::once(self.bin.clone()).chain(
+                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+                ))
+                .unwrap(),
+            )
             .env("CALL_LOG", &self.calls)
             .env("FAKE_SCRATCH_ROOT", &self.scratch)
             .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")
@@ -194,7 +200,8 @@ fn outside_and_symlink_paths_are_never_sent_to_the_verdict_checker() {
     fixture.install_diskm();
 
     let result = report(&fixture.run(&[]));
-    for path in [&outside, &link] {
+    {
+        let path = &link;
         let candidate = result["candidates"]
             .as_array()
             .unwrap()
@@ -203,6 +210,11 @@ fn outside_and_symlink_paths_are_never_sent_to_the_verdict_checker() {
             .unwrap();
         assert_eq!(candidate["eligible"], false);
     }
+    assert!(!result["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == outside.to_string_lossy().as_ref()));
     assert!(!fixture.calls().contains(outside.to_str().unwrap()));
     assert!(!fixture.calls().contains(link.to_str().unwrap()));
 }

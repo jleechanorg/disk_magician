@@ -1,4 +1,4 @@
-use diskm_shadow::{history, scan, status};
+use diskm_shadow::{history, preview, scan, status};
 use serde::Serialize;
 use std::env;
 use std::ffi::OsString;
@@ -12,6 +12,7 @@ const USAGE: &str = "diskm-rust — read-only Disk Magician candidate; output is
   diskm-rust status [PATH] [--state-dir DIR] [--json]
   diskm-rust scan PATH [--deadline-ms N] [--max-entries N] [--json]
   diskm-rust history --state-dir DIR [--days 7|30] [--json]
+  diskm-rust preview --state-dir DIR [--min-hours 6|48] [--max-candidates N] [--dry-run]
 
 Status defaults to the current directory. Scan defaults to 30 seconds and
 100,000 visited paths. An incomplete scan emits a report and exits 75.";
@@ -32,6 +33,11 @@ enum Operation {
     History {
         state_dir: PathBuf,
         days: u32,
+    },
+    Preview {
+        state_dir: PathBuf,
+        min_hours: u32,
+        max_candidates: usize,
     },
 }
 
@@ -64,7 +70,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         .ok_or_else(|| "invalid command".to_owned())?;
     match command {
         "-h" | "--help" | "help" => return Ok(Operation::Help),
-        "status" | "scan" | "history" => {}
+        "status" | "scan" | "history" | "preview" => {}
         _ => return Err(format!("unknown command {command:?}")),
     }
 
@@ -73,6 +79,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     let mut deadline_ms = 30_000;
     let mut max_entries = 100_000;
     let mut days = 7;
+    let mut min_hours = 48;
+    let mut max_candidates = 20;
     let mut positional_only = false;
 
     while let Some(arg) = args.next() {
@@ -81,6 +89,23 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             Some("--help" | "-h") => return Ok(Operation::Help),
             Some("--") => positional_only = true,
             Some("--json") => {}
+            Some("--dry-run") if command == "preview" => {}
+            Some("--min-hours") if command == "preview" => {
+                min_hours = match required_value(&mut args, "--min-hours")?.to_str() {
+                    Some("6") => 6,
+                    Some("48") => 48,
+                    _ => return Err("--min-hours must be 6 or 48".to_owned()),
+                };
+            }
+            Some("--max-candidates") if command == "preview" => {
+                max_candidates = positive(&mut args, "--max-candidates")?;
+                if max_candidates > preview::MAX_CANDIDATES {
+                    return Err(format!(
+                        "--max-candidates must be <= {}",
+                        preview::MAX_CANDIDATES
+                    ));
+                }
+            }
             Some("--state-dir") if command != "scan" && state_dir.is_none() => {
                 state_dir = Some(PathBuf::from(required_value(&mut args, "--state-dir")?));
             }
@@ -98,7 +123,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
                 };
             }
             Some(flag) if flag.starts_with('-') => return Err(format!("unexpected option {flag}")),
-            _ if command != "history" && root.is_none() => root = Some(PathBuf::from(arg)),
+            _ if matches!(command, "scan" | "status") && root.is_none() => {
+                root = Some(PathBuf::from(arg))
+            }
             _ => return Err("unexpected extra path".to_owned()),
         }
     }
@@ -121,6 +148,11 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         "history" => Ok(Operation::History {
             state_dir: state_dir.ok_or("history requires --state-dir")?,
             days,
+        }),
+        "preview" => Ok(Operation::Preview {
+            state_dir: state_dir.ok_or("preview requires --state-dir")?,
+            min_hours,
+            max_candidates,
         }),
         _ => unreachable!("command already validated"),
     }
@@ -149,6 +181,13 @@ fn run(operation: Operation) -> io::Result<u8> {
         }
         Operation::History { state_dir, days } => {
             print_json(&history::history(&state_dir, days)?)?;
+        }
+        Operation::Preview {
+            state_dir,
+            min_hours,
+            max_candidates,
+        } => {
+            print_json(&preview::preview(&state_dir, min_hours, max_candidates)?)?;
         }
     }
     Ok(0)
