@@ -210,7 +210,7 @@ RUN_REPO="$RUNS_ROOT/runs/20261120/disk-magician"
 RUN_UNIT="$RUN_REPO/build-20261120T120000Z-1234-5678"
 mkdir -p "$RUN_REPO/.dm-quarantine" "$RUN_UNIT"
 chmod 700 "$RUN_REPO/.dm-quarantine"
-printf '{"volumes":{"classes":{"scratch":{"mountpoint":"%s"}}}}\n' "$RUNS_ROOT" > "$TMPROOT/run-config.json"
+printf '{"volumes":{"swap_headroom_gb":1,"alarm_floor_gb":1,"encryption":"none","classes":{"scratch":{"name":"diskm-scratch","mountpoint":"%s","quota_gb":1}}}}\n' "$RUNS_ROOT" > "$TMPROOT/run-config.json"
 RUN_CONFIG="$TMPROOT/run-config.json"
 assert_eq "$(DISK_MAGICIAN_CONFIG="$RUN_CONFIG" c14_ephemeral_retention "$RUN_UNIT")" 2880 "owned dated run is a 48h unit"
 assert_eq "$(DISK_MAGICIAN_CONFIG="$RUN_CONFIG" c14_ephemeral_retention "$RUNS_ROOT/runs")" "" "runs namespace is never a removal unit"
@@ -223,6 +223,14 @@ assert_eq "$(DISK_MAGICIAN_CONFIG="$RUN_CONFIG" c14_ephemeral_retention "$BAD_RU
 NO_MARKER="$RUNS_ROOT/runs/20261120/disk-magician/unmanaged-output"
 mkdir -p "$NO_MARKER"
 assert_eq "$(DISK_MAGICIAN_CONFIG="$RUN_CONFIG" c14_ephemeral_retention "$NO_MARKER")" "" "unmarked path is not an allocator run"
+SECOND_RUN="$RUN_REPO/test-20261120T130000Z-5678-1234"
+mkdir -p "$SECOND_RUN"
+printf "original\n" >"$RUN_UNIT/old.log"
+touch -t 202001010000 "$RUNS_ROOT/runs" "$RUNS_ROOT/runs/20261120" "$RUN_REPO" "$RUN_REPO/.dm-quarantine" "$RUN_UNIT" "$RUN_UNIT/old.log" "$SECOND_RUN"
+for container in "$RUNS_ROOT/runs" "$RUNS_ROOT/runs/20261120" "$RUN_REPO" "$RUN_UNIT/old.log"; do
+    assert_eq "$(DISK_MAGICIAN_CONFIG="$RUN_CONFIG" SCRATCH_TOP_LEVEL_APPROVED=1 artifact_removal_verdict "$container" --min-idle-minutes 120)" kept:managed-run-boundary "manual budget protects managed namespace path: $container"
+done
+assert_eq "$(DISK_MAGICIAN_CONFIG="$RUN_CONFIG" c14_ephemeral_retention "$SECOND_RUN")" 2880 "second dated run retains its own 48h boundary"
 export DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$PT" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$PT"
 # shellcheck source=scripts/lib/worktree_lease.sh
 source "$REPO_ROOT/scripts/lib/worktree_lease.sh"
