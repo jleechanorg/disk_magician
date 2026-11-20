@@ -65,7 +65,7 @@ pub fn history(state_repo: &Path, days: u32) -> std::io::Result<HistoryReport> {
         .arg(state_repo)
         .args([
             "log",
-            "--since",
+            "--since-as-filter",
             &format!("{days}.days.ago"),
             "-n",
             "129",
