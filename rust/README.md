@@ -33,6 +33,9 @@ supply provenance, and live discovery works when the ledger is absent.
 
 The report separates discovery coverage and its filesystem gaps from verdicts.
 Each proposed path gets its own deadline with `diskm quarantine verdict`.
+Live preview ranks candidates by allocated bytes, with path order as a tie-break.
+The report retains both allocated and apparent sizes. These figures can count
+shared blocks more than once and do not measure space a deletion will free.
 The verdict pass checks 20 paths by default. Use `--max-candidates N` to change that count. The report still includes all discovered
 candidates and marks unchecked paths deferred. Linked checkouts and bare Git
 mirrors are excluded from six-hour verdicts. Only a current

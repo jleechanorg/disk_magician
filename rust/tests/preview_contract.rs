@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -365,6 +366,15 @@ fn six_hour_preview_discovers_old_scratch_artifacts_without_ledger_rows() {
 
     assert_eq!(result["discovery"]["complete"], true);
     assert_eq!(result["discovery"]["files_measured"], 4);
+    let directory = candidates
+        .iter()
+        .find(|entry| entry["path"] == old_directory.to_string_lossy().as_ref())
+        .unwrap();
+    assert!(directory["allocated_bytes"].as_u64().is_some());
+    assert!(result["discovery"]["allocated_bytes_semantics"]
+        .as_str()
+        .unwrap()
+        .contains("sum allocations per pathname"));
     assert!(!fixture.calls().contains(recent_sibling.to_str().unwrap()));
 }
 
@@ -404,6 +414,56 @@ fn six_hour_discovery_never_marks_symlinks_or_nested_git_content_eligible() {
     assert!(!fixture
         .calls()
         .contains(tracked_looking_content.to_str().unwrap()));
+}
+
+#[test]
+fn preview_verifies_allocated_space_before_sparse_apparent_size() {
+    let fixture = Fixture::new();
+    let sparse = fixture.scratch.join("removable-sparse.cache");
+    let sparse_file = fs::File::create(&sparse).unwrap();
+    sparse_file.set_len(32 * 1024 * 1024).unwrap();
+    Fixture::mark_old(&sparse);
+
+    let allocated = fixture.scratch.join("removable-allocated.cache");
+    let mut allocated_file = fs::File::create(&allocated).unwrap();
+    allocated_file.write_all(&vec![b'x'; 256 * 1024]).unwrap();
+    Fixture::mark_old(&allocated);
+    let tie_b = fixture.scratch_path("removable-tie-b.cache");
+    let tie_a = fixture.scratch_path("removable-tie-a.cache");
+    fs::write(&tie_a, b"").unwrap();
+    fs::write(&tie_b, b"").unwrap();
+    Fixture::mark_old(&tie_a);
+    Fixture::mark_old(&tie_b);
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6", "--max-candidates", "1"]));
+    let candidates = result["candidates"].as_array().unwrap();
+    let first = &candidates[0];
+    let sparse_candidate = candidates
+        .iter()
+        .find(|candidate| candidate["path"] == sparse.to_string_lossy().as_ref())
+        .unwrap();
+    let allocated_candidate = candidates
+        .iter()
+        .find(|candidate| candidate["path"] == allocated.to_string_lossy().as_ref())
+        .unwrap();
+
+    assert_eq!(first["path"], allocated.to_string_lossy().as_ref());
+    assert_eq!(first["verdict"], "remove");
+    assert_eq!(candidates[1]["verdict"], "deferred:verification-limit");
+    assert!(
+        allocated_candidate["apparent_bytes"].as_u64().unwrap()
+            < sparse_candidate["apparent_bytes"].as_u64().unwrap()
+    );
+    assert!(
+        allocated_candidate["allocated_bytes"].as_u64().unwrap()
+            > sparse_candidate["allocated_bytes"].as_u64().unwrap()
+    );
+    assert!(sparse_candidate["apparent_bytes"].as_u64().unwrap() > 0);
+    assert!(
+        sparse_candidate["allocated_bytes"].as_u64().unwrap()
+            < sparse_candidate["apparent_bytes"].as_u64().unwrap()
+    );
 }
 
 #[test]

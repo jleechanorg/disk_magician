@@ -34,6 +34,8 @@ struct Candidate {
     eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     apparent_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allocated_bytes: Option<u64>,
 }
 
 fn ledger_paths(state_dir: &Path, root: &Path) -> io::Result<Vec<(PathBuf, String)>> {
@@ -186,6 +188,7 @@ pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Rep
                     verdict: "missing".into(),
                     eligible: false,
                     apparent_bytes: None,
+                    allocated_bytes: None,
                 });
             }
             continue;
@@ -206,6 +209,7 @@ pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Rep
             verdict,
             eligible,
             apparent_bytes: None,
+            allocated_bytes: None,
         });
     }
     candidates.extend(missing.into_iter().take(limit - candidates.len()));
@@ -228,6 +232,7 @@ struct Discovery {
     directories_measured: usize,
     repository_roots: usize,
     measured_apparent_bytes: u64,
+    allocated_bytes_semantics: &'static str,
     gaps: Vec<ScanGap>,
 }
 
@@ -333,6 +338,7 @@ fn live_preview(
                 protected.push((
                     path,
                     dir.apparent_bytes,
+                    dir.path_allocated_bytes,
                     "kept:repository-use-worktree-route",
                 ));
             }
@@ -346,7 +352,7 @@ fn live_preview(
             continue;
         }
         selected.insert(path);
-        proposals.push((path, dir.apparent_bytes));
+        proposals.push((path, dir.apparent_bytes, dir.path_allocated_bytes));
     }
     for file in &measured.files {
         let path = Path::new(&file.path);
@@ -362,26 +368,29 @@ fn live_preview(
                 .skip(1)
                 .any(|parent| selected.contains(parent))
         {
-            proposals.push((path, file.apparent_bytes));
+            proposals.push((path, file.apparent_bytes, file.allocated_bytes));
         }
     }
-    proposals
-        .sort_unstable_by(|(a, a_bytes), (b, b_bytes)| b_bytes.cmp(a_bytes).then_with(|| a.cmp(b)));
+    proposals.sort_unstable_by(|(a, _, a_allocated), (b, _, b_allocated)| {
+        b_allocated.cmp(a_allocated).then_with(|| a.cmp(b))
+    });
     let mut complete = measured.complete;
-    let candidate = |path: &Path, bytes: u64, verdict: String| Candidate {
-        path: path.to_path_buf(),
-        source: history
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| "live_scan".into()),
-        eligible: verdict == "remove",
-        verdict,
-        apparent_bytes: Some(bytes),
-    };
+    let candidate =
+        |path: &Path, apparent_bytes: u64, allocated_bytes: u64, verdict: String| Candidate {
+            path: path.to_path_buf(),
+            source: history
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| "live_scan".into()),
+            eligible: verdict == "remove",
+            verdict,
+            apparent_bytes: Some(apparent_bytes),
+            allocated_bytes: Some(allocated_bytes),
+        };
     let mut candidates: Vec<_> = proposals
         .into_iter()
         .enumerate()
-        .map(|(index, (path, bytes))| {
+        .map(|(index, (path, apparent_bytes, allocated_bytes))| {
             let verdict = if !scratch_verdicts {
                 "deferred:temp-policy".into()
             } else if index >= limit {
@@ -390,14 +399,14 @@ fn live_preview(
                 checked_verdict(&root, path, device, min_hours)
             };
             complete &= !verdict.starts_with("deferred:");
-            candidate(path, bytes, verdict)
+            candidate(path, apparent_bytes, allocated_bytes, verdict)
         })
         .collect();
-    candidates.extend(
-        protected
-            .into_iter()
-            .map(|(path, bytes, reason)| candidate(path, bytes, reason.into())),
-    );
+    candidates.extend(protected.into_iter().map(
+        |(path, apparent_bytes, allocated_bytes, reason)| {
+            candidate(path, apparent_bytes, allocated_bytes, reason.into())
+        },
+    ));
     Ok(Report {
         scratch_root: scratch_verdicts.then(|| root.clone()),
         root,
@@ -412,6 +421,7 @@ fn live_preview(
             directories_measured: measured.directories.len(),
             repository_roots: repos.len(),
             measured_apparent_bytes: measured.apparent_bytes,
+            allocated_bytes_semantics: "File values are inode-block allocations for the path. Directory values sum allocations per pathname, so hardlinks/shared blocks may be counted more than once and sibling values are not additive. These estimates prioritize checks but do not predict physical reclaim.",
             gaps: measured.gaps,
         }),
     })
