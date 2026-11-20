@@ -422,3 +422,27 @@ fn whole_scratch_discovery_outlives_an_explicit_verdict_limit() {
     assert_eq!(candidates[1]["verdict"], "deferred:verification-limit");
     assert!(!fixture.calls().contains(second.to_str().unwrap()));
 }
+
+#[test]
+fn whole_scratch_preview_preserves_bare_repository_packs() {
+    let fixture = Fixture::new();
+    let repository = fixture.scratch.join("generated-mirror");
+    assert!(Command::new("git")
+        .args(["init", "--bare", "--quiet"])
+        .arg(&repository)
+        .status()
+        .unwrap()
+        .success());
+    let pack = repository.join("objects/pack/removable-cache.pack");
+    fs::write(&pack, b"fixture pack payload").unwrap();
+    Fixture::mark_old(&pack);
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6"]));
+    let candidates = result["candidates"].as_array().unwrap();
+    assert!(!candidates.iter().any(|entry| {
+        let path = Path::new(entry["path"].as_str().unwrap());
+        path.starts_with(&repository) && entry["eligible"] == true
+    }));
+    assert!(!fixture.calls().contains(repository.to_str().unwrap()));
+}
