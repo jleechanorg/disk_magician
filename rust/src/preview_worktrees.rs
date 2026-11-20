@@ -47,6 +47,7 @@ pub struct WorktreePreviewReport {
     /// The canonical cleaner process finished successfully and its ledger rows parsed.
     pub command_complete: bool,
     pub coverage_scope: &'static str,
+    pub retention_policy: &'static str,
     pub timed_out: bool,
     pub exit_code: Option<i32>,
     pub candidates: Vec<WorktreeCandidate>,
@@ -103,7 +104,7 @@ fn canonical_suffix(value: &str) -> bool {
 }
 
 fn parse_ledger_line(line: &str) -> Option<WorktreeCandidate> {
-    let body = line.trim_start().strip_prefix("LEDGER ")?;
+    let body = line.trim_start().strip_prefix("LEDGER ")?.trim_start();
     let (scope, remainder) = body.split_once(char::is_whitespace)?;
     if scope != "repo-local" {
         return None;
@@ -176,10 +177,12 @@ pub fn preview_worktrees() -> io::Result<WorktreePreviewReport> {
         output.status.code() == Some(124) || stderr.contains("worktree preview timed out");
     let mut candidates = Vec::new();
     let mut unparsed_ledger_rows = Vec::new();
-    for line in stdout
-        .lines()
-        .filter(|line| line.trim_start().starts_with("LEDGER "))
-    {
+    for line in stdout.lines().filter(|line| {
+        line.trim_start()
+            .strip_prefix("LEDGER ")
+            .and_then(|body| body.split_whitespace().next())
+            == Some("repo-local")
+    }) {
         match parse_ledger_line(line) {
             Some(candidate) if candidate.disposition != "unparsed" => candidates.push(candidate),
             _ => unparsed_ledger_rows.push(line.to_owned()),
@@ -192,6 +195,7 @@ pub fn preview_worktrees() -> io::Result<WorktreePreviewReport> {
         command_complete: complete,
         coverage_scope:
             "canonical cleanup-worktrees discovery; not a complete filesystem inventory",
+        retention_policy: "canonical worktree inactivity floor, 48 hours or higher",
         timed_out,
         exit_code: output.status.code(),
         candidates,
