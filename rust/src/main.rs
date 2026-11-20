@@ -146,7 +146,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         "preview" => Ok(Operation::Preview {
             state_dir: state_dir.ok_or("preview requires --state-dir")?,
             min_hours,
-            max_candidates: max_candidates.unwrap_or(if min_hours == 6 { usize::MAX } else { 20 }),
+            max_candidates: max_candidates.unwrap_or(20),
         }),
         _ => unreachable!("command already validated"),
     }

@@ -33,8 +33,9 @@ supply provenance, and live discovery works when the ledger is absent.
 
 The report separates discovery coverage and its filesystem gaps from verdicts.
 Each proposed path gets its own deadline with `diskm quarantine verdict`.
-An optional `--max-candidates N` limits verdict calls; the report still includes
-all discovered candidates and marks unchecked paths deferred. Only a current
+The verdict pass checks 20 paths by default. Use `--max-candidates N` to change that count. The report still includes all discovered
+candidates and marks unchecked paths deferred. Linked checkouts and bare Git
+mirrors are excluded from six-hour verdicts. Only a current
 C14 `remove` verdict is labeled eligible. Ownership and PR evidence holds
 outside C14 still apply. Apparent sizes are file-summed and do not project
 physical reclaim.

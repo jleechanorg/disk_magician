@@ -253,6 +253,7 @@ struct Discovery {
     complete: bool,
     files_measured: usize,
     directories_measured: usize,
+    repository_roots: usize,
     measured_apparent_bytes: u64,
     gaps: Vec<ScanGap>,
 }
@@ -298,7 +299,7 @@ fn live_preview(
         .keys()
         .filter(|path| check_path(&root, path, device) == Some("missing"))
         .count();
-    let repos: HashSet<_> = measured
+    let mut repos: HashSet<_> = measured
         .files
         .iter()
         .map(|file| file.path.as_str())
@@ -308,6 +309,25 @@ fn live_preview(
         .filter_map(Path::parent)
         .collect();
 
+    // A bare repository has HEAD and objects at its root, with no .git marker.
+    // Protect it as a unit because C14 sees an individual pack as just a file.
+    let heads: HashSet<_> = measured
+        .files
+        .iter()
+        .map(|file| Path::new(&file.path))
+        .filter(|path| path.file_name().is_some_and(|name| name == "HEAD"))
+        .filter_map(Path::parent)
+        .collect();
+    repos.extend(
+        measured
+            .directories
+            .iter()
+            .map(|dir| Path::new(&dir.path))
+            .filter(|path| path.file_name().is_some_and(|name| name == "objects"))
+            .filter_map(Path::parent)
+            .filter(|parent| heads.contains(parent)),
+    );
+    let repo_containers: HashSet<_> = repos.iter().flat_map(|path| path.ancestors()).collect();
     let evidence_containers: HashSet<_> = measured
         .directories
         .iter()
@@ -333,7 +353,7 @@ fn live_preview(
         {
             continue;
         }
-        if dir.contains_git || inside_repo(path) {
+        if dir.contains_git || inside_repo(path) || repo_containers.contains(path) {
             if history.contains_key(path) {
                 protected.push((
                     path,
@@ -412,6 +432,7 @@ fn live_preview(
             complete: measured.complete,
             files_measured: measured.files.len(),
             directories_measured: measured.directories.len(),
+            repository_roots: repos.len(),
             measured_apparent_bytes: measured.apparent_bytes,
             gaps: measured.gaps,
         }),
