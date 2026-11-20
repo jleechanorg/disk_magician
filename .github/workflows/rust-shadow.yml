@@ -34,6 +34,8 @@ jobs:
         working-directory: rust
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Set the isolated Cargo target directory
         run: |
           {
@@ -49,3 +51,10 @@ jobs:
       - name: Lint
         if: ${{ !cancelled() }}
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Preserve the tested preview executable
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: diskm-rust-${{ matrix.os }}
+          path: ${{ runner.temp }}/diskm-rust-target/debug/diskm-rust
+          if-no-files-found: error
+          retention-days: 3

@@ -1,3 +1,4 @@
+use crate::scan::{scan, ScanOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -144,6 +145,31 @@ fn check_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
     None
 }
 
+fn six_hour_repo_check(path: &Path, remaining: Duration) -> Option<&'static str> {
+    let report = match scan(
+        path,
+        ScanOptions {
+            deadline: remaining,
+            max_entries: 25_000,
+        },
+    ) {
+        Ok(report) if report.complete => report,
+        _ => return Some("deferred:repository-check"),
+    };
+    if report.files.iter().any(|file| {
+        Path::new(&file.path)
+            .file_name()
+            .is_some_and(|name| name == ".git")
+    }) || report.directories.iter().any(|dir| {
+        Path::new(&dir.path)
+            .file_name()
+            .is_some_and(|name| name == ".git")
+    }) {
+        return Some("kept:repository-use-worktree-route");
+    }
+    None
+}
+
 fn current_verdict(path: &Path, deadline: &str, min_hours: u32) -> String {
     let mut command = Command::new("diskm");
     command
@@ -178,12 +204,13 @@ pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Rep
     let (root, device) = registered_scratch()?;
     let paths = ledger_paths(state_dir, &root)?;
     let recorded_paths = paths.len();
+    let window = Duration::from_secs(CHECK_WINDOW_SECONDS);
     let mut complete = true;
     let mut missing_paths = 0;
     let mut missing = Vec::new();
     let mut candidates = Vec::new();
     for (path, source) in paths {
-        if started.elapsed() >= Duration::from_secs(CHECK_WINDOW_SECONDS) {
+        if started.elapsed() >= window {
             complete = false;
             break;
         }
@@ -204,10 +231,22 @@ pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Rep
             complete = false;
             break;
         }
-        let verdict = checked.map_or_else(
+        let scoped_check = checked.or_else(|| {
+            if min_hours == 6 {
+                six_hour_repo_check(&path, window.saturating_sub(started.elapsed()))
+            } else {
+                None
+            }
+        });
+        let mut verdict = scoped_check.map_or_else(
             || current_verdict(&path, &deadline, min_hours),
             str::to_owned,
         );
+        if started.elapsed() >= window {
+            verdict = "deferred:deadline".into();
+        } else if let Some(reason) = check_path(&root, &path, device) {
+            verdict = reason.into();
+        }
         complete &= !verdict.starts_with("deferred:");
         let eligible = verdict == "remove";
         candidates.push(Candidate {

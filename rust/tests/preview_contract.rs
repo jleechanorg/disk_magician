@@ -284,3 +284,24 @@ fn missing_historical_paths_do_not_consume_the_verdict_budget() {
     assert_eq!(result["candidates"][0]["path"], extant.to_str().unwrap());
     assert_eq!(result["complete"], true);
 }
+
+#[test]
+fn six_hour_preview_leaves_nested_repositories_to_the_worktree_route() {
+    let fixture = Fixture::new();
+    let container = fixture.scratch.join("old-container");
+    let repository = container.join("checkout");
+    fs::create_dir_all(&repository).unwrap();
+    fs::write(repository.join(".git"), "gitdir: /unavailable/admin").unwrap();
+    fixture.write_ledger(json!([
+        {"row_type":"cleanup_event", "canonical_path":container}
+    ]));
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6"]));
+    assert_eq!(
+        result["candidates"][0]["verdict"],
+        "kept:repository-use-worktree-route"
+    );
+    assert_eq!(result["candidates"][0]["eligible"], false);
+    assert!(!fixture.calls().contains("\tquarantine\tverdict"));
+}
