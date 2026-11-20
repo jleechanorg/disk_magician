@@ -29,6 +29,7 @@ pub struct Report {
     min_hours: u32,
     pub complete: bool,
     recorded_paths: usize,
+    missing_paths: usize,
     candidates: Vec<Candidate>,
 }
 
@@ -177,14 +178,33 @@ pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Rep
     let (root, device) = registered_scratch()?;
     let paths = ledger_paths(state_dir, &root)?;
     let recorded_paths = paths.len();
-    let mut complete = recorded_paths <= limit;
+    let mut complete = true;
+    let mut missing_paths = 0;
+    let mut missing = Vec::new();
     let mut candidates = Vec::new();
-    for (path, source) in paths.into_iter().take(limit) {
+    for (path, source) in paths {
         if started.elapsed() >= Duration::from_secs(CHECK_WINDOW_SECONDS) {
             complete = false;
             break;
         }
-        let verdict = check_path(&root, &path, device).map_or_else(
+        let checked = check_path(&root, &path, device);
+        if checked == Some("missing") {
+            missing_paths += 1;
+            if missing.len() < limit {
+                missing.push(Candidate {
+                    path,
+                    source,
+                    verdict: "missing".into(),
+                    eligible: false,
+                });
+            }
+            continue;
+        }
+        if candidates.len() == limit {
+            complete = false;
+            break;
+        }
+        let verdict = checked.map_or_else(
             || current_verdict(&path, &deadline, min_hours),
             str::to_owned,
         );
@@ -197,11 +217,13 @@ pub fn preview(state_dir: &Path, min_hours: u32, limit: usize) -> io::Result<Rep
             eligible,
         });
     }
+    candidates.extend(missing.into_iter().take(limit - candidates.len()));
     Ok(Report {
         scratch_root: root,
         min_hours,
         complete,
         recorded_paths,
+        missing_paths,
         candidates,
     })
 }

@@ -23,6 +23,7 @@ impl Fixture {
             std::process::id()
         ));
         fs::create_dir(&root).expect("create isolated preview fixture");
+        let root = fs::canonicalize(root).expect("resolve fixture root");
         let scratch = root.join("scratch");
         fs::create_dir(&scratch).expect("create scratch fixture");
         let state = root.join("state");
@@ -265,4 +266,21 @@ fn candidate_limit_is_enforced_and_invalid_age_is_rejected() {
     let invalid = fixture.run(&["--min-hours", "5"]);
     assert_eq!(invalid.status.code(), Some(2));
     assert!(invalid.stdout.is_empty());
+}
+
+#[test]
+fn missing_historical_paths_do_not_consume_the_verdict_budget() {
+    let fixture = Fixture::new();
+    let missing = fixture.scratch.join("already-deleted");
+    let extant = fixture.scratch_path("eligible");
+    fixture.write_ledger(json!([
+        {"row_type":"cleanup_event", "canonical_path":missing},
+        {"row_type":"cleanup_event", "canonical_path":extant}
+    ]));
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--max-candidates", "1"]));
+    assert_eq!(result["missing_paths"], 1);
+    assert_eq!(result["candidates"][0]["path"], extant.to_str().unwrap());
+    assert_eq!(result["complete"], true);
 }
