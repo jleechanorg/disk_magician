@@ -64,6 +64,9 @@ if [ "$#" -eq 3 ] && [ "$1" = volume ] && [ "$2" = path ] && [ "$3" = scratch ];
 fi
 if [ "$#" -eq 7 ] && [ "$1" = quarantine ] && [ "$2" = verdict ] && [ "$4" = --kind ] && [ "$5" = ephemeral ] && [ "$6" = --deadline-at ]; then
   case "${3##*/}" in
+    held-live*) printf 'kept:live-owner\n' ;;
+    held-open*) printf 'kept:open-file\n' ;;
+    held-unknown*) printf 'kept:owner-unknown\n' ;;
     removable*) printf 'remove\n' ;;
     *) printf 'kept:recent-activity\n' ;;
   esac
@@ -445,4 +448,39 @@ fn whole_scratch_preview_preserves_bare_repository_packs() {
         path.starts_with(&repository) && entry["eligible"] == true
     }));
     assert!(!fixture.calls().contains(repository.to_str().unwrap()));
+}
+
+#[test]
+fn six_hour_preview_preserves_checker_vetoes_and_evidence_scope() {
+    let fixture = Fixture::new();
+    let held = [
+        ("held-live.cache", "kept:live-owner"),
+        ("held-open.cache", "kept:open-file"),
+        ("held-unknown.cache", "kept:owner-unknown"),
+    ];
+    for (name, _) in held {
+        Fixture::mark_old(&fixture.scratch_path(name));
+    }
+    let container = fixture.scratch.join("removable-containing-evidence");
+    let evidence = container.join("evidence");
+    fs::create_dir_all(&evidence).unwrap();
+    let capture = evidence.join("removable-capture.avi");
+    fs::write(&capture, b"fixture capture").unwrap();
+    for path in [&container, &evidence, &capture] {
+        Fixture::mark_old(path);
+    }
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6"]));
+    let candidates = result["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), held.len());
+    for (name, reason) in held {
+        let path = fixture.scratch.join(name);
+        assert!(candidates.iter().any(|row| {
+            row["path"] == path.to_str().unwrap()
+                && row["verdict"] == reason
+                && row["eligible"] == false
+        }));
+    }
+    assert!(!fixture.calls().contains(container.to_str().unwrap()));
 }
