@@ -92,6 +92,8 @@ pub(crate) fn scratch_volume_path(override_cli: Option<PathBuf>) -> io::Result<O
     }
 }
 
+pub mod artifact_batch;
+pub mod artifact_discovery;
 pub mod history;
 pub mod preview;
 pub mod preview_scopes;

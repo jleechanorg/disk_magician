@@ -1,5 +1,6 @@
 use diskm_shadow::{
-    history, preview, reclaim_report, scan, scratch_dir, scratch_manifest, scratch_target, status,
+    artifact_batch, artifact_discovery, history, preview, reclaim_report, scan, scratch_dir,
+    scratch_manifest, scratch_target, status,
 };
 use serde::Serialize;
 use std::env;
@@ -521,6 +522,53 @@ fn native_volume(args: &[OsString]) -> Option<ExitCode> {
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "scratch-artifact-validate")
+    {
+        return match args.as_slice() {
+            [_, batch] => artifact_batch::validate(
+                std::path::Path::new(batch),
+                io::stdin().lock(),
+                io::stdout().lock(),
+                io::stderr().lock(),
+            ),
+            _ => {
+                let mut stderr = io::stderr().lock();
+                let _ = writeln!(stderr, "malformed-header");
+                ExitCode::from(75)
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "scratch-artifact-discover")
+    {
+        return match args.as_slice() {
+            [_, blocked] => match artifact_discovery::discover_batch(
+                io::stdin().lock(),
+                std::path::Path::new(blocked),
+                None,
+            ) {
+                Ok(frame) => {
+                    if io::stdout().lock().write_all(&frame).is_ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                }
+                Err(error) => {
+                    eprintln!("{}", error.reason());
+                    ExitCode::from(match error {
+                        artifact_discovery::DiscoveryError::Deadline => 124,
+                        artifact_discovery::DiscoveryError::MalformedInput
+                        | artifact_discovery::DiscoveryError::Io(_) => 1,
+                    })
+                }
+            },
+            _ => ExitCode::from(2),
+        };
+    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(status) = native_volume(&args) {
         return status;

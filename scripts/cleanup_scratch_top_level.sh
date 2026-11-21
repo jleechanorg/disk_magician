@@ -58,6 +58,7 @@ source "$SCRIPT_DIR/lib/actuator_deadline.sh"
 
 artifact_batch_output_file=""
 artifact_blocked_file=""
+artifact_validator_stderr=""
 scratch_lock_set_traps
 
 ORIG_ARGS=("$@")
@@ -648,9 +649,20 @@ if (( ${#candidates[@]} )); then
   if (( ${#candidate_dirs[@]} )); then
     artifact_batch_output_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-artifacts.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable; exit 75; }
     artifact_blocked_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-blocked.XXXXXX")" || { rm -f "$artifact_batch_output_file"; artifact_batch_output_file=""; emit_discovery_deferred_summary unmeasurable; exit 75; }
-    _artifact_mode=batch
-    [[ "$root_registered" == true ]] && _artifact_mode=batch-generic
-    printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" "$artifact_blocked_file" >"$artifact_batch_output_file"
+    _artifact_rust_bin="${DISK_MAGICIAN_RUST_ARTIFACT_BIN:-}"
+    if [[ -n "$_artifact_rust_bin" && ( "$_artifact_rust_bin" != /* || ! -f "$_artifact_rust_bin" || ! -x "$_artifact_rust_bin" ) ]]; then
+      emit_discovery_deferred_summary native-artifact-binary-unavailable
+      exit 75
+    fi
+    if [[ "$root_registered" == true && -n "$_artifact_rust_bin" ]]; then
+      # The registered-root native discovery emits the existing batch frame.
+      printf '%s\0' "${candidate_dirs[@]}" | act_run_bounded \
+        "$_artifact_rust_bin" scratch-artifact-discover "$artifact_blocked_file" >"$artifact_batch_output_file"
+    else
+      _artifact_mode=batch
+      [[ "$root_registered" == true ]] && _artifact_mode=batch-generic
+      printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" "$artifact_blocked_file" >"$artifact_batch_output_file"
+    fi
     _artifact_rc=$?
     if (( _artifact_rc != 0 )); then
       rm -f "$artifact_batch_output_file" "$artifact_blocked_file"
@@ -666,9 +678,38 @@ if (( ${#candidates[@]} )); then
     while IFS= read -r -d '' _blocked_root; do
       [[ -n "$_blocked_root" ]] && _artifact_discovery_blocked+=("$_blocked_root")
     done <"$artifact_blocked_file"
-    rm -f "$artifact_blocked_file"
-    artifact_blocked_file=""
-
+    if [[ -n "$_artifact_rust_bin" ]]; then
+      # The native process receives the same submitted parents and must
+      # validate its entire response below the same scheduler deadline.
+      artifact_validator_stderr="$(mktemp "${TMPDIR:-/tmp}/dm-sp-validator-error.XXXXXX")" || { emit_discovery_deferred_summary unmeasurable; exit 75; }
+      _artifact_rc=0
+      printf '%s\0' "${candidate_dirs[@]}" | act_run_bounded /bin/bash -c \
+        'exec "$1" scratch-artifact-validate "$2" 2>"$3"' _ "$_artifact_rust_bin" "$artifact_batch_output_file" "$artifact_validator_stderr" \
+        >"$artifact_blocked_file" || _artifact_rc=$?
+      if (( _artifact_rc != 0 )); then
+        _artifact_reason="$(<"$artifact_validator_stderr")"
+        if (( _artifact_rc == 124 )); then
+          _artifact_reason=deadline
+        else
+          case "$_artifact_reason" in
+            malformed-header|pair-count-mismatch|candidate-child-mismatch|invalid-child-path|invalid-child-component|symlink-component|path-changed) ;;
+            *) _artifact_reason="native-validator-rc-$_artifact_rc" ;;
+          esac
+        fi
+        emit_discovery_deferred_summary "$_artifact_reason"
+        exit 75
+      fi
+      _artifact_child=""
+      while IFS= read -r -d '' _artifact_child; do
+        _artifact_extra+=("$_artifact_child")
+      done <"$artifact_blocked_file"
+      if [[ -n "$_artifact_child" ]]; then
+        emit_discovery_deferred_summary malformed-header
+        exit 75
+      fi
+      rm -f "$artifact_validator_stderr"
+      artifact_validator_stderr=""
+    else
     _artifact_fields=()
     _artifact_field=""
     while IFS= read -r -d '' _artifact_field; do
@@ -744,6 +785,9 @@ if (( ${#candidates[@]} )); then
       fi
       _artifact_extra+=("$_artifact_child")
     done
+    fi
+    rm -f "$artifact_blocked_file"
+    artifact_blocked_file=""
     rm -f "$artifact_batch_output_file"
     artifact_batch_output_file=""
   fi
