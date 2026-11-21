@@ -1,5 +1,5 @@
 use diskm_shadow::{
-    history, preview, reclaim_report, scan, scratch_manifest, scratch_target, status,
+    history, preview, reclaim_report, scan, scratch_dir, scratch_manifest, scratch_target, status,
 };
 use serde::Serialize;
 use std::env;
@@ -17,6 +17,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scan PATH [--deadline-ms N] [--max-entries N] [--json]
   diskm reclaim-ledger --read-existing [--state-dir DIR]
   diskm history --state-dir DIR [--days 7|30] [--json]
+  diskm scratch-dir [SUBPATH]
   diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_FILE [--path ...] | --paths-from FILE
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all]
   diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--dry-run]
@@ -438,6 +439,23 @@ fn dispatch_legacy(args: &[OsString]) -> Option<ExitCode> {
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
+    if matches!(
+        args.first().and_then(|arg| arg.to_str()),
+        Some("scratch-dir" | "scratch_dir")
+    ) {
+        return match scratch_dir::resolve(args.get(1).map(OsString::as_os_str), io::stdout().lock())
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("scratch-dir: {error}");
+                if error.kind() == io::ErrorKind::InvalidInput {
+                    ExitCode::from(USAGE_ERROR)
+                } else {
+                    ExitCode::from(TEMPORARY_FAILURE)
+                }
+            }
+        };
+    }
     if let Some(request) = reclaim_report::read_request(&args) {
         return match reclaim_report::print_existing(request, io::stdout().lock()) {
             Ok(()) => ExitCode::SUCCESS,

@@ -494,3 +494,69 @@ fn published_reclaim_ledger_reads_match_legacy_without_the_backend() {
     let unsupported = fixture.run(&["reclaim-ledger".into(), "--stdout".into()]);
     assert_eq!(unsupported.status.code(), Some(91));
 }
+
+#[test]
+fn native_scratch_dir_keeps_volume_status_and_directory_containment() {
+    let fixture = LegacyFixture::new(
+        "#!/bin/sh\n[ \"$*\" = 'volume path scratch' ] || exit 64\n[ \"$VOLUME_RC\" = 0 ] || exit \"$VOLUME_RC\"\nprintf '%s\\n' \"$FAKE_SCRATCH_ROOT\"\n",
+    );
+    let outside = fixture.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    let inside = fixture.scratch.join("inside");
+    fs::create_dir(&inside).unwrap();
+    std::os::unix::fs::symlink(&inside, fixture.scratch.join("in-link")).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.scratch.join("out-link")).unwrap();
+    let invoke = |subpath: Option<&str>, volume_rc: &str| {
+        let mut args = vec![OsString::from("scratch-dir")];
+        args.extend(subpath.map(OsString::from));
+        run_os(
+            &args,
+            &[
+                ("DISK_MAGICIAN_DISKM_BIN", fixture.backend.as_os_str()),
+                (
+                    "DISKM_LEGACY_COMPAT_CLI",
+                    std::ffi::OsStr::new("/missing/backend"),
+                ),
+                ("FAKE_SCRATCH_ROOT", fixture.scratch.as_os_str()),
+                ("VOLUME_RC", std::ffi::OsStr::new(volume_rc)),
+            ],
+        )
+    };
+
+    let root = invoke(None, "0");
+    assert!(root.status.success());
+    assert_eq!(
+        String::from_utf8(root.stdout).unwrap().trim_end(),
+        fixture.scratch.to_str().unwrap()
+    );
+    let nested = invoke(Some("in-link/nested/child"), "0");
+    assert!(
+        nested.status.success(),
+        "{}",
+        String::from_utf8_lossy(&nested.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(nested.stdout).unwrap().trim_end(),
+        fixture
+            .scratch
+            .join("in-link/nested/child")
+            .to_str()
+            .unwrap()
+    );
+    assert!(inside.join("nested/child").is_dir());
+
+    for path in ["out-link", "out-link/rejected"] {
+        let escaped = invoke(Some(path), "0");
+        assert_eq!(escaped.status.code(), Some(75));
+        assert!(String::from_utf8_lossy(&escaped.stderr).contains("subpath escapes Scratch root"));
+    }
+    assert!(!outside.join("rejected").exists());
+    assert_eq!(
+        invoke(Some("unmanaged/../escape"), "0").status.code(),
+        Some(2)
+    );
+    assert_eq!(invoke(None, "75").status.code(), Some(75));
+    let absent = invoke(None, "3");
+    assert!(absent.status.success());
+    assert_eq!(absent.stdout, b"/tmp\n");
+}

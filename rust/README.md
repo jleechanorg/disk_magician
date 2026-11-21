@@ -132,3 +132,8 @@ The native `diskm reclaim-ledger --read-existing` command reads the published
 report and prints its completeness and generation-time warnings. It keeps the
 report's own coverage banners. Set `--state-dir DIR` to select a report
 explicitly. Publishing or regenerating the ledger uses the existing backend.
+
+The native `diskm scratch-dir [SUBPATH]` command retains the volume
+authority's active, absent, and unavailable outcomes. It opens each physical
+child directory relative to its verified parent before creating anything.
+Volume discovery still uses the configured backend.
