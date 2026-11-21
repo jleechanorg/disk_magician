@@ -86,6 +86,31 @@ else
   bad "30% snapshot should be rejected"
 fi
 
+section "2b. Large snapshot ranking drains sort output"
+RANK="$WORK/ranking"
+mkdir -p "$RANK/home" "$RANK/state" "$RANK/scripts/lib"
+for dependency in disk_audit.sh safety_lib.sh snapshot_lib.sh lib/degraded_gate.sh; do
+  cp "$REPO_ROOT/scripts/$dependency" "$RANK/scripts/$dependency"
+done
+python3 - "$PARTIAL" "$RANK/snapshot.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream:
+    snapshot = json.load(stream)
+snapshot["directories"] = {f"ranking-fixture-{i:05}-{'x' * 40}": i for i in range(1, 4097)}
+with open(sys.argv[2], "w") as stream:
+    json.dump(snapshot, stream)
+PY
+rank_rc=0
+HOME="$RANK/home" DISK_MAGICIAN_STATE_DIR="$RANK/state" DISK_SNAPSHOT_JSON="$RANK/snapshot.json" \
+  timeout 30 bash "$RANK/scripts/disk_audit.sh" --clean --routine --dry-run --no-history \
+  > "$RANK/output" 2>&1 || rank_rc=$?
+if [[ "$rank_rc" == 0 && "$(grep -c '^    ranking-fixture-' "$RANK/output")" == 20 ]] &&
+    grep -q '^    ranking-fixture-04096-' "$RANK/output"; then
+  ok "large snapshot ranks 20 rows and exits successfully"
+else
+  bad "large snapshot ranking exits successfully with 20 rows (rc=$rank_rc)"
+fi
+
 section "3. containers_captured is a single integer in snapshot JSON (emnx)"
 # Synthetic: simulate multi-line grep -c bug by ensuring snapshot validates
 FAKE_LISTING=$'123\t/foo\n456\t/bar'

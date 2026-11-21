@@ -492,7 +492,8 @@ elif [[ "$SNAP_USABLE" == true ]]; then
         echo "  ⚠️  STALE SNAPSHOT WARNING: $SNAP_STALE_WARN"
     fi
     echo
-    sort -t"$(printf '\t')" -k2 -rn "$SNAP_CACHE" | head -20 | while IFS="$(printf '\t')" read -r key kb; do
+    # Drain sort's output so pipefail does not turn a completed table into SIGPIPE.
+    sort -t"$(printf '\t')" -k2 -rn "$SNAP_CACHE" | sed -n '1,20p' | while IFS="$(printf '\t')" read -r key kb; do
         [[ -n "$key" ]] || continue
         printf "    %-34s %8s\n" "$key" "$(fmt_size "$kb")"
     done
