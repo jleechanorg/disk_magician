@@ -844,6 +844,12 @@ if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
   if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 && ${#_lru_candidates[@]} > 0 )); then
     _min_kb_val=$((10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}))
     _lru_keep_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-minkb.XXXXXX")" || { rm -f "$LRU_LIST"; echo skipped:measurement-unavailable; exit 75; }
+    _native_sizes=0
+    if [[ "$root_registered" == true && "$OSTYPE" == linux* && -n "${_artifact_rust_bin:-}" ]]; then
+      printf '%s\0' "${_lru_candidates[@]}" |
+        act_run_bounded "$_artifact_rust_bin" scratch-artifact-sizes >"$_lru_keep_file" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
+      _native_sizes=1
+    fi
     _below_count="$(printf '%s\0' "${_lru_candidates[@]}" | python3 -c '
 import os, subprocess, sys
 min_kb = int(sys.argv[1])
@@ -858,8 +864,41 @@ for p in entries:
     else:
         dirs.append(p)
 sizes = {}
+native_sizes = {}
+isolated = {}
+if sys.argv[3] == "1":
+    with open(keep_path, "rb") as f:
+        data = f.read()
+    fields = data.split(b"\0")
+    if fields[-1] or (len(fields) - 1) % 2:
+        sys.exit("invalid native size response")
+    submitted = set(entries)
+    for blocks, raw_path in zip(fields[:-1:2], fields[1:-1:2]):
+        p = os.fsdecode(raw_path)
+        if not blocks.isdigit() or p not in submitted or p in native_sizes:
+            sys.exit("invalid native size row")
+        native_sizes[p] = int(blocks)
 for i in range(0, len(dirs), 200):
     chunk = dirs[i:i+200]
+    # GNU du deduplicates subtrees in operand order. Reproduce that only for
+    # chunks whose trees are completely measured and have ordinary path text.
+    if all(p in native_sizes and p.isascii() and p.isprintable()
+           and os.path.normpath(p) == p for p in chunk):
+        covered = {}
+        measured = {}
+        for p in chunk:
+            if any(p == root or p.startswith(root + "/") for root in covered):
+                continue
+            descendants = [root for root in covered if root.startswith(p + "/")]
+            blocks = native_sizes[p] - sum(covered.pop(root) for root in descendants)
+            if blocks < 0:
+                break
+            covered[p] = native_sizes[p]
+            measured[p] = (blocks + 1) // 2
+        else:
+            sizes.update(measured)
+            isolated.update((p, (native_sizes[p] + 1) // 2) for p in chunk)
+            continue
     res = subprocess.run(["du", "-sk", "--", *chunk], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     if res.returncode == 0 or res.stdout:
         for line in res.stdout.splitlines():
@@ -868,7 +907,7 @@ for i in range(0, len(dirs), 200):
                 sizes[parts[1]] = int(parts[0].strip())
 below = 0
 for p in dirs:
-    kb = sizes.get(p)
+    kb = sizes.get(p, isolated.get(p))
     if kb is None:
         r2 = subprocess.run(["du", "-sk", "--", p], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         kb = int(r2.stdout.split("\t", 1)[0].strip()) if r2.returncode == 0 and "\t" in r2.stdout else 0
@@ -883,7 +922,7 @@ with open(keep_path, "wb") as f:
         if p in keep_set:
             f.write(os.fsencode(p) + b"\0")
 sys.stderr.write(f"{below}\n")
-' "$_min_kb_val" "$_lru_keep_file" 2>"${_lru_keep_file}.cnt")" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
+' "$_min_kb_val" "$_lru_keep_file" "$_native_sizes" 2>"${_lru_keep_file}.cnt")" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
     _below_count="$(cat "${_lru_keep_file}.cnt" 2>/dev/null || echo 0)"
     [[ "$_below_count" =~ ^[0-9]+$ ]] && kept=$(( kept + _below_count ))
     _lru_candidates=()

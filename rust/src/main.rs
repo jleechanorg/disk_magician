@@ -1,6 +1,6 @@
 use diskm_shadow::{
-    artifact_batch, artifact_discovery, history, preview, reclaim_report, scan, scratch_dir,
-    scratch_manifest, scratch_target, status,
+    artifact_batch, artifact_discovery, artifact_size, history, preview, reclaim_report, scan,
+    scratch_dir, scratch_manifest, scratch_target, status,
 };
 use serde::Serialize;
 use std::env;
@@ -137,7 +137,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
                     Some("ledger") => "ledger",
                     Some("all") => "all",
                     _ => {
-                        return Err("--scope must be scratch, tmp, worktrees, ledger, or all".into())
+                        return Err(
+                            "--scope must be scratch, tmp, worktrees, ledger, or all".into()
+                        );
                     }
                 };
             }
@@ -567,6 +569,23 @@ fn main() -> ExitCode {
                 }
             },
             _ => ExitCode::from(2),
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "scratch-artifact-sizes")
+    {
+        if args.len() != 1 {
+            return ExitCode::from(2);
+        }
+        return match artifact_size::measure_batch(io::stdin().lock())
+            .and_then(|frame| io::stdout().lock().write_all(&frame))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("scratch-artifact-sizes: {error}");
+                ExitCode::FAILURE
+            }
         };
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]

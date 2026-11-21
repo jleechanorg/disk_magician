@@ -151,6 +151,11 @@ qualification, and the existing quarantine path. A failed native phase
 defers the batch. With the environment variable unset, the installed
 scheduler keeps its existing path.
 
+On Linux with a positive `DISK_MAGICIAN_SCRATCH_MIN_KB`, the opt-in pilot
+measures overlapping directories in one shared walk before applying the
+minimum size. It uses the existing GNU `du` accounting for any operand batch
+containing an uncertain measurement. macOS keeps its existing size filter.
+
 The native `diskm reclaim-ledger --read-existing` command reads the published
 report and prints its completeness and generation-time warnings. It keeps the
 report's own coverage banners. Set `--state-dir DIR` to select a report
