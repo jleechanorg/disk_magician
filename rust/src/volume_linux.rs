@@ -2,8 +2,10 @@
 
 use serde_json::Value;
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -132,12 +134,16 @@ fn mount_field(path: &Path) -> io::Result<String> {
         .replace('\n', "\\012"))
 }
 
-fn mount_record<'a>(mountinfo: &'a str, mount: &Path) -> io::Result<Option<(&'a str, &'a str)>> {
+fn mount_record<'a>(
+    mountinfo: &'a str,
+    mount: &Path,
+) -> io::Result<Option<(&'a str, &'a str, &'a str)>> {
     let escaped = mount_field(mount)?;
     let mut found = None;
     for line in mountinfo.lines() {
         let mut fields = line.split_whitespace();
-        if fields.nth(4) != Some(escaped.as_str()) {
+        let mount_id = fields.next();
+        if fields.nth(3) != Some(escaped.as_str()) {
             continue;
         }
         if found.is_some() {
@@ -146,12 +152,10 @@ fn mount_record<'a>(mountinfo: &'a str, mount: &Path) -> io::Result<Option<(&'a 
         if !fields.any(|field| field == "-") {
             return Err(invalid("invalid mountinfo row for Scratch"));
         }
-        found = Some(
-            fields
-                .next()
-                .zip(fields.next())
-                .ok_or_else(|| invalid("incomplete Scratch mount record"))?,
-        );
+        found = Some(match (mount_id, fields.next(), fields.next()) {
+            (Some(id), Some(kind), Some(source)) => (id, kind, source),
+            _ => return Err(invalid("incomplete Scratch mount record")),
+        });
     }
     Ok(found)
 }
@@ -220,8 +224,14 @@ fn filesystem_uuid(path: &Path) -> io::Result<String> {
     Ok(uuid)
 }
 
-/// Return None for an unconfigured volume; errors describe unavailable or changed identity.
-pub fn verified_root(expected: Option<&Path>) -> io::Result<Option<PathBuf>> {
+struct VerifiedMount {
+    path: PathBuf,
+    directory: File,
+    uuid: String,
+}
+
+// Return None for an unconfigured volume; errors describe unavailable or changed identity.
+fn verified_mount(expected: Option<&Path>) -> io::Result<Option<VerifiedMount>> {
     let home = env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     let config = configuration(&home)?;
     let Some(scratch) = scratch_config(&config)? else {
@@ -255,6 +265,10 @@ pub fn verified_root(expected: Option<&Path>) -> io::Result<Option<PathBuf>> {
     {
         return Err(invalid("Scratch registry identity mismatch"));
     }
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(scratch.mount)?;
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
     let expected_type = if scratch.native { "ext4" } else { "fuse.ext4" };
     let device = if scratch.native {
@@ -262,10 +276,16 @@ pub fn verified_root(expected: Option<&Path>) -> io::Result<Option<PathBuf>> {
     } else {
         scratch.image.to_path_buf()
     };
-    let expected_source = device
-        .to_str()
-        .ok_or_else(|| invalid("invalid Scratch source encoding"))?;
-    if mount_record(&mountinfo, scratch.mount)? != Some((expected_type, expected_source)) {
+    let expected_source = mount_field(&device)?;
+    let fdinfo = fs::read_to_string(format!("/proc/self/fdinfo/{}", directory.as_raw_fd()))?;
+    let mount_id = fdinfo
+        .lines()
+        .find_map(|line| line.strip_prefix("mnt_id:").map(str::trim))
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(|| invalid("opened Scratch mount ID unavailable"))?;
+    if mount_record(&mountinfo, scratch.mount)?
+        != Some((mount_id, expected_type, expected_source.as_str()))
+    {
         return Err(invalid("Scratch mount identity mismatch"));
     }
     let image_uuid = filesystem_uuid(scratch.image)?;
@@ -274,7 +294,62 @@ pub fn verified_root(expected: Option<&Path>) -> io::Result<Option<PathBuf>> {
     {
         return Err(invalid("Scratch filesystem UUID mismatch"));
     }
-    Ok(Some(scratch.mount.to_path_buf()))
+    let opened = directory.metadata()?;
+    let current = fs::symlink_metadata(scratch.mount)?;
+    if !current.is_dir() || (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
+        return Err(invalid("Scratch mount changed during verification"));
+    }
+    Ok(Some(VerifiedMount {
+        path: scratch.mount.to_path_buf(),
+        directory,
+        uuid: image_uuid,
+    }))
+}
+
+pub fn verified_root(expected: Option<&Path>) -> io::Result<Option<PathBuf>> {
+    Ok(verified_mount(expected)?.map(|mount| mount.path))
+}
+
+fn allocated_bytes(
+    total_blocks: u64,
+    available_blocks: u64,
+    fragment_bytes: u64,
+) -> io::Result<u64> {
+    total_blocks
+        .checked_sub(available_blocks)
+        .and_then(|blocks| blocks.checked_mul(fragment_bytes))
+        .filter(|_| fragment_bytes > 0)
+        .ok_or_else(|| invalid("invalid Scratch used-byte measurement"))
+}
+
+pub(crate) fn mounted_usage(
+    path: &Path,
+    dev: u64,
+    ino: u64,
+    filesystem_id: Option<&str>,
+) -> io::Result<(String, u64)> {
+    let mount = verified_mount(Some(path))?.ok_or_else(|| invalid("Scratch mount unavailable"))?;
+    let metadata = mount.directory.metadata()?;
+    if (metadata.dev(), metadata.ino()) != (dev, ino)
+        || filesystem_id.is_some_and(|expected| expected != mount.uuid)
+    {
+        return Err(invalid("Scratch root or filesystem identity changed"));
+    }
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // fstatvfs measures the same opened mount that passed the identity checks.
+    if unsafe { libc::fstatvfs(mount.directory.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stats = unsafe { stats.assume_init() };
+    // Match legacy volume status: total minus space available to the caller,
+    // including filesystem-reserved blocks in the usage against the target.
+    #[allow(clippy::unnecessary_cast)] // The statvfs field widths vary by Linux architecture.
+    let used = allocated_bytes(
+        stats.f_blocks as u64,
+        stats.f_bavail as u64,
+        stats.f_frsize as u64,
+    )?;
+    Ok((mount.uuid, used))
 }
 
 #[cfg(test)]
@@ -308,12 +383,20 @@ mod tests {
     }
 
     #[test]
+    fn target_usage_counts_blocks_unavailable_to_the_caller() {
+        assert_eq!(allocated_bytes(100, 70, 4096).unwrap(), 30 * 4096);
+        assert!(allocated_bytes(70, 100, 4096).is_err());
+        assert!(allocated_bytes(100, 70, 0).is_err());
+        assert!(allocated_bytes(u64::MAX, 0, 4096).is_err());
+    }
+
+    #[test]
     fn mountinfo_requires_the_exact_mount_and_rejects_ambiguity() {
         let row = "36 25 7:0 / /home/test/Scratch\\040space rw - ext4 /dev/loop0 rw";
         let mount = Path::new("/home/test/Scratch space");
         assert_eq!(
             mount_record(row, mount).unwrap(),
-            Some(("ext4", "/dev/loop0"))
+            Some(("36", "ext4", "/dev/loop0"))
         );
         assert_eq!(
             mount_record(row, Path::new("/home/test/Scratch")).unwrap(),

@@ -185,6 +185,10 @@ fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
 }
 
 fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String, u64)> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os(crate::LEGACY_COMPAT_CLI).is_none() {
+        return crate::volume_linux::mounted_usage(&root.path, root.dev, root.ino, filesystem_id);
+    }
     let output = Command::new(crate::legacy_cli()?)
         .args(["volume", "status", "--snapshot"])
         .output()?;
