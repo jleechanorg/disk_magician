@@ -160,11 +160,11 @@ install_plist() {
     return 1
   fi
   dst="$DEST/${label}.plist"
-  # @SCRATCH_BUDGET_FLOOR_HOURS@ is an operator-approved tunable, not a path.
-  # Default 6h (the operator directive of 2026-11-19); override per host with
-  # DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS and reinstall.
-  local scratch_floor_h="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS:-6}"
-  [[ "$scratch_floor_h" =~ ^[1-9][0-9]{0,3}$ ]] || scratch_floor_h=6
+  # Operator decision 2026-11-20: scheduled Scratch keeps at least 48h.
+  local scratch_floor_h="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS:-48}"
+  if [[ ! "$scratch_floor_h" =~ ^[1-9][0-9]{0,3}$ ]] || (( 10#$scratch_floor_h < 48 )); then
+    scratch_floor_h=48
+  fi
   sed -e "s|@REPO_ROOT@|$REPO_ROOT|g" \
       -e "s|@HOME@|$HOME|g" \
       -e "s|@BASH@|$BASH_BIN|g" \

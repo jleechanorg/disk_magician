@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # scratch_new.sh — `diskm scratch-new <repo-path> <purpose> [--kind scratch|evidence|build]
-# [--detach <sha>] [--est-gb N]` (spec C3): admit, create ~/.worktrees/<repo>/
-# scratch-<purpose>-<UTC ts> (a detached worktree with --detach) or, for evidence,
-# $EVIDENCE_TMP_ROOT/<repo>/evidence/<purpose>-<UTC ts>, lease it, print the path.
+# [--detach <sha>] [--est-gb N]`: admit, create a detached worktree under
+# ~/.worktrees/<repo>/ for `scratch`, or a dated disposable run directory under
+# Scratch/runs/YYYYMMDD/<repo>/<run-id> for `build` and `evidence`.
+# The lease retains the kind and evidence provenance independently of the path.
 # Exit 2 bad args or path outside its root, 75 admission refused (nothing created).
 _SN_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 # shellcheck source=scripts/worktree_new.sh
@@ -23,7 +24,7 @@ sn_main() {
     local -a pos=()
     local -a lease_owner_args=()
     local -a producer_owner_list=()
-    local kind=scratch sha="" est="" owner_pid="" producer_owner="" producer_pid="" producer_pids="${DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS:-${DISK_MAGICIAN_SCRATCH_PRODUCER_PID:-}}" runner_owner="" runner_pid="" repo name path root cls=worktrees src="" volume_bin="${DISK_MAGICIAN_DISKM_BIN:-}" volume_rc quota_volume=0 admit_mode=""
+    local kind=scratch sha="" est="" owner_pid="" producer_owner="" producer_pid="" producer_pids="${DISK_MAGICIAN_SCRATCH_PRODUCER_PIDS:-${DISK_MAGICIAN_SCRATCH_PRODUCER_PID:-}}" runner_owner="" runner_pid="" repo name path root cls=worktrees src="" volume_bin="${DISK_MAGICIAN_DISKM_BIN:-}" volume_rc quota_volume=0 admit_mode="" run_stamp="" run_date="" run_id=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --kind) kind="${2:-}"; shift 2 || return 2 ;;
@@ -41,13 +42,18 @@ sn_main() {
     name="$(wtn_repo_name "$repo")"
     if [[ "$kind" == evidence || "$kind" == build ]]; then
         cls=tmp_containers
+        # One UTC timestamp supplies both the date partition and a readable,
+        # collision-resistant run identity. Same-day runs share their repo parent.
+        run_stamp="$(date -u +%Y%m%dT%H%M%SZ)" || return 1
+        run_date="${run_stamp:0:8}"
+        run_id="${pos[1]}-${run_stamp}-$$-${RANDOM}"
         if [[ -z "$volume_bin" ]]; then volume_bin="$_SN_DIR/../disk_magician.sh"; fi
         root="$("$volume_bin" volume path scratch 2>/dev/null)"; volume_rc=$?
         case "$volume_rc" in
-            0) quota_volume=1; path="${root%/}/$name/$kind/${pos[1]}-$(date -u +%Y%m%dT%H%M%SZ)" ;;
+            0) quota_volume=1; path="${root%/}/runs/$run_date/$name/$run_id" ;;
             3)
                 root="$EVIDENCE_TMP_ROOT"
-                path="${root%/}/$name/$kind/${pos[1]}-$(date -u +%Y%m%dT%H%M%SZ)"
+                path="${root%/}/runs/$run_date/$name/$run_id"
                 ;;
             75) echo "scratch-new: scratch volume unavailable" >&2; return 75 ;;
             *) echo "scratch-new: volume path check failed ($volume_rc)" >&2; return 75 ;;

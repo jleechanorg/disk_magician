@@ -1,0 +1,297 @@
+use diskm_shadow::{history, preview, scan, scratch_manifest, status};
+use serde::Serialize;
+use std::env;
+use std::ffi::OsString;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
+
+const USAGE: &str = "diskm — read-only Disk Magician candidate; output is JSON
+
+  diskm status [PATH] [--state-dir DIR] [--json]
+  diskm scan PATH [--deadline-ms N] [--max-entries N] [--json]
+  diskm history --state-dir DIR [--days 7|30] [--json]
+  diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_FILE [--path ...] | --paths-from FILE
+  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--dry-run]
+
+Preview --deadline-ms bounds only the six-hour Scratch discovery scan. Verdict
+checks run afterward, up to 12 seconds per candidate, and the default scan is unlimited.
+
+Status defaults to the current directory. Scan defaults to 30 seconds and
+100,000 visited paths. An incomplete scan emits a report and exits 75.
+Preview defaults to the Scratch scope. Use --scope all for all supported locations.";
+
+const TEMPORARY_FAILURE: u8 = 75;
+const USAGE_ERROR: u8 = 2;
+
+enum Operation {
+    Help,
+    Status {
+        root: PathBuf,
+        state_dir: Option<PathBuf>,
+    },
+    Scan {
+        root: PathBuf,
+        options: scan::ScanOptions,
+    },
+    History {
+        state_dir: PathBuf,
+        days: u32,
+    },
+    ScratchManifest {
+        cutoff: i64,
+        paths: Vec<PathBuf>,
+    },
+    Preview {
+        scope: &'static str,
+        state_dir: Option<PathBuf>,
+        min_hours: u32,
+        max_candidates: usize,
+        scan_deadline: Option<Duration>,
+    },
+}
+
+fn required_value(
+    args: &mut impl Iterator<Item = OsString>,
+    option: &str,
+) -> Result<OsString, String> {
+    args.next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{option} requires a value"))
+}
+
+fn positive<T: std::str::FromStr + Default + PartialOrd>(
+    args: &mut impl Iterator<Item = OsString>,
+    option: &str,
+) -> Result<T, String> {
+    required_value(args, option)?
+        .to_str()
+        .and_then(|value| value.parse::<T>().ok())
+        .filter(|value| *value > T::default())
+        .ok_or_else(|| format!("{option} requires a positive integer"))
+}
+
+fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let Some(command) = args.next() else {
+        return Ok(Operation::Help);
+    };
+    let command = command
+        .to_str()
+        .ok_or_else(|| "invalid command".to_owned())?;
+    match command {
+        "-h" | "--help" | "help" => return Ok(Operation::Help),
+        "scratch-manifest" => return parse_scratch_manifest(args),
+        "status" | "scan" | "history" | "preview" => {}
+        _ => return Err(format!("unknown command {command:?}")),
+    }
+
+    let mut root = None;
+    let mut state_dir = None;
+    let mut deadline_ms = 30_000;
+    let mut max_entries = 100_000;
+    let mut days = 7;
+    let mut preview_scope = "scratch";
+    let mut min_hours = 48;
+    let mut max_candidates = None;
+    let mut preview_deadline_ms = None;
+    let mut positional_only = false;
+
+    while let Some(arg) = args.next() {
+        let option = if positional_only { None } else { arg.to_str() };
+        match option {
+            Some("--help" | "-h") => return Ok(Operation::Help),
+            Some("--") => positional_only = true,
+            Some("--json") => {}
+            Some("--dry-run") if command == "preview" => {}
+            Some("--scope") if command == "preview" => {
+                preview_scope = match required_value(&mut args, "--scope")?.to_str() {
+                    Some("scratch") => "scratch",
+                    Some("tmp") => "tmp",
+                    Some("worktrees") => "worktrees",
+                    Some("ledger") => "ledger",
+                    Some("all") => "all",
+                    _ => {
+                        return Err("--scope must be scratch, tmp, worktrees, ledger, or all".into())
+                    }
+                };
+            }
+            Some("--min-hours") if command == "preview" => {
+                min_hours = match required_value(&mut args, "--min-hours")?.to_str() {
+                    Some("6") => 6,
+                    Some("48") => 48,
+                    _ => return Err("--min-hours must be 6 or 48".to_owned()),
+                };
+            }
+            Some("--max-candidates") if command == "preview" => {
+                max_candidates = Some(positive(&mut args, "--max-candidates")?);
+            }
+            Some("--deadline-ms") if command == "preview" => {
+                preview_deadline_ms = Some(positive(&mut args, "--deadline-ms")?);
+            }
+            Some("--state-dir") if command != "scan" && state_dir.is_none() => {
+                state_dir = Some(PathBuf::from(required_value(&mut args, "--state-dir")?));
+            }
+            Some("--deadline-ms") if command == "scan" => {
+                deadline_ms = positive(&mut args, "--deadline-ms")?;
+            }
+            Some("--max-entries") if command == "scan" => {
+                max_entries = positive(&mut args, "--max-entries")?;
+            }
+            Some("--days") if command == "history" => {
+                days = match required_value(&mut args, "--days")?.to_str() {
+                    Some("7") => 7,
+                    Some("30") => 30,
+                    _ => return Err("--days must be 7 or 30".to_owned()),
+                };
+            }
+            Some(flag) if flag.starts_with('-') => return Err(format!("unexpected option {flag}")),
+            _ if matches!(command, "scan" | "status") && root.is_none() => {
+                root = Some(PathBuf::from(arg))
+            }
+            _ => return Err("unexpected extra path".to_owned()),
+        }
+    }
+
+    match command {
+        "status" => Ok(Operation::Status {
+            root: root
+                .map(Ok)
+                .unwrap_or_else(env::current_dir)
+                .map_err(|error| format!("cannot resolve current directory: {error}"))?,
+            state_dir,
+        }),
+        "scan" => Ok(Operation::Scan {
+            root: root.ok_or("scan requires a path")?,
+            options: scan::ScanOptions {
+                deadline: Duration::from_millis(deadline_ms),
+                max_entries,
+            },
+        }),
+        "history" => Ok(Operation::History {
+            state_dir: state_dir.ok_or("history requires --state-dir")?,
+            days,
+        }),
+        "preview" => {
+            if preview_deadline_ms.is_some() && (preview_scope != "scratch" || min_hours != 6) {
+                return Err(
+                    "preview --deadline-ms is only supported for --scope scratch --min-hours 6"
+                        .into(),
+                );
+            }
+            if state_dir.is_none() && matches!(preview_scope, "scratch" | "ledger") {
+                return Err("this preview scope requires --state-dir".into());
+            }
+            Ok(Operation::Preview {
+                scope: preview_scope,
+                state_dir,
+                min_hours,
+                max_candidates: max_candidates.unwrap_or(20),
+                scan_deadline: preview_deadline_ms.map(Duration::from_millis),
+            })
+        }
+        _ => unreachable!("command already validated"),
+    }
+}
+
+fn parse_scratch_manifest(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let mut cutoff = None;
+    let mut paths = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--before-epoch") if cutoff.is_none() => {
+                cutoff = Some(positive(&mut args, "--before-epoch")?);
+            }
+            Some("--path") => paths.push(PathBuf::from(required_value(&mut args, "--path")?)),
+            Some("--paths-from") => {
+                let list = PathBuf::from(required_value(&mut args, "--paths-from")?);
+                let bytes = std::fs::read(&list)
+                    .map_err(|error| format!("cannot read {}: {error}", list.display()))?;
+                let paths_bytes = bytes.strip_suffix(&[0]).ok_or("--paths-from requires a NUL-terminated path list")?;
+                for item in paths_bytes.split(|byte| *byte == 0) {
+                    let path = std::str::from_utf8(item).map_err(|_| "--paths-from contains a non-UTF-8 path")?;
+                    if path.is_empty() {
+                        return Err("--paths-from contains an empty path".into());
+                    }
+                    paths.push(PathBuf::from(path));
+                }
+            }
+            Some("--help" | "-h") => return Ok(Operation::Help),
+            _ => {
+                return Err(
+                    "scratch-manifest accepts --before-epoch SECONDS, --path FILE, and --paths-from FILE".into(),
+                )
+            }
+        }
+    }
+    if paths.is_empty() {
+        return Err("scratch-manifest requires --path or --paths-from".into());
+    }
+    Ok(Operation::ScratchManifest {
+        cutoff: cutoff.ok_or("scratch-manifest requires --before-epoch")?,
+        paths,
+    })
+}
+
+fn print_json(report: &impl Serialize) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    serde_json::to_writer_pretty(&mut output, report).map_err(io::Error::other)?;
+    output.write_all(b"\n")
+}
+
+fn run(operation: Operation) -> io::Result<u8> {
+    match operation {
+        Operation::Help => {
+            writeln!(io::stdout().lock(), "{USAGE}")?;
+        }
+        Operation::Status { root, state_dir } => {
+            print_json(&status::status(&root, state_dir.as_deref())?)?;
+        }
+        Operation::Scan { root, options } => {
+            let report = scan::scan(&root, options)?;
+            print_json(&report)?;
+            if !report.complete {
+                return Ok(TEMPORARY_FAILURE);
+            }
+        }
+        Operation::ScratchManifest { cutoff, paths } => {
+            print_json(&scratch_manifest::create(&paths, cutoff)?)?;
+        }
+        Operation::History { state_dir, days } => {
+            print_json(&history::history(&state_dir, days)?)?;
+        }
+        Operation::Preview {
+            scope,
+            state_dir,
+            min_hours,
+            max_candidates,
+            scan_deadline,
+        } => {
+            print_json(&preview::scope_report(
+                scope,
+                state_dir.as_deref(),
+                min_hours,
+                max_candidates,
+                scan_deadline.unwrap_or(Duration::MAX),
+            )?)?;
+        }
+    }
+    Ok(0)
+}
+
+fn main() -> ExitCode {
+    let operation = match parse(env::args_os().skip(1)) {
+        Ok(operation) => operation,
+        Err(message) => {
+            eprintln!("diskm: {message}\n{USAGE}");
+            return ExitCode::from(USAGE_ERROR);
+        }
+    };
+    match run(operation) {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("diskm: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}

@@ -140,7 +140,7 @@ EOF
 chmod +x "$T/bin/hold-registry-lock"
 "$T/bin/hold-registry-lock" &
 HOLDER_PID=$!
-for attempt in {1..100}; do
+for attempt in {1..300}; do
     [[ -e "$REGISTRY_HELD" ]] && break
     kill -0 "$HOLDER_PID" 2>/dev/null || break
     sleep 0.01
@@ -151,8 +151,8 @@ LOCK_ERR="$T/registry-lock-wait.err"
 LOCK_STARTED=$SECONDS
 bash "$DISKM" scratch-new "$T/myrepo" registry-lock-wait --kind build >"$LOCK_OUT" 2>"$LOCK_ERR" &
 LOCK_PID=$!
-for attempt in {1..100}; do
-    LOCK_PATH="$(find "$T/tmp/myrepo/build" -mindepth 1 -maxdepth 1 -type d -name "registry-lock-wait-*" -print -quit 2>/dev/null)"
+for attempt in {1..300}; do
+    LOCK_PATH="$(find "$T/tmp/runs" -mindepth 3 -maxdepth 3 -type d -path '*/myrepo/registry-lock-wait-*' -print -quit 2>/dev/null)"
     [[ -n "$LOCK_PATH" ]] && break
     kill -0 "$LOCK_PID" 2>/dev/null || break
     sleep 0.01
@@ -184,7 +184,7 @@ if [[ "$LOCK_EXITED" == 0 ]]; then LOCK_TOTAL_SECONDS=$((SECONDS - LOCK_STARTED)
 printf "scratch-new held_lock=%ss cli_elapsed=%ss exit=%s\\n" "$LOCK_HOLD_SECONDS" "$LOCK_TOTAL_SECONDS" "$LOCK_RC"
 assert_eq "$LOCK_RC" 0 "scratch-new succeeds after transient lock release"
 (( LOCK_TOTAL_SECONDS < 30 )) && ok "scratch-new handoff completes within 30s" || bad "scratch-new exceeded bounded wait"
-assert_contains "$(cat "$LOCK_OUT")" "$T/tmp/myrepo/build/registry-lock-wait-" "scratch-new returns the allocated path"
+assert_contains "$(cat "$LOCK_OUT")" "$T/tmp/runs/$(date -u +%Y%m%d)/myrepo/registry-lock-wait-" "scratch-new returns the allocated path"
 [[ -d "$(cat "$LOCK_OUT")" ]] && ok "scratch-new leaves its test directory" || bad "scratch-new output directory missing"
 
 echo "== registry holder releases during failed-acquisition recovery =="
@@ -356,18 +356,30 @@ echo "== --kind evidence: dir under the evidence root, evidence lease, tmp_conta
 run 0 "$T/myrepo" ui-proof --kind evidence
 assert_eq "$RC" 0 "exit 0"
 EV="$OUT"
-assert_contains "$EV" "$T/tmp/myrepo/evidence/ui-proof-" "evidence path"
+assert_contains "$EV" "$T/tmp/runs/$(date -u +%Y%m%d)/myrepo/ui-proof-" "evidence path"
 [[ -d "$EV" ]] && ok "evidence dir exists" || bad "evidence dir missing"
 assert_eq "$(lease_field "$EV" kind)" evidence "evidence lease kind"
+assert_eq "$(basename "$(dirname "$(dirname "$EV")")")" "$(date -u +%Y%m%d)" "evidence run uses the UTC date partition"
+[[ -d "$(dirname "$EV")/.dm-quarantine" ]] && ok "run's repo parent has a private quarantine store" || bad "run quarantine store missing"
+assert_eq "$(lease_field "$EV" producer)" scratch-new "evidence run lease producer is preserved"
 assert_contains "$(cat "$T/admit.log")" "--class tmp_containers" "admit class tmp_containers"
 
 echo "== --kind build: dir under the build root with a valid producer lease =="
 run 0 "$T/myrepo" compiler-output --kind build
 assert_eq "$RC" 0 "build allocation exits 0"
 BUILD="$OUT"
-assert_contains "$BUILD" "$T/tmp/myrepo/build/compiler-output-" "build path"
+assert_contains "$BUILD" "$T/tmp/runs/$(date -u +%Y%m%d)/myrepo/compiler-output-" "build path"
 [[ -d "$BUILD" ]] && ok "build dir exists" || bad "build dir missing"
 assert_eq "$(lease_field "$BUILD" kind)" build "build lease kind"
+
+echo "== same-purpose build allocations receive unique IDs within a UTC date partition =="
+run 0 "$T/myrepo" repeated-run --kind build
+FIRST_RUN="$OUT"
+run 0 "$T/myrepo" repeated-run --kind build
+SECOND_RUN="$OUT"
+[[ "$FIRST_RUN" != "$SECOND_RUN" ]] && ok "same-purpose runs have unique paths" || bad "same-purpose run path collided"
+assert_contains "$FIRST_RUN" "$T/tmp/runs/$(date -u +%Y%m%d)/myrepo/repeated-run-" "first run uses dated namespace"
+assert_contains "$SECOND_RUN" "$T/tmp/runs/$(date -u +%Y%m%d)/myrepo/repeated-run-" "second run uses dated namespace"
 
 echo "== ownerless evidence lease remains protected after 48h =="
 run 0 "$T/myrepo" ownerless-evidence --kind evidence
@@ -400,7 +412,7 @@ for kind in evidence build; do
     assert_eq "$OUT" "" "$kind malformed registry emits no path"
     assert_contains "$ERR" "scratch volume unavailable" "$kind failure diagnosed"
     assert_eq "$(admits)" "$before" "$kind failure never admitted"
-    [[ "$(find "$T/tmp/myrepo/$kind" -mindepth 1 -maxdepth 1 -name "malformed-$kind-*" 2>/dev/null | wc -l | tr -d ' ')" == 0 ]] && ok "$kind failure created no fallback path" || bad "$kind failure created fallback path"
+    [[ "$(find "$T/tmp/runs" -mindepth 1 -maxdepth 5 -name "malformed-$kind-*" 2>/dev/null | wc -l | tr -d ' ')" == 0 ]] && ok "$kind failure created no fallback path" || bad "$kind failure created fallback path"
 done
 [[ ! -e "$T/Volumes/diskm-scratch" ]] && ok "malformed registry created no volume allocation" || bad "malformed registry volume allocation exists"
 mv "$T/state/volumes/registry.json" "$T/state/volumes/malformed-registry.json"
@@ -411,7 +423,7 @@ before="$(admits)"
 for kind in evidence build; do
     OUT="$(bash "$DISKM" scratch-new "$T/myrepo" "legacy-$kind" --kind "$kind" 2>"$T/err")"; RC=$?
     assert_eq "$RC" 0 "legacy config $kind fallback rc"
-    assert_contains "$OUT" "$T/tmp/myrepo/$kind/legacy-$kind-" "legacy config uses $kind tmp fallback"
+    assert_contains "$OUT" "$T/tmp/runs/$(date -u +%Y%m%d)/myrepo/legacy-$kind-" "legacy config uses dated runs fallback"
 done
 assert_eq "$(admits)" "$((before + 2))" "legacy config proceeds through normal admission"
 

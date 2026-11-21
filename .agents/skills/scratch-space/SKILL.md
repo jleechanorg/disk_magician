@@ -22,7 +22,7 @@ All temporary, disposable build, test scratch, and evidence paths resolve dynami
    EVIDENCE_DIR="$(diskm scratch-new <repo-path> <purpose> --kind evidence)"
    ```
    - Pass `--owner-pid <PID>` when allocating for a long-lived background process.
-   - `diskm scratch-new` checks volume health and admission and registers the producer lease. The ordinary cleanup floor is 48 hours of content inactivity. See the [operator playbook](../../../docs/operator-playbook.md#disposable-content-uses-a-48-hour-age-floor) for cleanup policy and scoped overrides.
+   - `diskm scratch-new --kind build|evidence` places new leased runs at `<Scratch>/runs/YYYYMMDD/<repo>/<purpose>-<UTC timestamp>-<allocator pid>-<nonce>/`. The lease records its kind and producer owner. Detached Git worktrees created with `--detach` stay under `~/.worktrees/<repo>/`. The ordinary cleanup floor is 48 hours of content inactivity. See the [operator playbook](../../../docs/operator-playbook.md#disposable-content-uses-a-48-hour-age-floor) for cleanup policy and scoped overrides.
 
 2. **Ad-Hoc Helper Files, PR Bodies, Frame Dumps, Server Logs & Ephemeral Scripts**
    ```bash

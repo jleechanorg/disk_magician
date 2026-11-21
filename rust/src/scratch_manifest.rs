@@ -1,0 +1,131 @@
+use crate::preview::registered_scratch;
+use serde::Serialize;
+use std::collections::BTreeSet;
+use std::fs::{self, Metadata};
+use std::io;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Component, Path, PathBuf};
+
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+
+#[derive(Serialize)]
+pub struct Manifest {
+    version: u8,
+    root: RootIdentity,
+    before_epoch_seconds: i64,
+    entries: Vec<Entry>,
+}
+
+#[derive(Serialize)]
+struct RootIdentity {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+#[derive(Serialize)]
+struct Entry {
+    path: PathBuf,
+    kind: &'static str,
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime_ns: i64,
+    ctime_ns: i64,
+}
+
+fn timestamp_ns(seconds: i64, nanos: i64) -> io::Result<i64> {
+    seconds
+        .checked_mul(NANOS_PER_SECOND)
+        .and_then(|n| n.checked_add(nanos))
+        .ok_or_else(|| io::Error::other("filesystem timestamp is out of range"))
+}
+
+// An exact path list is a nomination, never a cleanup verdict. The apply side
+// independently checks this identity, the exclusive cutoff, and all C14 holds.
+pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manifest> {
+    if paths.is_empty() {
+        return Err(io::Error::other("scratch-manifest needs at least one path"));
+    }
+    let cutoff_ns = timestamp_ns(before_epoch_seconds, 0)?;
+    let (root, dev) = registered_scratch()?;
+    let root_meta = fs::symlink_metadata(&root)?;
+    if !root_meta.is_dir() || root_meta.dev() != dev {
+        return Err(io::Error::other("Scratch root changed during resolution"));
+    }
+    let mut seen = BTreeSet::new();
+    let mut entries = Vec::with_capacity(paths.len());
+    for path in paths {
+        let relative = path.strip_prefix(&root).map_err(|_| {
+            io::Error::other(format!("outside registered Scratch: {}", path.display()))
+        })?;
+        let metadata = file_metadata(&root, relative, dev)?;
+        let mtime_ns = timestamp_ns(metadata.mtime(), metadata.mtime_nsec())?;
+        if mtime_ns >= cutoff_ns {
+            return Err(io::Error::other(format!(
+                "file is at or after the cutoff: {}",
+                path.display()
+            )));
+        }
+        if !seen.insert(relative) {
+            return Err(io::Error::other(format!(
+                "duplicate file path: {}",
+                path.display()
+            )));
+        }
+        entries.push(Entry {
+            path: relative.into(),
+            kind: "regular_file",
+            dev,
+            ino: metadata.ino(),
+            size: metadata.len(),
+            mtime_ns,
+            ctime_ns: timestamp_ns(metadata.ctime(), metadata.ctime_nsec())?,
+        });
+    }
+    let current = fs::symlink_metadata(&root)?;
+    if !current.is_dir() || current.dev() != dev || current.ino() != root_meta.ino() {
+        return Err(io::Error::other(
+            "Scratch root changed while building manifest",
+        ));
+    }
+    Ok(Manifest {
+        version: 1,
+        root: RootIdentity {
+            path: root,
+            dev,
+            ino: root_meta.ino(),
+        },
+        before_epoch_seconds,
+        entries,
+    })
+}
+
+fn file_metadata(root: &Path, relative: &Path, device: u64) -> io::Result<Metadata> {
+    let mut current = root.to_path_buf();
+    let mut parts = relative.components().peekable();
+    if parts.peek().is_none() || relative.to_str().is_none() {
+        return Err(io::Error::other(
+            "manifest requires a descendant UTF-8 path",
+        ));
+    }
+    while let Some(Component::Normal(name)) = parts.next() {
+        current.push(name);
+        let metadata = fs::symlink_metadata(&current)?;
+        if metadata.dev() != device {
+            return Err(io::Error::other(
+                "manifest path crosses a filesystem boundary",
+            ));
+        }
+        if parts.peek().is_none() && metadata.is_file() {
+            return Ok(metadata);
+        }
+        if !metadata.is_dir() {
+            break;
+        }
+    }
+    Err(io::Error::other(format!(
+        "manifest requires a regular file through real directories: {}",
+        relative.display()
+    )))
+}

@@ -183,5 +183,36 @@ printf '%s\0' "$SR/does-not-exist" | python3 "$SCOPE_HELPER" scope-batch "$SR" >
 rc=$?
 [[ "$rc" == 1 && ! -s "$T/scope-oserr.bin" ]] && ok "scope-batch exits 1 on OSError with no partial output" || bad "scope-batch OSError not rejected (rc=$rc)"
 
+# A scratch-new dated run is one cleanup unit; its individual caches are not
+# emitted as separately deletable children.
+RUNS="$SR/runs"
+RUN_REPO="$RUNS/20261120/repo"
+RUN_UNIT="$RUN_REPO/build-20261120T120000Z-1234-5678"
+mkdir -p "$RUN_REPO/.dm-quarantine" "$RUN_UNIT/venv/bin"
+chmod 700 "$RUN_REPO/.dm-quarantine"
+printf 'cache\n' >"$RUN_UNIT/venv/bin/cache"
+run_input="$T/runs-input.bin"
+run_output="$T/runs-output.bin"
+printf '%s\0' "$RUNS" >"$run_input"
+scratch_budget_artifact_children_batch 3 batch-generic <"$run_input" >"$run_output"
+python3 - "$run_output" "$RUN_UNIT" <<'PYRUNS'
+import sys
+fields = open(sys.argv[1], "rb").read().split(b"\0")
+assert fields[0] == b"diskm-artifact-children-v1"
+count = int(fields[1])
+pairs = list(zip(fields[2::2], fields[3::2]))
+assert len(pairs) == count
+paths = [child.decode() for _, child in pairs]
+assert sys.argv[2] in paths, "managed run root must be nominated"
+assert not any(path.startswith(sys.argv[2] + "/") for path in paths), "managed run contents must stay inside its lease unit"
+PYRUNS
+[[ $? == 0 ]] && ok "dated managed run is discovered as one leased cleanup unit" || bad "dated run was expanded below its producer lease"
+
+stream_output="$T/runs-stream.bin"
+python3 "$SCOPE_HELPER" stream-generic-leaves "$SR" "" >"$stream_output"
+run_stream="$(tr '\0' '\n' <"$stream_output")"
+grep -Fxq "$RUN_UNIT" <<<"$run_stream" && ok "streamed Scratch cleanup emits the dated run unit" || bad "streamed Scratch cleanup omitted the dated run"
+grep -qF "$RUN_UNIT/" <<<"$run_stream" && bad "streamed Scratch cleanup expanded run contents" || ok "streamed Scratch cleanup keeps run contents together"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

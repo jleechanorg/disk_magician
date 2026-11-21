@@ -50,9 +50,12 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
   list includes `~/.codex/sessions*`, `~/.codex/state*.sqlite`,
   `~/.codex/log`, and `~/.claude/projects`. Never replace a mutable tool
   state root with a symlink to another live state root.
-- Allocate worktrees via `diskm worktree-new` and disposable workspaces via
-  `diskm scratch-new` or `diskm scratch-dir`. Keep producer leases and use
-  the registered volume. Preserve `.diskm-ballast`. Follow the playbook's
+- Allocate worktrees via `diskm worktree-new`. Use
+  `diskm scratch-new <repo> <purpose> --kind build` for disposable run output
+  and retain the returned producer lease until the run finishes. Publish
+  evidence that must survive cleanup through the durable evidence route.
+  Use `diskm scratch-dir` for ad hoc scratch paths. Keep writes on the
+  registered volume and preserve `.diskm-ballast`. Follow the playbook's
   pressure and LRU rules only for the requested scope. A usage target supplies
   neither approval nor an exception to the applicable safety checks.
 
@@ -67,3 +70,12 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
   lightweight PR, package-sync, and deploy requirements. Check the installed
   entry point and scheduler receipts before claiming a job works. Disk-maintenance
   work may cross repositories under the standing authorization in the playbook.
+
+## Rust migration production LOC budget
+
+The Rust migration's agreed maximum is **10,500 physical production lines** across tracked Rust source files anywhere under the rust directory. Unit test implementations belong under rust/tests. Other tracked production sources there count toward the existing-code net-growth budget.
+
+- Rust production may not exceed 10,500 lines.
+- Existing non-generated production code may grow by at most 250 net lines per pull request compared with the PR base. Production source additions and deletions both count. Unit tests, test fixtures, documentation, `.github` tooling, and the generated `src/disk_magician/` package mirror are excluded.
+
+To change either limit, update the policy and the shared values in `.github/workflows/loc-budget.yml` in the same reviewed change.

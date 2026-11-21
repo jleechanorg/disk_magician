@@ -1,0 +1,18 @@
+[package]
+name = "diskm-shadow"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[lib]
+name = "diskm_shadow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "diskm"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

@@ -69,6 +69,9 @@ chmod +x "$MOCK_BIN/tmp_scratch_sweep.sh"
 cat > "$TMP_ROOT/disk_magician.sh" <<'MOCK'
 #!/bin/bash
 echo "disk_magician $* trigger=${DISK_MAGICIAN_TRIGGER:-} deadline=${ACT_DEADLINE_AT:-} cursor=${ACT_CURSOR:-}" >> "${INVOCATION_LOG:?}"
+if [[ "$1 $2" == "volume reclaim" ]]; then
+  echo "volume_reclaim_age_floor=${DISK_MAGICIAN_AGE_FLOOR_MINUTES:-unset}" >> "${INVOCATION_LOG:?}"
+fi
 if [[ "$*" == "volume path scratch --for-reclaim" ]]; then
   # This fixture host has no registered Scratch volume (rc=3 confirmed absence),
   # so the full sweep's free-space receipt falls back to the tmp roots it prunes.
@@ -113,7 +116,7 @@ FAIL=0
 
 assert_contains() {
   local name="$1" needle="$2" haystack="$3"
-  if grep -qF "$needle" <<<"$haystack"; then
+  if grep -qF -- "$needle" <<<"$haystack"; then
     echo "  PASS  $name"
     PASS=$(( PASS + 1 ))
   else
@@ -175,10 +178,12 @@ assert_receipt_field "volume reclaim result is retained when Scratch prune times
 
 echo "Test 0c: the LRU budget opt-in switches the Scratch pass to approved budget mode"
 : > "$INVOCATION_LOG"
-INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 \
+INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=50 DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS=6 DISK_MAGICIAN_AGE_FLOOR_MINUTES=360 \
   /bin/bash "$SCRIPT" --scratch-only --clean --deadline-at "$SCRATCH_DEADLINE" >/dev/null 2>&1 || true
 LRU_CALLS="$(cat "$INVOCATION_LOG")"
 assert_contains "opt-in passes --budget-pct to scratch-prune" "disk_magician scratch-prune --clean --budget-pct 50 --budget-preserve-content-keeps " "$LRU_CALLS"
+assert_contains "scheduled Scratch retains 48h even with the old 6h override" "--budget-floor-minutes 2880" "$LRU_CALLS"
+assert_contains "scheduled volume pass replaces an inherited 6h floor" "volume_reclaim_age_floor=2880" "$LRU_CALLS"
 assert_contains "opt-in runs the approved non-automatic mode" "scratch_prune_mode automatic=0 approval=1" "$LRU_CALLS"
 : > "$INVOCATION_LOG"
 INVOCATION_LOG="$INVOCATION_LOG" DISK_MAGICIAN_STATE_DIR="$STATE_DIR" DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=0 \
