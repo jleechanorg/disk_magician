@@ -105,6 +105,38 @@ guard_github_blob_sizes() {
   fi
 }
 
+guard_push_blob_sizes() {
+  local fetch_url="$1" branch="$2" fetch_range="$3"
+  local push_urls url range line oid ref rc
+  push_urls="$(git -C "$STATE_DIR" remote get-url --push --all origin)" || return 1
+  while IFS= read -r url; do
+    if remote_has_embedded_credentials "$url"; then
+      echo "Snapshot history guard: origin push URL contains embedded credentials." >&2
+      return 1
+    fi
+    if ! printf '%s\n' "$url" | grep -Eiq '^((https?://|ssh://git@)github\.com([/:]|$)|git@github\.com:)'; then
+      continue
+    fi
+    range="$fetch_range"
+    if [[ "$url" != "$fetch_url" ]]; then
+      # A push URL can have a different branch tip from the configured
+      # fetch remote. Check its exact range without refreshing tracking refs.
+      line="$(bounded 30 git -C "$STATE_DIR" ls-remote --exit-code --heads "$url" "refs/heads/$branch" 2>/dev/null)" && rc=0 || rc=$?
+      if [[ "$rc" == 2 ]]; then
+        range=HEAD
+      elif [[ "$rc" == 0 && "$line" != *$'\n'* ]]; then
+        read -r oid ref <<<"$line"
+        [[ "$oid" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ && "$ref" == "refs/heads/$branch" ]] || return 1
+        range="$oid..HEAD"
+      else
+        echo "Snapshot history guard: could not verify the GitHub push branch." >&2
+        return 1
+      fi
+    fi
+    guard_github_blob_sizes "$range" || return 1
+  done <<<"$push_urls"
+}
+
 guard_state_repo_push() {
   local branch remote_url remote_exists=false remote_ref="" scan_range gitleaks_bin gl_dir gl_conf gl_rc
   branch="$(git -C "$STATE_DIR" symbolic-ref --quiet --short HEAD)" || {
@@ -180,9 +212,7 @@ guard_state_repo_push() {
     return 1
   fi
 
-  if printf '%s\n' "$remote_url" | grep -Eiq '^((https?://|ssh://git@)github\.com([/:]|$)|git@github\.com:)'; then
-    guard_github_blob_sizes "$scan_range" || return 1
-  fi
+  guard_push_blob_sizes "$remote_url" "$branch" "$scan_range" || return 1
 
   gitleaks_bin="$(find_gitleaks)" || {
     echo "Snapshot history guard: gitleaks is unavailable; refusing unscanned push." >&2
