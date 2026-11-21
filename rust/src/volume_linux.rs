@@ -1,5 +1,6 @@
 //! Read-only Scratch mount identity on Linux.
 
+use crate::volume_config::{configuration, json_file};
 use serde_json::Value;
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -15,53 +16,6 @@ const GIB: u64 = 1024 * 1024 * 1024;
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::other(message)
-}
-
-fn json_file(path: &Path) -> io::Result<Value> {
-    serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)
-}
-
-fn configuration(home: &Path) -> io::Result<Value> {
-    if let Some(path) = env::var_os("DISK_MAGICIAN_CONFIG").filter(|path| !path.is_empty()) {
-        return json_file(Path::new(&path));
-    }
-    let user = env::var_os("XDG_CONFIG_HOME")
-        .map_or_else(|| home.join(".config"), PathBuf::from)
-        .join("disk-magician/config.json");
-    let mut overlay_state = None;
-    if user.is_file() {
-        let document = json_file(&user)?;
-        let overlay = document.as_object().is_some_and(|doc| {
-            !doc.is_empty()
-                && doc
-                    .keys()
-                    .all(|key| matches!(key.as_str(), "snapshot_measure" | "state_repo_path"))
-        });
-        if !overlay {
-            return Ok(document);
-        }
-        overlay_state = document["state_repo_path"]
-            .as_str()
-            .filter(|path| !path.is_empty())
-            .map(|path| match path {
-                "~" => home.to_path_buf(),
-                path if path.starts_with("~/") => home.join(&path[2..]),
-                path => home.join(path),
-            });
-    }
-    let state = env::var_os("DISK_MAGICIAN_STATE_REPO")
-        .map(PathBuf::from)
-        .or(overlay_state)
-        .unwrap_or_else(|| {
-            env::var_os("XDG_STATE_HOME")
-                .map_or_else(|| home.join(".local/state"), PathBuf::from)
-                .join("disk-magician")
-        });
-    let config = state.join("config/config.json");
-    if config.is_file() {
-        return json_file(&config);
-    }
-    serde_json::from_str(include_str!("../../config.json.template")).map_err(io::Error::other)
 }
 
 struct Scratch<'a> {
@@ -228,6 +182,7 @@ struct VerifiedMount {
     path: PathBuf,
     directory: File,
     uuid: String,
+    quota: u64,
 }
 
 // Return None for an unconfigured volume; errors describe unavailable or changed identity.
@@ -303,6 +258,7 @@ fn verified_mount(expected: Option<&Path>) -> io::Result<Option<VerifiedMount>> 
         path: scratch.mount.to_path_buf(),
         directory,
         uuid: image_uuid,
+        quota: scratch.quota,
     }))
 }
 
@@ -349,6 +305,9 @@ pub(crate) fn mounted_usage(
         stats.f_bavail as u64,
         stats.f_frsize as u64,
     )?;
+    if u128::from(used) * 10 >= u128::from(mount.quota) * 9 {
+        return Err(invalid("Linux Scratch volume usage alarm"));
+    }
     Ok((mount.uuid, used))
 }
 

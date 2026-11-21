@@ -175,3 +175,8 @@ ext4 image, mount record, and filesystem UUID. The native loop backend
 also verifies the unique backing-device mapping and mounted UUID.
 The read creates no registry state. Explicit legacy compatibility mode
 continues forwarding the volume command family to its selected backend.
+
+Native Scratch target measurement checks the registered filesystem identity and
+used bytes on Linux and macOS. On macOS it verifies the APFS container, volume,
+quota, and mount, then preserves the legacy capacity, usage, and ballast alarm
+checks. Set the explicit compatibility executable for migration fixtures.

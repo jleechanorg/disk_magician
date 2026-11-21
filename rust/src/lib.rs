@@ -53,3 +53,9 @@ pub mod status;
 
 #[cfg(target_os = "linux")]
 pub mod volume_linux;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod volume_config;
+
+#[cfg(any(target_os = "macos", test))]
+mod volume_macos;
