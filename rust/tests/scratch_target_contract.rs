@@ -99,7 +99,16 @@ elif [[ "$1" == volume && "$2" == status ]]; then
   slot=$((index-1))
   ((slot < ${#usages[@]})) || slot=$((${#usages[@]}-1))
   ((slot < ${#ids[@]})) || slot=$((${#ids[@]}-1))
-  printf '{"volumes":[{"class":"scratch","path":"%s","status":"active","filesystem_id":"%s","allocated_bytes":%s,"quota_bytes":214748364800,"available":false}]}\n' "$FAKE_SCRATCH_ROOT" "${ids[$slot]}" "${usages[$slot]}"
+  used="${usages[$slot]}"
+  alarms=""
+  if (( used >= 214748364800 )); then alarms='"volume_full"'
+  elif (( used >= 193273528320 )); then alarms='"volume_high"'; fi
+  if [[ -f "$STATUS_INDEX.alarm" ]]; then
+    if [[ -n "$alarms" ]]; then alarms="$alarms,"; fi
+    alarms="$alarms\"scratch_ballast_missing\""
+  fi
+  printf '{"alarms":[%s],"volumes":[{"class":"scratch","path":"%s","status":"active","filesystem_id":"%s","allocated_bytes":%s,"quota_bytes":214748364800,"available":false}]}\n' "$alarms" "$FAKE_SCRATCH_ROOT" "${ids[$slot]}" "$used"
+  if [[ -n "$alarms" ]]; then exit 1; fi
 elif [[ "$1" == quarantine && "$2" == scratch-apply ]]; then
   shift 2
   manifest=""; digest=""; selected=""
@@ -225,6 +234,37 @@ fn report(output: &Output) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("target apply emits JSON")
+}
+
+#[test]
+fn target_apply_accepts_high_and_full_usage_with_a_valid_measurement() {
+    for used in [190 * GIB, 200 * GIB] {
+        let fixture = Fixture::new(2);
+        let output = fixture.run(&[used, 99 * GIB], &["volume-a"; 2], &["--all"]);
+        let result = report(&output);
+        assert_eq!(result["status"], "target_reached");
+        assert_eq!(result["used_before_bytes"], used);
+        assert_eq!(result["used_after_bytes"], 99 * GIB);
+        assert_eq!(
+            result["pending_paths"],
+            serde_json::json!([fixture.entries[1]])
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.applies).unwrap().trim(),
+            fixture.entries[0]
+        );
+    }
+}
+
+#[test]
+fn target_apply_still_defers_when_pressure_accompanies_a_ballast_alarm() {
+    let fixture = Fixture::new(2);
+    fs::write(fixture.status_index.with_extension("alarm"), b"held").unwrap();
+    let output = fixture.run(&[190 * GIB], &["volume-a"], &["--all"]);
+    let result = report(&output);
+    assert_eq!(output.status.code(), Some(75));
+    assert_eq!(result["pending_paths"], serde_json::json!(fixture.entries));
+    assert!(!fixture.applies.exists());
 }
 
 #[test]

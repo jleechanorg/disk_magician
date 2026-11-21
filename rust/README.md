@@ -182,8 +182,8 @@ continues forwarding the volume command family to its selected backend.
 
 Native Scratch target measurement checks the registered filesystem identity and
 used bytes on Linux and macOS. On macOS it verifies the APFS container, volume,
-quota, and mount, then preserves the legacy capacity, usage, and ballast alarm
-checks. Set the explicit compatibility executable for migration fixtures.
+quota, and mount, then preserves the container capacity and ballast checks.
+Scratch quota pressure alone allows target apply to proceed. Set the explicit compatibility executable for migration fixtures.
 
 On macOS, the standalone lookup verifies the APFS registry, the Data container,
 and the mounted Scratch identity. Ordinary allocation requires valid ballast.

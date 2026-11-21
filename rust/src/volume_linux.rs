@@ -267,7 +267,6 @@ struct VerifiedMount {
     path: PathBuf,
     directory: File,
     uuid: String,
-    quota: u64,
 }
 
 // Return None for an unconfigured volume; errors describe unavailable or changed identity.
@@ -348,7 +347,6 @@ fn verified_mount(expected: Option<&Path>) -> io::Result<Option<VerifiedMount>> 
         path: scratch.mount.to_path_buf(),
         directory,
         uuid: image_uuid,
-        quota: scratch.quota,
     }))
 }
 
@@ -395,9 +393,6 @@ pub(crate) fn mounted_usage(
         stats.f_bavail as u64,
         stats.f_frsize as u64,
     )?;
-    if u128::from(used) * 10 >= u128::from(mount.quota) * 9 {
-        return Err(invalid("Linux Scratch volume usage alarm"));
-    }
     Ok((mount.uuid, used))
 }
 

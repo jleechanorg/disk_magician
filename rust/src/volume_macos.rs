@@ -161,9 +161,6 @@ fn check_capacity(
     if counts != [1, 1, 1] || fit > u128::from(ceiling) || provisioned > u128::from(ceiling) {
         return Err(invalid("APFS Scratch capacity alarm"));
     }
-    if u128::from(used) * 10 >= u128::from(quota) * 9 {
-        return Err(invalid("APFS Scratch volume usage alarm"));
-    }
     Ok(())
 }
 
@@ -556,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn target_measurement_keeps_legacy_capacity_and_usage_alarms() {
+    fn target_measurement_allows_scratch_pressure_and_preserves_container_interlocks() {
         let (mut listing, data, entry, _) = volumes();
         let path = Path::new("/Volumes/diskm-scratch");
         let scratch = registered_scratch(
@@ -581,7 +578,7 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(check_capacity(&listing, &scratch, 512, 1024, 1024).is_err());
+        assert!(check_capacity(&listing, &scratch, 512, 1024, 1024).is_ok());
     }
 
     #[test]
