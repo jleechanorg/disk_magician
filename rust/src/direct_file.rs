@@ -102,6 +102,21 @@ pub fn bind_parent(
     relative_parent: &Path,
     parent_identity: DirectoryIdentity,
 ) -> io::Result<BoundParent> {
+    let directory = open_parent(root, root_identity, relative_parent)?;
+    if DirectoryIdentity::from_directory(&directory)? != parent_identity {
+        return Err(io::Error::other("cleanup parent identity changed"));
+    }
+    Ok(BoundParent {
+        directory,
+        identity: parent_identity,
+    })
+}
+
+fn open_parent(
+    root: &File,
+    root_identity: DirectoryIdentity,
+    relative_parent: &Path,
+) -> io::Result<File> {
     if DirectoryIdentity::from_directory(root)? != root_identity {
         return Err(io::Error::other("cleanup root identity changed"));
     }
@@ -117,13 +132,31 @@ pub fn bind_parent(
             }
         }
     }
-    if DirectoryIdentity::from_directory(&current)? != parent_identity {
-        return Err(io::Error::other("cleanup parent identity changed"));
+    Ok(current)
+}
+
+/// Record the parent only if the pinned entry still matches the file chosen
+/// during manifest creation.
+pub(crate) fn capture_parent(
+    root: &File,
+    root_identity: DirectoryIdentity,
+    relative_path: &Path,
+    expected: FileIdentity,
+) -> io::Result<DirectoryIdentity> {
+    let relative_parent = relative_path
+        .parent()
+        .ok_or_else(|| io::Error::other("cleanup file has no parent"))?;
+    let name = relative_path
+        .file_name()
+        .ok_or_else(|| io::Error::other("cleanup file has no name"))?;
+    let parent = open_parent(root, root_identity, relative_parent)?;
+    let actual = stat_at(&parent, &component_name(name)?)?;
+    if file_identity(&actual) != expected {
+        return Err(io::Error::other(
+            "cleanup entry changed during parent capture",
+        ));
     }
-    Ok(BoundParent {
-        directory: current,
-        identity: parent_identity,
-    })
+    DirectoryIdentity::from_directory(&parent)
 }
 
 // libc exposes POSIX stat field widths per target, so these casts can be

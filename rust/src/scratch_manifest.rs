@@ -1,9 +1,10 @@
+use crate::direct_file::{capture_parent, DirectoryIdentity, FileIdentity};
 use crate::preview::{possible_dated_run, registered_scratch};
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::fs::{self, Metadata};
+use std::fs::{self, Metadata, OpenOptions};
 use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -34,7 +35,16 @@ struct Entry {
     mtime_ns: i64,
     ctime_ns: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    direct: Option<DirectIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     inventory_sha256: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DirectIdentity {
+    parent_dev: u64,
+    parent_ino: u64,
+    mode: u32,
 }
 
 fn timestamp_ns(seconds: i64, nanos: i64) -> io::Result<i64> {
@@ -85,6 +95,14 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
     if !root_meta.is_dir() || root_meta.dev() != dev {
         return Err(io::Error::other("Scratch root changed during resolution"));
     }
+    let root_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&root)?;
+    let root_identity = DirectoryIdentity {
+        device: dev,
+        inode: root_meta.ino(),
+    };
     let mut seen = BTreeSet::new();
     let mut entries = Vec::with_capacity(paths.len());
     for path in paths {
@@ -93,18 +111,33 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
         })?;
         let metadata = entry_metadata(&root, relative, dev)?;
         let mtime_ns = timestamp_ns(metadata.mtime(), metadata.mtime_nsec())?;
-        let (kind, inventory_sha256) = if metadata.is_file() {
+        let (kind, inventory_sha256, direct) = if metadata.is_file() {
             if mtime_ns >= cutoff_ns {
                 return Err(io::Error::other(format!(
                     "file is at or after the cutoff: {}",
                     path.display()
                 )));
             }
-            ("regular_file", None)
+            let parent = capture_parent(
+                &root_file,
+                root_identity,
+                relative,
+                FileIdentity::from_metadata(&metadata),
+            )?;
+            (
+                "regular_file",
+                None,
+                Some(DirectIdentity {
+                    parent_dev: parent.device,
+                    parent_ino: parent.inode,
+                    mode: metadata.mode(),
+                }),
+            )
         } else if possible_dated_run(&root.join("runs"), path).is_some() {
             (
                 "managed_run",
                 Some(fingerprint_run(path, before_epoch_seconds)?),
+                None,
             )
         } else {
             return Err(io::Error::other(format!(
@@ -126,6 +159,7 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
             size: metadata.len(),
             mtime_ns,
             ctime_ns: timestamp_ns(metadata.ctime(), metadata.ctime_nsec())?,
+            direct,
             inventory_sha256,
         });
     }

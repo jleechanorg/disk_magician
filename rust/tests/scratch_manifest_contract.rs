@@ -100,6 +100,9 @@ fn exact_manifest_records_identity_and_excludes_boundary_and_symlinks() {
     assert_eq!(entry["dev"], metadata.dev());
     assert_eq!(entry["ino"], metadata.ino());
     assert_eq!(entry["size"], metadata.len());
+    assert_eq!(entry["direct"]["parent_dev"], metadata.dev());
+    assert_eq!(entry["direct"]["parent_ino"], manifest["root"]["ino"]);
+    assert_eq!(entry["direct"]["mode"], metadata.mode());
     assert_eq!(
         entry["mtime_ns"],
         metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec()
@@ -118,7 +121,9 @@ fn exact_manifest_records_identity_and_excludes_boundary_and_symlinks() {
     assert!(!fixture.plan(&outside.join("keep"), cutoff).status.success());
     assert!(!fixture.plan(&link.join("keep"), cutoff).status.success());
     assert!(!fixture.plan(&link, cutoff).status.success());
-    let another = fixture.scratch.join("file\nwith newline");
+    let nested = fixture.scratch.join("nested parent");
+    fs::create_dir(&nested).unwrap();
+    let another = nested.join("file\nwith newline");
     fs::write(&another, "another disposable fixture").unwrap();
     let list = fixture.root.join("selected-paths");
     let mut paths = file.as_os_str().as_encoded_bytes().to_vec();
@@ -134,6 +139,10 @@ fn exact_manifest_records_identity_and_excludes_boundary_and_symlinks() {
     );
     let manifest: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(manifest["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        manifest["entries"][1]["direct"]["parent_ino"],
+        fs::metadata(nested).unwrap().ino()
+    );
     paths.pop();
     fs::write(&list, paths).unwrap();
     assert!(!fixture
@@ -154,6 +163,7 @@ fn exact_manifest_records_identity_and_excludes_boundary_and_symlinks() {
     let manifest: Value = serde_json::from_slice(&output.stdout).unwrap();
     let entry = &manifest["entries"][0];
     assert_eq!(entry["kind"], "managed_run");
+    assert!(entry.get("direct").is_none());
     assert_eq!(entry["inventory_sha256"], "0".repeat(64));
     assert!(!fixture.plan(&repo, cutoff).status.success());
 }
