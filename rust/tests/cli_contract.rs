@@ -433,6 +433,61 @@ fn legacy_compat_rejects_self_recursion_and_preserves_signal_exit() {
 }
 
 #[test]
+fn published_ledger_ignores_empty_state_path_and_prefers_an_explicit_root() {
+    let fixture = LegacyFixture::new("#!/bin/sh\nexit 91\n");
+    let xdg_config = fixture.root.join("xdg-config");
+    let user_config = xdg_config.join("disk-magician");
+    fs::create_dir_all(&user_config).unwrap();
+    let xdg_state = fixture.root.join("xdg-state");
+    let default_state = xdg_state.join("disk-magician");
+    let explicit_state = fixture.root.join("explicit-state");
+    let report = "# Known reclaim directories: NAME\nGenerated 2000-01-01 00:00 UTC by `diskm reclaim-ledger`\n> **STALE FULL-DISK LEDGER**\n### C. Cleaned\nnone\n### D. Regrowth\nnone\n### B1. Short\nnone\n### B2. Long\nnone\n### A. Attribution\nunavailable\n<!-- diskm reclaim-ledger complete -->\n";
+    for (root, name) in [
+        (&default_state, "default-XDG-fixture"),
+        (&explicit_state, "explicit-fixture"),
+    ] {
+        let reclaim = root.join("reclaim");
+        fs::create_dir_all(&reclaim).unwrap();
+        fs::write(
+            reclaim.join("known-reclaim-dirs.md"),
+            report.replace("NAME", name),
+        )
+        .unwrap();
+    }
+    let legacy_script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/reclaim_ledger.py");
+    for (configured, expected) in [
+        ("", "default-XDG-fixture"),
+        (explicit_state.to_str().unwrap(), "explicit-fixture"),
+    ] {
+        fs::write(
+            user_config.join("config.json"),
+            serde_json::to_vec(&serde_json::json!({"state_repo_path":configured})).unwrap(),
+        )
+        .unwrap();
+        let run = |mut command: Command| {
+            command
+                .env("HOME", &fixture.root)
+                .env("XDG_CONFIG_HOME", &xdg_config)
+                .env("XDG_STATE_HOME", &xdg_state)
+                .env_remove("DISK_MAGICIAN_STATE_REPO")
+                .env_remove("DISK_MAGICIAN_CONFIG")
+                .env("DISKM_LEGACY_COMPAT_CLI", &fixture.backend)
+                .output()
+                .unwrap()
+        };
+        let mut native = Command::new(env!("CARGO_BIN_EXE_diskm"));
+        native.args(["reclaim-ledger", "--read-existing"]);
+        let mut legacy = Command::new("python3");
+        legacy.arg(&legacy_script).arg("--read-existing");
+        let (native, legacy) = (run(native), run(legacy));
+        assert!(native.status.success() && legacy.status.success());
+        assert!(String::from_utf8_lossy(&legacy.stdout).contains(expected));
+        assert_eq!(native.stdout, legacy.stdout);
+    }
+}
+
+#[test]
 fn published_reclaim_ledger_reads_match_legacy_without_the_backend() {
     let fixture = LegacyFixture::new("#!/bin/sh\nexit 91\n");
     let reclaim = fixture.scratch.join("reclaim");

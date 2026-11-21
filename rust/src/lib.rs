@@ -50,3 +50,4 @@ pub mod scratch_manifest;
 mod scratch_recovery;
 pub mod scratch_target;
 pub mod status;
+mod volume_config;
