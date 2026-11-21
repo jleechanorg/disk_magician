@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
@@ -34,6 +35,52 @@ struct IndexRecord {
     root_ino: u64,
     #[serde(flatten)]
     entry: IndexEntry,
+}
+
+pub(crate) fn acquire_operation_lock() -> io::Result<File> {
+    let path = index_dir()?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(&path)?;
+    let uid = unsafe { libc::geteuid() };
+    let directory_metadata = directory.metadata()?;
+    if directory_metadata.uid() != uid || directory_metadata.mode() & 0o077 != 0 {
+        return Err(io::Error::other("unsafe quarantine index directory"));
+    }
+    // Canonical remove, restore and reconcile lock this inode.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c"operations.lock".as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let lock = unsafe { File::from_raw_fd(fd) };
+    let metadata = lock.metadata()?;
+    if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+        return Err(io::Error::other("unsafe quarantine operation lock"));
+    }
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let named_lock = fs::symlink_metadata(path.join("operations.lock"))?;
+    let named_directory = fs::symlink_metadata(&path)?;
+    if !named_lock.is_file()
+        || !named_directory.is_dir()
+        || (named_lock.dev(), named_lock.ino()) != (metadata.dev(), metadata.ino())
+        || (named_directory.dev(), named_directory.ino())
+            != (directory_metadata.dev(), directory_metadata.ino())
+    {
+        return Err(io::Error::other(
+            "quarantine operation lock identity changed",
+        ));
+    }
+    Ok(lock)
 }
 
 pub(crate) fn restore_is_settled(original: &Path, identity: (u64, u64)) -> io::Result<bool> {

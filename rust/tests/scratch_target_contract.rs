@@ -478,6 +478,26 @@ fn acknowledging_a_restored_entry_advances_the_checkpoint_without_calling_apply(
     )
     .unwrap();
 
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let transaction = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(fixture.root.join("state/quarantine-index/operations.lock"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(transaction.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let before = fs::read(&fixture.resume).unwrap();
+    let busy = fixture.run(&[101 * GIB], &["volume-a"], &["--ack-restored", path]);
+    assert_eq!(busy.status.code(), Some(75));
+    assert_eq!(fs::read(&fixture.resume).unwrap(), before);
+    assert_eq!(fs::read_to_string(&fixture.applies).unwrap(), previous);
+    drop(transaction);
+
     let acknowledged = fixture.run(&[101 * GIB], &["volume-a"], &["--ack-restored", path]);
     assert!(
         acknowledged.status.success(),

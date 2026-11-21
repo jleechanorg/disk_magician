@@ -386,6 +386,13 @@ pub fn apply(
             }
             Err(error) => return Err(error),
         };
+        let _transaction = match scratch_recovery::acquire_operation_lock() {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(report_recovery_required(&state, &manifest.entries, false));
+            }
+            Err(error) => return Err(error),
+        };
         return acknowledge_restored(state, &manifest.entries, path, resume_path);
     }
     if let Some(state) = existing_state.as_ref() {
