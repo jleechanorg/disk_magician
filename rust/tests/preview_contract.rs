@@ -318,6 +318,8 @@ fn missing_historical_paths_do_not_consume_the_verdict_budget() {
     let fixture = Fixture::new();
     let missing = fixture.scratch.join("already-deleted");
     let extant = fixture.scratch_path("eligible");
+    let unrecorded = fixture.scratch_path("unrecorded-old.cache");
+    Fixture::mark_old(&unrecorded);
     fixture.write_ledger(json!([
         {"row_type":"cleanup_event", "canonical_path":missing},
         {"row_type":"cleanup_event", "canonical_path":extant}
@@ -327,7 +329,10 @@ fn missing_historical_paths_do_not_consume_the_verdict_budget() {
     let result = report(&fixture.run(&["--max-candidates", "1"]));
     assert_eq!(result["missing_paths"], 1);
     assert_eq!(result["candidates"][0]["path"], extant.to_str().unwrap());
-    assert_eq!(result["complete"], true);
+    assert_eq!(result["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(result["complete"], false);
+    assert_eq!(result["discovery"]["files_measured"], 0);
+    assert_eq!(result["discovery"]["gaps"][0]["kind"], "not_scanned");
 }
 
 #[test]

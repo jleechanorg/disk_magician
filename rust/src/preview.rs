@@ -1,4 +1,4 @@
-use crate::scan::{scan, FileKind, ScanGap, ScanOptions};
+use crate::scan::{scan, FileKind, ScanGap, ScanGapKind, ScanOptions};
 use crate::{preview_scopes, preview_worktrees};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -179,7 +179,6 @@ pub fn preview(
         return live_preview(root, device, paths, min_hours, limit, true, scan_deadline);
     }
     let recorded_paths = paths.len();
-    let mut complete = true;
     let mut missing_paths = 0;
     let mut missing = Vec::new();
     let mut candidates = Vec::new();
@@ -200,14 +199,12 @@ pub fn preview(
             continue;
         }
         if candidates.len() == limit {
-            complete = false;
             break;
         }
         let verdict = checked.map_or_else(
             || checked_verdict(&root, &path, device, min_hours),
             str::to_owned,
         );
-        complete &= !verdict.starts_with("deferred:");
         let eligible = verdict == "remove";
         candidates.push(Candidate {
             path,
@@ -221,13 +218,27 @@ pub fn preview(
     candidates.extend(missing.into_iter().take(limit - candidates.len()));
     Ok(Report {
         scratch_root: Some(root.clone()),
+        discovery: Some(Discovery {
+            complete: false,
+            files_measured: 0,
+            directories_measured: 0,
+            repository_roots: 0,
+            measured_apparent_bytes: 0,
+            allocated_bytes_semantics:
+                "The ledger-only preview did not measure filesystem allocation.",
+            gaps: vec![ScanGap {
+                path: root.to_string_lossy().into_owned(),
+                path_bytes_hex: None,
+                kind: ScanGapKind::NotScanned,
+                message: "Ledger-only preview did not scan the Scratch filesystem.".into(),
+            }],
+        }),
         root,
         min_hours,
-        complete,
+        complete: false,
         recorded_paths,
         missing_paths,
         candidates,
-        discovery: None,
     })
 }
 

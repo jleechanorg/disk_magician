@@ -59,7 +59,7 @@ still receives the normal C14 verdict. Verdict checks run after scanning, up to
 
 Use `--scope tmp` to inventory canonical host temporary roots, including
 `/private/tmp` on macOS. The requested age filters discovery. The separate
-`diskm cleanup-tmp --dry-run` output applies the installed cleaner's policy.
+`diskm cleanup-tmp --dry-run --no-job-receipt` output applies the installed cleaner's policy.
 Inventory rows remain unqualified until that policy can establish eligibility.
 
 Use `--scope worktrees` to run the installed worktree dry run against its
@@ -81,3 +81,7 @@ The cutoff is exclusive. Outside paths, symlinks, nonregular entries, duplicate
 paths and files at or after the cutoff are rejected. A manifest records selected
 file identities and is read-only. The applying cleaner must recheck every entry
 and evaluate live protection and cleanup policy before removing anything.
+
+The default 48-hour ledger preview reports incomplete filesystem coverage.
+Its discovery gap names the Scratch root because this mode checks recorded
+paths without walking the filesystem.

@@ -70,5 +70,25 @@ else
 fi
 
 echo
+# A caller requesting an observational policy preview can avoid writing a
+# receipt. The flag cannot suppress receipts for a real cleanup.
+before_receipt="$T/before-receipt.json"
+cp "$receipts" "$before_receipt"
+for mode in --dry-run --clean; do
+  env -i HOME="$home" PATH="/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" TMPDIR="$T" \
+    DISK_MAGICIAN_TEST_CONTEXT="$DISK_MAGICIAN_TEST_CONTEXT" \
+    DISK_MAGICIAN_TEST_SANDBOX="$T" \
+    DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$priv" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$tmpdir" \
+    DISK_MAGICIAN_DARWIN_USER_TEMP_DIR_OVERRIDE="$tmpdir" DISK_MAGICIAN_ARCHIVE_ROOT="$archive" \
+    bash "$ROOT/scripts/cleanup_tmp.sh" "$mode" --no-job-receipt >"$out" 2>&1
+  rc=$?
+  if [[ "$mode" == --dry-run ]]; then
+    [[ "$rc" == 0 ]] && ok "receipt-free dry run succeeds" || bad "receipt-free dry run succeeds" "rc=$rc"
+  else
+    [[ "$rc" == 2 ]] && ok "clean cannot opt out of receipts" || bad "clean cannot opt out of receipts" "rc=$rc"
+  fi
+  cmp -s "$before_receipt" "$receipts" && ok "$mode leaves the prior receipt intact" || bad "$mode leaves the prior receipt intact"
+done
+
 echo "test_cleanup_tmp_receipt_scope: $PASS passed, $FAIL failed"
 [[ "$FAIL" == 0 ]]

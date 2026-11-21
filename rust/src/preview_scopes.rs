@@ -222,7 +222,7 @@ pub fn read_ledger(state_dir: &Path) -> io::Result<LedgerSummary> {
     })
 }
 
-/// Ask the canonical temp cleaner for its default dry-run selection. The cleaner writes a run receipt, which is flagged in the result.
+/// Ask the canonical temp cleaner for its default selection without a job receipt.
 pub fn temp_policy_preview() -> io::Result<TempPolicyPreview> {
     temp_policy_preview_command(Path::new(crate::LEGACY_CLI))
 }
@@ -256,6 +256,7 @@ print(json.dumps({
         executable_name.clone(),
         "cleanup-tmp".to_owned(),
         "--dry-run".to_owned(),
+        "--no-job-receipt".to_owned(),
     ];
     let output = Command::new("python3")
         .arg("-c")
@@ -264,7 +265,8 @@ print(json.dumps({
         .arg(MAX_POLICY_OUTPUT_BYTES.to_string())
         .args(&args)
         .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")
-        .env("DISK_MAGICIAN_RECEIPT_TRIGGER", "rust-preview")
+        .env_remove("DISK_MAGICIAN_RECEIPT_TRIGGER")
+        .env_remove("DISK_MAGICIAN_C14_LEDGER")
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other(
@@ -279,8 +281,8 @@ print(json.dumps({
         timed_out: response.timed_out,
         truncated: response.truncated,
         output: response.output,
-        may_write_job_receipt: true,
-        receipt_trigger: "rust-preview".to_owned(),
+        may_write_job_receipt: false,
+        receipt_trigger: String::new(),
     })
 }
 

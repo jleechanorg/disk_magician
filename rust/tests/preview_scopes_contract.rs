@@ -146,7 +146,8 @@ fn temp_policy_preview_runs_only_the_canonical_dry_run_and_bounds_output() {
         vec![
             executable.to_string_lossy().into_owned(),
             "cleanup-tmp".to_owned(),
-            "--dry-run".to_owned()
+            "--dry-run".to_owned(),
+            "--no-job-receipt".to_owned()
         ]
     );
     assert_eq!(report.status, Some(0));
@@ -155,8 +156,8 @@ fn temp_policy_preview_runs_only_the_canonical_dry_run_and_bounds_output() {
     assert!(report.output.len() <= 256 * 1024);
     assert_eq!(
         fs::read_to_string(log).unwrap(),
-        "cleanup-tmp|--dry-run||rust-preview"
+        "cleanup-tmp|--dry-run|--no-job-receipt||unset"
     );
-    assert!(report.may_write_job_receipt);
-    assert_eq!(report.receipt_trigger, "rust-preview");
+    assert!(!report.may_write_job_receipt);
+    assert!(report.receipt_trigger.is_empty());
 }

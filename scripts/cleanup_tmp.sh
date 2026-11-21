@@ -191,6 +191,7 @@ if [[ ${#SCRATCH_CONTAINER_ROOTS[@]} -eq 0 ]]; then
 fi
 
 DRY_RUN=true
+WRITE_JOB_RECEIPT=true
 INCLUDE_LARGE=false
 INCLUDE_AGED=false
 INCLUDE_OPENCODE_DYLIBS=false
@@ -217,6 +218,7 @@ Delete stale agent git clones and temp files from system temp paths.
 Options:
   --clean      Actually perform the cleanup (default: dry-run)
   --dry-run    Run in dry-run/preview mode
+  --no-job-receipt  Suppress the job receipt for a dry run
   --large      Include top-level /private/tmp dirs larger than LARGE_TMP_MIN_KB
   --aged       Include C14-proven top-level /private/tmp dirs of any size
                and C14 agent_prompt_*.txt files after AGED_TMP_ACTIVE_HOURS
@@ -241,6 +243,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean)   DRY_RUN=false ;;
     --dry-run) DRY_RUN=true ;;
+    --no-job-receipt) WRITE_JOB_RECEIPT=false ;;
     --large)   INCLUDE_LARGE=true ;;
     --aged)    INCLUDE_AGED=true ;;
     --opencode-dylibs) INCLUDE_OPENCODE_DYLIBS=true ;;
@@ -265,6 +268,11 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$WRITE_JOB_RECEIPT" == false && "$DRY_RUN" == false ]]; then
+  echo "Error: --no-job-receipt requires a dry run." >&2
+  exit 2
+fi
 
 if [[ "$INCLUDE_AGED" == true && "$INCLUDE_LARGE" == true ]]; then
   echo "Error: --aged and --large select different activity and recovery windows; run one mode at a time." >&2
@@ -358,21 +366,24 @@ RECEIPT_HELPER="${DISK_MAGICIAN_RECEIPT_HELPER:-$SCRIPT_DIR/job_receipt.py}"
 cleanup_tmp_df_free_bytes() {
   df -kP "$REPO_ROOT" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4 * 1024}'
 }
-RECEIPT_FREE_BEFORE="$(cleanup_tmp_df_free_bytes)"
-[[ "$RECEIPT_FREE_BEFORE" =~ ^[0-9]+$ ]] || RECEIPT_FREE_BEFORE=""
-RECEIPT_PRECONDITION='{}'
-[[ -n "$RECEIPT_FREE_BEFORE" ]] && RECEIPT_PRECONDITION="{\"free_bytes_before\":${RECEIPT_FREE_BEFORE}}"
-RECEIPT_TRIGGER="${DISK_MAGICIAN_RECEIPT_TRIGGER:-actuator}"
-RECEIPT_CLEAR_STALE_ARGS=()
-[[ "$DRY_RUN" == false ]] && RECEIPT_CLEAR_STALE_ARGS=(--clear-stale-active)
-RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp ${RECEIPT_CLEAR_STALE_ARGS[@]+"${RECEIPT_CLEAR_STALE_ARGS[@]}"} --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
-  log "ERROR: failed to record cleanup_tmp receipt begin"
-  exit 1
-}
+RECEIPT_RUN_ID=""
+if [[ "$WRITE_JOB_RECEIPT" == true ]]; then
+  RECEIPT_FREE_BEFORE="$(cleanup_tmp_df_free_bytes)"
+  [[ "$RECEIPT_FREE_BEFORE" =~ ^[0-9]+$ ]] || RECEIPT_FREE_BEFORE=""
+  RECEIPT_PRECONDITION='{}'
+  [[ -n "$RECEIPT_FREE_BEFORE" ]] && RECEIPT_PRECONDITION="{\"free_bytes_before\":${RECEIPT_FREE_BEFORE}}"
+  RECEIPT_TRIGGER="${DISK_MAGICIAN_RECEIPT_TRIGGER:-actuator}"
+  RECEIPT_CLEAR_STALE_ARGS=()
+  [[ "$DRY_RUN" == false ]] && RECEIPT_CLEAR_STALE_ARGS=(--clear-stale-active)
+  RECEIPT_RUN_ID="$(python3 "$RECEIPT_HELPER" begin --job cleanup_tmp ${RECEIPT_CLEAR_STALE_ARGS[@]+"${RECEIPT_CLEAR_STALE_ARGS[@]}"} --trigger "$RECEIPT_TRIGGER" --precondition "$RECEIPT_PRECONDITION")" || {
+    log "ERROR: failed to record cleanup_tmp receipt begin"
+    exit 1
+  }
+fi
 RECEIPT_FINISHED=false
 cleanup_tmp_finish_receipt() {
   local rc="${1:-0}" sig="${2:-0}" free_after="" delta="null" freed="null" outcome reason safety
-  [[ "$RECEIPT_FINISHED" == true ]] && return 0
+  [[ -z "$RECEIPT_RUN_ID" || "$RECEIPT_FINISHED" == true ]] && return 0
   RECEIPT_FINISHED=true
   free_after="$(cleanup_tmp_df_free_bytes)"
   [[ "$free_after" =~ ^[0-9]+$ ]] || free_after=""
