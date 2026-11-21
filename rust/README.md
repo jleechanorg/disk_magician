@@ -123,16 +123,12 @@ An interrupted mutation reports `recovery_required` and leaves the in-flight
 entry in the checkpoint. The existing legacy writer lock returns immediately
 under contention.
 
-### Legacy command bridge
+### Remaining compatibility adapters
 
-An installer may opt into an absolute compatibility executable with
-`DISKM_LEGACY_COMPAT_CLI`. Unsupported commands, plus ambiguous `status`,
-`history`, help, and empty invocations, exec that exact path with the original
-arguments. Rust-native `preview`, `scan`, and Scratch manifest commands stay
-native, while their volume, temp-policy, worktree-policy, and exact-apply calls
-resolve through the same compatibility setting. A self-path check and
-`DISKM_LEGACY_COMPAT_ACTIVE` guard prevent fallback recursion. Without the
-setting, unknown commands remain usage errors.
+The Rust command resolves its own help and rejects unsupported verbs. The
+named preview, Scratch volume lookup, and exact-apply adapters can still use
+the absolute backend selected by `DISKM_LEGACY_COMPAT_CLI`. The installed
+Python/Bash dispatcher remains the entry point for the unported jobs.
 
 The retained legacy `tmp-scratch-sweep` and `volume_reclaim` scripts default
 their nested volume calls to the adjacent `disk_magician.sh` dispatcher through

@@ -1,9 +1,7 @@
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +12,6 @@ fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_diskm"))
         .args(args)
         .env_remove("DISKM_LEGACY_COMPAT_CLI")
-        .env_remove("DISKM_LEGACY_COMPAT_ACTIVE")
         .output()
         .expect("candidate executable starts")
 }
@@ -22,9 +19,7 @@ fn run(args: &[&str]) -> Output {
 fn run_os(args: &[OsString], envs: &[(&str, &std::ffi::OsStr)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_diskm"));
     command.args(args);
-    command
-        .env_remove("DISKM_LEGACY_COMPAT_CLI")
-        .env_remove("DISKM_LEGACY_COMPAT_ACTIVE");
+    command.env_remove("DISKM_LEGACY_COMPAT_CLI");
     for (name, value) in envs {
         command.env(name, value);
     }
@@ -239,73 +234,31 @@ fn scan_matches_legacy_apparent_bytes_on_the_same_fixture_tree() {
 }
 
 #[test]
-fn legacy_compat_exec_preserves_argument_bytes_and_exit_status() {
-    let fixture = LegacyFixture::new(CAPTURE_LEGACY_ARGS);
-    let args = vec![
-        OsString::from("snapshot"),
-        OsString::from("--scope"),
-        OsString::from("path with spaces"),
-        OsString::from_vec(vec![b'\xff', b'x']),
-    ];
-    let output = fixture.run(&args);
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(
-        fixture.captured_args(),
-        vec![
-            b"snapshot".to_vec(),
-            b"--scope".to_vec(),
-            b"path with spaces".to_vec(),
-            vec![b'\xff', b'x'],
-        ]
-    );
-
-    let nonzero = Command::new(env!("CARGO_BIN_EXE_diskm"))
-        .arg("snapshot")
-        .env("DISKM_LEGACY_COMPAT_CLI", &fixture.backend)
-        .env("LEGACY_ARGV_RECORD", &fixture.record)
-        .env("LEGACY_EXIT_CODE", "23")
-        .output()
-        .unwrap();
-    assert_eq!(nonzero.status.code(), Some(23));
-}
-
-#[test]
-fn compatibility_routes_legacy_ambiguous_forms_and_preserves_native_verbs() {
+fn native_cli_rejects_unported_commands_without_launching_the_backend() {
     let fixture = LegacyFixture::new(CAPTURE_LEGACY_ARGS);
     for args in [
-        vec![OsString::from("status"), OsString::from("--json")],
-        vec![
-            OsString::from("history"),
-            OsString::from("diff"),
-            OsString::from("--days"),
-            OsString::from("7"),
-        ],
-        vec![
-            OsString::from("tmp-scratch-sweep"),
-            OsString::from("--scratch-only"),
-        ],
+        vec![OsString::from("snapshot")],
+        vec![OsString::from("tmp-scratch-sweep")],
+        vec![OsString::from("history"), OsString::from("diff")],
         vec![OsString::from("--legacy-option")],
-        vec![OsString::from("--help")],
-        Vec::new(),
     ] {
         let output = fixture.run(&args);
-        assert_eq!(output.status.code(), Some(0));
-        assert_eq!(
-            fixture.captured_args(),
-            args.iter()
-                .map(|arg| arg.as_encoded_bytes().to_vec())
-                .collect::<Vec<_>>()
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            !fixture.record.exists(),
+            "unported command started the legacy backend"
         );
     }
 
-    let native = Command::new(env!("CARGO_BIN_EXE_diskm"))
-        .args(["scan", ".", "--not-a-scan-option"])
-        .env("DISKM_LEGACY_COMPAT_CLI", &fixture.backend)
-        .env("LEGACY_ARGV_RECORD", &fixture.record)
-        .output()
-        .unwrap();
-    assert_eq!(native.status.code(), Some(2));
-    assert_eq!(fixture.captured_args(), Vec::<Vec<u8>>::new());
+    for args in [vec![OsString::from("--help")], Vec::new()] {
+        let output = fixture.run(&args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("diskm"));
+        assert!(
+            !fixture.record.exists(),
+            "native help started the legacy backend"
+        );
+    }
 }
 
 #[test]
@@ -361,75 +314,6 @@ fn native_worktree_preview_uses_the_same_selected_legacy_backend() {
         fixture.captured_args(),
         vec![b"cleanup-worktrees".to_vec(), b"--dry-run".to_vec()]
     );
-}
-
-#[test]
-fn legacy_dispatch_can_make_a_distinct_nested_diskm_call() {
-    let fixture = LegacyFixture::new(
-        "#!/bin/sh\ncase \"$1\" in\n snapshot) exec \"$RUST_DISKM\" volume path scratch ;;\n volume) printf \"nested volume\\n\" ;;\nesac\n",
-    );
-    let output = run_os(
-        &["snapshot".into()],
-        &[
-            ("DISKM_LEGACY_COMPAT_CLI", fixture.backend.as_os_str()),
-            (
-                "RUST_DISKM",
-                std::ffi::OsStr::new(env!("CARGO_BIN_EXE_diskm")),
-            ),
-        ],
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"nested volume\n");
-}
-
-#[test]
-fn legacy_compat_rejects_self_recursion_and_preserves_signal_exit() {
-    let self_path = PathBuf::from(env!("CARGO_BIN_EXE_diskm"));
-    let recursive = Command::new(&self_path)
-        .arg("snapshot")
-        .env("DISKM_LEGACY_COMPAT_CLI", &self_path)
-        .output()
-        .unwrap();
-    assert_eq!(recursive.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&recursive.stderr).contains("self-recursive"));
-
-    let wrapper = LegacyFixture::new("#!/bin/sh\nexec \"$RUST_DISKM\" snapshot\n");
-    let recursive_wrapper = Command::new(&self_path)
-        .arg("snapshot")
-        .env("DISKM_LEGACY_COMPAT_CLI", &wrapper.backend)
-        .env_remove("DISKM_LEGACY_COMPAT_ACTIVE")
-        .env("RUST_DISKM", &self_path)
-        .output()
-        .unwrap();
-    assert_eq!(recursive_wrapper.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&recursive_wrapper.stderr).contains("recursive"));
-
-    let root = std::env::temp_dir().join(format!(
-        "diskm-legacy-signal-{}-{}",
-        std::process::id(),
-        NEXT_LEGACY.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
-    let backend = root.join("legacy-signal");
-    fs::write(
-        &backend,
-        "#!/usr/bin/env python3\nimport os,signal\nos.kill(os.getpid(), signal.SIGTERM)\n",
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&backend).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&backend, permissions).unwrap();
-    let signaled = Command::new(self_path)
-        .arg("snapshot")
-        .env("DISKM_LEGACY_COMPAT_CLI", &backend)
-        .output()
-        .unwrap();
-    fs::remove_dir_all(&root).unwrap();
-    assert_eq!(signaled.status.signal(), Some(15));
 }
 
 #[test]
@@ -547,7 +431,7 @@ fn published_reclaim_ledger_reads_match_legacy_without_the_backend() {
     assert!(explicit.status.success());
     assert!(String::from_utf8_lossy(&explicit.stdout).contains("STALE RECLAIM REPORT"));
     let unsupported = fixture.run(&["reclaim-ledger".into(), "--stdout".into()]);
-    assert_eq!(unsupported.status.code(), Some(91));
+    assert_eq!(unsupported.status.code(), Some(2));
 }
 
 #[test]

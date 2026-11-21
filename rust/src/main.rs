@@ -5,11 +5,9 @@ use diskm_shadow::{
 use serde::Serialize;
 use std::env;
 use std::ffi::OsString;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Write};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::time::Duration;
 
 const USAGE: &str = "diskm — Disk Magician migration candidate; inventory output is JSON
@@ -33,8 +31,6 @@ Preview defaults to the Scratch scope. Use --scope all for all supported locatio
 
 const TEMPORARY_FAILURE: u8 = 75;
 const USAGE_ERROR: u8 = 2;
-const LEGACY_COMPAT_CLI: &str = diskm_shadow::LEGACY_COMPAT_CLI;
-const LEGACY_COMPAT_ACTIVE: &str = "DISKM_LEGACY_COMPAT_ACTIVE";
 
 enum Operation {
     Help,
@@ -446,51 +442,9 @@ fn run(operation: Operation) -> io::Result<u8> {
     Ok(0)
 }
 
-fn dispatch_legacy(args: &[OsString]) -> Option<ExitCode> {
-    env::var_os(LEGACY_COMPAT_CLI)?;
-    if matches!(
-        args.first().and_then(|arg| arg.to_str()),
-        Some("preview" | "scan" | "scratch-manifest" | "scratch-target-apply")
-    ) {
-        return None;
-    }
-    // The legacy command may legitimately invoke diskm with different arguments.
-    // Store a fingerprint of each forwarded argv to catch repeated dispatch.
-    let mut hasher = DefaultHasher::new();
-    args.hash(&mut hasher);
-    let fingerprint = format!("{:016x}", hasher.finish());
-    let mut chain = env::var(LEGACY_COMPAT_ACTIVE).unwrap_or_default();
-    if chain.split(',').any(|previous| previous == fingerprint) {
-        eprintln!("diskm: refusing recursive legacy compatibility dispatch");
-        return Some(ExitCode::from(USAGE_ERROR));
-    }
-    if !chain.is_empty() {
-        chain.push(',');
-    }
-    chain.push_str(&fingerprint);
-    let legacy = match diskm_shadow::legacy_cli() {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
-            eprintln!("diskm: legacy compatibility backend refused: {error}");
-            return Some(ExitCode::from(USAGE_ERROR));
-        }
-        Err(error) => {
-            eprintln!("diskm: legacy compatibility backend unavailable: {error}");
-            return Some(ExitCode::from(127));
-        }
-    };
-    let error = Command::new(legacy)
-        .arg0("diskm")
-        .args(args)
-        .env(LEGACY_COMPAT_ACTIVE, chain)
-        .exec();
-    eprintln!("diskm: cannot exec legacy compatibility backend: {error}");
-    Some(ExitCode::from(127))
-}
-
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn native_volume(args: &[OsString]) -> Option<ExitCode> {
-    if env::var_os(LEGACY_COMPAT_CLI).is_some() || args.first()?.as_os_str() != "volume" {
+    if args.first()?.as_os_str() != "volume" {
         return None;
     }
     let parameters = &args[1..];
@@ -600,9 +554,6 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
-    }
-    if let Some(status) = dispatch_legacy(&args) {
-        return status;
     }
     let operation = match parse(args.into_iter()) {
         Ok(operation) => operation,
