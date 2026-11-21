@@ -1,7 +1,6 @@
 use serde_json::{json, Value};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,7 +27,10 @@ impl Fixture {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir(&root).expect("create isolated target fixture");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .expect("create private target fixture");
         let scratch = root.join("scratch");
         let bin = root.join("bin");
         fs::create_dir(&scratch).unwrap();
@@ -195,6 +197,7 @@ fi
             ])
             .args(extra)
             .env("PATH", search_path)
+            .env("DISKM_LEGACY_COMPAT_CLI", self.bin.join("disk-magician"))
             .env("HOME", &self.root)
             .env("DISK_MAGICIAN_STATE_DIR", self.root.join("state"))
             .env("FAKE_SCRATCH_ROOT", &self.scratch)

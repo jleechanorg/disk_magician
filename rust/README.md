@@ -173,10 +173,21 @@ In standalone Linux mode, `volume path scratch` and
 `volume verify-mount PATH` read the configured registry and verify the
 ext4 image, mount record, and filesystem UUID. The native loop backend
 also verifies the unique backing-device mapping and mounted UUID.
-The read creates no registry state. Explicit legacy compatibility mode
+The read creates no registry state. On Linux, standalone scratch-dir,
+preview, and manifest nomination use the same native root lookup.
+Explicit legacy compatibility mode
 continues forwarding the volume command family to its selected backend.
 
 Native Scratch target measurement checks the registered filesystem identity and
 used bytes on Linux and macOS. On macOS it verifies the APFS container, volume,
 quota, and mount, then preserves the legacy capacity, usage, and ballast alarm
 checks. Set the explicit compatibility executable for migration fixtures.
+
+The default 48-hour ledger preview reports incomplete filesystem coverage. It
+reports the total missing nominations and the number of verdicts deferred,
+including nominations after the output cap. Scratch verdicts recheck repository
+ancestry independently of discovery. A directory that would otherwise pass is
+checked for protected evidence and repository descendants within the candidate's
+remaining deadline. Incomplete checks stay deferred.
+Its discovery gap names the Scratch root because this mode checks recorded
+paths without walking the filesystem.

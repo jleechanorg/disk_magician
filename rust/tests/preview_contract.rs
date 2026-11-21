@@ -70,6 +70,10 @@ if [ "$#" -eq 7 ] && [ "$1" = quarantine ] && [ "$2" = verdict ] && [ "$4" = --k
     held-live*) printf 'kept:live-owner\n' ;;
     held-open*) printf 'kept:open-file\n' ;;
     held-unknown*) printf 'kept:owner-unknown\n' ;;
+    removable-new-repository*)
+      printf 'gitdir: /unavailable/admin\n' > "${3%/*}/.git"
+      printf 'remove\n'
+      ;;
     removable*) printf 'remove\n' ;;
     *) printf 'kept:recent-activity\n' ;;
   esac
@@ -98,6 +102,7 @@ exit 64
                 ))
                 .unwrap(),
             )
+            .env("DISKM_LEGACY_COMPAT_CLI", self.bin.join("disk-magician"))
             .env("CALL_LOG", &self.calls)
             .env("FAKE_SCRATCH_ROOT", &self.scratch)
             .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")
@@ -198,6 +203,81 @@ fn preview_reads_history_and_only_current_remove_verdicts_are_eligible() {
 }
 
 #[test]
+fn ledger_preview_holds_files_under_worktree_and_bare_repository_roots() {
+    let fixture = Fixture::new();
+    let checkout = fixture.scratch.join("checkout");
+    let bare = fixture.scratch.join("bare");
+    fs::create_dir_all(checkout.join("cache")).unwrap();
+    fs::create_dir_all(bare.join("objects")).unwrap();
+    std::os::unix::fs::symlink("missing-admin-directory", checkout.join(".git")).unwrap();
+    fs::write(bare.join("HEAD"), b"ref: refs/heads/main").unwrap();
+    let tracked = checkout.join("cache/removable-build-output");
+    let pack = bare.join("objects/removable-pack");
+    for file in [&tracked, &pack] {
+        fs::write(file, b"fixture").unwrap();
+        Fixture::mark_old(file);
+    }
+    fixture.write_ledger(json!([
+        {"row_type":"cleanup_event", "canonical_path":tracked},
+        {"row_type":"cleanup_event", "canonical_path":pack}
+    ]));
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&[]));
+    let candidates = result["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    for candidate in candidates {
+        assert_eq!(candidate["verdict"], "kept:repository-use-worktree-route");
+        assert_eq!(candidate["eligible"], false);
+    }
+    assert!(!fixture.calls().contains("quarantine"));
+}
+
+#[test]
+fn ledger_preview_holds_evidence_and_its_container() {
+    let fixture = Fixture::new();
+    let container = fixture.scratch.join("removable-capture-container");
+    let evidence = container.join("job/evidence");
+    fs::create_dir_all(&evidence).unwrap();
+    let capture = evidence.join("removable-capture");
+    fs::write(&capture, b"evidence fixture").unwrap();
+    fixture.write_ledger(json!([
+        {"row_type":"cleanup_event", "canonical_path":capture},
+        {"row_type":"cleanup_event", "canonical_path":container}
+    ]));
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&[]));
+    let candidates = result["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    for candidate in candidates {
+        assert_eq!(candidate["verdict"], "kept:protected-scope");
+        assert_eq!(candidate["eligible"], false);
+    }
+    assert!(!fixture.calls().contains(capture.to_str().unwrap()));
+}
+
+#[test]
+fn live_preview_rechecks_if_repository_marker_appears_during_verdict() {
+    let fixture = Fixture::new();
+    let dir = fixture.scratch.join("checkout");
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("removable-new-repository");
+    let file = fs::File::create(&path).unwrap();
+    // Force itemization so the old file gets its own verdict.
+    file.set_len(101 * 1024 * 1024).unwrap();
+    Fixture::mark_old(&path);
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6"]));
+    assert!(dir.join(".git").is_file());
+    let row = &result["candidates"][0];
+    assert_eq!(row["path"], path.to_str().unwrap());
+    assert_eq!(row["verdict"], "kept:repository-use-worktree-route");
+    assert_eq!(row["eligible"], false);
+}
+
+#[test]
 fn explicit_six_hour_preview_passes_scoped_age_to_each_verdict() {
     let fixture = Fixture::new();
     let candidate = fixture.scratch_path("removable-old-cache");
@@ -280,15 +360,21 @@ fn candidate_limit_is_enforced_and_invalid_age_is_rejected() {
     let fixture = Fixture::new();
     let first = fixture.scratch_path("removable-first");
     let second = fixture.scratch_path("removable-second");
+    let missing = fixture.scratch.join("already-deleted-after-cap");
     fixture.write_ledger(json!([
         {"row_type":"cleanup_event", "canonical_path":first},
-        {"row_type":"cleanup_event", "canonical_path":second}
+        {"row_type":"cleanup_event", "canonical_path":second},
+        {"row_type":"cleanup_event", "canonical_path":missing}
     ]));
     fixture.install_diskm();
 
     let bounded = report(&fixture.run(&["--max-candidates", "1"]));
     assert_eq!(bounded["candidates"].as_array().unwrap().len(), 1);
     assert_eq!(bounded["complete"], false);
+    assert_eq!(bounded["recorded_paths"], 3);
+    assert_eq!(bounded["missing_paths"], 1);
+    assert_eq!(bounded["deferred_verdicts"], 1);
+    assert!(!fixture.calls().contains(second.to_str().unwrap()));
 
     let invalid = fixture.run(&["--min-hours", "5"]);
     assert_eq!(invalid.status.code(), Some(2));
@@ -587,6 +673,7 @@ fn completed_checkpoint_reports_prior_remove_as_historical_after_replacement() {
         path.to_string_lossy().as_ref()
     );
     assert_eq!(resumed["candidates"][0]["verdict"], "historical:remove");
+    assert_eq!(resumed["deferred_verdicts"], 0);
     assert_eq!(resumed["candidates"][0]["eligible"], false);
 }
 

@@ -39,6 +39,44 @@ pub fn legacy_cli() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Read the registered Scratch root. None means the volume authority confirmed absence.
+pub(crate) fn scratch_volume_path(override_cli: Option<PathBuf>) -> io::Result<Option<PathBuf>> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "linux")]
+    if override_cli.is_none() && env::var_os(LEGACY_COMPAT_CLI).is_none() {
+        return volume_linux::verified_root(None);
+    }
+
+    let backend = match override_cli {
+        Some(path) => path,
+        None => legacy_cli()?,
+    };
+    let output = Command::new(backend)
+        .args(["volume", "path", "scratch"])
+        .stderr(Stdio::null())
+        .output()?;
+    match output.status.code() {
+        Some(3) => Ok(None),
+        Some(0) => {
+            let mut bytes = output.stdout;
+            while bytes.last() == Some(&b'\n') {
+                bytes.pop();
+            }
+            if bytes.is_empty() {
+                return Err(io::Error::other("active Scratch volume returned no path"));
+            }
+            Ok(Some(PathBuf::from(OsString::from_vec(bytes))))
+        }
+        Some(code) => Err(io::Error::other(format!(
+            "Scratch volume lookup failed (rc={code})"
+        ))),
+        None => Err(io::Error::other("Scratch volume lookup was interrupted")),
+    }
+}
+
 pub mod history;
 pub mod preview;
 pub mod preview_scopes;

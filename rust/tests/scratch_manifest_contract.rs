@@ -54,6 +54,7 @@ exit 64
             ])
             .arg(path)
             .env("PATH", &self.root)
+            .env("DISKM_LEGACY_COMPAT_CLI", self.root.join("disk-magician"))
             .env("TEST_SCRATCH", &self.scratch)
             .output()
             .unwrap()
