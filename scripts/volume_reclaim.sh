@@ -200,7 +200,7 @@ raise SystemExit(0 if d == {"operation":"intent_write","errno":28,"errno_name":"
 PYDIAG
  then
   local release_rc=0
-  "$diskm" volume ballast release scratch >/dev/null 2>&1 || release_rc=$?
+  DISK_MAGICIAN_BALLAST_RETRY_PID="$$" "$diskm" volume ballast release scratch >/dev/null 2>&1 || release_rc=$?
   if (( release_rc == 0 )); then
    local retry_allowed=true
    if [[ "$available_floor" == true ]]; then
@@ -307,7 +307,9 @@ fi
 if [[ "$clean" == true ]]; then
  if [[ "$pending_ballast" == true ]]; then
   "$diskm" volume ballast recover scratch >/dev/null 2>&1 || BALLAST_RESTORE_FAILURES=1
- elif [[ "$available_floor" != true ]] || (( BALLAST_RELEASE_ATTEMPTED )); then
+ elif (( BALLAST_RELEASE_ATTEMPTED )); then
+  DISK_MAGICIAN_BALLAST_RETRY_PID="$$" "$diskm" volume ballast ensure scratch >/dev/null 2>&1 || BALLAST_RESTORE_FAILURES=1
+ elif [[ "$available_floor" != true ]]; then
   "$diskm" volume ballast ensure scratch >/dev/null 2>&1 || BALLAST_RESTORE_FAILURES=1
  fi
  # Manual quota mode can recover a transient probe; scheduled policy retains

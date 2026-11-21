@@ -2244,24 +2244,63 @@ raise SystemExit(volume.ballast_cmd('recover','scratch'))
             write.assert_not_called()
         self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
 
-    def test_ballast_recovery_respects_active_cleanup_lock_and_inherited_owner(self):
+    def test_ballast_ensure_without_pending_release_ignores_cleanup_lock(self):
         import scratch_lock
+
+        self.make_fit()
+        self.assertTrue(volume.unlink_ballast_verified(self.mp))
+        self.assertFalse(volume.ballast_ok(self.mp))
+        self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+        fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+        volume.fcntl.flock(fd, volume.fcntl.LOCK_EX | volume.fcntl.LOCK_NB)
+        try:
+            command = [sys.executable, str(ROOT / "scripts/volume.py"), "ballast", "ensure", "scratch"]
+            result = volume.subprocess.run(command, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(volume.ballast_ok(self.mp))
+        finally:
+            os.close(fd)
+
+    def test_ballast_retry_owner_blocks_early_restore_and_can_restore(self):
+        self.make_fit()
+        retry = {"DISK_MAGICIAN_BALLAST_RETRY_PID": str(os.getpid())}
+        with mock.patch.dict(os.environ, retry):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        self.assertFalse(volume.ballast_ok(self.mp))
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 76)
+        self.assertEqual(volume.ballast_cmd("ensure", "scratch"), 75)
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        with mock.patch.dict(os.environ, retry):
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+        self.assertTrue(volume.ballast_ok(self.mp))
+        self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+
+    def test_unowned_ballast_recovery_ignores_unrelated_cleanup_lock(self):
+        import scratch_lock
+
         self.make_fit()
         self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
         fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
         volume.fcntl.flock(fd, volume.fcntl.LOCK_EX | volume.fcntl.LOCK_NB)
         try:
-            command = [sys.executable, str(ROOT / "scripts/volume.py"), "ballast", "recover", "scratch"]
-            result = volume.subprocess.run(command, capture_output=True, timeout=5)
-            self.assertEqual(result.returncode, 75)
-            self.assertFalse(volume.ballast_ok(self.mp))
-            self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+            self.assertTrue(volume.ballast_ok(self.mp))
+            self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
         finally:
             os.close(fd)
-        result = volume.subprocess.run([sys.executable, str(ROOT / "scripts/scratch_lock.py"),
-            "run", "--caller", "recovery-test", "--script", sys.executable, "--args", "--",
-            str(ROOT / "scripts/volume.py"), "ballast", "recover", "scratch"], capture_output=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_ballast_retry_can_be_recovered_after_its_owner_exits(self):
+        self.make_fit()
+        with volume.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as owner:
+            try:
+                retry = {"DISK_MAGICIAN_BALLAST_RETRY_PID": str(owner.pid)}
+                with mock.patch.dict(os.environ, retry):
+                    self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+                self.assertEqual(volume.ballast_cmd("recover", "scratch"), 76)
+            finally:
+                owner.terminate()
+                owner.wait(timeout=3)
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
         self.assertTrue(volume.ballast_ok(self.mp))
 
     def test_pending_recovery_reports_typed_low_space_without_clearing_intent(self):
