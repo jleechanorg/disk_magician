@@ -1082,7 +1082,9 @@ if __name__ == "__main__":
                 tail = tail[2:]
             else:
                 print("kept:check-failed"); sys.exit(0)
-        lock = operation_lock(deadline)
+        # Exact manifest apply can resume when another transaction is active.
+        # Keep its operation deadline separate from the immediate lock attempt.
+        lock = operation_lock(time.monotonic() if expected_identity is not None else deadline)
         if lock is None: print("deferred:operation-lock"); sys.exit(0)
         try: print(combined_remove(args[1], args[2], args[3], deadline, expected_identity))
         finally: operation_unlock(lock)
