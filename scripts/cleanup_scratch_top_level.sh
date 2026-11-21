@@ -688,13 +688,21 @@ if (( ${#candidates[@]} )); then
       emit_discovery_deferred_summary pair-count-mismatch
       exit 75
     fi
+    # batch-generic writes all children for one submitted parent before moving
+    # to the next parent. Reuse only that consecutive membership result.
+    _artifact_last_parent=""
+    _artifact_last_parent_submitted=false
     for ((_artifact_i=2; _artifact_i<${#_artifact_fields[@]}; _artifact_i+=2)); do
       _artifact_parent="${_artifact_fields[_artifact_i]}"
       _artifact_child="${_artifact_fields[_artifact_i+1]}"
-      _artifact_parent_submitted=false
-      for _candidate in ${candidate_dirs[@]+"${candidate_dirs[@]}"}; do
-        [[ "$_candidate" == "$_artifact_parent" ]] && { _artifact_parent_submitted=true; break; }
-      done
+      if [[ "$_artifact_parent" != "$_artifact_last_parent" ]]; then
+        _artifact_last_parent="$_artifact_parent"
+        _artifact_last_parent_submitted=false
+        for _candidate in ${candidate_dirs[@]+"${candidate_dirs[@]}"}; do
+          [[ "$_candidate" == "$_artifact_parent" ]] && { _artifact_last_parent_submitted=true; break; }
+        done
+      fi
+      _artifact_parent_submitted="$_artifact_last_parent_submitted"
       if [[ "$_artifact_parent_submitted" != true || "$_artifact_child" != "$_artifact_parent"/* ]]; then
         rm -f "$artifact_batch_output_file"
         artifact_batch_output_file=""
