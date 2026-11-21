@@ -98,7 +98,7 @@ check "recent dir skipped" 'grep -q "recently active dir.*recent_big" <<<"$OUT"'
 check "du never run on recent dir" '! grep -q recent_big "$TMP_ROOT/du.log"'
 check "old dir archived" '[[ ! -e "$P1/pr_old_big" ]]'
 check "recent dir preserved" '[[ -e "$P1/recent_big" ]]'
-check "lsof only for the eligible dir (1 call)" '[[ "$(wc -l < "$TMP_ROOT/lsof.log" | tr -d " ")" == 1 ]]' "$(cat "$TMP_ROOT/lsof.log" 2>/dev/null)"
+check "lsof only for the eligible dir and its final recheck (2 calls)" '[[ "$(wc -l < "$TMP_ROOT/lsof.log" | tr -d " ")" == 2 ]]' "$(cat "$TMP_ROOT/lsof.log" 2>/dev/null)"
 
 echo "Test 2: a hung du is bounded and fails closed for that entry only"
 P2="$TMP_ROOT/p2"; mk_fixture "$P2" slow_big
