@@ -2261,6 +2261,20 @@ raise SystemExit(volume.ballast_cmd('recover','scratch'))
         finally:
             os.close(fd)
 
+    def test_ballast_retry_owner_blocks_early_restore_and_can_restore(self):
+        self.make_fit()
+        retry = {"DISK_MAGICIAN_BALLAST_RETRY_PID": str(os.getpid())}
+        with mock.patch.dict(os.environ, retry):
+            self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
+        self.assertFalse(volume.ballast_ok(self.mp))
+        self.assertEqual(volume.ballast_cmd("recover", "scratch"), 76)
+        self.assertEqual(volume.ballast_cmd("ensure", "scratch"), 75)
+        self.assertEqual(volume.ballast_cmd("release", "scratch"), 75)
+        with mock.patch.dict(os.environ, retry):
+            self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)
+        self.assertTrue(volume.ballast_ok(self.mp))
+        self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+
     def test_ballast_recovery_respects_active_cleanup_lock_and_inherited_owner(self):
         import scratch_lock
         self.make_fit()
