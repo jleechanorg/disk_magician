@@ -1,4 +1,3 @@
-use diskm_shadow::preview;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
@@ -75,6 +74,10 @@ if [ "$#" -eq 7 ] && [ "$1" = quarantine ] && [ "$2" = verdict ] && [ "$4" = --k
       printf 'gitdir: /unavailable/admin\n' > "${3%/*}/.git"
       printf 'remove\n'
       ;;
+    retryable-*)
+      if [ -e "${CALL_LOG%/*}/retry-ready" ]; then printf 'remove\n'
+      else printf 'deferred:metadata\n'; fi
+      ;;
     removable*) printf 'remove\n' ;;
     *) printf 'kept:recent-activity\n' ;;
   esac
@@ -110,23 +113,14 @@ exit 64
             .expect("candidate executable starts")
     }
 
-    fn report_with_scan_deadline(&self, deadline: Duration) -> Value {
-        let _env_guard = PROCESS_ENV_LOCK.lock().unwrap();
-        let original_path = std::env::var_os("PATH");
-        let original_call_log = std::env::var_os("CALL_LOG");
-        let original_scratch = std::env::var_os("FAKE_SCRATCH_ROOT");
-        let path = std::env::join_paths(std::iter::once(self.bin.clone()).chain(
-            std::env::split_paths(&original_path.clone().unwrap_or_default()),
-        ))
-        .unwrap();
-        std::env::set_var("PATH", path);
-        std::env::set_var("CALL_LOG", &self.calls);
-        std::env::set_var("FAKE_SCRATCH_ROOT", &self.scratch);
-        let result = preview::scope_report("scratch", Some(&self.state), 6, 10, deadline);
-        restore_env("PATH", original_path);
-        restore_env("CALL_LOG", original_call_log);
-        restore_env("FAKE_SCRATCH_ROOT", original_scratch);
-        serde_json::to_value(result.unwrap()).unwrap()
+    fn report_with_checkpoint(&self, deadline: Duration, checkpoint: &Path) -> Value {
+        let deadline_ms = deadline.as_millis().to_string();
+        report(&self.run(&[
+            "--deadline-ms",
+            &deadline_ms,
+            "--resume-state",
+            checkpoint.to_str().unwrap(),
+        ]))
     }
 
     fn calls(&self) -> String {
@@ -151,14 +145,6 @@ exit 64
 impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.root).expect("remove owned preview fixture");
-    }
-}
-
-fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-    if let Some(value) = value {
-        std::env::set_var(name, value);
-    } else {
-        std::env::remove_var(name);
     }
 }
 
@@ -614,17 +600,23 @@ fn incomplete_scan_reports_and_checks_only_the_measured_frontier() {
     }
     fixture.install_diskm();
 
-    let result = fixture.report_with_scan_deadline(Duration::from_millis(20));
+    let checkpoint = fixture.root.join("scratch-resume.json");
+    let result = fixture.report_with_checkpoint(Duration::from_millis(20), &checkpoint);
+    assert_eq!(result["min_hours"], 48);
     let candidates = result["candidates"].as_array().unwrap();
 
     assert_eq!(result["complete"], false);
     assert_eq!(result["discovery"]["complete"], false);
-    assert!(result["discovery"]["gaps"]
+    assert!(checkpoint.is_file());
+    let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    assert_eq!(saved["complete"], false);
+    assert!(saved["unfinished_scan_paths"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|gap| {
-            gap["kind"] == "deadline" && gap["path"] == frontier.to_string_lossy().as_ref()
+        .any(|row| {
+            row["path"] == frontier.to_string_lossy().as_ref()
+                || row["path"] == fixture.scratch.to_string_lossy().as_ref()
         }));
     let eligible_row = candidates
         .iter()
@@ -639,6 +631,130 @@ fn incomplete_scan_reports_and_checks_only_the_measured_frontier() {
     assert_eq!(held_row["verdict"], "kept:owner-unknown");
     assert_eq!(held_row["eligible"], false);
     assert!(!fixture.calls().contains(frontier.to_str().unwrap()));
+
+    let resumed = fixture.report_with_checkpoint(Duration::from_secs(10), &checkpoint);
+    assert_eq!(resumed["complete"], true);
+    assert_eq!(
+        resumed["resumable"]["unfinished_scan_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let resumed_candidates = resumed["candidates"].as_array().unwrap();
+    assert_eq!(
+        resumed_candidates
+            .iter()
+            .filter(|row| row["path"] == eligible.to_string_lossy().as_ref())
+            .count(),
+        1
+    );
+    assert_eq!(
+        resumed_candidates
+            .iter()
+            .filter(|row| row["path"] == held.to_string_lossy().as_ref())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn completed_checkpoint_reports_prior_remove_as_historical_after_replacement() {
+    let fixture = Fixture::new();
+    let path = fixture.scratch_path("removable-prior.cache");
+    Fixture::mark_old(&path);
+    fixture.install_diskm();
+    let checkpoint = fixture.root.join("completed-checkpoint.json");
+
+    let first = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(first["complete"], true);
+    assert_eq!(first["candidates"][0]["eligible"], true);
+    fs::write(&path, b"replacement content").unwrap();
+    let resumed = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(
+        resumed["candidates"][0]["path"],
+        path.to_string_lossy().as_ref()
+    );
+    assert_eq!(resumed["candidates"][0]["verdict"], "historical:remove");
+    assert_eq!(resumed["deferred_verdicts"], 0);
+    assert_eq!(resumed["candidates"][0]["eligible"], false);
+}
+
+#[test]
+fn deferred_retry_refreshes_measurements_and_preserves_the_original_cutoff() {
+    let fixture = Fixture::new();
+    let old = fixture.scratch_path("retryable-old");
+    let fresh = fixture.scratch_path("retryable-fresh");
+    Fixture::mark_old(&old);
+    Fixture::mark_old(&fresh);
+    fixture.install_diskm();
+    let checkpoint = fixture.root.join("transient-retry.json");
+
+    let first = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(first["deferred_verdicts"], 2);
+    let replacement = b"replacement with different sizes in the original date window";
+    fs::write(&old, replacement).unwrap();
+    Fixture::mark_old(&old);
+    fs::write(&fresh, b"replacement after the original cutoff").unwrap();
+    fs::write(fixture.root.join("retry-ready"), b"ready").unwrap();
+
+    let resumed = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(resumed["deferred_verdicts"], 0);
+    let rows = resumed["candidates"].as_array().unwrap();
+    let old_row = rows
+        .iter()
+        .find(|row| row["path"] == old.to_str().unwrap())
+        .unwrap();
+    let fresh_row = rows
+        .iter()
+        .find(|row| row["path"] == fresh.to_str().unwrap())
+        .unwrap();
+    assert_eq!(old_row["eligible"], true);
+    assert_eq!(old_row["apparent_bytes"], replacement.len());
+    assert_eq!(fresh_row["eligible"], false);
+    assert_eq!(fresh_row["verdict"], "kept:outside-date-window");
+}
+
+#[test]
+fn deferred_directories_share_the_resume_scan_deadline() {
+    let fixture = Fixture::new();
+    fixture.install_diskm();
+    for name in ["removable-a", "removable-b", "removable-c"] {
+        let dir = fixture.scratch.join(name);
+        fs::create_dir(&dir).unwrap();
+        let payload = dir.join("old-output");
+        fs::write(&payload, b"old").unwrap();
+        Fixture::mark_old(&payload);
+    }
+    let checkpoint = fixture.root.join("directory-budget.json");
+    let checkpoint = checkpoint.to_str().unwrap();
+    let first = report(&fixture.run(&["--resume-state", checkpoint, "--max-candidates", "1"]));
+    let deferred = first["resumable"]["pending_verdict_paths"]
+        .as_array()
+        .unwrap();
+    assert_eq!(deferred.len(), 2);
+    let slow = Path::new(deferred[0].as_str().unwrap());
+    let other = deferred[1].as_str().unwrap();
+    // Exceed one small scan window in the first deferred directory.
+    for index in 0..10_000 {
+        fs::File::create(slow.join(format!("filler-{index}"))).unwrap();
+    }
+    let calls_before = fixture.calls();
+    let paused = report(&fixture.run(&[
+        "--resume-state",
+        checkpoint,
+        "--max-candidates",
+        "2",
+        "--deadline-ms",
+        "2",
+    ]));
+    assert!(paused["resumable"]["pending_verdict_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path == other));
+    let calls_after = fixture.calls();
+    assert!(!calls_after[calls_before.len()..].contains(other));
 }
 
 #[test]
@@ -718,4 +834,154 @@ fn six_hour_preview_preserves_checker_vetoes_and_evidence_scope() {
         }));
     }
     assert!(!fixture.calls().contains(container.to_str().unwrap()));
+}
+
+#[test]
+fn explicit_recheck_revalidates_only_selected_checkpoint_files() {
+    let fixture = Fixture::new();
+    let unchanged = fixture.scratch_path("removable-unchanged.cache");
+    let changed = fixture.scratch_path("removable-replaced.cache");
+    Fixture::mark_old(&unchanged);
+    Fixture::mark_old(&changed);
+    fixture.install_diskm();
+    let checkpoint = fixture.root.join("exact-recheck.json");
+    let initial = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(initial["complete"], true);
+    let original = fs::read(&checkpoint).unwrap();
+
+    fs::write(&changed, b"new content").unwrap();
+    let unrecorded = fixture.scratch_path("removable-unrecorded.cache");
+    Fixture::mark_old(&unrecorded);
+    let checkpoint_str = checkpoint.to_str().unwrap();
+    let unchanged_str = unchanged.to_str().unwrap();
+    let changed_str = changed.to_str().unwrap();
+    let before = fixture
+        .calls()
+        .lines()
+        .filter(|line| line.contains("quarantine"))
+        .count();
+
+    let fresh = report(&fixture.run(&[
+        "--resume-state",
+        checkpoint_str,
+        "--recheck",
+        unchanged_str,
+        "--recheck",
+        changed_str,
+    ]));
+    assert!(fresh["before_epoch_seconds"].as_i64().is_some());
+    assert_eq!(fresh["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(fresh["candidates"][0]["eligible"], true);
+    assert!(fresh["candidates"][0]["allocated_bytes"].as_u64().is_some());
+    assert_eq!(
+        fresh["candidates"][1]["verdict"],
+        "kept:outside-date-window"
+    );
+    assert_eq!(fresh["candidates"][1]["eligible"], false);
+
+    let invalid = fixture.run(&[
+        "--resume-state",
+        checkpoint_str,
+        "--recheck",
+        unchanged_str,
+        "--recheck",
+        unrecorded.to_str().unwrap(),
+    ]);
+    assert!(!invalid.status.success());
+    assert!(invalid.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("path is absent from the checkpoint"));
+
+    let over_budget = fixture.run(&[
+        "--resume-state",
+        checkpoint_str,
+        "--max-candidates",
+        "1",
+        "--recheck",
+        unchanged_str,
+        "--recheck",
+        changed_str,
+    ]);
+    assert!(!over_budget.status.success());
+    assert!(String::from_utf8_lossy(&over_budget.stderr).contains("exceed --max-candidates"));
+    let after = fixture
+        .calls()
+        .lines()
+        .filter(|line| line.contains("quarantine"))
+        .count();
+    assert_eq!(after, before + 1);
+    assert_eq!(fs::read(&checkpoint).unwrap(), original);
+}
+
+#[test]
+fn large_dated_runs_keep_file_measurements_and_one_verdict_per_run() {
+    let fixture = Fixture::new();
+    let repo = fixture.scratch.join("runs/20261120/disk-magician");
+    let old_run = repo.join("removable-build-20261120T120000Z-1234-5678");
+    let leased_run = repo.join("held-live-test-20261120T120000Z-1234-9012");
+    let recent_run = repo.join("removable-recent-20261120T120000Z-1234-3456");
+    let paths = [&old_run, &leased_run, &recent_run];
+    let size = 128 * 1024 * 1024;
+    for run in paths {
+        fs::create_dir_all(run.join("nested")).unwrap();
+        let payload = run.join("nested/removable-output.cache");
+        fs::File::create(&payload).unwrap().set_len(size).unwrap();
+        if run != &recent_run {
+            Fixture::mark_old(&payload);
+        }
+    }
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6"]));
+    let candidates = result["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    let old = candidates
+        .iter()
+        .find(|row| row["path"] == old_run.to_str().unwrap())
+        .unwrap();
+    let leased = candidates
+        .iter()
+        .find(|row| row["path"] == leased_run.to_str().unwrap())
+        .unwrap();
+    assert_eq!(old["verdict"], "remove");
+    assert_eq!(old["apparent_bytes"], size);
+    assert_eq!(leased["verdict"], "kept:live-owner");
+
+    let files = result["dated_run_files"].as_array().unwrap();
+    assert_eq!(files.len(), 3);
+    for run in paths {
+        let payload = run.join("nested/removable-output.cache");
+        let row = files
+            .iter()
+            .find(|row| row["path"] == payload.to_str().unwrap())
+            .unwrap();
+        assert_eq!(row["apparent_bytes"], size);
+        assert!(row["allocated_bytes"].as_u64().is_some());
+    }
+    let calls = fixture.calls();
+    let checks: Vec<_> = calls
+        .lines()
+        .filter(|line| line.contains("\tquarantine\tverdict"))
+        .collect();
+    assert_eq!(checks.len(), 2);
+
+    let checkpoint = fixture.root.join("dated-run-files.json");
+    let checkpoint_args = [
+        "--resume-state",
+        checkpoint.to_str().unwrap(),
+        "--deadline-ms",
+        "2000",
+        "--max-candidates",
+        "1",
+    ];
+    let first = report(&fixture.run(&checkpoint_args));
+    assert_eq!(first["complete"], false);
+    assert_eq!(first["dated_run_files"].as_array().unwrap().len(), 3);
+    let resumed = report(&fixture.run(&checkpoint_args));
+    assert_eq!(resumed["complete"], true);
+    assert_eq!(resumed["dated_run_files"], first["dated_run_files"]);
+    let replay = report(&fixture.run(&checkpoint_args));
+    assert_eq!(replay["dated_run_files"], first["dated_run_files"]);
+
+    assert!(checks.iter().all(|line| !line.contains("nested/")));
+    assert!(!checks.iter().any(|line| line.contains("removable-recent")));
 }

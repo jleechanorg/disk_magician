@@ -1,4 +1,4 @@
-use diskm_shadow::{history, preview, scan, scratch_manifest, status};
+use diskm_shadow::{history, preview, scan, scratch_manifest, scratch_target, status};
 use serde::Serialize;
 use std::env;
 use std::ffi::OsString;
@@ -7,15 +7,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-const USAGE: &str = "diskm — read-only Disk Magician candidate; output is JSON
+const USAGE: &str = "diskm — Disk Magician migration candidate; output is JSON
 
   diskm status [PATH] [--state-dir DIR] [--json]
   diskm scan PATH [--deadline-ms N] [--max-entries N] [--json]
   diskm history --state-dir DIR [--days 7|30] [--json]
   diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_FILE [--path ...] | --paths-from FILE
-  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--dry-run]
+  diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all]
+  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
 
-Preview --deadline-ms bounds only the six-hour Scratch discovery scan. Verdict
+Preview --deadline-ms bounds Scratch discovery. With --resume-state, it supports
+48-hour and six-hour live inventory. Verdict
 checks run afterward, up to 12 seconds per candidate, and the default scan is unlimited.
 
 Status defaults to the current directory. Scan defaults to 30 seconds and
@@ -43,12 +45,22 @@ enum Operation {
         cutoff: i64,
         paths: Vec<PathBuf>,
     },
+    ScratchTargetApply {
+        manifest: PathBuf,
+        digest: String,
+        resume_state: PathBuf,
+        target_used_bytes: u64,
+        paths: Vec<String>,
+        all_entries: bool,
+    },
     Preview {
         scope: &'static str,
         state_dir: Option<PathBuf>,
         min_hours: u32,
         max_candidates: usize,
         scan_deadline: Option<Duration>,
+        resume_state: Option<PathBuf>,
+        recheck_paths: Vec<PathBuf>,
     },
 }
 
@@ -82,6 +94,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     match command {
         "-h" | "--help" | "help" => return Ok(Operation::Help),
         "scratch-manifest" => return parse_scratch_manifest(args),
+        "scratch-target-apply" => return parse_scratch_target_apply(args),
         "status" | "scan" | "history" | "preview" => {}
         _ => return Err(format!("unknown command {command:?}")),
     }
@@ -95,6 +108,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     let mut min_hours = 48;
     let mut max_candidates = None;
     let mut preview_deadline_ms = None;
+    let mut preview_resume_state = None;
+    let mut recheck_paths = Vec::new();
     let mut positional_only = false;
 
     while let Some(arg) = args.next() {
@@ -128,6 +143,13 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             }
             Some("--deadline-ms") if command == "preview" => {
                 preview_deadline_ms = Some(positive(&mut args, "--deadline-ms")?);
+            }
+            Some("--resume-state") if command == "preview" && preview_resume_state.is_none() => {
+                preview_resume_state =
+                    Some(PathBuf::from(required_value(&mut args, "--resume-state")?));
+            }
+            Some("--recheck") if command == "preview" => {
+                recheck_paths.push(PathBuf::from(required_value(&mut args, "--recheck")?));
             }
             Some("--state-dir") if command != "scan" && state_dir.is_none() => {
                 state_dir = Some(PathBuf::from(required_value(&mut args, "--state-dir")?));
@@ -173,13 +195,32 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             days,
         }),
         "preview" => {
-            if preview_deadline_ms.is_some() && (preview_scope != "scratch" || min_hours != 6) {
+            if preview_resume_state.is_some() && preview_scope != "scratch" {
+                return Err("preview --resume-state requires --scope scratch".into());
+            }
+            if preview_deadline_ms.is_some()
+                && (preview_scope != "scratch"
+                    || (min_hours != 6 && preview_resume_state.is_none()))
+            {
                 return Err(
-                    "preview --deadline-ms is only supported for --scope scratch --min-hours 6"
+                    "preview --deadline-ms requires Scratch with --min-hours 6 or --resume-state"
                         .into(),
                 );
             }
-            if state_dir.is_none() && matches!(preview_scope, "scratch" | "ledger") {
+            if !recheck_paths.is_empty() {
+                if preview_resume_state.is_none() || preview_scope != "scratch" {
+                    return Err("preview --recheck requires Scratch and --resume-state".into());
+                }
+                if preview_deadline_ms.is_some() {
+                    return Err(
+                        "preview --deadline-ms bounds scans; --recheck checks exact files".into(),
+                    );
+                }
+            }
+            if recheck_paths.is_empty()
+                && state_dir.is_none()
+                && matches!(preview_scope, "scratch" | "ledger")
+            {
                 return Err("this preview scope requires --state-dir".into());
             }
             Ok(Operation::Preview {
@@ -188,6 +229,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
                 min_hours,
                 max_candidates: max_candidates.unwrap_or(20),
                 scan_deadline: preview_deadline_ms.map(Duration::from_millis),
+                resume_state: preview_resume_state,
+                recheck_paths,
             })
         }
         _ => unreachable!("command already validated"),
@@ -233,6 +276,55 @@ fn parse_scratch_manifest(mut args: impl Iterator<Item = OsString>) -> Result<Op
     })
 }
 
+fn parse_scratch_target_apply(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<Operation, String> {
+    let mut manifest = None;
+    let mut digest = None;
+    let mut resume_state = None;
+    let mut target_used_bytes = None;
+    let mut paths = Vec::new();
+    let mut all_entries = false;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--manifest") if manifest.is_none() => {
+                manifest = Some(PathBuf::from(required_value(&mut args, "--manifest")?));
+            }
+            Some("--manifest-sha256") if digest.is_none() => {
+                let value = required_value(&mut args, "--manifest-sha256")?;
+                let value = value.to_str().ok_or("manifest digest must be UTF-8")?;
+                if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err("manifest digest must be 64 hexadecimal characters".into());
+                }
+                digest = Some(value.to_ascii_lowercase());
+            }
+            Some("--resume-state") if resume_state.is_none() => {
+                resume_state = Some(PathBuf::from(required_value(&mut args, "--resume-state")?));
+            }
+            Some("--target-used-bytes") if target_used_bytes.is_none() => {
+                target_used_bytes = Some(positive(&mut args, "--target-used-bytes")?);
+            }
+            Some("--path") if !all_entries => {
+                paths.push(
+                    required_value(&mut args, "--path")?
+                        .into_string()
+                        .map_err(|_| "manifest paths must be UTF-8")?,
+                );
+            }
+            Some("--all") if !all_entries && paths.is_empty() => all_entries = true,
+            _ => return Err("invalid scratch-target-apply options".into()),
+        }
+    }
+    Ok(Operation::ScratchTargetApply {
+        manifest: manifest.ok_or("--manifest is required")?,
+        digest: digest.ok_or("--manifest-sha256 is required")?,
+        resume_state: resume_state.ok_or("--resume-state is required")?,
+        target_used_bytes: target_used_bytes.ok_or("--target-used-bytes is required")?,
+        paths,
+        all_entries,
+    })
+}
+
 fn print_json(report: &impl Serialize) -> io::Result<()> {
     let mut output = io::stdout().lock();
     serde_json::to_writer_pretty(&mut output, report).map_err(io::Error::other)?;
@@ -257,6 +349,28 @@ fn run(operation: Operation) -> io::Result<u8> {
         Operation::ScratchManifest { cutoff, paths } => {
             print_json(&scratch_manifest::create(&paths, cutoff)?)?;
         }
+        Operation::ScratchTargetApply {
+            manifest,
+            digest,
+            resume_state,
+            target_used_bytes,
+            paths,
+            all_entries,
+        } => {
+            let report = scratch_target::apply(
+                &manifest,
+                &digest,
+                &resume_state,
+                target_used_bytes,
+                &paths,
+                all_entries,
+            )?;
+            let reached = report.target_reached;
+            print_json(&report)?;
+            if !reached {
+                return Ok(TEMPORARY_FAILURE);
+            }
+        }
         Operation::History { state_dir, days } => {
             print_json(&history::history(&state_dir, days)?)?;
         }
@@ -266,14 +380,41 @@ fn run(operation: Operation) -> io::Result<u8> {
             min_hours,
             max_candidates,
             scan_deadline,
+            resume_state,
+            recheck_paths,
         } => {
-            print_json(&preview::scope_report(
-                scope,
-                state_dir.as_deref(),
-                min_hours,
-                max_candidates,
-                scan_deadline.unwrap_or(Duration::MAX),
-            )?)?;
+            if !recheck_paths.is_empty() {
+                let checkpoint = resume_state
+                    .as_deref()
+                    .expect("recheck requires a checkpoint");
+                let report = preview::recheck_checkpoint_files(
+                    checkpoint,
+                    min_hours,
+                    max_candidates,
+                    &recheck_paths,
+                )?;
+                print_json(&report)?;
+                return Ok(0);
+            }
+            let report = if let Some(checkpoint) = resume_state.as_deref() {
+                preview::scope_report_resumable(
+                    scope,
+                    state_dir.as_deref(),
+                    min_hours,
+                    max_candidates,
+                    scan_deadline.unwrap_or(Duration::MAX),
+                    checkpoint,
+                )?
+            } else {
+                preview::scope_report(
+                    scope,
+                    state_dir.as_deref(),
+                    min_hours,
+                    max_candidates,
+                    scan_deadline.unwrap_or(Duration::MAX),
+                )?
+            };
+            print_json(&report)?;
         }
     }
     Ok(0)

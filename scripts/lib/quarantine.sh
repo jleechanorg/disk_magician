@@ -24,7 +24,7 @@ quarantine_remove() {
   if ! _lease_scope_is_owner; then
     if _lease_lock_scope release quarantine_remove "$@"; then return 0; else return $?; fi
   fi
-  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 dkb=0 dact=remove lease_lock_held=0
+  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 expected_target='' dkb=0 dact=remove lease_lock_held=0
   [[ $# -ge 1 ]] || { echo kept:check-failed; return 0; }
   path_arg="$1"; verdict_path="$1"; shift
   local -a caller_verdict_args=()
@@ -35,6 +35,9 @@ quarantine_remove() {
         python3 -c 'import math,sys; x=float(sys.argv[1]); sys.exit(0 if math.isfinite(x) and x >= 0 else 1)' "$2" >/dev/null 2>&1 || { echo kept:check-failed; return 0; }
         deadline="$2"; deadline_seen=1; caller_verdict_args+=("$1" "$2"); shift 2 ;;
       --inventory-out) echo kept:check-failed; return 0 ;;
+      --expected-target-identity)
+        [[ $# -ge 2 && -z "$expected_target" && "$2" =~ ^[0-9]+,[0-9]+,[0-9]+,-?[0-9]+,-?[0-9]+$ ]] || { echo kept:check-failed; return 0; }
+        expected_target="$2"; shift 2 ;;
       --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity)
         [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
         caller_verdict_args+=("$1" "$2"); shift 2 ;;
@@ -100,14 +103,23 @@ PY
     rm -f "$inv" "$binding"; echo kept:lease-busy; return 0
   fi
   lease_lock_held=1
+  if [[ -n "$expected_target" ]] && ! python3 "$_Q_LIB/../quarantine_scratch_manifest.py" --check-entry "$path_arg" "$expected_target" >/dev/null 2>&1; then
+    rm -f "$inv" "$binding"
+    lease_registry_mutation_lock_exit || true
+    echo kept:identity-mismatch
+    return 0
+  fi
   v="$(artifact_removal_verdict "$verdict_path" "${verdict_args[@]:0:1}" "$inv" "${verdict_args[@]:1}" 2>/dev/null)" || v=kept:check-failed
   if [[ "$v" == remove ]]; then
     dkb="$(deletion_size_kb "$path_arg")" || dkb=0
     if [[ -L "$path_arg" ]]; then dact=remove_symlink; elif [[ -f "$path_arg" ]]; then dact=remove_file; fi
+    local -a remove_args=("$path_arg" "$inv" "$binding")
+    [[ -z "$expected_target" ]] || remove_args+=(--expected-root-identity "$expected_target")
     if [[ "$deadline_seen" == 1 ]]; then
-      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" --deadline-at "$deadline" 2>/dev/null)" || v=kept:check-failed
+      remove_args+=(--deadline-at "$deadline")
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v=kept:check-failed
     else
-      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "$path_arg" "$inv" "$binding" 2>/dev/null)" || v=kept:check-failed
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v=kept:check-failed
     fi
   fi
   rm -f "$inv" "$binding" || true

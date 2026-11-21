@@ -1,6 +1,6 @@
 # Disk Magician Rust candidate
 
-The standalone Cargo package builds a read-only candidate named `diskm`. Run it by its build path. Temporary preview calls use the installed legacy `disk-magician` executable by name. Keep the installed production entry points and jobs until parity and rollback are verified.
+The standalone Cargo package builds a migration candidate named `diskm`. Run it by its build path. Preview and target apply use the installed legacy `disk-magician` executable by name. Keep the installed production entry points and jobs until parity and rollback are verified.
 
 From the repository root:
 
@@ -21,7 +21,7 @@ diskm history --state-dir DIR [--days 7|30]
 
 All reports are JSON. Status measures filesystem capacity without crawling. Its optional state directory is read for existing snapshot and ledger metadata. A scan returns apparent file sizes and an allocation estimate with explicit coverage gaps. It reports symlinks as leaves and marks filesystem boundaries as incomplete. The scan uses path-based metadata and directory reads. On a concurrently changing tree, the result is a best-effort observation and cannot be used to authorize mutation. The deadline is cooperative between filesystem calls, so a blocked filesystem call may run past it. Incomplete scans emit a report and exit 75. History reads compatible, complete committed records from the supplied state repository. The candidate accepts a conservative subset of legacy complete ledger records. It groups observations by recorded host and root path. That identity cannot distinguish remounts at the same path. A report without comparable records has no authoritative floor.
 
-The candidate has no reclaim, lease, provisioning or scheduling operations. Before a default switch, compare retained commands on macOS and Linux, prove state transfer and safe apply on each in-use backend, and rehearse rollback with live leases and interrupted recovery. See the repository's legacy CLI and tests for current behavior.
+Target apply uses the legacy quarantine actuator. Native lease, provisioning, scheduled cleanup, and recovery parity remain migration work. Before a default switch, compare retained commands on macOS and Linux, prove state transfer and safe apply on each in-use backend, and rehearse rollback with live leases and interrupted recovery. See the repository's legacy CLI and tests for current behavior.
 
 ### Scratch cleanup preview
 
@@ -30,6 +30,13 @@ registered Scratch filesystem without an entry or scan deadline cap. Old
 regular files and complete artifact directories below 100 MiB are considered
 independently of newer siblings. Larger trees are itemized. Historical paths
 supply provenance, and live discovery works when the ledger is absent.
+
+Live Scratch discovery reports measured files under the dated runs
+namespace in `dated_run_files`. A complete dated run root can receive
+a C14 verdict as a single leased unit even at or above 100 MiB. Its
+children and shared containers stay out of the candidate list. File
+measurements describe the current scan pass and do not add to a
+candidate's reclaim estimate.
 
 The report separates discovery coverage and its filesystem gaps from verdicts.
 Each proposed path gets its own deadline with `diskm quarantine verdict`.
@@ -42,6 +49,9 @@ mirrors are excluded from six-hour verdicts. Only a current
 C14 `remove` verdict is labeled eligible. Ownership and PR evidence holds
 outside C14 still apply. Apparent sizes are file-summed and do not project
 physical reclaim.
+
+A ledger-only report marks filesystem coverage incomplete and names the
+Scratch root in its discovery gaps.
 
 The default 48-hour preview reads prior cleanup paths from the supplied state
 directory. The separate six-hour scan does not alter that policy, run cleanup,
@@ -81,6 +91,44 @@ The cutoff is exclusive. Outside paths, symlinks, nonregular entries, duplicate
 paths and files at or after the cutoff are rejected. A manifest records selected
 file identities and is read-only. The applying cleaner must recheck every entry
 and evaluate live protection and cleanup policy before removing anything.
+
+The compatibility apply route is `disk-magician quarantine scratch-apply
+--manifest FILE --manifest-sha256 SHA --path RELATIVE_FILE`. Repeat
+`--path` for an exact subset, or explicitly use `--all` for all rows in
+the referenced digest. This first apply slice targets regular files in
+existing Scratch. Managed dated runs are reclaimed as lease-backed units.
+Files with path characters the canonical deletion log cannot represent
+remain in place. Direct apply defers immediately when another Scratch writer is active.
+Both staged executables are required until the Rust
+quarantine and recovery port is complete.
+
+### Checkpointed Scratch preview and target apply
+
+Use `diskm preview --state-dir DIR --resume-state ABSOLUTE_FILE --deadline-ms N`
+to scan Scratch against the default 48-hour age floor. Repeat the command
+with the same checkpoint to process unfinished paths and deferred verdicts.
+A prior remove verdict is retained as `historical:remove` until a fresh
+check qualifies the path. A deferred retry refreshes path measurements against
+the original cutoff. Dated-run itemization keeps the last observation from
+each scan pass. Allocated bytes estimate reclaim.
+
+Use `diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA
+--resume-state FILE --target-used-bytes N` with an explicit initial
+`--path RELATIVE_FILE` selection or `--all` for a reviewed manifest.
+The resume file lives outside the Scratch volume. Repeat the same command
+without selection flags to use its saved queue. The candidate measures the
+verified mount before applying and after each completed entry. It saves
+the remaining queue when usage reaches the target or measurement is unavailable.
+An interrupted mutation reports `recovery_required` and leaves the in-flight
+entry in the checkpoint. The existing legacy writer lock returns immediately
+under contention.
+
+Pass repeatable `--recheck ABSOLUTE_PATH` arguments with `--resume-state`
+to obtain fresh verdicts for selected regular files already in that
+checkpoint. The recheck honors `--max-candidates` and the checkpoint's
+original age cutoff. It preserves the checkpoint and reports only the
+selected paths. An eligible result can be nominated via the exact
+manifest command, whose apply path independently revalidates it.
 
 The default 48-hour ledger preview reports incomplete filesystem coverage. It
 reports the total missing nominations and the number of verdicts deferred,

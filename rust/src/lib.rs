@@ -9,4 +9,5 @@ pub mod preview_scopes;
 pub mod preview_worktrees;
 pub mod scan;
 pub mod scratch_manifest;
+pub mod scratch_target;
 pub mod status;
