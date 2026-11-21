@@ -9,15 +9,17 @@ for arg in "$@"; do
  case "$arg" in --clean) clean=true;; --available-floor) available_floor=true;;
  *) echo "usage: volume reclaim [--clean] [--available-floor]" >&2; exit 2;; esac
 done
-# Every destructive pass holds the shared Scratch lock, so every clean pass is
-# bounded; an unbounded manual run starved the scheduled timer for 27 minutes.
+# Bound each destructive pass independently of other cleanup work.
 if [[ ( "$available_floor" == true || "$clean" == true ) && -z "$ACT_DEADLINE_AT" ]]; then
  deadline_secs="${DISK_MAGICIAN_VOLUME_RECLAIM_TIMEOUT_SECONDS:-300}"
  [[ "$deadline_secs" =~ ^[1-9][0-9]*$ ]] || deadline_secs=300
  ACT_DEADLINE_AT="$(python3 -c 'import sys,time; print(time.monotonic()+int(sys.argv[1]))' "$deadline_secs")" || exit 75
  export ACT_DEADLINE_AT
 fi
-if [[ "$clean" == true ]]; then source "$SCRIPT_DIR/lib/scratch_lock.sh"; scratch_lock_acquire volume_reclaim "$@" || exit $?; fi
+if [[ "$clean" == true && -n "$ACT_CURSOR" ]]; then
+ source "$SCRIPT_DIR/lib/scratch_lock.sh"
+ scratch_cursor_lock_acquire volume_reclaim "$ACT_CURSOR" "$@" || exit $?
+fi
 diskm="${DISK_MAGICIAN_DISKM_BIN:-$SCRIPT_DIR/../disk_magician.sh}"
 status_json() {
  local output rc
@@ -35,9 +37,8 @@ pressure_failure() {
   python3 "$SCRIPT_DIR/job_receipt.py" finish --job volume_reclaim --run-id "$failure_id" --outcome error --reason "$1" --postcondition '{"available_bytes_after":null,"target_reached":null}' >/dev/null || return 1
  fi
 }
-# Recover only our durable prior-release obligation while holding the same
-# cleanup lock as producers of that obligation. Low space permits C14 work,
-# but forbids another reserve release until recovery completes.
+# A live reserve retry or low space permits independent C14 work, but
+# this run may not release the reserve again until recovery completes.
 pending_ballast=false
 if [[ "$available_floor" == true && "$clean" == true ]]; then
  recovery_rc=0
@@ -284,7 +285,7 @@ while IFS= read -r -d '' entry; do
  fi
 done <"$DISCOVERY_DIR/candidates"
 # Reap the bounded producer even after an early consumer stop. It remains
-# covered by the same deadline and lock; closing the FIFO also stops writes.
+# covered by the same deadline; closing the FIFO also stops writes.
 wait "$discovery_pid"; discovery_rc=$?
 rm -f "$DISCOVERY_DIR/candidates" "$DISCOVERY_DIR/records"
 rmdir "$DISCOVERY_DIR"
