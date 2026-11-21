@@ -2,10 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
 // An index record is a path pointer, not the potentially large sidecar inventory.
@@ -39,10 +39,25 @@ struct IndexRecord {
 
 pub(crate) fn acquire_operation_lock() -> io::Result<File> {
     let path = index_dir()?;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(&path)?;
+    let open_directory = || {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&path)
+    };
+    let directory = match open_directory() {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // An interrupted first apply can leave a checkpoint before the
+            // canonical quarantine actuator creates its private index.
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path)?;
+            open_directory()?
+        }
+        Err(error) => return Err(error),
+    };
     let uid = unsafe { libc::geteuid() };
     let directory_metadata = directory.metadata()?;
     if directory_metadata.uid() != uid || directory_metadata.mode() & 0o077 != 0 {

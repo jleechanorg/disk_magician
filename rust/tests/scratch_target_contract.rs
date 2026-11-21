@@ -519,6 +519,39 @@ fn acknowledging_a_restored_entry_advances_the_checkpoint_without_calling_apply(
 }
 
 #[test]
+fn acknowledgment_handles_an_interruption_before_the_quarantine_index_exists() {
+    let fixture = Fixture::new(1);
+    let first = fixture.run_result(
+        &[101 * GIB],
+        &["volume-a"],
+        &["--all"],
+        "deferred:quarantine-error",
+    );
+    assert!(report(&first)["status"]
+        .as_str()
+        .unwrap()
+        .starts_with("recovery_required:"));
+    let index = fixture.root.join("state/quarantine-index");
+    assert!(!index.exists());
+    let previous = fs::read(&fixture.applies).unwrap();
+    let acknowledged = fixture.run(
+        &[101 * GIB],
+        &["volume-a"],
+        &["--ack-restored", &fixture.entries[0]],
+    );
+    assert!(
+        acknowledged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&acknowledged.stderr)
+    );
+    let result = report(&acknowledged);
+    assert_eq!(result["status"], "queue_exhausted");
+    assert_eq!(result["receipts"][0]["result"], "kept:restored");
+    assert_eq!(fs::read(&fixture.applies).unwrap(), previous);
+    assert!(index.join("operations.lock").is_file());
+}
+
+#[test]
 fn unverified_or_oversized_manifest_never_reaches_the_volume_or_actuator() {
     let fixture = Fixture::new(1);
     fs::write(&fixture.manifest, b"changed manifest bytes").unwrap();
