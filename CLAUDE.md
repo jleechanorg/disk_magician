@@ -58,6 +58,25 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
   registered volume and preserve `.diskm-ballast`. Follow the playbook's
   pressure and LRU rules only for the requested scope. A usage target supplies
   neither approval nor an exception to the applicable safety checks.
+- **Bulk file operations use `&` (or one throttled process), not subagents.**
+  Use background shell loops for uniform bulk I/O: one process per shard, big
+  `xargs -n` batches, `nice -n 19`, and low `-P`. Reserve subagents for work
+  where each unit needs independent judgement. A subagent per shard is the
+  expensive tool for a cheap job.
+
+  Measured 2026-11-20 deleting 681,775 old Scratch files:
+
+  | approach | outcome |
+  |---|---|
+  | 9 subagent workers | 6 timed out at the 30-min cap; each re-ran its own 85,000-path verification sweep, so ~9 redundant full scans |
+  | 6 `&` loops, `nice 19`, `xargs -n 3000 -P 1` | completed; 180.7 → 111 GiB (−69.7 GiB) |
+
+  On a memory-starved host the subagent version drove `kernel_task` to ~40%
+  managing pages. Parallel forks each add page-table work; fewer, larger,
+  lower-priority operations are the correct response to memory pressure, not
+  more concurrency. Never let a verification pass re-scan a list a sibling
+  already scanned — have one process do the sweep, and report counts.
+
 
 ## Before operating or changing Disk Magician
 
