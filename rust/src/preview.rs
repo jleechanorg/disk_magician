@@ -401,7 +401,7 @@ fn current_cutoff(min_hours: u32) -> io::Result<i64> {
 
 // Match the allocator's path shape for nomination. C14 validates the
 // calendar, quarantine marker, leases, and other removal safeguards.
-fn possible_dated_run(runs: &Path, path: &Path) -> Option<()> {
+pub(crate) fn possible_dated_run(runs: &Path, path: &Path) -> Option<()> {
     let mut parts = path.strip_prefix(runs).ok()?.components();
     let (
         Some(Component::Normal(day)),

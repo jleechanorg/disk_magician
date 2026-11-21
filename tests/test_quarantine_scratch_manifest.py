@@ -256,5 +256,74 @@ class ScratchManifestApplyTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
 
+    def test_managed_run_inventory_binds_nested_changes_before_quarantine(self):
+        volume = self.temp_root.resolve() / "volume"
+        repo = volume / "runs/20261120/disk-magician"
+        run = repo / "build-20261120T120000Z-123-456"
+        payload = run / "nested/output"
+        payload.parent.mkdir(parents=True)
+        marker = repo / ".dm-quarantine"
+        marker.mkdir(mode=0o700)
+        marker.chmod(0o700)
+        payload.write_bytes(b"original")
+        old_ns = self.target.stat().st_mtime_ns
+        os.utime(payload, ns=(old_ns, old_ns))
+        cutoff = int(time.time()) - 48 * 3600
+        config = dict(os.environ)
+        config.pop("DISKM_LEGACY_COMPAT_CLI", None)
+        config.update({
+            "PATH": str(self.bin) + os.pathsep + config.get("PATH", ""),
+            "BASH_ENV": "/dev/null",
+            "FIXTURE_SCRATCH_ROOT": str(volume),
+            "DISK_MAGICIAN_STATE_DIR": str(self.state),
+            "DISK_MAGICIAN_DELETION_LOG": str(self.log),
+        })
+        args = ["bash", str(DISKM), "quarantine", "scratch-apply", "--fingerprint-run"]
+        result = subprocess.run([*args, str(run), str(cutoff)], env=config, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        digest = result.stdout.strip()
+        self.assertRegex(digest, "^[0-9a-f]{64}$")
+        rejected = subprocess.run([*args, str(repo), str(cutoff)], env=config, capture_output=True, text=True)
+        self.assertEqual(rejected.returncode, 2)
+        at_cutoff = subprocess.run([*args, str(run), str(old_ns // 1_000_000_000)],
+                                   env=config, capture_output=True, text=True)
+        self.assertEqual(at_cutoff.returncode, 2)
+        self.assertIn("at or after the cutoff", at_cutoff.stderr)
+
+        # Substitute the C14 verdict on the fixture, while keeping the real
+        # binding, inventory check, rename, and quarantine phase 2.
+        shell = r'''
+source "$1/scripts/lib/quarantine.sh"
+probe="$1/scripts/c14_probe.py"
+shift
+artifact_removal_verdict() {
+    [[ "$(python3 "$probe" inventory "$1" "$3")" == ok ]] || { echo kept:check-failed; return; }
+    echo remove
+}
+quarantine_remove "$@"
+'''
+        st = run.lstat()
+        identity = ",".join(str(value) for value in
+                            (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+        command = ["bash", "-c", shell, "managed-run-fixture", str(REPO), str(run),
+                   "--kind", "ephemeral", "--expected-target-identity", identity,
+                   "--expected-inventory", f"{digest},{cutoff}"]
+        payload.write_bytes(b"replaced")
+        os.utime(payload, ns=(old_ns, old_ns))
+        changed = subprocess.run(command, env=config, capture_output=True, text=True)
+        self.assertEqual(changed.stdout.strip(), "kept:inventory-mismatch", changed.stderr)
+        self.assertEqual(payload.read_bytes(), b"replaced")
+        self.assertFalse(self.log.exists())
+
+        payload.write_bytes(b"original")
+        os.utime(payload, ns=(old_ns, old_ns))
+        result = subprocess.run(command, env=config, capture_output=True, text=True)
+        self.assertTrue(result.stdout.strip().startswith("removed:"), result.stdout + result.stderr)
+        self.assertFalse(run.exists())
+        self.assertTrue(repo.is_dir())
+        self.assertTrue(marker.is_dir())
+        self.assertEqual(len(self.log.read_text().splitlines()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

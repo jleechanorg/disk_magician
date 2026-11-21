@@ -82,10 +82,10 @@ Ledger rows are historical leads. With `--scope all --state-dir DIR`, the JSON
 includes the Scratch, temp, worktree, and ledger views. A failed view is reported
 under its own scope.
 
-### Exact-file Scratch manifest
+### Exact Scratch manifest
 
-Use the built candidate's `scratch-manifest --before-epoch SECONDS --path ABSOLUTE_FILE`
-to turn selected regular files into an identity-bound JSON manifest. Repeat
+Use the built candidate's `scratch-manifest --before-epoch SECONDS --path ABSOLUTE_PATH`
+to turn selected regular files or exact managed runs into an identity-bound JSON manifest. Repeat
 `--path` or pass a NUL-terminated UTF-8 path list with `--paths-from FILE`.
 The cutoff is exclusive. Outside paths, symlinks, nonregular entries, duplicate
 paths and files at or after the cutoff are rejected. A manifest records selected
@@ -95,8 +95,8 @@ and evaluate live protection and cleanup policy before removing anything.
 The compatibility apply route is `disk-magician quarantine scratch-apply
 --manifest FILE --manifest-sha256 SHA --path RELATIVE_FILE`. Repeat
 `--path` for an exact subset, or explicitly use `--all` for all rows in
-the referenced digest. This first apply slice targets regular files in
-existing Scratch. Managed dated runs are reclaimed as lease-backed units.
+the referenced digest. Regular files use a file identity. Managed dated
+runs use a full content inventory and stay lease-backed cleanup units.
 Files with path characters the canonical deletion log cannot represent
 remain in place. Both staged executables are required until the Rust
 quarantine and recovery port is complete.
@@ -154,3 +154,10 @@ checkpoint. The recheck honors `--max-candidates` and the checkpoint's
 original age cutoff. It preserves the checkpoint and reports only the
 selected paths. An eligible result can be nominated via the exact
 manifest command, whose apply path independently revalidates it.
+
+A manifest can also nominate an exact managed run directory. The legacy
+quarantine inventory writer fingerprints its full contents at nomination.
+Apply checks the fingerprint and original content cutoff against the
+inventory produced by C14 under the lease mutation guard. Quarantine
+recovery and deletion receipts use the existing engine. Structural
+containers and paths without an allocator marker remain ineligible.

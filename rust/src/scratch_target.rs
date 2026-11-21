@@ -539,9 +539,12 @@ fn selected_manifest_paths(
     }
     if paths.is_empty()
         || paths.iter().collect::<std::collections::HashSet<_>>().len() != paths.len()
-        || paths
-            .iter()
-            .any(|path| manifest_paths.get(path.as_str()).copied() != Some("regular_file"))
+        || paths.iter().any(|path| {
+            !matches!(
+                manifest_paths.get(path.as_str()).copied(),
+                Some("regular_file" | "managed_run")
+            )
+        })
     {
         return Err(io::Error::other(
             "select unique paths present in the manifest",
