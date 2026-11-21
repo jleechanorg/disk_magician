@@ -219,9 +219,16 @@ install_launchdaemon() {
 
   dst="/Library/LaunchDaemons/${label}.plist"
   echo "Installing root LaunchDaemon: $label -> $dst (requires sudo)"
+  # This substitution list MUST stay in step with install_plist's. When it
+  # drifts, a template placeholder reaches the installed daemon as a literal
+  # "@NAME@" string and fails silently at runtime (Spotted 2026-11-19: the
+  # daemon path lacked @SCRATCH_BUDGET_FLOOR_HOURS@ while the agent path had it).
+  local scratch_floor_h="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS:-6}"
+  [[ "$scratch_floor_h" =~ ^[1-9][0-9]{0,3}$ ]] || scratch_floor_h=6
   sed -e "s|@REPO_ROOT@|$REPO_ROOT|g" \
       -e "s|@HOME@|$HOME|g" \
       -e "s|@BASH@|$BASH_BIN|g" \
+      -e "s|@SCRATCH_BUDGET_FLOOR_HOURS@|$scratch_floor_h|g" \
       "$src" | sudo tee "$dst" >/dev/null
   sudo chown root:wheel "$dst"
   sudo launchctl bootout system "$dst" 2>/dev/null || true
