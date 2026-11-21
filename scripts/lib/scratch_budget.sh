@@ -472,9 +472,11 @@ scratch_budget_evict_root() {
   fi
   candidates_file="$(mktemp -t disk-magician-scratch-budget-candidates.XXXXXX)"
 
-  local item base kb mtime total_kb=0
+  local item base kb mtime blocks row total_kb=0
+  local -a file_stat=(stat -c "%Y %b")
+  [[ "$OSTYPE" != darwin* ]] || file_stat=(stat -f "%m %b")
   while IFS= read -r -d '' item; do
-    base="$(basename "$item")"
+    base="${item##*/}"
     [[ -n "$base" ]] || continue
     if (( target_pct > 0 )) && [[ "$item" == *$'\t'* || "$item" == *$'\n'* ]]; then
       log "scratch_budget: preserving path with unsupported control characters"
@@ -495,12 +497,24 @@ scratch_budget_evict_root() {
       log "scratch_budget: preserving repository container or uninspectable path: $item"
       continue
     fi
-    mtime="$(scratch_budget_content_mtime "$item")"
-    if (( target_pct > 0 )); then
-      kb="$(path_size_kb "$item" strict)" || kb=-1
-      [[ "$kb" =~ ^[0-9]+$ ]] || kb=-1
+    if (( target_pct > 0 )) && [[ -f "$item" && ! -L "$item" ]]; then
+      # Top-level regular files have no descendants. Read age and physical
+      # blocks in the same metadata lookup; apply still rechecks both.
+      kb=-1
+      if row="$("${file_stat[@]}" "$item" 2>/dev/null)"; then
+        read -r mtime blocks <<<"$row"
+        if [[ "$mtime" =~ ^[0-9]+$ && "$blocks" =~ ^[0-9]+$ ]]; then
+          kb=$(( (blocks + 1) / 2 ))
+        fi
+      fi
     else
-      kb="$( { path_size_kb "$item" || true; } | awk '$1 ~ /^-?[0-9]+$/ {f=$1} END{print f+0}' )"
+      mtime="$(scratch_budget_content_mtime "$item")"
+      if (( target_pct > 0 )); then
+        kb="$(path_size_kb "$item" strict)" || kb=-1
+        [[ "$kb" =~ ^[0-9]+$ ]] || kb=-1
+      else
+        kb="$( { path_size_kb "$item" || true; } | awk '$1 ~ /^-?[0-9]+$/ {f=$1} END{print f+0}' )"
+      fi
     fi
     if (( kb < 0 )); then
       log "scratch_budget: size unknown for $item — preserving (excluded from eviction and total)."

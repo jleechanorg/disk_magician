@@ -86,9 +86,19 @@ fi
 [[ -f "$OTHER_TMP/pr1_unrelated/payload.txt" ]]
 [[ -z "$(find "$ARCHIVE" -mindepth 1 -print -quit)" ]]
 mk_candidate pr1_partial 24
+printf 'old prompt fixture\n' > "$PRIVATE_TMP/agent_prompt_old.txt"
+python3 -c 'import os,sys,time; stamp=int(time.time())-25*3600; os.utime(sys.argv[1],(stamp,stamp))' "$PRIVATE_TMP/agent_prompt_old.txt"
 env "${ENV_ARGS[@]}" PARTIAL_SIZE_FIXTURE=1 bash "$REPO_ROOT/disk_magician.sh" cleanup-tmp \
   --system-tmp-budget-pct 50 --budget-floor-minutes 360 --dry-run >"$OUT" 2>&1
-grep -F "size unknown for $PRIVATE_TMP/pr1_partial" "$OUT" >/dev/null
+if ! grep -F "size unknown for $PRIVATE_TMP/pr1_partial" "$OUT" >/dev/null; then
+  cat "$OUT"
+  exit 1
+fi
+if ! grep -F "$PRIVATE_TMP/agent_prompt_old.txt" "$OUT" >/dev/null; then
+  cat "$OUT"
+  echo "regular file did not reach scoped qualification" >&2
+  exit 1
+fi
 if grep -F "would evict (budget): $PRIVATE_TMP/pr1_partial" "$OUT"; then
   echo "partial size was accepted" >&2
   exit 1
