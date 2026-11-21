@@ -81,6 +81,30 @@ sys.exit(0 if url.scheme in {"http", "https"} and (url.username or url.password)
 ' <<<"$remote_url"
 }
 
+guard_github_blob_sizes() {
+  local range="$1" inventory count largest
+  # GitHub rejects ordinary Git blobs larger than 100 MiB. Check only new
+  # objects, including files deleted in later outgoing commits, without
+  # reading blob contents or running Git's packer.
+  inventory="$(bounded 30 bash -o pipefail -c '
+    git -C "$1" rev-list --objects --no-object-names "$2" |
+      git -C "$1" cat-file --batch-check="%(objecttype) %(objectsize)" |
+      LC_ALL=C awk "$3"
+  ' _ "$STATE_DIR" "$range" '
+    NF != 2 || $1 !~ /^(blob|commit|tree|tag)$/ || $2 !~ /^[0-9]+$/ { invalid = 1; next }
+    $1 == "blob" && $2 > 104857600 { count++; if ($2 > largest) largest = $2 }
+    END { if (invalid) exit 1; printf "%d %.0f\n", count, largest }
+  ')" || {
+    echo "Snapshot history guard: could not verify outgoing GitHub object sizes." >&2
+    return 1
+  }
+  read -r count largest <<<"$inventory"
+  if (( count > 0 )); then
+    echo "Snapshot history guard: $count outgoing Git blobs exceed GitHub's 100 MiB limit (largest $largest bytes); commits kept local." >&2
+    return 1
+  fi
+}
+
 guard_state_repo_push() {
   local branch remote_url remote_exists=false remote_ref="" scan_range gitleaks_bin gl_dir gl_conf gl_rc
   branch="$(git -C "$STATE_DIR" symbolic-ref --quiet --short HEAD)" || {
@@ -154,6 +178,10 @@ guard_state_repo_push() {
      ! git -C "$STATE_DIR" merge-base --is-ancestor refs/heads/archive/pre-reset-20260711 HEAD; then
     echo "Snapshot history guard: main no longer contains archive/pre-reset-20260711; refusing history loss." >&2
     return 1
+  fi
+
+  if printf '%s\n' "$remote_url" | grep -Eiq '^((https?://|ssh://git@)github\.com([/:]|$)|git@github\.com:)'; then
+    guard_github_blob_sizes "$scan_range" || return 1
   fi
 
   gitleaks_bin="$(find_gitleaks)" || {
