@@ -186,6 +186,28 @@ else
   record_fail "Test11: /tmp-style symlink alias and real root dedupe to one root" "occurrences: $out"
 fi
 
+# The lookup must let the producer finish even when its first row matches.
+# A tail larger than a pipe buffer distinguishes a drained table from an
+# early pipe close without relying on a sleep or the host's process timing.
+lookup_alias="$TMP_TEST_ROOT/protected-input-alias"
+ln -s "$PRIV" "$lookup_alias"
+if bash -e -c '
+  source "$1"
+  matching_path="$(cd "$2" && pwd -P)"
+  marker="$3"
+  scratch_roots_protected_paths() {
+    printf "%s\n" "$matching_path"
+    printf "%2097152s\n" ""
+    : > "$marker"
+  }
+  scratch_roots_is_protected_path "$2"
+  [[ -f "$marker" ]]
+' bash "$LIB" "$lookup_alias" "$TMP_TEST_ROOT/protected-table-complete"; then
+  record_pass "Test12: protected lookup consumes the complete table"
+else
+  record_fail "Test12: protected lookup consumes the complete table" "producer did not finish"
+fi
+
 echo ""
 echo "===================================="
 echo "Results: $PASS passed, $FAIL failed"
