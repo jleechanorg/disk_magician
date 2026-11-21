@@ -226,8 +226,9 @@ def run(caller: str, script: str, args: list[str], scope: str = "scratch",
             os.close(fd)
             if isinstance(exc, BlockingIOError):
                 note = f"after waiting {wait:g}s" if wait > 0 else "— not queuing"
+                label = "cursor" if scope == "cursor" else "scratch"
                 print(
-                    f"[{caller}] skipped, scratch lock held {note}; {stale_holder_report(path)}",
+                    f"[{caller}] skipped, {label} lock held {note}; {stale_holder_report(path)}",
                     file=sys.stderr,
                 )
                 return EXIT_LOCK_HELD
