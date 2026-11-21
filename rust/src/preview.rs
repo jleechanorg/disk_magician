@@ -27,6 +27,7 @@ pub struct Report {
     pub complete: bool,
     recorded_paths: usize,
     missing_paths: usize,
+    deferred_verdicts: usize,
     candidates: Vec<Candidate>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     dated_run_files: Vec<FileMeasurement>,
@@ -216,12 +217,93 @@ else:
     }
 }
 
-fn checked_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> String {
+fn marker_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn check_verdict_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
     if let Some(reason) = check_path(root, path, device) {
+        return Some(reason);
+    }
+    if protected_scope(root, path) {
+        return Some("kept:protected-scope");
+    }
+    let first = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => path,
+        Ok(_) => path.parent()?,
+        Err(_) => return Some("deferred:metadata"),
+    };
+    // Partial discovery may miss repository markers even after seeing old files.
+    for ancestor in first
+        .ancestors()
+        .take_while(|ancestor| ancestor.starts_with(root))
+    {
+        let is_repository = marker_exists(&ancestor.join(".git")).and_then(|found| {
+            if found || !marker_exists(&ancestor.join("HEAD"))? {
+                Ok(found)
+            } else {
+                marker_exists(&ancestor.join("objects"))
+            }
+        });
+        match is_repository {
+            Ok(true) => return Some("kept:repository-use-worktree-route"),
+            Ok(false) => {}
+            Err(_) => return Some("deferred:repository-metadata"),
+        }
+    }
+    None
+}
+
+fn check_directory_contents(path: &Path, deadline: Duration) -> Option<&'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => return None,
+        Ok(_) => {}
+        Err(_) => return Some("deferred:metadata"),
+    }
+    // A legacy verdict can approve a parent directory without checking for
+    // protected evidence within it. Check only a directory that returned remove.
+    let Ok(measured) = scan(
+        path,
+        ScanOptions {
+            deadline,
+            max_entries: usize::MAX,
+        },
+    ) else {
+        return Some("deferred:subtree-coverage");
+    };
+    if measured
+        .directories
+        .iter()
+        .map(|dir| dir.path.as_str())
+        .chain(measured.files.iter().map(|file| file.path.as_str()))
+        .map(Path::new)
+        .any(|path| path.file_name().is_some_and(|name| name == "evidence"))
+    {
+        return Some("kept:protected-scope");
+    }
+    if !repository_roots(&measured).is_empty() {
+        return Some("kept:repository-use-worktree-route");
+    }
+    (!measured.complete).then_some("deferred:subtree-coverage")
+}
+
+fn checked_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> String {
+    if let Some(reason) = check_verdict_path(root, path, device) {
         return reason.into();
     }
+    let started = Instant::now();
     let verdict = current_verdict(path, min_hours);
-    check_path(root, path, device).map_or(verdict, str::to_owned)
+    if verdict == "remove" {
+        let remaining = Duration::from_secs(CHECK_WINDOW_SECONDS).saturating_sub(started.elapsed());
+        if let Some(reason) = check_directory_contents(path, remaining) {
+            return reason.into();
+        }
+    }
+    check_verdict_path(root, path, device).map_or(verdict, str::to_owned)
 }
 
 pub fn preview(
@@ -240,6 +322,7 @@ pub fn preview(
     }
     let recorded_paths = paths.len();
     let mut missing_paths = 0;
+    let mut deferred_verdicts = 0;
     let mut missing = Vec::new();
     let mut candidates = Vec::new();
     for (path, source) in paths {
@@ -259,13 +342,15 @@ pub fn preview(
             continue;
         }
         if candidates.len() == limit {
-            break;
+            deferred_verdicts += 1;
+            continue;
         }
         let verdict = checked.map_or_else(
             || checked_verdict(&root, &path, device, min_hours),
             str::to_owned,
         );
         let eligible = verdict == "remove";
+        deferred_verdicts += usize::from(verdict.starts_with("deferred:"));
         candidates.push(Candidate {
             path,
             source,
@@ -285,12 +370,12 @@ pub fn preview(
             repository_roots: 0,
             measured_apparent_bytes: 0,
             allocated_bytes_semantics:
-                "The ledger-only preview did not measure filesystem allocation.".into(),
+                "The ledger-only preview does not report filesystem allocation.".into(),
             gaps: vec![ScanGap {
                 path: root.to_string_lossy().into_owned(),
                 path_bytes_hex: None,
                 kind: ScanGapKind::NotScanned,
-                message: "Ledger-only preview did not scan the Scratch filesystem.".into(),
+                message: "Ledger-only preview did not scan the full Scratch filesystem.".into(),
             }],
         }),
         root,
@@ -298,6 +383,7 @@ pub fn preview(
         complete: false,
         recorded_paths,
         missing_paths,
+        deferred_verdicts,
         candidates,
         dated_run_files: Vec::new(),
         resumable: None,
@@ -340,17 +426,39 @@ fn live_candidate_verdict(root: &Path, path: &Path, device: u64, min_hours: u32)
     if path.starts_with(&runs) && possible_dated_run(&runs, path).is_none() {
         return "kept:managed-run-boundary".into();
     }
-    for ancestor in path.ancestors().skip(1).take_while(|p| p.starts_with(root)) {
-        match fs::symlink_metadata(ancestor.join(".git")) {
-            Ok(_) => return "kept:repository-use-worktree-route".into(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return "deferred:metadata".into(),
-        }
-        if ancestor.join("HEAD").is_file() && ancestor.join("objects").is_dir() {
-            return "kept:repository-use-worktree-route".into();
-        }
-    }
     checked_verdict(root, path, device, min_hours)
+}
+
+fn repository_roots(measured: &ScanReport) -> HashSet<&Path> {
+    let mut repos: HashSet<_> = measured
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(measured.directories.iter().map(|dir| dir.path.as_str()))
+        .map(Path::new)
+        .filter(|path| path.file_name().is_some_and(|name| name == ".git"))
+        .filter_map(Path::parent)
+        .collect();
+
+    // A bare repository has HEAD and objects at its root, with no .git marker.
+    // Protect it as a unit because C14 sees an individual pack as just a file.
+    let heads: HashSet<_> = measured
+        .files
+        .iter()
+        .map(|file| Path::new(&file.path))
+        .filter(|path| path.file_name().is_some_and(|name| name == "HEAD"))
+        .filter_map(Path::parent)
+        .collect();
+    repos.extend(
+        measured
+            .directories
+            .iter()
+            .map(|dir| Path::new(&dir.path))
+            .filter(|path| path.file_name().is_some_and(|name| name == "objects"))
+            .filter_map(Path::parent)
+            .filter(|parent| heads.contains(parent)),
+    );
+    repos
 }
 
 fn live_preview(
@@ -457,34 +565,7 @@ fn live_preview_from_measurement(
         .keys()
         .filter(|path| check_path(&root, path, device) == Some("missing"))
         .count();
-    let mut repos: HashSet<_> = measured
-        .files
-        .iter()
-        .map(|file| file.path.as_str())
-        .chain(measured.directories.iter().map(|dir| dir.path.as_str()))
-        .map(Path::new)
-        .filter(|path| path.file_name().is_some_and(|name| name == ".git"))
-        .filter_map(Path::parent)
-        .collect();
-
-    // A bare repository has HEAD and objects at its root, with no .git marker.
-    // Protect it as a unit because C14 sees an individual pack as just a file.
-    let heads: HashSet<_> = measured
-        .files
-        .iter()
-        .map(|file| Path::new(&file.path))
-        .filter(|path| path.file_name().is_some_and(|name| name == "HEAD"))
-        .filter_map(Path::parent)
-        .collect();
-    repos.extend(
-        measured
-            .directories
-            .iter()
-            .map(|dir| Path::new(&dir.path))
-            .filter(|path| path.file_name().is_some_and(|name| name == "objects"))
-            .filter_map(Path::parent)
-            .filter(|parent| heads.contains(parent)),
-    );
+    let repos = repository_roots(&measured);
     let repo_containers: HashSet<_> = repos.iter().flat_map(|path| path.ancestors()).collect();
     let evidence_containers: HashSet<_> = measured
         .directories
@@ -562,6 +643,7 @@ fn live_preview_from_measurement(
         b_allocated.cmp(a_allocated).then_with(|| a.cmp(b))
     });
     let mut complete = measured.complete;
+    let mut deferred_verdicts = 0;
     let candidate =
         |path: &Path, apparent_bytes: u64, allocated_bytes: u64, verdict: String| Candidate {
             path: path.to_path_buf(),
@@ -585,7 +667,10 @@ fn live_preview_from_measurement(
             } else {
                 live_candidate_verdict(&root, path, device, min_hours)
             };
-            complete &= !verdict.starts_with("deferred:");
+            if verdict.starts_with("deferred:") {
+                deferred_verdicts += 1;
+                complete = false;
+            }
             candidate(path, apparent_bytes, allocated_bytes, verdict)
         })
         .collect();
@@ -608,6 +693,7 @@ fn live_preview_from_measurement(
         complete,
         recorded_paths,
         missing_paths,
+        deferred_verdicts,
         candidates,
         dated_run_files,
         discovery: Some(Discovery {
@@ -1001,11 +1087,14 @@ pub fn scope_report_resumable(
     mark_prior_verdicts(&mut prior_candidates);
     // Previously unchecked exact paths receive the next available verdict slots.
     for candidate in prior_candidates.iter_mut().filter(|candidate| {
-        candidate.verdict.starts_with("deferred:verification-limit")
-            || candidate.verdict.starts_with("deferred:deadline")
-            || candidate
-                .verdict
-                .starts_with("deferred:verdict-unavailable")
+        matches!(
+            candidate.verdict.as_str(),
+            "deferred:verification-limit"
+                | "deferred:deadline"
+                | "deferred:verdict-unavailable"
+                | "deferred:repository-metadata"
+                | "deferred:subtree-coverage"
+        )
     }) {
         if remaining_limit == 0 {
             break;
@@ -1110,6 +1199,7 @@ pub fn scope_report_resumable(
         complete,
         recorded_paths: current_recorded,
         missing_paths: current_missing,
+        deferred_verdicts: pending_verdict_paths.len(),
         candidates: candidates.clone(),
         dated_run_files: current.dated_run_files,
         discovery: discovery.clone(),
@@ -1150,7 +1240,7 @@ fn mark_prior_verdicts(candidates: &mut [Candidate]) {
 
 fn report_from_checkpoint(path: &Path, mut saved: ResumeCheckpoint) -> Report {
     mark_prior_verdicts(&mut saved.candidates);
-    let pending_verdict_paths = saved
+    let pending_verdict_paths: Vec<PathBuf> = saved
         .candidates
         .iter()
         .filter(|candidate| candidate.verdict.starts_with("deferred:"))
@@ -1163,6 +1253,7 @@ fn report_from_checkpoint(path: &Path, mut saved: ResumeCheckpoint) -> Report {
         complete: saved.complete,
         recorded_paths: saved.recorded_paths,
         missing_paths: saved.missing_paths,
+        deferred_verdicts: pending_verdict_paths.len(),
         candidates: saved.candidates,
         dated_run_files: Vec::new(),
         discovery: saved.discovery,

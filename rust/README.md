@@ -127,3 +127,12 @@ checkpoint. The recheck honors `--max-candidates` and the checkpoint's
 original age cutoff. It preserves the checkpoint and reports only the
 selected paths. An eligible result can be nominated via the exact
 manifest command, whose apply path independently revalidates it.
+
+The default 48-hour ledger preview reports incomplete filesystem coverage. It
+reports the total missing nominations and the number of verdicts deferred,
+including nominations after the output cap. Scratch verdicts recheck repository
+ancestry independently of discovery. A directory that would otherwise pass is
+checked for protected evidence and repository descendants within the candidate's
+remaining deadline. Incomplete checks stay deferred.
+Its discovery gap names the Scratch root because this mode checks recorded
+paths without walking the filesystem.
