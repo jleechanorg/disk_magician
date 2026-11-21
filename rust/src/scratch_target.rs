@@ -1,5 +1,6 @@
 //! Bounded apply orchestration for one digest-bound Scratch manifest.
 
+use crate::scratch_recovery::{self, RecoveryHint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -50,6 +51,8 @@ struct Root {
 struct Entry {
     path: String,
     kind: String,
+    dev: Option<u64>,
+    ino: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -70,6 +73,8 @@ struct ResumeState {
     pending_paths: VecDeque<String>,
     receipts: Vec<Receipt>,
     status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    in_flight_quarantine_id: Option<String>,
     used_before_bytes: Option<u64>,
     used_after_bytes: Option<u64>,
 }
@@ -84,6 +89,8 @@ pub struct Report {
     pub used_after_bytes: Option<u64>,
     pub pending_paths: Vec<String>,
     pub receipts: Vec<Receipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryHint>,
 }
 
 struct ResumeLock(File);
@@ -334,7 +341,11 @@ pub fn apply(
     }
     if let Some(state) = existing_state.as_ref() {
         if state.status.starts_with("applying:") {
-            return Ok(report_recovery_required(state));
+            return Ok(report_recovery_required(
+                state,
+                &manifest.entries,
+                writer.is_ok(),
+            ));
         }
     }
     let initial_paths = if existing_state.is_none() {
@@ -359,6 +370,7 @@ pub fn apply(
                     used_after_bytes: state.used_after_bytes,
                     pending_paths: state.pending_paths.iter().cloned().collect(),
                     receipts: state.receipts.clone(),
+                    recovery: None,
                 });
             }
             return Ok(Report {
@@ -370,6 +382,7 @@ pub fn apply(
                 used_after_bytes: None,
                 pending_paths: initial_paths.clone().unwrap_or_default(),
                 receipts: Vec::new(),
+                recovery: None,
             });
         }
         Err(error) => return Err(error),
@@ -399,6 +412,7 @@ pub fn apply(
                 pending_paths: initial_paths.unwrap_or_default().into(),
                 receipts: Vec::new(),
                 status: format!("deferred:{}", error),
+                in_flight_quarantine_id: None,
                 used_before_bytes: None,
                 used_after_bytes: None,
             };
@@ -427,6 +441,7 @@ pub fn apply(
             pending_paths: paths.into(),
             receipts: Vec::new(),
             status: "in_progress".into(),
+            in_flight_quarantine_id: None,
             used_before_bytes: Some(start_used),
             used_after_bytes: Some(start_used),
         }
@@ -461,22 +476,26 @@ pub fn apply(
             return Ok(report(state));
         }
         state.status = format!("applying:{path}");
+        state.in_flight_quarantine_id = None;
         state.used_after_bytes = Some(used_before);
         write_state(resume_path, &state)?;
         let result = match legacy_apply(manifest_path, digest, &path, lock.0.as_raw_fd()) {
             Ok(result) => result,
-            Err(_) => return Ok(report_recovery_required(&state)),
+            Err(_) => return Ok(report_recovery_required(&state, &manifest.entries, true)),
         };
-        if result.starts_with("deferred:") {
-            if result == "deferred:operation-lock" {
-                state.status = result;
-                write_state(resume_path, &state)?;
-                return Ok(report(state));
-            }
-            return Ok(report_recovery_required(&state));
+        if result == "deferred:operation-lock" {
+            state.status = result;
+            write_state(resume_path, &state)?;
+            return Ok(report(state));
         }
-        if result.starts_with("kept:quarantine_partial_kept") {
-            return Ok(report_recovery_required(&state));
+        if result.starts_with("deferred:") || result.starts_with("kept:quarantine_partial_kept") {
+            if let Some((_, id)) = result.rsplit_once(':') {
+                if scratch_recovery::is_quarantine_id(id) {
+                    state.in_flight_quarantine_id = Some(id.to_owned());
+                    write_state(resume_path, &state)?;
+                }
+            }
+            return Ok(report_recovery_required(&state, &manifest.entries, true));
         }
         state.pending_paths.pop_front();
         state.receipts.push(Receipt {
@@ -575,10 +594,28 @@ fn report(state: ResumeState) -> Report {
         used_after_bytes: state.used_after_bytes,
         pending_paths: state.pending_paths.into_iter().collect(),
         receipts: state.receipts,
+        recovery: None,
     }
 }
 
-fn report_recovery_required(state: &ResumeState) -> Report {
+fn report_recovery_required(
+    state: &ResumeState,
+    entries: &[Entry],
+    writer_available: bool,
+) -> Report {
+    let recovery = state.pending_paths.front().map(|path| {
+        let identity = entries
+            .iter()
+            .find(|entry| &entry.path == path)
+            .and_then(|entry| entry.dev.zip(entry.ino));
+        scratch_recovery::hint(
+            &state.root.path,
+            path,
+            identity,
+            state.in_flight_quarantine_id.as_deref(),
+            writer_available,
+        )
+    });
     Report {
         status: "recovery_required:check exact in-flight quarantine before resume".into(),
         complete: false,
@@ -588,5 +625,6 @@ fn report_recovery_required(state: &ResumeState) -> Report {
         used_after_bytes: state.used_after_bytes,
         pending_paths: state.pending_paths.iter().cloned().collect(),
         receipts: state.receipts.clone(),
+        recovery,
     }
 }

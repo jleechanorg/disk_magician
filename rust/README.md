@@ -161,3 +161,10 @@ Apply checks the fingerprint and original content cutoff against the
 inventory produced by C14 under the lease mutation guard. Quarantine
 recovery and deletion receipts use the existing engine. Structural
 containers and paths without an allocator marker remain ineligible.
+
+When an apply remains in flight, its `recovery` field reports the selected
+path and any quarantine ID returned by the actuator. The native lookup
+matches canonical index records on the exact original path, device, and
+inode. It reports ambiguity or unavailability when a unique record cannot
+be established. The index phase describes that record alone. Recovery
+inspection leaves candidate and quarantine state intact.
