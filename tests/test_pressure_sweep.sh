@@ -767,15 +767,15 @@ assert_not_contains "Test 25 no scratch cleanup invoked" "cleanup_tmp" "$INVOCAT
 assert_receipt_field "Test 25 blocked_safety receipt" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome')" "blocked_safety"
 assert_receipt_field "Test 25 receipt nulls timed-out tmp metric" "$FAIL_STATE_DIR/receipts/pressure_sweep.json" "str(d.get('last_terminal', {}).get('precondition', {}).get('tmp_gb'))" "None"
 
-echo "Test 26: scratch lock held (rc 75) is a skip, not a FAILED step"
+echo "Test 26: checkpoint contention (rc 75) is a skip"
 : > "$INVOCATION_LOG"
 : > "$LOG_FILE"
 rm -rf "$STATE_DIR/pressure_sweep.lock"
 TMP_MODE_RC=75 run_pressure 8
 LOG_CONTENT="$(cat "$LOG_FILE")"
-assert_contains "logs the skip" "step 1/3 cleanup_tmp.sh skipped (scratch lock held)" "$LOG_CONTENT"
+assert_contains "logs the skip" "step 1/3 cleanup_tmp.sh skipped (checkpoint busy)" "$LOG_CONTENT"
 assert_not_contains "does not log FAILED for step 1" "cleanup_tmp.sh FAILED" "$LOG_CONTENT"
-assert_receipt_field "Test 26 records STEP1 skip" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP1_SKIPPED=scratch_lock_held' in d.get('last_terminal', {}).get('reason', '')" "True"
+assert_receipt_field "Test 26 records STEP1 skip" "$STATE_DIR/receipts/pressure_sweep.json" "'STEP1_SKIPPED=checkpoint_busy' in d.get('last_terminal', {}).get('reason', '')" "True"
 assert_receipt_field "Test 26 outcome is not error" "$STATE_DIR/receipts/pressure_sweep.json" "d.get('last_terminal', {}).get('outcome') != 'error'" "True"
 
 echo "Results: $PASS passed, $FAIL failed"
