@@ -189,18 +189,20 @@ fi
 # The lookup must let the producer finish even when its first row matches.
 # A tail larger than a pipe buffer distinguishes a drained table from an
 # early pipe close without relying on a sleep or the host's process timing.
+lookup_alias="$TMP_TEST_ROOT/protected-input-alias"
+ln -s "$PRIV" "$lookup_alias"
 if bash -e -c '
   source "$1"
-  matching_path="$2"
+  matching_path="$(cd "$2" && pwd -P)"
   marker="$3"
   scratch_roots_protected_paths() {
     printf "%s\n" "$matching_path"
     printf "%2097152s\n" ""
     : > "$marker"
   }
-  scratch_roots_is_protected_path "$matching_path"
+  scratch_roots_is_protected_path "$2"
   [[ -f "$marker" ]]
-' bash "$LIB" "$PRIV" "$TMP_TEST_ROOT/protected-table-complete"; then
+' bash "$LIB" "$lookup_alias" "$TMP_TEST_ROOT/protected-table-complete"; then
   record_pass "Test12: protected lookup consumes the complete table"
 else
   record_fail "Test12: protected lookup consumes the complete table" "producer did not finish"
