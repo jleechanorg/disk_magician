@@ -43,6 +43,9 @@ C14 `remove` verdict is labeled eligible. Ownership and PR evidence holds
 outside C14 still apply. Apparent sizes are file-summed and do not project
 physical reclaim.
 
+A ledger-only report marks filesystem coverage incomplete and names the
+Scratch root in its discovery gaps.
+
 The default 48-hour preview reads prior cleanup paths from the supplied state
 directory. The separate six-hour scan does not alter that policy, run cleanup,
 or change worktree retention.
@@ -59,7 +62,7 @@ still receives the normal C14 verdict. Verdict checks run after scanning, up to
 
 Use `--scope tmp` to inventory canonical host temporary roots, including
 `/private/tmp` on macOS. The requested age filters discovery. The separate
-`diskm cleanup-tmp --dry-run` output applies the installed cleaner's policy.
+`diskm cleanup-tmp --dry-run --no-job-receipt` output applies the installed cleaner's policy.
 Inventory rows remain unqualified until that policy can establish eligibility.
 
 Use `--scope worktrees` to run the installed worktree dry run against its
