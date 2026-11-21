@@ -407,7 +407,12 @@ fn one_checkpoint_lock_defers_same_checkpoint_but_not_another() {
 
     fixture.resume = fixture.root.join("other-resume.json");
     let output = fixture.run(&[101 * GIB, 99 * GIB], &["volume-a"], &["--all"]);
-    assert_eq!(report(&output)["status"], "target_reached");
+    let result = report(&output);
+    assert_eq!(result["complete"], true, "{result}");
+    assert_eq!(
+        result["receipts"][0]["result"], "removed:fixture",
+        "{result}"
+    );
     assert!(fixture.applies.exists());
 
     holder.kill().unwrap();

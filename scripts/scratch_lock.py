@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -16,18 +17,40 @@ import time
 
 ENV_FD = "DISK_MAGICIAN_SCRATCH_LOCK_FD"
 ENV_PID = "DISK_MAGICIAN_SCRATCH_LOCK_PID"
+ENV_SCOPE = "DISK_MAGICIAN_SCRATCH_LOCK_SCOPE"
+ENV_KEY = "DISK_MAGICIAN_SCRATCH_LOCK_KEY"
 # Contention is a skip, not a failure: EX_TEMPFAIL lets callers tell it apart from rc=1.
 EXIT_LOCK_HELD = 75
 
 
-def lock_path() -> Path:
+def canonical_cursor_path(raw: str | os.PathLike[str]) -> str:
+    value = Path(raw)
+    if not value.is_absolute():
+        value = Path.cwd() / value
+    if value.is_symlink():
+        raise ValueError("cursor lock key cannot be a symlink")
+    parent = value.parent.resolve(strict=False)
+    canonical = parent / value.name
+    if canonical.exists() and not canonical.is_file():
+        raise ValueError("cursor lock key must name a regular file")
+    return os.fspath(canonical)
+
+
+def lock_path(scope: str = "scratch", key: str | None = None) -> Path:
     home = os.environ.get("HOME", "")
     if not home or not Path(home).is_absolute():
         raise PermissionError("unsafe HOME for scratch lock")
     home_stat = os.lstat(home)
     if not stat.S_ISDIR(home_stat.st_mode) or home_stat.st_uid != os.geteuid() or home_stat.st_mode & 0o022:
         raise PermissionError("unsafe HOME for scratch lock")
-    return Path(home) / ".disk_magician_locks" / "scratch_cleanup.lock"
+    base = Path(home) / ".disk_magician_locks"
+    if scope == "scratch" and key is None:
+        return base / "scratch_cleanup.lock"
+    if scope != "cursor" or key is None:
+        raise ValueError("invalid scratch lock scope")
+    canonical = canonical_cursor_path(key)
+    digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()
+    return base / f"cursor-{digest}.lock"
 
 
 def open_lock(path: Path, create: bool) -> int:
@@ -58,9 +81,9 @@ def open_lock(path: Path, create: bool) -> int:
         os.close(dir_fd)
 
 
-def verify_fd(fd: int) -> bool:
+def verify_fd(fd: int, scope: str = "scratch", key: str | None = None) -> bool:
     try:
-        canonical_fd = open_lock(lock_path(), create=False)
+        canonical_fd = open_lock(lock_path(scope, key), create=False)
         try:
             opened = os.fstat(fd)
             canonical = os.fstat(canonical_fd)
@@ -109,9 +132,9 @@ def disable_implicit_git_fsmonitor() -> None:
     os.environ["GIT_CONFIG_COUNT"] = str(count + 1)
 
 
-def holder_path() -> Path:
+def holder_path(path: Path | None = None) -> Path:
     """Sidecar record naming the live lock holder, for staleness diagnosis."""
-    return lock_path().with_suffix(".holder")
+    return (path or lock_path()).with_suffix(".holder")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -126,13 +149,13 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def write_holder(fd: int) -> None:
+def write_holder(fd: int, path: Path) -> None:
     """Best-effort holder record. Never fail the run because of it."""
     try:
-        path = holder_path()
-        tmp = path.with_suffix(f".holder.{os.getpid()}")
+        record = holder_path(path)
+        tmp = record.with_suffix(f".holder.{os.getpid()}")
         tmp.write_text(f"pid={os.getpid()}\nsince={int(time.time())}\nfd_locked=1\n")
-        os.replace(tmp, path)
+        os.replace(tmp, record)
     except OSError:
         pass
 
@@ -144,7 +167,7 @@ def clear_holder() -> None:
         pass
 
 
-def stale_holder_report() -> str:
+def stale_holder_report(path: Path | None = None) -> str:
     """Human-readable diagnosis when the lock is held.
 
     Reports whether the recorded holder is still alive. This is diagnostic only:
@@ -156,7 +179,7 @@ def stale_holder_report() -> str:
     cleanup reported only "scratch lock held".
     """
     try:
-        raw = holder_path().read_text()
+        raw = holder_path(path).read_text()
     except OSError:
         return "holder=unknown (no holder record)"
     info = {}
@@ -177,8 +200,13 @@ def stale_holder_report() -> str:
     return f"holder=pid {pid} DEAD (stale record; flock must have been released){age}"
 
 
-def run(caller: str, script: str, args: list[str]) -> int:
-    path = lock_path()
+def run(caller: str, script: str, args: list[str], scope: str = "scratch",
+        key: str | None = None) -> int:
+    try:
+        path = lock_path(scope, key)
+    except (OSError, ValueError) as exc:
+        print(f"[{caller}] invalid scratch lock scope: {exc}", file=sys.stderr)
+        return 2
     try:
         fd = open_lock(path, create=True)
     except OSError as exc:
@@ -199,40 +227,62 @@ def run(caller: str, script: str, args: list[str]) -> int:
             if isinstance(exc, BlockingIOError):
                 note = f"after waiting {wait:g}s" if wait > 0 else "— not queuing"
                 print(
-                    f"[{caller}] skipped, scratch lock held {note}; {stale_holder_report()}",
+                    f"[{caller}] skipped, scratch lock held {note}; {stale_holder_report(path)}",
                     file=sys.stderr,
                 )
                 return EXIT_LOCK_HELD
             print(f"[{caller}] failed to acquire scratch lock {path}: {exc}", file=sys.stderr)
             return 1
 
-    write_holder(fd)
+    write_holder(fd, path)
     os.set_inheritable(fd, True)
     os.environ[ENV_FD] = str(fd)
     os.environ[ENV_PID] = str(os.getpid())
+    if scope == "cursor":
+        os.environ[ENV_SCOPE] = scope
+        os.environ[ENV_KEY] = canonical_cursor_path(key or "")
+    else:
+        os.environ.pop(ENV_SCOPE, None)
+        os.environ.pop(ENV_KEY, None)
     disable_implicit_git_fsmonitor()
     os.execvpe(script, [script, *args], os.environ)
     return 127
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "key":
+        try:
+            print(canonical_cursor_path(sys.argv[2]))
+            return 0
+        except (OSError, ValueError) as exc:
+            print(f"scratch_lock.py: invalid cursor path: {exc}", file=sys.stderr)
+            return 2
     if len(sys.argv) >= 2 and sys.argv[1] == "run":
         try:
-            caller = sys.argv[sys.argv.index("--caller") + 1]
-            script = sys.argv[sys.argv.index("--script") + 1]
-            marker = sys.argv.index("--args")
-            args = sys.argv[marker + 1 :]
+            end = sys.argv.index("--args")
+            options = sys.argv[2:end]
+            caller = options[options.index("--caller") + 1]
+            script = options[options.index("--script") + 1]
+            scope = "scratch"
+            key = None
+            if "--scope" in options:
+                scope = options[options.index("--scope") + 1]
+            if "--key" in options:
+                key = options[options.index("--key") + 1]
+            args = sys.argv[end + 1 :]
             if args[:1] == ["--"]:
                 args = args[1:]
         except (ValueError, IndexError):
             print("scratch_lock.py: invalid run arguments", file=sys.stderr)
             return 2
-        return run(caller, script, args)
+        return run(caller, script, args, scope, key)
 
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="mode", required=True)
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("--fd", type=int, required=True)
+    verify_parser.add_argument("--scope", choices=("scratch", "cursor"), default="scratch")
+    verify_parser.add_argument("--key")
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--caller", required=True)
     run_parser.add_argument("--script", required=True)
@@ -240,7 +290,7 @@ def main() -> int:
     ns = parser.parse_args()
 
     if ns.mode == "verify":
-        return 0 if verify_fd(ns.fd) else 1
+        return 0 if verify_fd(ns.fd, ns.scope, ns.key) else 1
     args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
     return run(ns.caller, ns.script, args)
 

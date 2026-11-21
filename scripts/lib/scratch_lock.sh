@@ -19,6 +19,32 @@ scratch_lock_acquire() {
   exec python3 "$helper" run --caller "$caller" --script "$script_path" --args -- "$@"
 }
 
+# Serialize updates only when multiple callers share one resume cursor.
+scratch_cursor_lock_acquire() {
+  local caller="$1" cursor="$2" script_path="${BASH_SOURCE[1]}" helper
+  shift 2
+  helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scratch_lock.py"
+  local cursor_key
+  cursor_key="$(python3 "$helper" key "$cursor")" || return 2
+  if [[ "${DISK_MAGICIAN_SCRATCH_LOCK_FD:-}" =~ ^[0-9]+$ &&
+        "${DISK_MAGICIAN_SCRATCH_LOCK_PID:-}" == "${BASHPID:-$$}" &&
+        "${DISK_MAGICIAN_SCRATCH_LOCK_SCOPE:-}" == cursor &&
+        "${DISK_MAGICIAN_SCRATCH_LOCK_KEY:-}" == "$cursor_key" ]] &&
+      python3 "$helper" verify --fd "$DISK_MAGICIAN_SCRATCH_LOCK_FD" \
+        --scope cursor --key "$cursor_key" >/dev/null 2>&1; then
+    return 0
+  fi
+  unset DISK_MAGICIAN_SCRATCH_LOCK_FD DISK_MAGICIAN_SCRATCH_LOCK_PID
+  if (($#)); then
+    DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 exec python3 "$helper" run \
+      --caller "$caller" --script "$script_path" --scope cursor --key "$cursor_key" \
+      --args -- "$@"
+  else
+    DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 exec python3 "$helper" run \
+      --caller "$caller" --script "$script_path" --scope cursor --key "$cursor_key" --args --
+  fi
+}
+
 # Shared scratch cleanup traps preserve handlers installed by the caller, then
 # release only temporary files owned by the current script.
 SCRATCH_LOCK_PREVIOUS_EXIT_TRAP=""
