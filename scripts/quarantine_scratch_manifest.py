@@ -17,6 +17,8 @@ import tempfile
 from c14_probe import inventory
 from lib.scratch_budget_artifact_children import is_managed_run
 
+import scratch_lock
+
 MAX_BYTES = 256 * 1024 * 1024
 FIELDS = ("dev", "ino", "size", "mtime_ns", "ctime_ns")
 IDENTITY = re.compile(r"^([0-9]+),([0-9]+),([0-9]+),(-?[0-9]+),(-?[0-9]+)$")
@@ -190,7 +192,7 @@ def verify(root, root_dev, entry, cutoff):
     return target, None
 
 
-def remove_exact(path, entry, cutoff):
+def remove_exact(path, entry, cutoff, lock_fd):
     repo = Path(__file__).resolve().parent.parent
     encoded = ",".join(str(entry[k]) for k in FIELDS)
     shell = 'source "$1/scripts/lib/quarantine.sh"; shift; quarantine_remove "$@"'
@@ -202,36 +204,32 @@ def remove_exact(path, entry, cutoff):
     env = dict(os.environ, C14_NO_RESCUE_PUSH="1")
     env.pop("DISK_MAGICIAN_AGE_FLOOR_MINUTES", None)
     env.pop("DISK_MAGICIAN_OPERATOR_TARGETS", None)
-    result = subprocess.run(args, capture_output=True, text=True, env=env)
+    result = subprocess.run(args, capture_output=True, text=True, env=env, pass_fds=(lock_fd,))
     verdict = result.stdout.strip()
     if result.returncode or verdict == "remove" or not verdict.startswith(("removed:", "kept:", "deferred:")):
         return "deferred:quarantine-error"
     return verdict
 
 
-def apply(manifest_path, digest, paths, all_entries):
+def apply(manifest_path, digest, paths, all_entries, lock_fd):
     manifest = load_manifest(manifest_path, digest)
     root, dev, ino = scratch_root()
     recorded = manifest["root"]
     if (recorded["path"], recorded["dev"], recorded["ino"]) != (str(root), dev, ino):
         raise ValueError("Scratch root identity changed")
-    entries = {}
-    for entry in manifest["entries"]:
-        path = entry.get("path") if isinstance(entry, dict) else None
-        if not isinstance(path, str) or path in entries:
-            raise ValueError("invalid or duplicate manifest entry")
-        entries[path] = entry
-    if all_entries:
-        if paths:
-            raise ValueError("--all cannot be combined with --path")
-        paths = list(entries)
+    rows = manifest["entries"]
+    entries = {row["path"]: row for row in rows
+               if isinstance(row, dict) and isinstance(row.get("path"), str)}
+    if len(entries) != len(rows):
+        raise ValueError("invalid or duplicate manifest entry")
+    paths = list(entries) if all_entries else paths
     if not paths or len(set(paths)) != len(paths) or any(path not in entries for path in paths):
         raise ValueError("select unique paths present in the manifest")
     results = []
     for relative in paths:
         entry = entries[relative]
         target, reason = verify(root, dev, entry, manifest["before_epoch_seconds"])
-        result = reason if reason else remove_exact(target, entry, manifest["before_epoch_seconds"])
+        result = reason if reason else remove_exact(target, entry, manifest["before_epoch_seconds"], lock_fd)
         results.append({"path": relative, "result": result})
     return {"manifest_sha256": digest, "before_epoch_seconds": manifest["before_epoch_seconds"], "results": results}
 
@@ -248,31 +246,33 @@ def main(args):
             print(str(error), file=sys.stderr)
             return 2
         return 0
-    manifest = digest = None
-    paths = []
+    fields = {flag: [] for flag in ("--manifest", "--manifest-sha256", "--path")}
     all_entries = False
-    i = 0
-    while i < len(args):
-        if args[i] in ("--manifest", "--manifest-sha256", "--path") and i + 1 < len(args):
-            if args[i] == "--manifest":
-                if manifest is not None: return 2
-                manifest = args[i + 1]
-            elif args[i] == "--manifest-sha256":
-                if digest is not None: return 2
-                digest = args[i + 1]
-            else:
-                paths.append(args[i + 1])
-            i += 2
-        elif args[i] == "--all" and not all_entries:
+    options = iter(args)
+    for flag in options:
+        if flag in fields:
+            value = next(options, None)
+            if value is None:
+                return 2
+            fields[flag].append(value)
+        elif flag == "--all" and not all_entries:
             all_entries = True
-            i += 1
         else:
             return 2
-    if not manifest or not digest:
+    manifests, digests, paths = fields.values()
+    if len(manifests) != 1 or len(digests) != 1 or not manifests[0] or not digests[0] or (all_entries and paths):
         return 2
     try:
-        result = apply(manifest, digest, paths, all_entries)
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        try:
+            fd = int(os.environ.get(scratch_lock.ENV_FD, ""))
+        except ValueError:
+            fd = -1
+        if not 0 <= fd <= 2**31 - 1 or not scratch_lock.verify_fd(fd):
+            os.environ["DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS"] = "0"
+            return scratch_lock.run("scratch-apply", sys.executable, [__file__, *args])
+        scratch_lock.disable_implicit_git_fsmonitor()
+        result = apply(manifests[0], digests[0], paths, all_entries, fd)
+    except (OSError, ValueError, TypeError) as error:
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 2
     print(json.dumps(result, separators=(",", ":")))

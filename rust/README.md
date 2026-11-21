@@ -98,7 +98,8 @@ The compatibility apply route is `disk-magician quarantine scratch-apply
 the referenced digest. Regular files use a file identity. Managed dated
 runs use a full content inventory and stay lease-backed cleanup units.
 Files with path characters the canonical deletion log cannot represent
-remain in place. Both staged executables are required until the Rust
+remain in place. Direct apply defers immediately when another Scratch writer is active.
+Both staged executables are required until the Rust
 quarantine and recovery port is complete.
 
 ### Checkpointed Scratch preview and target apply
@@ -107,8 +108,9 @@ Use `diskm preview --state-dir DIR --resume-state ABSOLUTE_FILE --deadline-ms N`
 to scan Scratch against the default 48-hour age floor. Repeat the command
 with the same checkpoint to process unfinished paths and deferred verdicts.
 A prior remove verdict is retained as `historical:remove` until a fresh
-check qualifies the path. Discovery and allocation figures describe a scan
-pass. Allocated bytes estimate reclaim.
+check qualifies the path. A deferred retry refreshes path measurements against
+the original cutoff. Dated-run itemization keeps the last observation from
+each scan pass. Allocated bytes estimate reclaim.
 
 Use `diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA
 --resume-state FILE --target-used-bytes N` with an explicit initial
