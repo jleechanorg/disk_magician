@@ -256,6 +256,26 @@ class ScratchManifestApplyTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
 
+    def test_interrupted_manifest_quarantine_reports_uncertain_outcome(self):
+        result = self.run_apply(
+            self.selected.as_posix(),
+            extra_env={"DISK_MAGICIAN_TEST_KILL_AT": "after_rename"},
+        )
+        records = list((self.state / "quarantine-index").glob("*.json"))
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0].read_text())
+        self.assertEqual(record["original"], self.target.as_posix())
+        self.assertFalse(self.target.exists())
+        env = dict(os.environ, DISK_MAGICIAN_STATE_DIR=str(self.state), BASH_ENV="/dev/null")
+        restored = subprocess.run(
+            ["bash", str(DISKM), "quarantine", "restore", record["id"]],
+            env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertIn("restored:", restored.stdout)
+        self.assertEqual(self.target.read_bytes(), b"old generated fixture")
+        self.assertEqual(result["results"][0]["result"], "deferred:quarantine-error")
+
     def test_managed_run_inventory_binds_nested_changes_before_quarantine(self):
         volume = self.temp_root.resolve() / "volume"
         repo = volume / "runs/20261120/disk-magician"

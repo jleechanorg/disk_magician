@@ -121,13 +121,17 @@ PY
   if [[ "$v" == remove ]]; then
     dkb="$(deletion_size_kb "$path_arg")" || dkb=0
     if [[ -L "$path_arg" ]]; then dact=remove_symlink; elif [[ -f "$path_arg" ]]; then dact=remove_file; fi
+    # A failed actuator process may have already renamed the exact target.
+    # Keep its manifest checkpoint in flight until recovery can inspect it.
+    local remove_error=kept:check-failed
+    [[ -z "$expected_target" ]] || remove_error=deferred:quarantine-error
     local -a remove_args=("$path_arg" "$inv" "$binding")
     [[ -z "$expected_target" ]] || remove_args+=(--expected-root-identity "$expected_target")
     if [[ "$deadline_seen" == 1 ]]; then
       remove_args+=(--deadline-at "$deadline")
-      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v=kept:check-failed
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v="$remove_error"
     else
-      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v=kept:check-failed
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v="$remove_error"
     fi
   fi
   rm -f "$inv" "$binding" || true
