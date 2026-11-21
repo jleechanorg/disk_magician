@@ -183,6 +183,12 @@ used bytes on Linux and macOS. On macOS it verifies the APFS container, volume,
 quota, and mount, then preserves the legacy capacity, usage, and ballast alarm
 checks. Set the explicit compatibility executable for migration fixtures.
 
+On macOS, the standalone lookup verifies the APFS registry, the Data container,
+and the mounted Scratch identity. Ordinary allocation requires valid ballast.
+Reclaim lookup accepts missing ballast, while mount verification only checks the
+mount. Missing configuration or registration is reported as absent only after
+checking for a live Scratch volume in the Data container.
+
 The default 48-hour ledger preview reports incomplete filesystem coverage. It
 reports the total missing nominations and the number of verdicts deferred,
 including nominations after the output cap. Scratch verdicts recheck repository

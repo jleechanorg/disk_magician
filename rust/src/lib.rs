@@ -39,15 +39,30 @@ pub fn legacy_cli() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Verify the local Scratch registry against the mounted filesystem.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn verified_scratch_volume(
+    expected: Option<&std::path::Path>,
+    for_reclaim: bool,
+) -> io::Result<Option<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = for_reclaim;
+        volume_linux::verified_root(expected)
+    }
+    #[cfg(target_os = "macos")]
+    volume_macos::verified_root(expected, for_reclaim)
+}
+
 /// Read the registered Scratch root. None means the volume authority confirmed absence.
 pub(crate) fn scratch_volume_path(override_cli: Option<PathBuf>) -> io::Result<Option<PathBuf>> {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     use std::process::{Command, Stdio};
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if override_cli.is_none() && env::var_os(LEGACY_COMPAT_CLI).is_none() {
-        return volume_linux::verified_root(None);
+        return verified_scratch_volume(None, false);
     }
 
     let backend = match override_cli {

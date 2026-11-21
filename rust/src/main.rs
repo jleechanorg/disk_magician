@@ -470,40 +470,42 @@ fn dispatch_legacy(args: &[OsString]) -> Option<ExitCode> {
     Some(ExitCode::from(127))
 }
 
-#[cfg(target_os = "linux")]
-fn native_linux_volume(args: &[OsString]) -> Option<ExitCode> {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn native_volume(args: &[OsString]) -> Option<ExitCode> {
     if env::var_os(LEGACY_COMPAT_CLI).is_some() || args.first()?.as_os_str() != "volume" {
         return None;
     }
     let parameters = &args[1..];
-    let expected = match parameters {
-        [verb, class] if verb == "path" && class == "scratch" => None,
+    let (expected, for_reclaim) = match parameters {
+        [verb, class] if verb == "path" && class == "scratch" => (None, false),
         [verb, class, mode] if verb == "path" && class == "scratch" && mode == "--for-reclaim" => {
-            None
+            (None, true)
         }
-        [verb, path] if verb == "verify-mount" => Some(std::path::Path::new(path)),
+        [verb, path] if verb == "verify-mount" => (Some(std::path::Path::new(path)), false),
         _ => return None,
     };
-    Some(match diskm_shadow::volume_linux::verified_root(expected) {
-        Ok(Some(root)) => {
-            if expected.is_none() {
-                println!("{}", root.display());
+    Some(
+        match diskm_shadow::verified_scratch_volume(expected, for_reclaim) {
+            Ok(Some(root)) => {
+                if expected.is_none() {
+                    println!("{}", root.display());
+                }
+                ExitCode::SUCCESS
             }
-            ExitCode::SUCCESS
-        }
-        Ok(None) if expected.is_none() => ExitCode::from(3),
-        Ok(None) => ExitCode::from(TEMPORARY_FAILURE),
-        Err(error) => {
-            eprintln!("diskm: {error}");
-            ExitCode::from(TEMPORARY_FAILURE)
-        }
-    })
+            Ok(None) if expected.is_none() => ExitCode::from(3),
+            Ok(None) => ExitCode::from(TEMPORARY_FAILURE),
+            Err(error) => {
+                eprintln!("diskm: {error}");
+                ExitCode::from(TEMPORARY_FAILURE)
+            }
+        },
+    )
 }
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    #[cfg(target_os = "linux")]
-    if let Some(status) = native_linux_volume(&args) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(status) = native_volume(&args) {
         return status;
     }
 
