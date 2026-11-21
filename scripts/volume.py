@@ -694,12 +694,6 @@ def ballast_cmd(action: str, name: str) -> int:
     lock_handle = None
     cleanup_fd = None
     try:
-        if action in {"ensure", "recover"}:
-            import scratch_lock
-            inherited = os.environ.get(scratch_lock.ENV_FD, "")
-            if not (inherited.isdigit() and scratch_lock.verify_fd(int(inherited))):
-                cleanup_fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
-                fcntl.flock(cleanup_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         registry_file, lock_handle = locked_registry()
         if linux_backend_enabled(name):
             settings, scratch = cls(name)
@@ -722,6 +716,14 @@ def ballast_cmd(action: str, name: str) -> int:
             return 75
         if action == "recover" and pending is None:
             return 0
+        if action in {"ensure", "recover"} and pending is not None:
+            # A release may be in use by an ENOSPC retry. Ordinary repair has
+            # no such handoff and is serialized solely by the volume registry.
+            import scratch_lock
+            inherited = os.environ.get(scratch_lock.ENV_FD, "")
+            if not (inherited.isdigit() and scratch_lock.verify_fd(int(inherited))):
+                cleanup_fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+                fcntl.flock(cleanup_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         def clear_intent():
             if "ballast_recovery" in record:
                 del record["ballast_recovery"]

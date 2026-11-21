@@ -2244,6 +2244,23 @@ raise SystemExit(volume.ballast_cmd('recover','scratch'))
             write.assert_not_called()
         self.assertIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
 
+    def test_ballast_ensure_without_pending_release_ignores_cleanup_lock(self):
+        import scratch_lock
+
+        self.make_fit()
+        self.assertTrue(volume.unlink_ballast_verified(self.mp))
+        self.assertFalse(volume.ballast_ok(self.mp))
+        self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
+        fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+        volume.fcntl.flock(fd, volume.fcntl.LOCK_EX | volume.fcntl.LOCK_NB)
+        try:
+            command = [sys.executable, str(ROOT / "scripts/volume.py"), "ballast", "ensure", "scratch"]
+            result = volume.subprocess.run(command, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(volume.ballast_ok(self.mp))
+        finally:
+            os.close(fd)
+
     def test_ballast_recovery_respects_active_cleanup_lock_and_inherited_owner(self):
         import scratch_lock
         self.make_fit()
