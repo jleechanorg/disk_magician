@@ -168,3 +168,10 @@ matches canonical index records on the exact original path, device, and
 inode. It reports ambiguity or unavailability when a unique record cannot
 be established. The index phase describes that record alone. Recovery
 inspection leaves candidate and quarantine state intact.
+
+In standalone Linux mode, `volume path scratch` and
+`volume verify-mount PATH` read the configured registry and verify the
+ext4 image, mount record, and filesystem UUID. The native loop backend
+also verifies the unique backing-device mapping and mounted UUID.
+The read creates no registry state. Explicit legacy compatibility mode
+continues forwarding the volume command family to its selected backend.

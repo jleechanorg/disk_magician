@@ -470,8 +470,43 @@ fn dispatch_legacy(args: &[OsString]) -> Option<ExitCode> {
     Some(ExitCode::from(127))
 }
 
+#[cfg(target_os = "linux")]
+fn native_linux_volume(args: &[OsString]) -> Option<ExitCode> {
+    if env::var_os(LEGACY_COMPAT_CLI).is_some() || args.first()?.as_os_str() != "volume" {
+        return None;
+    }
+    let parameters = &args[1..];
+    let expected = match parameters {
+        [verb, class] if verb == "path" && class == "scratch" => None,
+        [verb, class, mode] if verb == "path" && class == "scratch" && mode == "--for-reclaim" => {
+            None
+        }
+        [verb, path] if verb == "verify-mount" => Some(std::path::Path::new(path)),
+        _ => return None,
+    };
+    Some(match diskm_shadow::volume_linux::verified_root(expected) {
+        Ok(Some(root)) => {
+            if expected.is_none() {
+                println!("{}", root.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(None) if expected.is_none() => ExitCode::from(3),
+        Ok(None) => ExitCode::from(TEMPORARY_FAILURE),
+        Err(error) => {
+            eprintln!("diskm: {error}");
+            ExitCode::from(TEMPORARY_FAILURE)
+        }
+    })
+}
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
+    #[cfg(target_os = "linux")]
+    if let Some(status) = native_linux_volume(&args) {
+        return status;
+    }
+
     if matches!(
         args.first().and_then(|arg| arg.to_str()),
         Some("scratch-dir" | "scratch_dir")

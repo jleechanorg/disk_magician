@@ -50,3 +50,6 @@ pub mod scratch_manifest;
 mod scratch_recovery;
 pub mod scratch_target;
 pub mod status;
+
+#[cfg(target_os = "linux")]
+pub mod volume_linux;
