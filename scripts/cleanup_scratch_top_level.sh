@@ -654,16 +654,20 @@ if (( ${#candidates[@]} )); then
       emit_discovery_deferred_summary native-artifact-binary-unavailable
       exit 75
     fi
+    # The native producer can request the canonical legacy discovery for a
+    # marked run name whose Unicode digit rules depend on the legacy runtime.
+    _artifact_rc=76
     if [[ "$root_registered" == true && -n "$_artifact_rust_bin" ]]; then
-      # The registered-root native discovery emits the existing batch frame.
+      _artifact_rc=0
       printf '%s\0' "${candidate_dirs[@]}" | act_run_bounded \
-        "$_artifact_rust_bin" scratch-artifact-discover "$artifact_blocked_file" >"$artifact_batch_output_file"
-    else
+        "$_artifact_rust_bin" scratch-artifact-discover "$artifact_blocked_file" >"$artifact_batch_output_file" || _artifact_rc=$?
+    fi
+    if (( _artifact_rc == 76 )); then
       _artifact_mode=batch
       [[ "$root_registered" == true ]] && _artifact_mode=batch-generic
-      printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" "$artifact_blocked_file" >"$artifact_batch_output_file"
+      _artifact_rc=0
+      printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" "$artifact_blocked_file" >"$artifact_batch_output_file" || _artifact_rc=$?
     fi
-    _artifact_rc=$?
     if (( _artifact_rc != 0 )); then
       rm -f "$artifact_batch_output_file" "$artifact_blocked_file"
       artifact_batch_output_file=""
@@ -847,7 +851,7 @@ if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
     _native_sizes=0
     if [[ "$root_registered" == true && "$OSTYPE" == linux* && -n "${_artifact_rust_bin:-}" ]]; then
       printf '%s\0' "${_lru_candidates[@]}" |
-        act_run_bounded "$_artifact_rust_bin" scratch-artifact-sizes >"$_lru_keep_file" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
+        act_run_bounded "$_artifact_rust_bin" scratch-artifact-sizes "$_min_kb_val" >"$_lru_keep_file" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
       _native_sizes=1
     fi
     _below_count="$(printf '%s\0' "${_lru_candidates[@]}" | python3 -c '
@@ -864,41 +868,25 @@ for p in entries:
     else:
         dirs.append(p)
 sizes = {}
-native_sizes = {}
-isolated = {}
+certified_below = set()
+skipped_below = set()
 if sys.argv[3] == "1":
     with open(keep_path, "rb") as f:
-        data = f.read()
-    fields = data.split(b"\0")
-    if fields[-1] or (len(fields) - 1) % 2:
+        fields = f.read().split(b"\0")
+    if fields[-1]:
         sys.exit("invalid native size response")
     submitted = set(entries)
-    for blocks, raw_path in zip(fields[:-1:2], fields[1:-1:2]):
+    for raw_path in fields[:-1]:
         p = os.fsdecode(raw_path)
-        if not blocks.isdigit() or p not in submitted or p in native_sizes:
+        if p not in submitted or p in certified_below:
             sys.exit("invalid native size row")
-        native_sizes[p] = int(blocks)
+        certified_below.add(p)
 for i in range(0, len(dirs), 200):
     chunk = dirs[i:i+200]
-    # GNU du deduplicates subtrees in operand order. Reproduce that only for
-    # chunks whose trees are completely measured and have ordinary path text.
-    if all(p in native_sizes and p.isascii() and p.isprintable()
-           and os.path.normpath(p) == p for p in chunk):
-        covered = {}
-        measured = {}
-        for p in chunk:
-            if any(p == root or p.startswith(root + "/") for root in covered):
-                continue
-            descendants = [root for root in covered if root.startswith(p + "/")]
-            blocks = native_sizes[p] - sum(covered.pop(root) for root in descendants)
-            if blocks < 0:
-                break
-            covered[p] = native_sizes[p]
-            measured[p] = (blocks + 1) // 2
-        else:
-            sizes.update(measured)
-            isolated.update((p, (native_sizes[p] + 1) // 2) for p in chunk)
-            continue
+    # An enclosing tree bound can skip a chunk only if every operand is small.
+    if all(p in certified_below for p in chunk):
+        skipped_below.update(chunk)
+        continue
     res = subprocess.run(["du", "-sk", "--", *chunk], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     if res.returncode == 0 or res.stdout:
         for line in res.stdout.splitlines():
@@ -907,7 +895,11 @@ for i in range(0, len(dirs), 200):
                 sizes[parts[1]] = int(parts[0].strip())
 below = 0
 for p in dirs:
-    kb = sizes.get(p, isolated.get(p))
+    if p in skipped_below:
+        print(f"kept:below-min-size {p} (confirmed below {min_kb} KB by enclosing tree)")
+        below += 1
+        continue
+    kb = sizes.get(p)
     if kb is None:
         r2 = subprocess.run(["du", "-sk", "--", p], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         kb = int(r2.stdout.split("\t", 1)[0].strip()) if r2.returncode == 0 and "\t" in r2.stdout else 0

@@ -563,6 +563,7 @@ fn main() -> ExitCode {
                     eprintln!("{}", error.reason());
                     ExitCode::from(match error {
                         artifact_discovery::DiscoveryError::Deadline => 124,
+                        artifact_discovery::DiscoveryError::LegacyRequired => 76,
                         artifact_discovery::DiscoveryError::MalformedInput
                         | artifact_discovery::DiscoveryError::Io(_) => 1,
                     })
@@ -575,10 +576,17 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == "scratch-artifact-sizes")
     {
-        if args.len() != 1 {
+        let [_, minimum] = args.as_slice() else {
             return ExitCode::from(2);
-        }
-        return match artifact_size::measure_batch(io::stdin().lock())
+        };
+        let Some(minimum) = minimum
+            .to_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+        else {
+            return ExitCode::from(2);
+        };
+        return match artifact_size::measure_batch(io::stdin().lock(), minimum)
             .and_then(|frame| io::stdout().lock().write_all(&frame))
         {
             Ok(()) => ExitCode::SUCCESS,

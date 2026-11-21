@@ -15,6 +15,7 @@ const MARKER: &[u8] = b"diskm-artifact-children-v1";
 #[derive(Debug)]
 pub enum DiscoveryError {
     MalformedInput,
+    LegacyRequired,
     Deadline,
     Io(io::Error),
 }
@@ -23,6 +24,7 @@ impl DiscoveryError {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::MalformedInput => "malformed-input",
+            Self::LegacyRequired => "legacy-required",
             Self::Deadline => "deadline",
             Self::Io(_) => "unmeasurable",
         }
@@ -79,55 +81,113 @@ fn has_git_marker(path: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-fn is_managed_run(root: &Path, path: &Path) -> io::Result<bool> {
-    let run_roots = [root.to_path_buf(), root.join("runs")];
-    let run_shape = run_roots
-        .iter()
-        .any(|runs| possible_dated_run(runs, path).is_some());
-    if !run_shape {
-        return Ok(false);
+fn unicode_managed_run_shape(root: &Path, path: &Path) -> bool {
+    // The run name repeats the day. All candidates without Unicode in their
+    // name use the fast allocator grammar above.
+    if path.file_name().is_none_or(|id| id.as_bytes().is_ascii()) {
+        return false;
     }
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| io::Error::other("managed run escaped discovery root"))?;
-    let mut components: Vec<_> = relative
-        .components()
-        .map(|component| component.as_os_str().as_bytes())
-        .collect();
-    if components
-        .first()
-        .is_some_and(|component| *component == b"runs")
-    {
-        components.remove(0);
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut parts: Vec<_> = relative.components().map(|part| part.as_os_str()).collect();
+    if parts.first().is_some_and(|part| *part == "runs") {
+        parts.remove(0);
     }
-    if components.len() != 3 {
-        return Ok(false);
+    if parts.len() != 3 {
+        return false;
     }
-    let day = std::str::from_utf8(components[0])
-        .map_err(|_| io::Error::other("invalid managed run date encoding"))?;
-    if day.len() != 8 || !day.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Ok(false);
+    let (Some(day), Some(id)) = (parts[0].to_str(), parts[2].to_str()) else {
+        return false;
+    };
+    let repo = parts[1].as_bytes();
+    if repo.is_empty() || repo.starts_with(b".") {
+        return false;
     }
-    // Use the canonical UTC date parser for calendar validation.
-    let iso_day = format!("{}-{}-{}", &day[0..4], &day[4..6], &day[6..8]);
-    if parse_utc(&format!("{iso_day}T00:00:00Z")).is_none() {
-        return Ok(false);
+    // The Python parser decides which Unicode scalars are decimal digits.
+    let digit_slot = |c: char| c.is_ascii_digit() || !c.is_ascii();
+    if day.chars().count() != 8 || !day.chars().all(digit_slot) {
+        return false;
     }
+    let mut fields = id.rsplitn(4, '-');
+    let (Some(nonce), Some(pid), Some(stamp), Some(purpose)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    let Some(time) = stamp
+        .strip_prefix(day)
+        .and_then(|rest| rest.strip_prefix('T'))
+        .and_then(|rest| rest.strip_suffix('Z'))
+    else {
+        return false;
+    };
+    (1..=40).contains(&purpose.len())
+        && purpose
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && time.chars().count() == 6
+        && time.chars().all(digit_slot)
+        && [pid, nonce]
+            .iter()
+            .all(|value| !value.is_empty() && value.chars().all(digit_slot))
+}
+
+fn secure_quarantine_marker(path: &Path) -> bool {
     let run = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(_) => return Ok(false),
+        Err(_) => return false,
     };
     let marker_path = path.parent().unwrap_or(path).join(".dm-quarantine");
     let marker = match fs::symlink_metadata(marker_path) {
         Ok(metadata) => metadata,
-        Err(_) => return Ok(false),
+        Err(_) => return false,
     };
-    Ok(run.is_dir()
+    run.is_dir()
         && !run.file_type().is_symlink()
         && marker.is_dir()
         && !marker.file_type().is_symlink()
         && marker.uid() == unsafe { libc::geteuid() }
-        && marker.mode() & 0o7777 == 0o700)
+        && marker.mode() & 0o7777 == 0o700
+}
+
+fn is_managed_run(root: &Path, path: &Path) -> Result<bool, DiscoveryError> {
+    let run_roots = [root.to_path_buf(), root.join("runs")];
+    if run_roots
+        .iter()
+        .any(|runs| possible_dated_run(runs, path).is_some())
+    {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| io::Error::other("managed run escaped discovery root"))?;
+        let mut components: Vec<_> = relative
+            .components()
+            .map(|component| component.as_os_str().as_bytes())
+            .collect();
+        if components
+            .first()
+            .is_some_and(|component| *component == b"runs")
+        {
+            components.remove(0);
+        }
+        if components.len() != 3 {
+            return Ok(false);
+        }
+        let day = std::str::from_utf8(components[0])
+            .map_err(|_| io::Error::other("invalid managed run date encoding"))?;
+        if day.len() != 8 || !day.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Ok(false);
+        }
+        let iso_day = format!("{}-{}-{}", &day[0..4], &day[4..6], &day[6..8]);
+        if parse_utc(&format!("{iso_day}T00:00:00Z")).is_none() {
+            return Ok(false);
+        }
+        return Ok(secure_quarantine_marker(path));
+    }
+    if unicode_managed_run_shape(root, path) && secure_quarantine_marker(path) {
+        return Err(DiscoveryError::LegacyRequired);
+    }
+    Ok(false)
 }
 
 // Python str(os.fsdecode(path)) compares Unicode scalar values and maps each
@@ -235,6 +295,7 @@ pub fn discover_batch(
             ),
             Err(DiscoveryError::Deadline) => return Err(DiscoveryError::Deadline),
             Err(DiscoveryError::MalformedInput) => return Err(DiscoveryError::MalformedInput),
+            Err(DiscoveryError::LegacyRequired) => return Err(DiscoveryError::LegacyRequired),
             Err(DiscoveryError::Io(_)) => blocked.push(root_bytes),
         }
     }
@@ -398,6 +459,27 @@ mod tests {
             .collect();
         assert!(emitted.contains(&run.as_os_str().as_bytes()));
         assert!(!emitted.contains(&run.join("nested").as_os_str().as_bytes()));
+    }
+
+    #[test]
+    fn unicode_managed_run_boundaries_require_legacy_without_emitting_frame() {
+        let fixture = Fixture::new("unicode-managed-run");
+        for (label, day, stamp) in [
+            ("unicode-time", "20261121", "20261121T١٢٣٤٥٦Z-123-456"),
+            ("unicode-year", "٢٠٢٦1121", "٢٠٢٦1121T123456Z-123-456"),
+            ("unicode-pid", "20261121", "20261121T123456Z-١-٢"),
+        ] {
+            let root = fixture.path(label);
+            let run = root.join(format!("runs/{day}/example/build-{stamp}"));
+            fs::create_dir_all(run.join("nested")).unwrap();
+            let marker = run.parent().unwrap().join(".dm-quarantine");
+            fs::create_dir(&marker).unwrap();
+            fs::set_permissions(&marker, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(matches!(
+                fixture.run(&[&root]),
+                Err(DiscoveryError::LegacyRequired)
+            ));
+        }
     }
 
     #[test]

@@ -147,14 +147,15 @@ DISK_MAGICIAN_RUST_ARTIFACT_BIN to the absolute path of the matching Rust
 candidate for a read-only `diskm scratch-prune --dry-run` invocation.
 The Rust candidate handles batched artifact discovery and validation. The
 wrapper still owns mount verification, the shared deadline, ordering,
-qualification, and the existing quarantine path. A failed native phase
-defers the batch. With the environment variable unset, the installed
+qualification, and the existing quarantine path. Marked dated runs with
+Unicode digits use the existing discovery parser. Other failed native phases
+defer the batch. With the environment variable unset, the installed
 scheduler keeps its existing path.
 
 On Linux with a positive `DISK_MAGICIAN_SCRATCH_MIN_KB`, the opt-in pilot
-measures overlapping directories in one shared walk before applying the
-minimum size. It uses the existing GNU `du` accounting for any operand batch
-containing an uncertain measurement. macOS keeps its existing size filter.
+uses GNU `du` to measure enclosing trees for overlapping operands. It skips
+the original size probes only for batches wholly below the threshold. Mixed or
+uncertain batches and the macOS size filter use the existing accounting.
 
 The native `diskm reclaim-ledger --read-existing` command reads the published
 report and prints its completeness and generation-time warnings. It keeps the
