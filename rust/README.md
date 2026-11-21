@@ -152,6 +152,11 @@ Unicode digits use the existing discovery parser. Other failed native phases
 defer the batch. With the environment variable unset, the installed
 scheduler keeps its existing path.
 
+On Linux with a positive `DISK_MAGICIAN_SCRATCH_MIN_KB`, the opt-in pilot
+uses GNU `du` to measure enclosing trees for overlapping operands. It skips
+the original size probes only for batches wholly below the threshold. Mixed or
+uncertain batches and the macOS size filter use the existing accounting.
+
 The native `diskm reclaim-ledger --read-existing` command reads the published
 report and prints its completeness and generation-time warnings. It keeps the
 report's own coverage banners. Set `--state-dir DIR` to select a report

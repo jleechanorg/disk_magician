@@ -848,6 +848,12 @@ if [[ -n "$BUDGET_PCT" ]] && (( ! CURSOR_ERROR )); then
   if [[ "$SCRATCH_AUTOMATIC" != 1 && "${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}" =~ ^[0-9]+$ ]] && (( 10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0} > 0 && ${#_lru_candidates[@]} > 0 )); then
     _min_kb_val=$((10#${DISK_MAGICIAN_SCRATCH_MIN_KB:-0}))
     _lru_keep_file="$(mktemp "${TMPDIR:-/tmp}/dm-sp-minkb.XXXXXX")" || { rm -f "$LRU_LIST"; echo skipped:measurement-unavailable; exit 75; }
+    _native_sizes=0
+    if [[ "$root_registered" == true && "$OSTYPE" == linux* && -n "${_artifact_rust_bin:-}" ]]; then
+      printf '%s\0' "${_lru_candidates[@]}" |
+        act_run_bounded "$_artifact_rust_bin" scratch-artifact-sizes "$_min_kb_val" >"$_lru_keep_file" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
+      _native_sizes=1
+    fi
     _below_count="$(printf '%s\0' "${_lru_candidates[@]}" | python3 -c '
 import os, subprocess, sys
 min_kb = int(sys.argv[1])
@@ -862,8 +868,25 @@ for p in entries:
     else:
         dirs.append(p)
 sizes = {}
+certified_below = set()
+skipped_below = set()
+if sys.argv[3] == "1":
+    with open(keep_path, "rb") as f:
+        fields = f.read().split(b"\0")
+    if fields[-1]:
+        sys.exit("invalid native size response")
+    submitted = set(entries)
+    for raw_path in fields[:-1]:
+        p = os.fsdecode(raw_path)
+        if p not in submitted or p in certified_below:
+            sys.exit("invalid native size row")
+        certified_below.add(p)
 for i in range(0, len(dirs), 200):
     chunk = dirs[i:i+200]
+    # An enclosing tree bound can skip a chunk only if every operand is small.
+    if all(p in certified_below for p in chunk):
+        skipped_below.update(chunk)
+        continue
     res = subprocess.run(["du", "-sk", "--", *chunk], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     if res.returncode == 0 or res.stdout:
         for line in res.stdout.splitlines():
@@ -872,6 +895,10 @@ for i in range(0, len(dirs), 200):
                 sizes[parts[1]] = int(parts[0].strip())
 below = 0
 for p in dirs:
+    if p in skipped_below:
+        print(f"kept:below-min-size {p} (confirmed below {min_kb} KB by enclosing tree)")
+        below += 1
+        continue
     kb = sizes.get(p)
     if kb is None:
         r2 = subprocess.run(["du", "-sk", "--", p], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -887,7 +914,7 @@ with open(keep_path, "wb") as f:
         if p in keep_set:
             f.write(os.fsencode(p) + b"\0")
 sys.stderr.write(f"{below}\n")
-' "$_min_kb_val" "$_lru_keep_file" 2>"${_lru_keep_file}.cnt")" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
+' "$_min_kb_val" "$_lru_keep_file" "$_native_sizes" 2>"${_lru_keep_file}.cnt")" || { rm -f "$LRU_LIST" "$_lru_keep_file" "${_lru_keep_file}.cnt"; echo skipped:measurement-unavailable; exit 75; }
     _below_count="$(cat "${_lru_keep_file}.cnt" 2>/dev/null || echo 0)"
     [[ "$_below_count" =~ ^[0-9]+$ ]] && kept=$(( kept + _below_count ))
     _lru_candidates=()

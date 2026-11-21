@@ -28,7 +28,12 @@ impl Drop for TestRoot {
     }
 }
 
-fn preview(fixture: &TestRoot, native: Option<&Path>, simulate_failure: bool) -> Output {
+fn preview(
+    fixture: &TestRoot,
+    native: Option<&Path>,
+    simulate_failure: bool,
+    minimum_kb: Option<u64>,
+) -> Output {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/cleanup_scratch_top_level.sh");
     let mut command = Command::new("/bin/bash");
@@ -60,6 +65,9 @@ fn preview(fixture: &TestRoot, native: Option<&Path>, simulate_failure: bool) ->
     if let Some(native) = native {
         command.env("DISK_MAGICIAN_RUST_ARTIFACT_BIN", native);
     }
+    if let Some(minimum) = minimum_kb {
+        command.env("DISK_MAGICIAN_SCRATCH_MIN_KB", minimum.to_string());
+    }
     if simulate_failure {
         command.env("FAIL_VALIDATION", "1");
     }
@@ -86,9 +94,9 @@ fn registered_preview_uses_native_artifact_pilot_only_when_selected() {
         "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$CALL_LOG\"\nif [ \"$1\" = scratch-artifact-validate ] && [ \"$FAIL_VALIDATION\" = 1 ]; then\n  printf '%s\\0' \"$FIXTURE_ROOT/project/build\"\n  printf '%s\\n' symlink-component >&2\n  exit 75\nfi\nexec \"$NATIVE_BINARY\" \"$@\"\n",
     );
 
-    let legacy = preview(&root, None, false);
+    let legacy = preview(&root, None, false, None);
     assert!(!root.0.join("native.log").exists());
-    let selected = preview(&root, Some(&native), false);
+    let selected = preview(&root, Some(&native), false, None);
     assert_eq!(
         fs::read_to_string(root.0.join("native.log")).unwrap(),
         "scratch-artifact-discover\nscratch-artifact-validate\n",
@@ -118,7 +126,7 @@ printf '%s\n' "$1" >> "$CALL_LOG"
 exec "$NATIVE_BINARY" "$@"
 "#,
     );
-    let fallback = preview(&root, Some(&fallback), false);
+    let fallback = preview(&root, Some(&fallback), false, None);
     assert_eq!(fallback.status.code(), legacy.status.code());
     let fallback_stdout = String::from_utf8_lossy(&fallback.stdout);
     assert!(fallback_stdout.contains("lru: stop="), "{fallback_stdout}");
@@ -130,7 +138,7 @@ exec "$NATIVE_BINARY" "$@"
         .unwrap()
         .ends_with("legacy-required\nscratch-artifact-validate\n"));
 
-    let failed = preview(&root, Some(&native), true);
+    let failed = preview(&root, Some(&native), true, None);
     let stdout = String::from_utf8_lossy(&failed.stdout);
     assert_eq!(failed.status.code(), Some(75), "{stdout}");
     assert!(
@@ -138,6 +146,49 @@ exec "$NATIVE_BINARY" "$@"
         "{stdout}"
     );
     assert!(!stdout.contains("would-remove:"), "{stdout}");
+    #[cfg(target_os = "linux")]
+    {
+        let measured = Command::new("du")
+            .args(["-sk", "--"])
+            .arg(artifact.parent().unwrap())
+            .output()
+            .unwrap();
+        assert!(measured.status.success());
+        let measured = String::from_utf8(measured.stdout).unwrap();
+        let threshold = measured
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            + 1;
+        let limited_legacy = preview(&root, None, false, Some(threshold));
+        let limited_native = preview(&root, Some(&native), false, Some(threshold));
+        let verdicts = |output: &Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.starts_with("kept:") || line.starts_with("scanned="))
+                .map(|line| {
+                    line.split(" data_free_before_bytes=")
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = verdicts(&limited_legacy);
+        assert!(expected.iter().any(|line| line.starts_with("scanned=")));
+        assert_ne!(
+            expected,
+            verdicts(&legacy),
+            "fixture must exercise size filtering"
+        );
+        assert_eq!(limited_native.status.code(), limited_legacy.status.code());
+        assert_eq!(verdicts(&limited_native), expected);
+        assert!(fs::read_to_string(root.0.join("native.log"))
+            .unwrap()
+            .ends_with("scratch-artifact-sizes\n"));
+    }
     assert_eq!(
         fs::read_to_string(artifact.join("fresh.txt")).unwrap(),
         "retained"
