@@ -14,7 +14,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; output is JSON
   diskm history --state-dir DIR [--days 7|30] [--json]
   diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_FILE [--path ...] | --paths-from FILE
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all]
-  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--dry-run]
+  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
 
 Preview --deadline-ms bounds Scratch discovery. With --resume-state, it supports
 48-hour and six-hour live inventory. Verdict
@@ -60,6 +60,7 @@ enum Operation {
         max_candidates: usize,
         scan_deadline: Option<Duration>,
         resume_state: Option<PathBuf>,
+        recheck_paths: Vec<PathBuf>,
     },
 }
 
@@ -108,6 +109,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     let mut max_candidates = None;
     let mut preview_deadline_ms = None;
     let mut preview_resume_state = None;
+    let mut recheck_paths = Vec::new();
     let mut positional_only = false;
 
     while let Some(arg) = args.next() {
@@ -145,6 +147,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             Some("--resume-state") if command == "preview" && preview_resume_state.is_none() => {
                 preview_resume_state =
                     Some(PathBuf::from(required_value(&mut args, "--resume-state")?));
+            }
+            Some("--recheck") if command == "preview" => {
+                recheck_paths.push(PathBuf::from(required_value(&mut args, "--recheck")?));
             }
             Some("--state-dir") if command != "scan" && state_dir.is_none() => {
                 state_dir = Some(PathBuf::from(required_value(&mut args, "--state-dir")?));
@@ -202,7 +207,20 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
                         .into(),
                 );
             }
-            if state_dir.is_none() && matches!(preview_scope, "scratch" | "ledger") {
+            if !recheck_paths.is_empty() {
+                if preview_resume_state.is_none() || preview_scope != "scratch" {
+                    return Err("preview --recheck requires Scratch and --resume-state".into());
+                }
+                if preview_deadline_ms.is_some() {
+                    return Err(
+                        "preview --deadline-ms bounds scans; --recheck checks exact files".into(),
+                    );
+                }
+            }
+            if recheck_paths.is_empty()
+                && state_dir.is_none()
+                && matches!(preview_scope, "scratch" | "ledger")
+            {
                 return Err("this preview scope requires --state-dir".into());
             }
             Ok(Operation::Preview {
@@ -212,6 +230,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
                 max_candidates: max_candidates.unwrap_or(20),
                 scan_deadline: preview_deadline_ms.map(Duration::from_millis),
                 resume_state: preview_resume_state,
+                recheck_paths,
             })
         }
         _ => unreachable!("command already validated"),
@@ -362,7 +381,21 @@ fn run(operation: Operation) -> io::Result<u8> {
             max_candidates,
             scan_deadline,
             resume_state,
+            recheck_paths,
         } => {
+            if !recheck_paths.is_empty() {
+                let checkpoint = resume_state
+                    .as_deref()
+                    .expect("recheck requires a checkpoint");
+                let report = preview::recheck_checkpoint_files(
+                    checkpoint,
+                    min_hours,
+                    max_candidates,
+                    &recheck_paths,
+                )?;
+                print_json(&report)?;
+                return Ok(0);
+            }
             let report = if let Some(checkpoint) = resume_state.as_deref() {
                 preview::scope_report_resumable(
                     scope,

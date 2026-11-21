@@ -113,3 +113,10 @@ the remaining queue when usage reaches the target or measurement is unavailable.
 An interrupted mutation reports `recovery_required` and leaves the in-flight
 entry in the checkpoint. The existing legacy writer lock returns immediately
 under contention.
+
+Pass repeatable `--recheck ABSOLUTE_PATH` arguments with `--resume-state`
+to obtain fresh verdicts for selected regular files already in that
+checkpoint. The recheck honors `--max-candidates` and the checkpoint's
+original age cutoff. It preserves the checkpoint and reports only the
+selected paths. An eligible result can be nominated via the exact
+manifest command, whose apply path independently revalidates it.
