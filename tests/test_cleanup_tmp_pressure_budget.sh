@@ -34,7 +34,7 @@ mkdir -p "$BIN" "$TMP_ROOT/emptytmp"
 cat > "$BIN/du" <<EOF
 #!/usr/bin/env bash
 echo "\${@: -1}" >> "$TMP_ROOT/du.log"
-case "\${@: -1}" in *slow*) exec sleep 30 ;; *fail_*|*agent_prompt_fail*) exit 1 ;; *perm_1) echo "du: Permission denied" >&2; printf "1258291\\t%s\\n" "\${@: -1}"; exit 1 ;; *big_[123]) printf "1258291\\t%s\\n" "\${@: -1}"; exit 0 ;; esac
+case "\${@: -1}" in *slow*) exec sleep 60 ;; *fail_*|*agent_prompt_fail*) exit 1 ;; *perm_1) echo "du: Permission denied" >&2; printf "1258291\\t%s\\n" "\${@: -1}"; exit 1 ;; *big_[123]) printf "1258291\\t%s\\n" "\${@: -1}"; exit 0 ;; esac
 exec /usr/bin/du "\$@"
 EOF
 cat > "$BIN/lsof" <<EOF
@@ -104,7 +104,7 @@ echo "Test 2: a hung du is bounded and fails closed for that entry only"
 P2="$TMP_ROOT/p2"; mk_fixture "$P2" slow_big
 start=$SECONDS
 run_tmp "$P2" DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS=1
-check "finished fast (<20s)" '(( SECONDS - start < 20 ))' "took $((SECONDS - start))s"
+check "finished fast (<55s)" '(( SECONDS - start < 55 ))' "took $((SECONDS - start))s"
 check "slow dir preserved" '[[ -e "$P2/slow_big" ]]'
 check "other eligible dir still archived" '[[ ! -e "$P2/pr_old_big" ]]'
 

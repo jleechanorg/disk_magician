@@ -16,26 +16,110 @@ concurrency:
 jobs:
   test:
     name: Test and lint
-    runs-on: macos-15
-    timeout-minutes: 90
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJson(vars.SELF_HOSTED_RUNNER_LABELS || '["self-hosted","Linux","self-hosted-mikey"]') }}
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.13"
-
-      - name: Install test tools
+      - name: Set up isolated Python venv and rootless Linux CI tools
         run: |
-          python3 -m pip install pytest
-          command -v timeout >/dev/null 2>&1 || brew install coreutils
-          command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
-          command -v rg >/dev/null 2>&1 || brew install ripgrep
-          command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
+          export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
+          PY_BIN="$(command -v python3.13 || command -v python3.12 || command -v python3)"
+          VENV_DIR="${RUNNER_TEMP}/diskm-ci-venv"
+          if command -v uv >/dev/null 2>&1; then
+            uv venv --seed --clear "$VENV_DIR" --python "$PY_BIN"
+            uv pip install --python "$VENV_DIR/bin/python" pytest "PyYAML>=6.0" shellcheck-py
+          else
+            "$PY_BIN" -m venv --clear "$VENV_DIR"
+            "$VENV_DIR/bin/pip" install -q pytest "PyYAML>=6.0" shellcheck-py
+          fi
+          VENV_PYTHON="${VENV_DIR}/bin/python"
+          CI_HOME="${RUNNER_TEMP}/ci-home"
+          CI_SHIMS="${RUNNER_TEMP}/ci-lowprio-shims"
+          SYSROOT="${RUNNER_TEMP}/ci-rootless-sysroot"
+          mkdir -p "$CI_HOME/.local/bin" "$CI_SHIMS" "$SYSROOT/usr/bin" "${RUNNER_TEMP}/ci-debs"
+          printf '#!/usr/bin/env bash\nexec "%s/disk_magician.sh" "$@"\n' "${GITHUB_WORKSPACE}" > "$CI_HOME/.local/bin/diskm"
+          chmod +x "$CI_HOME/.local/bin/diskm"
+          if [ "$(uname -s)" = "Linux" ]; then
+            (
+              cd "${RUNNER_TEMP}/ci-debs"
+              for pkg_spec in \
+                "l/lsof:lsof_4.99." \
+                "libt/libtirpc:libtirpc3t64_" \
+                "k/krb5:libgssapi-krb5-2_" \
+                "k/krb5:libkrb5-3_" \
+                "k/krb5:libk5crypto3_" \
+                "k/krb5:libkrb5support0_" \
+                "e/e2fsprogs:libcom-err2_" \
+                "k/keyutils:libkeyutils1_" \
+                "r/rsync:rsync_3.2.7" \
+                "p/popt:libpopt0_1.19" \
+                "x/xxhash:libxxhash0_0.8.2" \
+                "s/sqlite3:sqlite3_3.45." \
+                "s/sqlite3:libsqlite3-0_3.45." \
+                "r/readline:libreadline8t64_" \
+                "p/psmisc:psmisc_"; do
+                dir="${pkg_spec%%:*}"
+                pfx="${pkg_spec#*:}"
+                if [ "$pfx" = "lsof_4.99." ] && command -v lsof >/dev/null 2>&1; then
+                  continue
+                fi
+                if [ "$pfx" = "rsync_3.2.7" ] && command -v rsync >/dev/null 2>&1; then
+                  continue
+                fi
+                if [ "$pfx" = "sqlite3_3.45." ] && command -v sqlite3 >/dev/null 2>&1; then
+                  continue
+                fi
+                if [ "$pfx" = "psmisc_" ] && command -v fuser >/dev/null 2>&1; then
+                  continue
+                fi
+                base="https://mirrors.edge.kernel.org/ubuntu/pool/main/${dir}/"
+                deb="$(curl -fsSL "$base" | grep -oE 'href="[^"]*_amd64\.deb"' | sed 's/href="//;s/"//' | grep -F "$pfx" | tail -n 1 || true)"
+                if [ -z "$deb" ]; then
+                  deb="$(curl -fsSL "$base" | grep -oE 'href="[^"]*_amd64\.deb"' | sed 's/href="//;s/"//' | tail -n 1)"
+                fi
+                curl -fsSL "${base}${deb}" -o "${pfx}.deb"
+                dpkg-deb -x "${pfx}.deb" "$SYSROOT"
+              done
+            )
+            if ! command -v rg >/dev/null 2>&1; then
+              curl -fsSL https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz | tar -xz --strip-components=1 -C "$CI_SHIMS" ripgrep-14.1.1-x86_64-unknown-linux-musl/rg
+            fi
+            if ! gitleaks git --help >/dev/null 2>&1; then
+              curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz | tar -xz -C "$CI_SHIMS" gitleaks
+            fi
+            for bin in lsof rsync sqlite3 fuser; do
+              if ! command -v "$bin" >/dev/null 2>&1; then
+                target="$SYSROOT/usr/bin/$bin"
+                [ -x "$target" ] || target="$SYSROOT/bin/$bin"
+                if [ -x "$target" ]; then
+                  printf '#!/usr/bin/env bash\nexport LD_LIBRARY_PATH="%s/usr/lib/x86_64-linux-gnu:%s/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "%s" "$@"\n' "$SYSROOT" "$SYSROOT" "$target" > "$CI_SHIMS/$bin"
+                  chmod +x "$CI_SHIMS/$bin"
+                fi
+              fi
+            done
+          fi
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"
+          rm -f "$GIT_CONFIG_GLOBAL"
+          GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.name "disk_magician CI"
+          GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.email "ci@disk-magician.test"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$CI_SHIMS" >> "$GITHUB_PATH"
+          echo "$CI_HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
+          echo "VENV_PYTHON=${VENV_DIR}/bin/python" >> "$GITHUB_ENV"
+          echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"
+          echo "CI_SHIMS=${CI_SHIMS}" >> "$GITHUB_ENV"
+          echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_TEST_JOBS=2" >> "$GITHUB_ENV"
+          "$VENV_PYTHON" -c 'import os, sys; assert os.path.realpath(sys.prefix) == os.path.realpath(os.environ["RUNNER_TEMP"] + "/diskm-ci-venv"), sys.prefix; print(sys.version, sys.executable)'
 
       - name: Verify package-tree synchronization
         run: bash ./disk_magician.sh sync-package-tree --check
@@ -45,26 +129,281 @@ jobs:
 
       - name: Check shell syntax and ShellCheck errors
         run: |
+          SHELL_FILES=()
           while IFS= read -r -d '' candidate; do
-            case "$(head -n 1 "$candidate")" in
+            IFS= read -r first_line < "$candidate" || true
+            case "$first_line" in
               *bash|*sh)
-                /bin/bash -n "$candidate"
-                shellcheck --severity=error --external-sources "$candidate"
+                SHELL_FILES+=("$candidate")
                 ;;
             esac
           done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
+          if [ "${#SHELL_FILES[@]}" -gt 0 ]; then
+            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 1 -P 4 /bin/bash -n
+            printf '%s\0' "${SHELL_FILES[@]}" | xargs -0 -n 25 -P 2 shellcheck --severity=error
+          fi
 
       - name: Run Python tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+        env:
+          HOME: ${{ env.CI_HOME }}
+        run: |
+          unset BASH_ENV
+          "$VENV_PYTHON" - <<'PY'
+          import glob
+          import pathlib
+          import subprocess
+          import sys
+
+          darwin_host_only = {
+              "test_lease_recover_lock.py",
+              "test_c14_cli_hygiene.py",
+              "test_cli_reliability.py",
+              "test_disk_frontier_scan.py",
+              "test_disk_inventory.py",
+              "test_disk_observer.py",
+              "test_fleet_source_root.py",
+              "test_frontier_intrinsic_accounting.py",
+              "test_govern_reconcile_measure.py",
+              "test_history_diff.py",
+              "test_job_inventory.py",
+              "test_reclaim_scheduler_coverage.py",
+              "test_render_topdown_ledger.py",
+              "test_review_governor_edges.py",
+              "test_scratch_pressure.py",
+              "test_snapshot_failure_diagnostics.py",
+          }
+          suites = sorted(
+              p for p in glob.glob("tests/test_*.py")
+              if pathlib.Path(p).name not in darwin_host_only
+          )
+          assert len(suites) >= 75, f"unexpectedly few Linux Python suites: {len(suites)}"
+          for idx in range(0, len(suites), 10):
+              batch = suites[idx : idx + 10]
+              rc = subprocess.call(
+                  [sys.executable, "-m", "pytest", "-q", *batch],
+                  stdin=subprocess.DEVNULL,
+              )
+              if rc != 0:
+                  sys.exit(rc)
+          PY
 
       - name: Run inventory integration tests
-        run: >-
-          python3 -m pytest -q
-          tests/test_directory_inventory.py
-          tests/test_directory_ledger_export.py
-          tests/test_inventory_history_import.py
-          tests/test_inventory_retention_cli.py
-          tests/test_volume_admin_transport.py
+        env:
+          HOME: ${{ env.CI_HOME }}
+        run: |
+          unset BASH_ENV
+          "$VENV_PYTHON" -m pytest -q \
+            tests/test_directory_inventory.py \
+            tests/test_directory_ledger_export.py \
+            tests/test_inventory_history_import.py \
+            tests/test_inventory_retention_cli.py \
+            tests/test_volume_admin_transport.py
+
+      - name: Run Linux and cross-platform shell tests
+        env:
+          HOME: ${{ env.CI_HOME }}
+          DISK_MAGICIAN_LSOF_BIN: ${{ env.CI_SHIMS }}/lsof
+        run: |
+          unset BASH_ENV
+          "$VENV_PYTHON" - <<'PY'
+          import glob
+          import pathlib
+          import subprocess
+          import sys
+
+          # Suites requiring native Darwin host facilities (launchctl/plutil/vm_stat/
+          # BSD date -v/overlayfs-incompatible /proc cwd invariants) run on jobs.test-macos
+          # when vars.EZGHA_NATIVE_MACOS_LEG == 'enabled' (bead jleechan-hxz0).
+          darwin_or_baremetal_only = {
+              "test_artifact_verdict.sh",
+              "test_artifact_verdict_cache_rows.sh",
+              "test_artifact_verdict_or_proofs.sh",
+              "test_birth_audit.sh",
+              "test_c14_adoption_lease.sh",
+              "test_c14_scope_t3.sh",
+              "test_check_launchd_fleet.sh",
+              "test_cleanup_claude_state.sh",
+              "test_cleanup_codex_db.sh",
+              "test_cleanup_colima_probe.sh",
+              "test_cleanup_mirror_clones.sh",
+              "test_cleanup_safety.sh",
+              "test_cleanup_scratch_top_level.sh",
+              "test_cleanup_task_scratch.sh",
+              "test_cleanup_tmp_large_protections.sh",
+              "test_cleanup_worktree_deps.sh",
+              "test_cleanup_worktree_venvs.sh",
+              "test_cleanup_worktree_venvs_dryrun_gates.sh",
+              "test_cleanup_worktree_venvs_tracked.sh",
+              "test_cleanup_worktrees_merged_fastpath.sh",
+              "test_cleanup_worktrees_repo_local.sh",
+              "test_cleanup_worktrees_single_age_walk.sh",
+              "test_cwd_scanner.sh",
+              "test_disk_snapshot_nonfile_signals.sh",
+              "test_disk_snapshot_swap_vm.sh",
+              "test_diskm_measure.sh",
+              "test_git_shim_admit.sh",
+              "test_govern.sh",
+              "test_hands_off_auto_cleanup.sh",
+              "test_install_launchd_sweepers_lock.sh",
+              "test_install_launchd_sweepers_preflight.sh",
+              "test_install_root_frontier_runner.sh",
+              "test_linux_scratch_autotrim.sh",
+              "test_main_sweeper.sh",
+              "test_post_job_docker_prune.sh",
+              "test_prune_aside_sessions.sh",
+              "test_scratch_lease_busy_streak.sh",
+              "test_scratch_prune_lru_budget.sh",
+              "test_sim_lifecycle.sh",
+              "test_slim_worktree_checkouts.sh",
+              "test_state_repo_e2e.sh",
+              "test_sweeper_health.sh",
+              "test_sweeper_health_dispatch.sh",
+              "test_symlink_shared_gemini.sh",
+              "test_symlink_shared_venvs.sh",
+              "test_vacuum_hermes_state.sh",
+              "test_volume_reclaim.sh",
+              "test_worktree_create_hook.sh",
+              "test_worktree_hygiene_preserve_wip.sh",
+              "test_worktree_ignored_fail_closed.sh",
+              "test_worktree_new.sh",
+              "test_worktree_reap_dispatch.sh",
+              "test_worktree_reuse_real.sh",
+          }
+          suites = sorted(
+              p for p in glob.glob("tests/test_*.sh")
+              if pathlib.Path(p).name not in darwin_or_baremetal_only
+          )
+          assert len(suites) >= 165, f"unexpectedly few Linux shell suites: {len(suites)}"
+          rc = subprocess.call(
+              [sys.executable, "./scripts/run_shell_tests_parallel.py", "--timeout", "600", *suites],
+              stdin=subprocess.DEVNULL,
+          )
+          sys.exit(rc)
+          PY
+
+      - name: Clean up isolated CI venv
+        if: always()
+        run: |
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${RUNNER_TEMP}" != "/" ]; then
+            rm -rf "${RUNNER_TEMP:?}/diskm-ci-venv" "${RUNNER_TEMP:?}/ci-home" "${RUNNER_TEMP:?}/ci-lowprio-shims" "${RUNNER_TEMP:?}/ci-rootless-sysroot" "${RUNNER_TEMP:?}/ci-debs" "${RUNNER_TEMP:?}/gitconfig-ci"
+          fi
+
+  # Native macOS leg: gated on repository variable EZGHA_NATIVE_MACOS_LEG=enabled
+  # while non-iOS Mac runners are parked under bead jleechan-hxz0 (matching
+  # jleechanorg/user_scope policy-installer-tests.yml so PRs never queue forever
+  # or fall back to paid GitHub-hosted macos-15).
+  test-macos:
+    name: Test and lint (macOS native)
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.EZGHA_NATIVE_MACOS_LEG == 'enabled'
+    runs-on: ${{ fromJson(vars.NATIVE_MACOS_RUNNER_LABELS || '["self-hosted-native-macos"]') }}
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up isolated Python 3.13 venv and verify tools
+        run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"
+          PY_BIN="$(command -v python3.13 || command -v python3.12 || command -v python3)"
+          VENV_DIR="${RUNNER_TEMP}/diskm-ci-venv"
+          if command -v uv >/dev/null 2>&1; then
+            uv venv --seed --clear "$VENV_DIR" --python "$PY_BIN"
+            uv pip install --python "$VENV_DIR/bin/python" pytest "PyYAML>=6.0"
+          else
+            "$PY_BIN" -m venv --clear "$VENV_DIR"
+            "$VENV_DIR/bin/pip" install -q pytest "PyYAML>=6.0"
+          fi
+          VENV_PYTHON="${VENV_DIR}/bin/python"
+          CI_HOME="${RUNNER_TEMP}/ci-home"
+          mkdir -p "$CI_HOME/.local/bin"
+          printf '#!/usr/bin/env bash\nexec "%s/disk_magician.sh" "$@"\n' "${GITHUB_WORKSPACE}" > "$CI_HOME/.local/bin/diskm"
+          chmod +x "$CI_HOME/.local/bin/diskm"
+          if [ -f "$HOME/.disk_magician_state/volumes/registry.json" ]; then
+            mkdir -p "$CI_HOME/.disk_magician_state/volumes"
+            cp "$HOME/.disk_magician_state/volumes/registry.json" "$CI_HOME/.disk_magician_state/volumes/registry.json"
+            HOST_CFG="$("$VENV_PYTHON" ./scripts/resolve_config.py || true)"
+            if [ -n "$HOST_CFG" ] && [ -f "$HOST_CFG" ]; then
+              mkdir -p "$CI_HOME/.config/disk-magician"
+              "$VENV_PYTHON" -c '
+          import json, pathlib, sys
+          tpl = json.loads(pathlib.Path("config.json.template").read_text(encoding="utf-8"))
+          host = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if "volumes" in host:
+              tpl["volumes"] = host["volumes"]
+          pathlib.Path(sys.argv[2]).write_text(json.dumps(tpl, indent=2) + "\n", encoding="utf-8")
+          ' "$HOST_CFG" "$CI_HOME/.config/disk-magician/config.json"
+            fi
+          fi
+          CI_SHIMS="${RUNNER_TEMP}/ci-lowprio-shims"
+          mkdir -p "$CI_SHIMS" "${RUNNER_TEMP}/ci-darwin-user-temp/T" "${RUNNER_TEMP}/ci-darwin-user-temp/X"
+          printf '%s\n' '#!/usr/bin/env bash' '[[ "${1:-}" == "-b" ]] && shift' 'exec "$@"' > "$CI_SHIMS/taskpolicy"
+          printf '%s\n' '#!/usr/bin/env bash' 'if [[ "${1:-}" == "-n" ]]; then shift 2; fi' 'exec "$@"' > "$CI_SHIMS/nice"
+          ln -sf "$( [ -x /opt/homebrew/bin/git ] && echo /opt/homebrew/bin/git || echo /usr/bin/git )" "$CI_SHIMS/git"
+          ln -sf /bin/rm "$CI_SHIMS/rm"
+          ln -sf /usr/bin/rsync "$CI_SHIMS/rsync"
+          cat > "$CI_SHIMS/getconf" <<'EOF'
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "DARWIN_USER_TEMP_DIR" && -n "${CI_DARWIN_USER_TEMP_DIR:-}" ]]; then
+            mkdir -p "$CI_DARWIN_USER_TEMP_DIR"
+            printf '%s/\n' "${CI_DARWIN_USER_TEMP_DIR%/}"
+            exit 0
+          fi
+          exec /usr/bin/getconf "$@"
+          EOF
+          chmod +x "$CI_SHIMS/taskpolicy" "$CI_SHIMS/nice" "$CI_SHIMS/getconf"
+          GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/gitconfig-ci"
+          rm -f "$GIT_CONFIG_GLOBAL"
+          GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.name "disk_magician CI"
+          GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" git config --global user.email "ci@disk-magician.test"
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$CI_SHIMS" >> "$GITHUB_PATH"
+          echo "$VENV_DIR/bin" >> "$GITHUB_PATH"
+          echo "VENV_PYTHON=${VENV_DIR}/bin/python" >> "$GITHUB_ENV"
+          echo "CI_HOME=${CI_HOME}" >> "$GITHUB_ENV"
+          echo "CI_SHIMS=${CI_SHIMS}" >> "$GITHUB_ENV"
+          echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_FRONTIER_ROOT_JSON=${RUNNER_TEMP}/nonexistent-frontier.json" >> "$GITHUB_ENV"
+          echo "DISK_MAGICIAN_TEST_JOBS=8" >> "$GITHUB_ENV"
+          command -v timeout >/dev/null 2>&1 || brew install coreutils
+          command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
+          command -v rg >/dev/null 2>&1 || brew install ripgrep
+          command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
+          command -v jq >/dev/null 2>&1 || brew install jq
+
+      - name: Run Python tests
+        env:
+          HOME: ${{ env.CI_HOME }}
+        run: |
+          unset BASH_ENV
+          if [ -x /usr/bin/caffeinate ]; then
+            /usr/bin/caffeinate -i "$VENV_PYTHON" -m pytest -q tests --ignore=tests/test_lease_recover_lock.py
+            /usr/bin/caffeinate -i "$VENV_PYTHON" tests/test_lease_recover_lock.py
+          else
+            "$VENV_PYTHON" -m pytest -q tests --ignore=tests/test_lease_recover_lock.py
+            "$VENV_PYTHON" tests/test_lease_recover_lock.py
+          fi
 
       - name: Run shell tests
-        run: bash ./disk_magician.sh test-shell
+        env:
+          HOME: ${{ env.CI_HOME }}
+          CI_DARWIN_USER_TEMP_DIR: ${{ runner.temp }}/ci-darwin-user-temp/T
+          SNAPSHOT_TIMEOUT: "600"
+        run: |
+          unset BASH_ENV
+          if [ -x /usr/bin/caffeinate ]; then
+            /usr/bin/caffeinate -i bash ./disk_magician.sh test-shell --timeout 5400
+          else
+            bash ./disk_magician.sh test-shell --timeout 5400
+          fi
+
+      - name: Clean up isolated CI venv
+        if: always()
+        run: |
+          if [ -n "${RUNNER_TEMP:-}" ] && [ "${RUNNER_TEMP}" != "/" ]; then
+            rm -rf "${RUNNER_TEMP:?}/diskm-ci-venv" "${RUNNER_TEMP:?}/ci-home" "${RUNNER_TEMP:?}/ci-lowprio-shims" "${RUNNER_TEMP:?}/gitconfig-ci" "${RUNNER_TEMP:?}/ci-darwin-user-temp"
+          fi

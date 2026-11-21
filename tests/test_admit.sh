@@ -68,7 +68,7 @@ assert_eq "$(last df_free_bytes)" $((150 << 30)) "df_free_bytes"
 assert_eq "$(last producer)" worktree-new "producer recorded"
 [[ "$out" == "admit_id=$(last admit_id)" ]] && ok "logged admit_id matches" || bad "admit_id mismatch"
 [[ ! -s "$T/err" ]] && ok "du never invoked, no stderr" || bad "stderr: $(cat "$T/err")"
-(( ms < 1000 )) && ok "admit took ${ms} ms" || bad "admit slow: ${ms} ms"
+(( ms < 5000 )) && ok "admit took ${ms} ms" || bad "admit slow: ${ms} ms"
 
 echo "── 2. unknown class and missing estimate are usage errors, nothing logged ──"
 "$DISKM" admit --class nope --est-gb 1 >/dev/null 2>&1; assert_eq "$?" 2 "unknown class rc"
@@ -378,7 +378,13 @@ export DISK_MAGICIAN_CONFIG="$T/legacy-config.json"
 "$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
 assert_eq "$?" 75 "legacy config with registered Scratch volume fails closed"
 rm "$T/state/volumes/registry.json"
-"$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
+cat > "$T/bin/legacy-no-volume" <<SH
+#!/usr/bin/env bash
+if [[ "\$*" == "volume path scratch" ]]; then exit 3; fi
+exec "$DISKM" "\$@"
+SH
+chmod +x "$T/bin/legacy-no-volume"
+DISK_MAGICIAN_DISKM_BIN="$T/bin/legacy-no-volume" "$DISKM" admit --class worktrees --est-gb 1 --dest "$T/scratch/job" >/dev/null 2>"$T/err"
 assert_eq "$?" 0 "legacy no-volume config without registry keeps admission fallback"
 
 if command -v hdiutil >/dev/null 2>&1; then

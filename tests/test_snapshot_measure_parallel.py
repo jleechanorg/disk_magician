@@ -24,13 +24,20 @@ FAKE_WORKER = textwrap.dedent('''\
     shift  # --measure-one
     key="$1"; path="$2"; to="$3"; out="$4"
     d="${FAKE_DIR:?}"
-    echo "$(date +%s.%N) start $key $to" >> "$d/events.log"
-    env > "$d/env.$key"
-    touch "$d/running.$key"
-    echo "$(ls "$d"/running.* | wc -l)" >> "$d/concurrency.log"
-    spec=$(python3 -c "import json,sys; print(json.load(open('$d/spec.json')).get('$key', {}).get('mode','ok'))")
-    secs=$(python3 -c "import json; print(json.load(open('$d/spec.json')).get('$key', {}).get('sleep', 0))")
-    kb=$(python3 -c "import json; print(json.load(open('$d/spec.json')).get('$key', {}).get('kb', 100))")
+    printf '%s start %s %s\\n' "${EPOCHREALTIME:-0}" "$key" "$to" >> "$d/events.log"
+    if [[ "${FAKE_RECORD_ENV:-1}" == "1" ]]; then env > "$d/env.$key"; fi
+    : > "$d/running.$key"
+    shopt -s nullglob
+    _running=("$d"/running.*)
+    shopt -u nullglob
+    printf '%s\\n' "${#_running[@]}" >> "$d/concurrency.log"
+    if [[ -f "$d/spec.$key" ]]; then
+      IFS=$'\\t' read -r spec secs kb < "$d/spec.$key"
+    elif command -v jq >/dev/null 2>&1; then
+      IFS=$'\\t' read -r spec secs kb < <(jq -r --arg k "$key" '.[$k] // {} | [(.mode // "ok"), (.sleep // 0), (.kb // 100)] | @tsv' "$d/spec.json")
+    else
+      IFS=$'\\t' read -r spec secs kb < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])).get(sys.argv[2],{}); print("{}\\t{}\\t{}".format(d.get("mode","ok"), d.get("sleep",0), d.get("kb",100)))' "$d/spec.json" "$key")
+    fi
     if [[ "$spec" == "children" ]]; then
       timeout 120 sleep 120 & echo $! >> "$d/pids"
       ( sleep 120 & echo $! >> "$d/pids"; wait ) &
@@ -207,7 +214,9 @@ class MeasureOrchestratorTests(_TmpCase):
         cfg.write_text(json.dumps({"monitored_dirs": dirs}))
         spec = {d["key"]: {"sleep": round(d.get("timeout", 30) * 0.004, 3)} for d in dirs}
         (env["dir"] / "spec.json").write_text(json.dumps(spec))
-        e = dict(os.environ, FAKE_DIR=str(env["dir"]))
+        for d in dirs:
+            (env["dir"] / f"spec.{d['key']}").write_text(f"ok\t{round(d.get('timeout', 30) * 0.004, 3)}\t100\n")
+        e = dict(os.environ, FAKE_DIR=str(env["dir"]), DISK_MAGICIAN_SHARDING="0", FAKE_RECORD_ENV="0")
         deadline = int(time.time() + 40)
         t0 = time.time()
         r = subprocess.run([sys.executable, str(ORCH), "--config", str(cfg), "--snapshot-script", str(env["worker"]),

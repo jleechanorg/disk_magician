@@ -442,11 +442,20 @@ python3 "$T8_RECEIPT_HELPER" finish --job volume_reclaim --run-id "$run_id" --ou
 printf 'skipped:available-floor:53687091200\n'
 VOLUME_FIXTURE
 chmod +x "$T8_BIN/volume-timeout"
+cat > "$T8_BIN/unconfigured-volume" <<UNCONFIGURED_FIXTURE
+#!/usr/bin/env bash
+if [[ "\$*" == "volume path scratch --for-reclaim" ]]; then
+  exit 3
+fi
+exec "$REPO_ROOT/disk_magician.sh" "\$@"
+UNCONFIGURED_FIXTURE
+chmod +x "$T8_BIN/unconfigured-volume"
 T8_OUT="$TMP_ROOT/t8-first.out"
 if run_capture "$T8_OUT" env -i HOME="$TMP_ROOT/t8-home" PATH="$TMP_ROOT/t8-bin:/usr/bin:/bin" \
   TMPDIR="$TEST_FIXTURE_ROOT" LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T8_ARCHIVE" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T8_PRIVATE_TMP" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T8_TMP" \
+  DISK_MAGICIAN_DISKM_BIN="$T8_BIN/unconfigured-volume" \
   DISK_MAGICIAN_VOLUME_TIMEOUT_BIN="$T8_BIN/volume-timeout" T8_VOLUME_LOG="$TMP_ROOT/t8-volume.log" T8_RECEIPT_HELPER="$REPO_ROOT/scripts/job_receipt.py" \
   bash "$REPO_ROOT/scripts/tmp_scratch_sweep.sh" --clean --deadline-at 0 --cursor "$T8_CURSOR"; then T8_RC=0; else T8_RC=$?; fi
 assert_rc "Test 8: expired deadline exits cleanly" 0 "$T8_RC"
@@ -478,6 +487,7 @@ if run_capture "$T8_OUT" env -i HOME="$TMP_ROOT/t8-home" PATH="$TMP_ROOT/t8-bin:
   TMPDIR="$TEST_FIXTURE_ROOT" LARGE_TMP_ARCHIVE_RETENTION_HOURS=1 LARGE_TMP_ARCHIVE_MAX_HOURS=876000 \
   DISK_MAGICIAN_ARCHIVE_ROOT="$T8_ARCHIVE" DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_CURSOR_DEBUG=1 DISK_MAGICIAN_TEST_SANDBOX="$TMP_ROOT" \
   DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T8_PRIVATE_TMP" DISK_MAGICIAN_TMP_ROOT_OVERRIDE="$T8_TMP" \
+  DISK_MAGICIAN_DISKM_BIN="$T8_BIN/unconfigured-volume" \
   DISK_MAGICIAN_VOLUME_TIMEOUT_BIN="$T8_BIN/volume-timeout" T8_VOLUME_LOG="$TMP_ROOT/t8-volume.log" T8_RECEIPT_HELPER="$REPO_ROOT/scripts/job_receipt.py" \
   bash "$REPO_ROOT/scripts/tmp_scratch_sweep.sh" --clean --deadline-at "$T8_DEADLINE" --cursor "$T8_CURSOR"; then T8_RC=0; else T8_RC=$?; fi
 if [[ "$T8_RC" -ne 0 ]]; then sed 's/^/        | /' "$T8_OUT"; fi

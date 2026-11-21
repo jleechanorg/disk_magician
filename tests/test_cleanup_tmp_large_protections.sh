@@ -100,12 +100,19 @@ assert_missing() {
 run_capture() {
   local out_file="$1"
   shift
-  local arg
+  local arg has_lsof_bin=false
   for arg in "$@"; do
-    case "$arg" in HOME=*) mkdir -p "${arg#HOME=}" && chmod 700 "${arg#HOME=}" ;; esac
+    case "$arg" in
+      HOME=*) mkdir -p "${arg#HOME=}" && chmod 700 "${arg#HOME=}" ;;
+      DISK_MAGICIAN_LSOF_BIN=*) has_lsof_bin=true ;;
+    esac
   done
+  local cmd=("$@")
+  if [[ -n "${DISK_MAGICIAN_LSOF_BIN:-}" && "$has_lsof_bin" == false && "${1:-}" == "env" && "${2:-}" == "-i" ]]; then
+    cmd=("$1" "$2" "DISK_MAGICIAN_LSOF_BIN=$DISK_MAGICIAN_LSOF_BIN" "${@:3}")
+  fi
   set +e
-  "$@" >"$out_file" 2>&1
+  "${cmd[@]}" >"$out_file" 2>&1
   local rc=$?
   set -e
   return "$rc"
