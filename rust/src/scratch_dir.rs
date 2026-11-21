@@ -43,7 +43,7 @@ fn physical_target(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-fn open_child(fd: RawFd, name: &CString) -> io::Result<OwnedFd> {
+pub(crate) fn open_child(fd: RawFd, name: &CString) -> io::Result<OwnedFd> {
     // O_DIRECTORY|O_NOFOLLOW keeps each descent on the checked physical path.
     let child = unsafe { libc::openat(fd, name.as_ptr(), DIRECTORY_FLAGS) };
     if child < 0 {

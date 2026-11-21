@@ -7,10 +7,34 @@
 //! It never follows links, traverses directories, or retries a mismatch.
 
 use std::ffi::{CString, OsStr};
+use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+impl DirectoryIdentity {
+    pub fn from_directory(directory: &File) -> io::Result<Self> {
+        let metadata = directory.metadata()?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a directory",
+            ));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileIdentity {
@@ -65,6 +89,43 @@ fn component_name(name: &OsStr) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "filename contains NUL"))
 }
 
+pub struct BoundParent {
+    directory: File,
+    identity: DirectoryIdentity,
+}
+
+/// Open the recorded parent below a pinned root, without following symlinks
+/// or crossing a device boundary. An empty relative parent names the root.
+pub fn bind_parent(
+    root: &File,
+    root_identity: DirectoryIdentity,
+    relative_parent: &Path,
+    parent_identity: DirectoryIdentity,
+) -> io::Result<BoundParent> {
+    if DirectoryIdentity::from_directory(root)? != root_identity {
+        return Err(io::Error::other("cleanup root identity changed"));
+    }
+    let mut current = root.try_clone()?;
+    let relative = relative_parent.as_os_str().as_bytes();
+    if !relative.is_empty() {
+        for bytes in relative.split(|byte| *byte == b'/') {
+            let name = component_name(OsStr::from_bytes(bytes))?;
+            let child = crate::scratch_dir::open_child(current.as_raw_fd(), &name)?;
+            current = File::from(child);
+            if DirectoryIdentity::from_directory(&current)?.device != root_identity.device {
+                return Err(io::Error::other("cleanup parent crosses a device boundary"));
+            }
+        }
+    }
+    if DirectoryIdentity::from_directory(&current)? != parent_identity {
+        return Err(io::Error::other("cleanup parent identity changed"));
+    }
+    Ok(BoundParent {
+        directory: current,
+        identity: parent_identity,
+    })
+}
+
 // libc exposes POSIX stat field widths per target, so these casts can be
 // redundant on Linux and required on Apple platforms.
 #[allow(clippy::unnecessary_cast)]
@@ -91,7 +152,7 @@ fn file_identity(metadata: &libc::stat) -> FileIdentity {
     }
 }
 
-fn stat_at(parent: &OwnedFd, name: &CString) -> io::Result<libc::stat> {
+fn stat_at(parent: &File, name: &CString) -> io::Result<libc::stat> {
     let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: name is NUL-terminated, parent is a live owned descriptor, and
     // metadata points to writable storage for libc::stat.
@@ -115,34 +176,21 @@ fn stat_at(parent: &OwnedFd, name: &CString) -> io::Result<libc::stat> {
 // libc's device field has target-dependent POSIX integer widths.
 #[allow(clippy::unnecessary_cast)]
 pub fn unlink_regular_file(
-    parent: &OwnedFd,
+    parent: &BoundParent,
     name: &OsStr,
     expected: &FileIdentity,
 ) -> io::Result<UnlinkOutcome> {
     let name = component_name(name)?;
-    let mut parent_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: parent is a live owned descriptor and parent_stat is writable.
-    let result = unsafe { libc::fstat(parent.as_raw_fd(), parent_stat.as_mut_ptr()) };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fstat returned success and initialized the output structure.
-    let parent_stat = unsafe { parent_stat.assume_init() };
-    if parent_stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "pinned parent descriptor is not a directory",
-        ));
-    }
+    let directory = &parent.directory;
 
-    let observed = match stat_at(parent, &name) {
+    let observed = match stat_at(directory, &name) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(UnlinkOutcome::AlreadyMissing)
         }
         Err(error) => return Err(error),
     };
-    let parent_device = parent_stat.st_dev as u64;
+    let parent_device = parent.identity.device;
     if observed.st_mode & libc::S_IFMT != libc::S_IFREG
         || observed.st_dev as u64 != parent_device
         || observed.st_nlink != 1
@@ -154,7 +202,7 @@ pub fn unlink_regular_file(
 
     // SAFETY: name is a validated single component. Flags are zero, so unlinkat
     // cannot remove a directory and cannot traverse the final component.
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
         let error = io::Error::last_os_error();
         if error.kind() == io::ErrorKind::NotFound {
             return Ok(UnlinkOutcome::AlreadyMissing);
@@ -165,7 +213,7 @@ pub fn unlink_regular_file(
     // Removal has happened, but durability is not confirmed unless the
     // containing directory also syncs successfully.
     // SAFETY: parent remains an open directory descriptor.
-    if unsafe { libc::fsync(parent.as_raw_fd()) } != 0 {
+    if unsafe { libc::fsync(directory.as_raw_fd()) } != 0 {
         let error = io::Error::last_os_error();
         return Ok(UnlinkOutcome::RemovedNotSynced(
             error.raw_os_error().unwrap_or(libc::EIO),
@@ -180,7 +228,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::ffi::OsString;
     use std::fs;
-    use std::os::fd::FromRawFd;
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
@@ -206,14 +253,10 @@ mod tests {
             Self(root)
         }
 
-        fn parent(&self) -> OwnedFd {
-            let path = CString::new(self.0.as_os_str().as_bytes()).unwrap();
-            // SAFETY: path is NUL-terminated, flags request a directory fd, and
-            // successful open returns ownership to OwnedFd.
-            let raw = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
-            assert!(raw >= 0, "{}", io::Error::last_os_error());
-            // SAFETY: raw was returned by open and is not wrapped elsewhere.
-            unsafe { OwnedFd::from_raw_fd(raw) }
+        fn parent(&self) -> BoundParent {
+            let root = File::open(&self.0).unwrap();
+            let identity = DirectoryIdentity::from_directory(&root).unwrap();
+            bind_parent(&root, identity, Path::new(""), identity).unwrap()
         }
     }
 
@@ -229,6 +272,27 @@ mod tests {
         identity: &FileIdentity,
     ) -> io::Result<UnlinkOutcome> {
         unlink_regular_file(&fixture.parent(), name, identity)
+    }
+
+    #[test]
+    fn parent_binding_rejects_symlinks_and_replaced_directories() {
+        let fixture = Fixture::new();
+        let root = File::open(&fixture.0).unwrap();
+        let root_id = DirectoryIdentity::from_directory(&root).unwrap();
+        let parent_path = fixture.0.join("nested");
+        fs::create_dir(&parent_path).unwrap();
+        let original = File::open(&parent_path).unwrap();
+        let parent_id = DirectoryIdentity::from_directory(&original).unwrap();
+        assert!(bind_parent(&root, root_id, Path::new("nested"), parent_id).is_ok());
+        let alias = fixture.0.join("alias");
+        symlink(&parent_path, &alias).unwrap();
+        assert!(bind_parent(&root, root_id, Path::new("alias"), parent_id).is_err());
+        assert!(bind_parent(&root, root_id, Path::new("nested/.."), root_id).is_err());
+
+        fs::rename(&parent_path, fixture.0.join("prior")).unwrap();
+        fs::create_dir(&parent_path).unwrap();
+        assert!(bind_parent(&root, root_id, Path::new("nested"), parent_id).is_err());
+        assert!(bind_parent(&root, parent_id, Path::new("nested"), parent_id).is_err());
     }
 
     #[test]
