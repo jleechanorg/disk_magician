@@ -31,6 +31,9 @@ impl Fixture {
             .mode(0o700)
             .create(&root)
             .expect("create private target fixture");
+        // Match the canonical mount paths returned by the real volume resolver
+        // on macOS, where temp_dir may contain a /var -> /private/var alias.
+        let root = fs::canonicalize(root).expect("resolve target fixture root");
         let scratch = root.join("scratch");
         let bin = root.join("bin");
         fs::create_dir(&scratch).unwrap();
