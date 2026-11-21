@@ -39,6 +39,59 @@ pub fn legacy_cli() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Verify the local Scratch registry against the mounted filesystem.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn verified_scratch_volume(
+    expected: Option<&std::path::Path>,
+    for_reclaim: bool,
+) -> io::Result<Option<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = for_reclaim;
+        volume_linux::verified_root(expected)
+    }
+    #[cfg(target_os = "macos")]
+    volume_macos::verified_root(expected, for_reclaim)
+}
+
+/// Read the registered Scratch root. None means the volume authority confirmed absence.
+pub(crate) fn scratch_volume_path(override_cli: Option<PathBuf>) -> io::Result<Option<PathBuf>> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::process::{Command, Stdio};
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if override_cli.is_none() && env::var_os(LEGACY_COMPAT_CLI).is_none() {
+        return verified_scratch_volume(None, false);
+    }
+
+    let backend = match override_cli {
+        Some(path) => path,
+        None => legacy_cli()?,
+    };
+    let output = Command::new(backend)
+        .args(["volume", "path", "scratch"])
+        .stderr(Stdio::null())
+        .output()?;
+    match output.status.code() {
+        Some(3) => Ok(None),
+        Some(0) => {
+            let mut bytes = output.stdout;
+            while bytes.last() == Some(&b'\n') {
+                bytes.pop();
+            }
+            if bytes.is_empty() {
+                return Err(io::Error::other("active Scratch volume returned no path"));
+            }
+            Ok(Some(PathBuf::from(OsString::from_vec(bytes))))
+        }
+        Some(code) => Err(io::Error::other(format!(
+            "Scratch volume lookup failed (rc={code})"
+        ))),
+        None => Err(io::Error::other("Scratch volume lookup was interrupted")),
+    }
+}
+
 pub mod history;
 pub mod preview;
 pub mod preview_scopes;
@@ -51,3 +104,9 @@ mod scratch_recovery;
 pub mod scratch_target;
 pub mod status;
 mod volume_config;
+
+#[cfg(target_os = "linux")]
+pub mod volume_linux;
+
+#[cfg(any(target_os = "macos", test))]
+mod volume_macos;

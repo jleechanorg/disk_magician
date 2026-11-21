@@ -171,6 +171,26 @@ inode. It reports ambiguity or unavailability when a unique record cannot
 be established. The index phase describes that record alone. Recovery
 inspection leaves candidate and quarantine state intact.
 
+In standalone Linux mode, `volume path scratch` and
+`volume verify-mount PATH` read the configured registry and verify the
+ext4 image, mount record, and filesystem UUID. The native loop backend
+also verifies the unique backing-device mapping and mounted UUID.
+The read creates no registry state. On Linux, standalone scratch-dir,
+preview, and manifest nomination use the same native root lookup.
+Explicit legacy compatibility mode
+continues forwarding the volume command family to its selected backend.
+
+Native Scratch target measurement checks the registered filesystem identity and
+used bytes on Linux and macOS. On macOS it verifies the APFS container, volume,
+quota, and mount, then preserves the container capacity and ballast checks.
+Scratch quota pressure alone allows target apply to proceed. Set the explicit compatibility executable for migration fixtures.
+
+On macOS, the standalone lookup verifies the APFS registry, the Data container,
+and the mounted Scratch identity. Ordinary allocation requires valid ballast.
+Reclaim lookup accepts missing ballast, while mount verification only checks the
+mount. Missing configuration or registration is reported as absent only after
+checking for a live Scratch volume in the Data container.
+
 The default 48-hour ledger preview reports incomplete filesystem coverage. It
 reports the total missing nominations and the number of verdicts deferred,
 including nominations after the output cap. Scratch verdicts recheck repository

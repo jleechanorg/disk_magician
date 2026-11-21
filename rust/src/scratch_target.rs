@@ -185,13 +185,34 @@ fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
 }
 
 fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String, u64)> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os(crate::LEGACY_COMPAT_CLI).is_none() {
+        return crate::volume_linux::mounted_usage(&root.path, root.dev, root.ino, filesystem_id);
+    }
+    #[cfg(target_os = "macos")]
+    if std::env::var_os(crate::LEGACY_COMPAT_CLI).is_none() {
+        return crate::volume_macos::mounted_usage(&root.path, root.dev, root.ino, filesystem_id);
+    }
     let output = Command::new(crate::legacy_cli()?)
         .args(["volume", "status", "--snapshot"])
         .output()?;
-    if !output.status.success() {
+    let status = output.status.code();
+    if !matches!(status, Some(0 | 1)) {
         return Err(io::Error::other("Scratch volume status unavailable"));
     }
     let document: Value = serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
+    // Scratch quota pressure is a reason to reclaim. Other alarms still
+    // defer target apply, even when an allocated-byte reading exists.
+    if status == Some(1)
+        && !document["alarms"].as_array().is_some_and(|alarms| {
+            !alarms.is_empty()
+                && alarms
+                    .iter()
+                    .all(|alarm| matches!(alarm.as_str(), Some("volume_high" | "volume_full")))
+        })
+    {
+        return Err(io::Error::other("Scratch volume status unavailable"));
+    }
     let row = document["volumes"]
         .as_array()
         .and_then(|rows| rows.iter().find(|row| row["class"] == "scratch"))

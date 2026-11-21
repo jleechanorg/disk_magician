@@ -106,6 +106,7 @@ exit 64
                 ))
                 .unwrap(),
             )
+            .env("DISKM_LEGACY_COMPAT_CLI", self.bin.join("disk-magician"))
             .env("CALL_LOG", &self.calls)
             .env("FAKE_SCRATCH_ROOT", &self.scratch)
             .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")

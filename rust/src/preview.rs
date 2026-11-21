@@ -123,15 +123,13 @@ fn ledger_paths(state_dir: &Path, root: &Path) -> io::Result<Vec<(PathBuf, Strin
 }
 
 pub(crate) fn registered_scratch() -> io::Result<(PathBuf, u64)> {
-    let output = Command::new(crate::legacy_cli()?)
-        .args(["volume", "path", "scratch"])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other("registered Scratch volume is unavailable"));
-    }
-    let path = String::from_utf8(output.stdout).map_err(io::Error::other)?;
-    let root = PathBuf::from(path.trim_end_matches(['\n', '\r']));
-    if !root.is_absolute() || root == Path::new("/") || fs::canonicalize(&root)? != root {
+    let root = crate::scratch_volume_path(None)?
+        .ok_or_else(|| io::Error::other("registered Scratch volume is unavailable"))?;
+    if root.to_str().is_none()
+        || !root.is_absolute()
+        || root == Path::new("/")
+        || fs::canonicalize(&root)? != root
+    {
         return Err(io::Error::other("invalid registered Scratch root"));
     }
     let info = fs::symlink_metadata(&root)?;

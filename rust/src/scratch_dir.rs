@@ -1,44 +1,21 @@
 //! Scratch directory resolution and contained allocation.
 
 use std::env;
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{CString, OsStr};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
 
 const DIRECTORY_FLAGS: i32 = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 fn scratch_root() -> io::Result<PathBuf> {
-    let backend = match env::var_os("DISK_MAGICIAN_DISKM_BIN").filter(|path| !path.is_empty()) {
-        Some(path) => PathBuf::from(path),
-        None => crate::legacy_cli()?,
-    };
-    let output = Command::new(backend)
-        .args(["volume", "path", "scratch"])
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| io::Error::other("configured Disk Magician CLI is unavailable"))?;
-    match output.status.code() {
-        Some(3) => Ok("/tmp".into()),
-        Some(0) => {
-            let mut bytes = output.stdout;
-            while bytes.last() == Some(&b'\n') {
-                bytes.pop();
-            }
-            if bytes.is_empty() {
-                return Err(io::Error::other("active Scratch volume returned no path"));
-            }
-            Ok(PathBuf::from(OsString::from_vec(bytes)))
-        }
-        Some(code) => Err(io::Error::other(format!(
-            "Scratch volume lookup failed (rc={code})"
-        ))),
-        None => Err(io::Error::other("Scratch volume lookup was interrupted")),
-    }
+    let explicit = env::var_os("DISK_MAGICIAN_DISKM_BIN")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    Ok(crate::scratch_volume_path(explicit)?.unwrap_or_else(|| "/tmp".into()))
 }
 
 // Resolve existing inward symlinks without allowing a nonexistent suffix to
