@@ -48,16 +48,23 @@ pub(crate) fn configuration(home: &Path) -> io::Result<Value> {
     if config.is_file() {
         return json_file(&config);
     }
-    packaged_configuration(&env::current_exe()?)
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    packaged_configuration(&env::current_exe()?, crate_dir.parent())
 }
 
-fn packaged_configuration(executable: &Path) -> io::Result<Value> {
-    // Source and installed distributions can pair the binary with the existing
-    // Disk Magician package config and template, including a Cargo target dir.
-    if let Some(package) = executable.ancestors().skip(1).find(|directory| {
+fn packaged_configuration(executable: &Path, source_package: Option<&Path>) -> io::Result<Value> {
+    // A relocated installation owns its colocated config. A development
+    // build with CARGO_TARGET_DIR outside the tree still belongs to its source package.
+    let is_package = |directory: &&Path| {
         directory.join("config.json.template").is_file()
             || directory.join("disk_magician.sh").is_file()
-    }) {
+    };
+    let package = executable
+        .ancestors()
+        .skip(1)
+        .find(is_package)
+        .or_else(|| source_package.filter(is_package));
+    if let Some(package) = package {
         for candidate in ["config.json", "config.json.template"] {
             let path = package.join(candidate);
             if path.is_file() {
@@ -73,21 +80,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn package_config_precedes_the_template_even_for_a_cargo_build() {
+    fn package_config_precedes_template_for_in_tree_and_external_targets() {
         let root = env::temp_dir().join(format!("diskm-volume-config-{}", std::process::id()));
-        fs::create_dir(&root).unwrap();
-        let template = root.join("config.json.template");
-        let config = root.join("config.json");
+        let package = root.join("package");
+        fs::create_dir_all(&package).unwrap();
+        let template = package.join("config.json.template");
+        let config = package.join("config.json");
         fs::write(&template, r#"{"source":"template"}"#).unwrap();
-        let executable = root.join("rust/target/debug/diskm");
+        let in_tree = package.join("rust/target/debug/diskm");
+        let external = root.join("external-target/debug/diskm");
         assert_eq!(
-            packaged_configuration(&executable).unwrap()["source"],
+            packaged_configuration(&in_tree, None).unwrap()["source"],
             "template"
         );
         fs::write(&config, r#"{"source":"package config"}"#).unwrap();
         assert_eq!(
-            packaged_configuration(&executable).unwrap()["source"],
+            packaged_configuration(&in_tree, None).unwrap()["source"],
             "package config"
+        );
+        assert_eq!(
+            packaged_configuration(&external, Some(&package)).unwrap()["source"],
+            "package config"
+        );
+        let installed = root.join("installed");
+        fs::create_dir(&installed).unwrap();
+        fs::write(
+            installed.join("config.json.template"),
+            r#"{"source":"installed template"}"#,
+        )
+        .unwrap();
+        fs::write(
+            installed.join("config.json"),
+            r#"{"source":"installed config"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            packaged_configuration(&installed.join("bin/diskm"), Some(&package)).unwrap()["source"],
+            "installed config"
         );
         fs::remove_dir_all(&root).unwrap();
     }
