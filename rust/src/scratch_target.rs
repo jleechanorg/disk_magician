@@ -2,14 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// Match the existing quarantine actuator's 256 MiB manifest limit.
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
 
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
@@ -146,21 +150,27 @@ fn acquire_scratch_lock() -> io::Result<ResumeLock> {
 }
 
 fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
-    let metadata = fs::symlink_metadata(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::other("manifest must be a regular file"));
     }
-    let result = Command::new("python3")
-        .args([
-            "-c",
-            "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())",
-        ])
-        .arg(path)
-        .output()?;
-    if !result.status.success() || String::from_utf8_lossy(&result.stdout).trim() != digest {
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Err(io::Error::other("manifest exceeds the actuator size limit"));
+    }
+    // Hash and parse the same bytes, even if the path is replaced after open.
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(io::Error::other("manifest exceeds the actuator size limit"));
+    }
+    if format!("{:x}", Sha256::digest(&bytes)) != digest {
         return Err(io::Error::other("manifest digest mismatch"));
     }
-    let manifest: Manifest = serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     if manifest.version != 1 {
         return Err(io::Error::other("unsupported manifest version"));
     }

@@ -72,6 +72,11 @@ impl Fixture {
             .output()
             .expect("hash fixture manifest");
         let digest = String::from_utf8(digest.stdout).unwrap().trim().to_owned();
+        let blocked_python = bin.join("python3");
+        fs::write(&blocked_python, "#!/bin/sh\nexit 91\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&blocked_python, fs::Permissions::from_mode(0o755)).unwrap();
+
         let script = bin.join("disk-magician");
         fs::write(
             &script,
@@ -113,7 +118,6 @@ fi
         )
         .unwrap();
         let mut permissions = fs::metadata(&script).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
         permissions.set_mode(0o755);
         fs::set_permissions(script, permissions).unwrap();
         Self {
@@ -352,4 +356,29 @@ fn interrupted_in_flight_quarantine_requires_exact_recovery_without_global_recon
             .count(),
         previous_apply_count
     );
+}
+
+#[test]
+fn unverified_or_oversized_manifest_never_reaches_the_volume_or_actuator() {
+    let fixture = Fixture::new(1);
+    fs::write(&fixture.manifest, b"changed manifest bytes").unwrap();
+    let invalid = fixture.run(&[101 * GIB], &["fixture-volume"], &["--all"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("manifest digest mismatch"));
+    assert!(!fixture.status_index.exists());
+    assert!(!fixture.applies.exists());
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&fixture.manifest)
+        .unwrap()
+        .set_len(256 * 1024 * 1024 + 1)
+        .unwrap();
+    let large = fixture.run(&[101 * GIB], &["fixture-volume"], &["--all"]);
+    assert!(!large.status.success());
+    assert!(
+        String::from_utf8_lossy(&large.stderr).contains("manifest exceeds the actuator size limit")
+    );
+    assert!(!fixture.status_index.exists());
+    assert!(!fixture.applies.exists());
 }
