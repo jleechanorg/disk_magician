@@ -138,9 +138,9 @@ fn loop_device(image: &Path) -> io::Result<PathBuf> {
     device.ok_or_else(|| invalid("Scratch image has no verified loop mapping"))
 }
 
-fn filesystem_uuid(path: &Path) -> io::Result<String> {
+fn probe_filesystem(path: &Path) -> io::Result<String> {
     let mut child = Command::new("blkid")
-        .args(["-p", "-s", "UUID", "-o", "value"])
+        .args(["-p", "-o", "export"])
         .arg(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -160,14 +160,28 @@ fn filesystem_uuid(path: &Path) -> io::Result<String> {
     if !status.success() {
         return Err(invalid("Scratch UUID probe failed"));
     }
-    let mut uuid = String::new();
+    let mut output = String::new();
     child
         .stdout
         .take()
         .ok_or_else(|| invalid("Scratch UUID output unavailable"))?
-        .take(128)
-        .read_to_string(&mut uuid)?;
-    let uuid = uuid.trim().to_ascii_lowercase();
+        .take(4097)
+        .read_to_string(&mut output)?;
+    if output.len() > 4096 {
+        return Err(invalid(
+            "Scratch filesystem metadata output exceeds its limit",
+        ));
+    }
+    Ok(output)
+}
+
+fn filesystem_uuid(path: &Path) -> io::Result<String> {
+    let output = probe_filesystem(path)?;
+    let uuid = output
+        .lines()
+        .find_map(|line| line.strip_prefix("UUID="))
+        .ok_or_else(|| invalid("Scratch filesystem UUID unavailable"))?
+        .to_ascii_lowercase();
     if uuid.len() != 36
         || !uuid
             .bytes()
@@ -176,6 +190,77 @@ fn filesystem_uuid(path: &Path) -> io::Result<String> {
         return Err(invalid("invalid Scratch filesystem UUID"));
     }
     Ok(uuid)
+}
+
+fn absence_contains_scratch(
+    mountinfo: &str,
+    known_mounts: &[&Path],
+    known_image: Option<&Path>,
+    mut source_label: impl FnMut(&Path) -> io::Result<Option<String>>,
+) -> io::Result<bool> {
+    for mount in known_mounts {
+        if mount_record(mountinfo, mount)?.is_some() {
+            return Ok(true);
+        }
+    }
+    let known_image = known_image.map(mount_field).transpose()?;
+    let mut inspected = std::collections::HashSet::new();
+    for row in mountinfo.lines() {
+        let Some((_, mount)) = row.split_once(" - ") else {
+            return Err(invalid("invalid Linux mount inventory"));
+        };
+        let mut fields = mount.split_whitespace();
+        let Some((kind, source)) = fields.next().zip(fields.next()) else {
+            return Err(invalid("incomplete Linux mount inventory"));
+        };
+        if known_image.as_deref() == Some(source) {
+            return Ok(true);
+        }
+        if kind == "ext4" && source.starts_with("/dev/loop") || kind == "fuse.ext4" {
+            // Mountinfo escapes path separators used as field delimiters.
+            let decoded = source
+                .replace("\\040", " ")
+                .replace("\\011", "\t")
+                .replace("\\012", "\n")
+                .replace("\\134", "\\");
+            if inspected.insert(decoded.clone())
+                && source_label(Path::new(&decoded))?.as_deref() == Some("diskm-scratch")
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn confirm_absence(home: &Path, configured: Option<&Scratch<'_>>) -> io::Result<()> {
+    let default_mount = home.join("Scratch");
+    let mut mounts = vec![default_mount.as_path()];
+    if let Some(scratch) = configured {
+        mounts.push(scratch.mount);
+    }
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
+    if absence_contains_scratch(
+        &mountinfo,
+        &mounts,
+        configured.map(|scratch| scratch.image),
+        |source| {
+            if !source.is_absolute() {
+                return Err(invalid(
+                    "cannot verify the backing source of a possible Scratch mount",
+                ));
+            }
+            let fields = probe_filesystem(source)?;
+            Ok(fields
+                .lines()
+                .find_map(|line| line.strip_prefix("LABEL=").map(str::to_owned)))
+        },
+    )? {
+        return Err(invalid(
+            "live Scratch mount has no usable configuration or registry",
+        ));
+    }
+    Ok(())
 }
 
 struct VerifiedMount {
@@ -190,6 +275,7 @@ fn verified_mount(expected: Option<&Path>) -> io::Result<Option<VerifiedMount>> 
     let home = env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     let config = configuration(&home)?;
     let Some(scratch) = scratch_config(&config)? else {
+        confirm_absence(&home, None)?;
         return Ok(None);
     };
     if expected.is_some_and(|expected| expected.as_os_str() != scratch.mount.as_os_str()) {
@@ -199,13 +285,17 @@ fn verified_mount(expected: Option<&Path>) -> io::Result<Option<VerifiedMount>> 
         .map_or_else(|| home.join(".disk_magician_state"), PathBuf::from);
     let registry = match json_file(&state.join("volumes/registry.json")) {
         Ok(registry) => registry,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            confirm_absence(&home, Some(&scratch))?;
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
     if registry["schema_version"].as_u64() != Some(1) || !registry["volumes"].is_object() {
         return Err(invalid("invalid Scratch registry"));
     }
     let Some(entry) = registry["volumes"].get("scratch") else {
+        confirm_absence(&home, Some(&scratch))?;
         return Ok(None);
     };
     if fs::canonicalize(scratch.image)? != scratch.image
@@ -314,6 +404,26 @@ pub(crate) fn mounted_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_registration_requires_absence_of_configured_and_labeled_mounts() {
+        let mountinfo = "36 25 7:2 / /custom/Scratch rw - ext4 /dev/loop2 rw";
+        let known = Path::new("/custom/Scratch");
+        assert!(absence_contains_scratch(mountinfo, &[known], None, |_| Ok(None)).unwrap());
+        assert!(absence_contains_scratch(mountinfo, &[], None, |source| {
+            assert_eq!(source, Path::new("/dev/loop2"));
+            Ok(Some("diskm-scratch".into()))
+        })
+        .unwrap());
+        assert!(
+            !absence_contains_scratch(mountinfo, &[], None, |_| Ok(Some("unrelated".into())))
+                .unwrap()
+        );
+        assert!(
+            absence_contains_scratch(mountinfo, &[], None, |_| Err(invalid("unreadable label")))
+                .is_err()
+        );
+    }
 
     #[test]
     fn configured_linux_mount_requires_valid_backend_quota_and_absolute_paths() {

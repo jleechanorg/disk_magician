@@ -48,5 +48,47 @@ pub(crate) fn configuration(home: &Path) -> io::Result<Value> {
     if config.is_file() {
         return json_file(&config);
     }
+    packaged_configuration(&env::current_exe()?)
+}
+
+fn packaged_configuration(executable: &Path) -> io::Result<Value> {
+    // Source and installed distributions can pair the binary with the existing
+    // Disk Magician package config and template, including a Cargo target dir.
+    if let Some(package) = executable.ancestors().skip(1).find(|directory| {
+        directory.join("config.json.template").is_file()
+            || directory.join("disk_magician.sh").is_file()
+    }) {
+        for candidate in ["config.json", "config.json.template"] {
+            let path = package.join(candidate);
+            if path.is_file() {
+                return json_file(&path);
+            }
+        }
+    }
     serde_json::from_str(include_str!("../../config.json.template")).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_config_precedes_the_template_even_for_a_cargo_build() {
+        let root = env::temp_dir().join(format!("diskm-volume-config-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let template = root.join("config.json.template");
+        let config = root.join("config.json");
+        fs::write(&template, r#"{"source":"template"}"#).unwrap();
+        let executable = root.join("rust/target/debug/diskm");
+        assert_eq!(
+            packaged_configuration(&executable).unwrap()["source"],
+            "template"
+        );
+        fs::write(&config, r#"{"source":"package config"}"#).unwrap();
+        assert_eq!(
+            packaged_configuration(&executable).unwrap()["source"],
+            "package config"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
 }
