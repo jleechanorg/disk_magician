@@ -14,8 +14,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree_safety.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_roots.sh"
 # shellcheck source=scripts/lib/scratch_budget.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_budget.sh"
-# shellcheck source=scripts/lib/scratch_lock.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/scratch_lock.sh"
 # shellcheck source=scripts/lib/quarantine.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/quarantine.sh"
 
@@ -79,7 +77,6 @@ if [[ ${#PATTERNS[@]} -eq 0 ]]; then
 fi
 
 DRY_RUN=true
-SCRATCH_LOCK_ORIGINAL_ARGS=("$@")
 CLI_TMP_DIRS=()
 CLI_PATTERNS=()
 # Size-budget mode (bead disk_magician-d45): 0 disables.
@@ -224,7 +221,6 @@ fi
 
 # Shared lock invariant: serialize destructive sweep against cleanup_tmp.
 # Dry-run (--dry-run) is read-only and skips the lock.
-[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_pr_scratch" "${SCRATCH_LOCK_ORIGINAL_ARGS[@]}" || exit 1; }
 
 TMP_DIRS=()
 if [[ ${#CLI_TMP_DIRS[@]} -gt 0 ]]; then
@@ -478,7 +474,7 @@ fi
 # just validated; rc 0 on removed:*. Unlike c14_remove it keeps the verdict, so
 # the caller can report the specific reason instead of a generic failure.
 pr_scratch_remove() {
-  local verdict floor_minutes default_floor
+  local verdict floor_minutes default_floor permission_flag="${PR_SCRATCH_MAKE_OWNER_WRITABLE_DIRS:-}"
   default_floor="$(safety_disposable_recency_floor_minutes)"
   floor_minutes=$((MIN_AGE_HOURS * 60))
   (( floor_minutes < 120 )) && floor_minutes=120
@@ -486,10 +482,21 @@ pr_scratch_remove() {
     # The operator-selected age already passed this cleaner's content/use
     # gates. Carry that explicit floor into both C14's idle veto and age proof;
     # scheduled/default calls continue to use the shared 48h floor.
-    verdict="$(DISK_MAGICIAN_AGE_FLOOR_MINUTES="$floor_minutes" DM_DELETION_LOGGED=1 \
-      quarantine_remove "$1" --kind ephemeral --min-idle-minutes "$floor_minutes" 2>/dev/null)" || verdict="kept:check-failed"
+    if [[ -n "$permission_flag" ]]; then
+      verdict="$(DISK_MAGICIAN_AGE_FLOOR_MINUTES="$floor_minutes" DM_DELETION_LOGGED=1 \
+        quarantine_remove "$1" --kind ephemeral --min-idle-minutes "$floor_minutes" \
+          --owner-writable-directories 2>/dev/null)" || verdict="kept:check-failed"
+    else
+      verdict="$(DISK_MAGICIAN_AGE_FLOOR_MINUTES="$floor_minutes" DM_DELETION_LOGGED=1 \
+        quarantine_remove "$1" --kind ephemeral --min-idle-minutes "$floor_minutes" 2>/dev/null)" || verdict="kept:check-failed"
+    fi
   else
-    verdict="$(DM_DELETION_LOGGED=1 quarantine_remove "$1" --kind ephemeral 2>/dev/null)" || verdict="kept:check-failed"
+    if [[ -n "$permission_flag" ]]; then
+      verdict="$(DM_DELETION_LOGGED=1 quarantine_remove "$1" --kind ephemeral \
+        --owner-writable-directories 2>/dev/null)" || verdict="kept:check-failed"
+    else
+      verdict="$(DM_DELETION_LOGGED=1 quarantine_remove "$1" --kind ephemeral 2>/dev/null)" || verdict="kept:check-failed"
+    fi
   fi
   PR_SCRATCH_LAST_VERDICT="${verdict:-kept:check-failed}"
   [[ "$PR_SCRATCH_LAST_VERDICT" == removed:* ]]
@@ -602,11 +609,10 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
             pr_scratch_report_keep "$item" "$PR_SCRATCH_LAST_VERDICT"
           fi
         elif [[ -d "$item" ]]; then
-          # Best-effort write-permission fix before rm -rf: a single
-          # read-only entry under $item would otherwise abort this whole
-          # sweep under `set -euo pipefail` instead of just skipping that
-          # one item (bead disk_magician-qap).
-          chmod -R u+w "$item" 2>/dev/null || true
+          # Permission preparation is requested inside quarantine phase 2,
+          # after C14 binds and moves the exact candidate into private state.
+          # Never chmod a candidate path before its C14 verdict.
+          PR_SCRATCH_MAKE_OWNER_WRITABLE_DIRS=1
           if pr_scratch_remove "$item"; then
             DIRS_DELETED=$(( DIRS_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))
@@ -614,8 +620,8 @@ if [[ ${#CANONICAL_TMP_DIRS[@]} -gt 0 ]]; then
           else
             pr_scratch_report_keep "$item" "$PR_SCRATCH_LAST_VERDICT"
           fi
+          PR_SCRATCH_MAKE_OWNER_WRITABLE_DIRS=""
         else
-          chmod u+w "$item" 2>/dev/null || true
           if pr_scratch_remove "$item"; then
             FILES_DELETED=$(( FILES_DELETED + 1 ))
             TOTAL_KB=$(( TOTAL_KB + kb ))

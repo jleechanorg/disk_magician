@@ -4,7 +4,7 @@
 #
 # Live failure 2026-10-11: du ran on every top-level /private/tmp dir BEFORE the
 # recency check, so a large /tmp spent the whole 600s step before its first
-# verdict; a held scratch lock returned rc=1 (FAILED) instead of a skip.
+# verdict. The fixture also covers progress while a legacy writer is active.
 #
 # Run: bash tests/test_cleanup_tmp_pressure_budget.sh
 set -euo pipefail
@@ -98,7 +98,7 @@ check "recent dir skipped" 'grep -q "recently active dir.*recent_big" <<<"$OUT"'
 check "du never run on recent dir" '! grep -q recent_big "$TMP_ROOT/du.log"'
 check "old dir archived" '[[ ! -e "$P1/pr_old_big" ]]'
 check "recent dir preserved" '[[ -e "$P1/recent_big" ]]'
-check "lsof only for the eligible dir (1 call)" '[[ "$(wc -l < "$TMP_ROOT/lsof.log" | tr -d " ")" == 1 ]]' "$(cat "$TMP_ROOT/lsof.log" 2>/dev/null)"
+check "lsof only for the eligible dir and its final recheck (2 calls)" '[[ "$(wc -l < "$TMP_ROOT/lsof.log" | tr -d " ")" == 2 ]]' "$(cat "$TMP_ROOT/lsof.log" 2>/dev/null)"
 
 echo "Test 2: a hung du is bounded and fails closed for that entry only"
 P2="$TMP_ROOT/p2"; mk_fixture "$P2" slow_big
@@ -121,23 +121,13 @@ time.sleep(float(sys.argv[2]))" "$TMP_ROOT/home/.disk_magician_locks/scratch_cle
   for _ in $(seq 100); do grep -q held "$TMP_ROOT/hold.out" 2>/dev/null && break; sleep 0.05; done
 }
 
-echo "Test 3: held scratch lock - bounded wait, then proceeds when released"
+echo "Test 3: an unrelated legacy cleanup lock does not hold up temp archiving"
 P3="$TMP_ROOT/p3"; mk_fixture "$P3"
-hold_lock 2
-run_tmp "$P3" DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=15
-wait "$HOLDER_PID" 2>/dev/null || true; HOLDER_PID=""
-check "waited then ran (rc 0)" '[[ $RC -eq 0 ]]' "rc=$RC $OUT"
-check "eligible dir archived after wait" '[[ ! -e "$P3/pr_old_big" ]]'
-
-echo "Test 4: lock held past the wait budget - distinct skip rc 75, nothing touched"
-P4="$TMP_ROOT/p4"; mk_fixture "$P4"
-hold_lock 6
-run_tmp "$P4" DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=1
-printf "%s" "$OUT" > "$TMP_ROOT/wait4.out"
+hold_lock 45
+run_tmp "$P3"
+check "legacy fixture holder is still live" 'kill -0 "$HOLDER_PID"'
 kill "$HOLDER_PID" 2>/dev/null || true; wait "$HOLDER_PID" 2>/dev/null || true; HOLDER_PID=""
-check "rc 75 (skip, not failure)" '[[ $RC -eq 75 ]]' "rc=$RC"
-check "skip message" 'grep -q "skipped, scratch lock held" <<<"$OUT"' "$OUT"
-check "fixture untouched" '[[ -e "$P4/pr_old_big" ]]'
+check "temp archive completed independently" '[[ $RC -eq 0 && ! -e "$P3/pr_old_big" ]]' "rc=$RC $OUT"
 
 echo "Test 5: budget mode - timeout and unproven entries stay preserved"
 R5="$TMP_ROOT/r5"; rm -rf "$R5"; mkdir -p "$R5"
@@ -208,14 +198,6 @@ run_tmp "$P9" DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS=abc
 check "invalid value logs fallback" 'grep -q "invalid DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS" <<<"$OUT"' "$OUT"
 run_tmp "$P9" DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS=120
 check "values >99 accepted silently" '! grep -q "invalid DISK_MAGICIAN_PROBE_TIMEOUT_SECONDS" <<<"$OUT"'
-
-echo "Test 10: scratch_lock wait parsing rejects non-finite values"
-check "parse_wait" 'python3 -c "
-import sys; sys.path.insert(0, \"$REPO_ROOT/scripts\")
-import scratch_lock as s
-assert s.parse_wait(\"inf\")==20.0 and s.parse_wait(\"nan\")==20.0 and s.parse_wait(\"x\")==20.0
-assert s.parse_wait(\"-5\")==0.0 and s.parse_wait(\"3\")==3.0 and s.parse_wait(None)==20.0"'
-check "message reports the wait" 'grep -q "after waiting" <<<"$(cat "$TMP_ROOT/wait4.out")"'
 
 budget_run() {  # <root> [VAR=val ...] — budget run over <root>; sets RC and OUT
   local root="$1"; shift

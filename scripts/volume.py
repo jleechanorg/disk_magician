@@ -689,17 +689,31 @@ def log_ballast_release(path: Path, volume_uuid: str, action: str) -> bool:
         return False
 
 
+def ballast_process_start(pid: int) -> str | None:
+    # Bind reuse of a PID to the process start time visible to both hosts.
+    result = subprocess.run(
+        ["/bin/ps", "-p", str(pid), "-o", "lstart="],
+        capture_output=True, text=True, timeout=2, check=False,
+        env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+    )
+    return (result.stdout.strip() or None) if result.returncode == 0 else None
+
+
+def ballast_retry_active(retry: dict) -> bool:
+    try:
+        os.kill(retry["pid"], 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    start = ballast_process_start(retry["pid"])
+    return start is None or start == retry["start"]
+
+
 def ballast_cmd(action: str, name: str) -> int:
     registry_file = None
     lock_handle = None
-    cleanup_fd = None
     try:
-        if action in {"ensure", "recover"}:
-            import scratch_lock
-            inherited = os.environ.get(scratch_lock.ENV_FD, "")
-            if not (inherited.isdigit() and scratch_lock.verify_fd(int(inherited))):
-                cleanup_fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
-                fcntl.flock(cleanup_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         registry_file, lock_handle = locked_registry()
         if linux_backend_enabled(name):
             settings, scratch = cls(name)
@@ -717,11 +731,30 @@ def ballast_cmd(action: str, name: str) -> int:
         expected_intent = {"volume_uuid": volume.uuid, "mountpoint": mountpoint}
         pending = record.get("ballast_recovery")
         if "ballast_recovery" in record and (not isinstance(pending, dict)
-                or set(pending) - {"volume_uuid", "mountpoint", "allocation"}
+                or set(pending) - {"volume_uuid", "mountpoint", "allocation", "retry"}
                 or {key: pending.get(key) for key in expected_intent} != expected_intent):
             return 75
         if action == "recover" and pending is None:
             return 0
+        retry_pid = os.environ.get("DISK_MAGICIAN_BALLAST_RETRY_PID")
+        owner = None
+        if retry_pid is not None:
+            if not re.fullmatch(r"[1-9][0-9]{0,9}", retry_pid) or int(retry_pid) > 2**31 - 1:
+                return 75
+            start = ballast_process_start(int(retry_pid))
+            if start is None:
+                return 75
+            owner = {"pid": int(retry_pid), "start": start}
+        retry = pending.get("retry") if isinstance(pending, dict) else None
+        if isinstance(pending, dict) and "retry" in pending:
+            if (not isinstance(retry, dict) or set(retry) != {"pid", "start"}
+                    or type(retry["pid"]) is not int or not 0 < retry["pid"] <= 2**31 - 1
+                    or not isinstance(retry["start"], str) or not retry["start"]):
+                return 75
+            if retry != owner and ballast_retry_active(retry):
+                return 76 if action == "recover" else 75
+        if retry is not None:
+            expected_intent["retry"] = retry
         def clear_intent():
             if "ballast_recovery" in record:
                 del record["ballast_recovery"]
@@ -783,6 +816,8 @@ def ballast_cmd(action: str, name: str) -> int:
                 return 75
             # Commit recovery intent before unlink while retaining the same
             # registry lock. A killed caller can never erase this obligation.
+            if owner is not None:
+                expected_intent["retry"] = owner
             record["ballast_recovery"] = expected_intent
             save_registry(registry_file, lock_handle, data, release_lock=False)
             if not unlink_ballast_verified(mountpoint):
@@ -795,8 +830,6 @@ def ballast_cmd(action: str, name: str) -> int:
     finally:
         if lock_handle is not None:
             lock_handle.close()
-        if cleanup_fd is not None:
-            os.close(cleanup_fd)
 
 
 def encryption_is_acknowledged(settings: dict[str, Any]) -> bool:

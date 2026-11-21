@@ -183,6 +183,14 @@ inode. It reports ambiguity or unavailability when a unique record cannot
 be established. The index phase describes that record alone. Recovery
 inspection leaves candidate and quarantine state intact.
 
+The direct regular-file actuator is a library component. Before a cleanup
+route can use it, the caller must bind the parent and target to the original
+manifest, retain the writer and lease mutation locks through qualification
+and unlink, and persist an in-flight receipt before unlink. A missing file
+after restart is an unresolved result unless the journal establishes what
+happened. Existing quarantine recovery continues to serve previously
+quarantined entries.
+
 After restoring the exact in-flight entry, repeat the same target command with
 `--ack-restored RELATIVE_PATH` and the original manifest digest, target, and
 resume state. The acknowledgment verifies the restored identity, records

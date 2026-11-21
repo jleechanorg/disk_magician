@@ -4,7 +4,8 @@ candidate config is never read; a local remote must be an absolute path outside 
 gitmeta: .git outside objects/ refs/ logs/ packed-refs index *HEAD, as a manifest or
 compared with a lease's git_meta. admin: a linked worktree's admin dir; prints the
 object ids under *HEAD, refs/, logs/ and the branch reflog, or kept:<reason>."""
-import hashlib, json, os, re, signal, stat, subprocess, sys, tempfile, time
+import errno, hashlib, json, os, re, signal, stat, subprocess, sys, tempfile, time
+DIRFL = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 SKIP = {"objects", "refs", "logs", "packed-refs", "index"}
 
@@ -842,6 +843,122 @@ def archive_receipt(source, receipt, archived_at=None, retention_minutes=None, r
         print("kept:archive-identity")
         return 1
 
+def archive_bind(source):
+    """Print a compact descriptor binding for a directory before qualification."""
+    try:
+        absolute = os.path.abspath(source)
+        parent_input, base = os.path.dirname(absolute), os.path.basename(absolute)
+        parent = os.path.realpath(parent_input)
+        pfd = os.open(parent, DIRFL)
+        try:
+            pst = os.fstat(pfd)
+            st = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        finally:
+            os.close(pfd)
+        if not stat.S_ISDIR(st.st_mode):
+            raise ValueError("archive source is not a directory")
+        row = {"path": os.path.join(parent, base), "parent": parent, "base": base,
+               "parent_dev": pst.st_dev, "parent_ino": pst.st_ino,
+               "dev": st.st_dev, "ino": st.st_ino, "mode": stat.S_IFMT(st.st_mode),
+               "size": st.st_size, "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
+        print(json.dumps(row, separators=(",", ":"), sort_keys=True))
+        return 0
+    except Exception:
+        print("kept:archive-identity")
+        return 1
+
+def archive_parent_bind(directory):
+    """Print a descriptor binding for the exact destination directory."""
+    try:
+        absolute = os.path.realpath(directory)
+        fd = os.open(absolute, DIRFL)
+        try:
+            st = os.fstat(fd)
+        finally:
+            os.close(fd)
+        print(json.dumps({"path": absolute, "dev": st.st_dev, "ino": st.st_ino},
+                         separators=(",", ":"), sort_keys=True))
+        return 0
+    except Exception:
+        print("kept:archive-identity")
+        return 1
+
+def archive_move(binding_json, destination_binding_json, destination, receipt):
+    """Move a qualified directory by descriptor-relative exclusive rename."""
+    try:
+        binding = json.loads(binding_json)
+        destination_binding = json.loads(destination_binding_json)
+        source_parent, base, source_path = binding["parent"], binding["base"], binding["path"]
+        if (not all(isinstance(binding.get(k), int) for k in
+                    ("parent_dev", "parent_ino", "dev", "ino", "mode", "size")) or
+                binding["mode"] != stat.S_IFDIR or source_path != os.path.join(source_parent, base)):
+            raise ValueError("invalid archive binding")
+        if (not isinstance(destination_binding.get("path"), str) or
+                not all(isinstance(destination_binding.get(k), int) for k in ("dev", "ino"))):
+            raise ValueError("invalid destination binding")
+        import quarantine_rename
+        source_fd = os.open(source_parent, DIRFL)
+        try:
+            destination_parent_input = os.path.dirname(os.path.abspath(destination))
+            destination_parent = os.path.realpath(destination_parent_input)
+            destination_base = os.path.basename(destination)
+            receipt_parent_input = os.path.dirname(os.path.abspath(receipt))
+            receipt_parent = os.path.realpath(receipt_parent_input)
+            receipt_base = os.path.basename(receipt)
+            if (destination_parent_input != receipt_parent_input or destination_parent != receipt_parent or
+                    destination_parent != destination_binding["path"] or
+                    receipt_base != destination_base + ".c14-origin.json"):
+                raise ValueError("receipt does not match destination")
+            destination_fd = os.open(destination_parent, DIRFL)
+            try:
+                parent_st, dst_st = os.fstat(source_fd), os.fstat(destination_fd)
+                if (parent_st.st_dev, parent_st.st_ino) != (binding["parent_dev"], binding["parent_ino"]):
+                    raise ValueError("source parent changed")
+                if (dst_st.st_dev, dst_st.st_ino) != (destination_binding["dev"], destination_binding["ino"]):
+                    raise ValueError("destination parent changed")
+                if parent_st.st_dev != dst_st.st_dev:
+                    raise OSError(errno.EXDEV, "archive move crosses filesystems")
+                current = os.stat(base, dir_fd=source_fd, follow_symlinks=False)
+                if (not stat.S_ISDIR(current.st_mode) or
+                        (current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode), current.st_size,
+                         current.st_mtime_ns, current.st_ctime_ns) !=
+                        (binding["dev"], binding["ino"], binding["mode"], binding["size"],
+                         binding["mtime_ns"], binding["ctime_ns"])):
+                    raise ValueError("source identity changed")
+                rfd = os.open(receipt_base, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+                              dir_fd=destination_fd)
+                try:
+                    rst = os.fstat(rfd)
+                    if not stat.S_ISREG(rst.st_mode):
+                        raise ValueError("receipt is not regular")
+                    with os.fdopen(os.dup(rfd), "r", encoding="utf-8") as stream:
+                        row = json.load(stream)
+                finally:
+                    os.close(rfd)
+                if (row.get("original_path") != source_path or row.get("dev") != binding["dev"] or
+                        row.get("ino") != binding["ino"] or row.get("size") != binding["size"]):
+                    raise ValueError("receipt identity mismatch")
+                quarantine_rename.renamex(source_fd, base, destination_fd, destination_base)
+                moved = os.stat(destination_base, dir_fd=destination_fd, follow_symlinks=False)
+                if (not stat.S_ISDIR(moved.st_mode) or
+                        (moved.st_dev, moved.st_ino, stat.S_IFMT(moved.st_mode), moved.st_size,
+                         moved.st_mtime_ns) !=
+                        (binding["dev"], binding["ino"], binding["mode"], binding["size"],
+                         binding["mtime_ns"])):
+                    # A non-C14 writer raced the final stat. Restore the unexpected
+                    # entry only when the original name is still vacant.
+                    quarantine_rename.renamex(destination_fd, destination_base, source_fd, base)
+                    raise ValueError("moved entry identity changed")
+            finally:
+                os.close(destination_fd)
+        finally:
+            os.close(source_fd)
+        print("ok")
+        return 0
+    except Exception:
+        print("kept:archive-identity")
+        return 1
+
 def archive_info(candidate, receipt, inv_file):
     """Validate archive identity against both the live path and verdict inventory."""
     try:
@@ -1307,6 +1424,12 @@ if __name__ == "__main__":
             sys.exit(account(*a[1:]))
         if len(a) in (3, 4, 5, 6) and a[0] == "archive-receipt":
             sys.exit(archive_receipt(a[1], a[2], a[3] if len(a) >= 4 else None, a[4] if len(a) >= 5 else None, a[5] if len(a) >= 6 else None))
+        if len(a) == 2 and a[0] == "archive-bind":
+            sys.exit(archive_bind(a[1]))
+        if len(a) == 2 and a[0] == "archive-parent-bind":
+            sys.exit(archive_parent_bind(a[1]))
+        if len(a) == 5 and a[0] == "archive-move":
+            sys.exit(archive_move(a[1], a[2], a[3], a[4]))
         if len(a) == 4 and a[0] == "archive-info":
             sys.exit(archive_info(a[1], a[2], a[3]))
         if len(a) == 2 and a[0] == "repos":

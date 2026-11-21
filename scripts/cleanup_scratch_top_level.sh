@@ -244,14 +244,10 @@ if [[ "$AVAILABLE_FLOOR" == true && "$root_registered" != true ]]; then
   exit 2
 fi
 
-if [[ "$DRY_RUN" != true ]]; then
-  # Serialize with volume reclaim and the tmp sweeps; the supervisor execs this
-  # script again, so pass the original argv (never the consumed one).
-  if (( ${#ORIG_ARGS[@]} )); then
-    scratch_lock_acquire scratch_prune "${ORIG_ARGS[@]}" || exit $?
-  else
-    scratch_lock_acquire scratch_prune || exit $?
-  fi
+if [[ "$DRY_RUN" != true && -n "$ACT_CURSOR" ]]; then
+  # A checkpoint is a read/modify/write stream. Serialize only callers sharing
+  # its canonical path; independent scratch-prune passes run concurrently.
+  scratch_cursor_lock_acquire scratch-prune "$ACT_CURSOR" "${ORIG_ARGS[@]}" || exit $?
 fi
 
 ACT_CURSOR_SOURCE="scratch_prune:v1:$root"

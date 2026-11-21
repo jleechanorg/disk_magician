@@ -13,6 +13,78 @@ VERDICT_SH = ROOT / "scripts" / "lib" / "artifact_verdict.sh"
 LEASE_SH = ROOT / "scripts" / "lib" / "worktree_lease.sh"
 
 
+class TestC14ArchiveMove(unittest.TestCase):
+    def setUp(self):
+        fixture = tempfile.TemporaryDirectory(dir="/tmp", prefix="dm-archive-move-")
+        self.addCleanup(fixture.cleanup)
+        self.root = Path(fixture.name).resolve()
+        self.source = self.root / "candidate"
+        self.source.mkdir()
+        (self.source / "original").write_text("original fixture")
+        archive = Path(fixture.name) / "archive"
+        archive.mkdir()
+        self.destination = archive / self.source.name
+        self.receipt = archive / (self.destination.name + ".c14-origin.json")
+        result = self.call_probe("archive-bind", self.source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.binding = result.stdout
+        result = self.call_probe("archive-parent-bind", archive)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.destination_binding = result.stdout
+        result = self.call_probe("archive-receipt", self.source, self.receipt, "", "60")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def call_probe(self, *args):
+        return subprocess.run(
+            [sys.executable, PROBE, *args],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+
+    def move(self):
+        return self.call_probe(
+            "archive-move", self.binding, self.destination_binding, self.destination, self.receipt
+        )
+
+    def test_move_preserves_directory_identity_and_receipt(self):
+        original = self.source.stat()
+        result = self.move()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.source.exists())
+        self.assertEqual(self.destination.stat().st_ino, original.st_ino)
+        self.assertEqual((self.destination / "original").read_text(), "original fixture")
+        self.assertEqual(json.loads(self.receipt.read_text())["ino"], original.st_ino)
+
+    def test_source_replacement_remains_at_original_path(self):
+        prior = self.root / "prior"
+        self.source.rename(prior)
+        self.source.mkdir()
+        (self.source / "replacement").write_text("preserve")
+        result = self.move()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.source / "replacement").exists())
+        self.assertTrue((prior / "original").exists())
+        self.assertFalse(self.destination.exists())
+
+    def test_existing_destination_is_not_replaced(self):
+        self.destination.mkdir()
+        (self.destination / "occupied").write_text("preserve")
+        result = self.move()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.source / "original").exists())
+        self.assertTrue((self.destination / "occupied").exists())
+
+    def test_replaced_destination_parent_is_rejected_even_with_matching_receipt(self):
+        contents = self.receipt.read_bytes()
+        parent = self.destination.parent
+        parent.rename(self.root / "prior-archive")
+        parent.mkdir()
+        self.receipt.write_bytes(contents)
+        result = self.move()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.source / "original").exists())
+        self.assertFalse(self.destination.exists())
+
+
 class TestC14ProbeRemoteAlternates(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir="/tmp", prefix="dm-c14-alt-")

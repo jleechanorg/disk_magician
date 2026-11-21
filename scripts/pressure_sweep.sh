@@ -54,13 +54,8 @@ LOCK_TTL_SEC=3600
 LOG_FILE="${DISK_MAGICIAN_PRESSURE_LOG:-$HOME/Library/Logs/disk-magician-pressure-sweep.log}"
 STEP_TIMEOUT="${DISK_MAGICIAN_PRESSURE_STEP_TIMEOUT:-600}"
 # SIGKILL escalation (bead disk_magician-xt2y). `timeout STEP_TIMEOUT cmd`
-# sends TERM only; a step child that traps TERM and then keeps working (the
-# deferred-TERM case observed on this host) outlives its deadline. That matters
-# beyond the step itself: cleanup_tmp's scratch flock fd is deliberately
-# inheritable (scripts/scratch_lock.py os.set_inheritable), flock lives on the
-# open file description, so any surviving descendant keeps
-# ~/.disk_magician_locks/scratch_cleanup.lock held and every competing cleanup
-# then fails closed (rc 75 "skipped, scratch lock held"). STEP_KILL_AFTER is
+# sends TERM only; a step child that defers TERM can outlive its deadline.
+# A surviving descendant may retain its own resume-cursor FD. STEP_KILL_AFTER is
 # the grace period between TERM and SIGKILL; 0 disables escalation (byte-for-
 # byte pre-fix behaviour). Both values accept the DISK_MAGICIAN_PRESSURE_* env
 # hook pattern used by FREE_GB_OVERRIDE above so tests can drive them
@@ -451,10 +446,10 @@ if run_step_timeout "${tmp_step[@]}" >> "$LOG_FILE" 2>&1; then
 else
   STEP1_RC=$?
   if [[ $STEP1_RC -eq 75 ]]; then
-    # EX_TEMPFAIL from scratch_lock.py: another scratch cleanup owns the lock.
+    # EX_TEMPFAIL: this lane could not acquire its checkpoint.
     STEP1_RC=0
     STEP1_SKIPPED=true
-    log "pressure_sweep: step 1/3 cleanup_tmp.sh skipped (scratch lock held) — continuing to step 2."
+    log "pressure_sweep: step 1/3 cleanup_tmp.sh skipped (checkpoint busy) — continuing to step 2."
   else
     if [[ $STEP1_RC -eq 124 || $STEP1_RC -eq 137 ]]; then
       STEP1_TIMEOUT=true
@@ -507,7 +502,7 @@ OUTCOME="success"
 REASON=""
 
 STEP_STATUS="STEP1_RC=${STEP1_RC}, STEP1_TIMEOUT=${STEP1_TIMEOUT}, STEP2_RC=${STEP2_RC}, STEP2_TIMEOUT=${STEP2_TIMEOUT}, STEP3_RC=${STEP3_RC}, STEP3_TIMEOUT=${STEP3_TIMEOUT}"
-[[ "$STEP1_SKIPPED" == true ]] && STEP_STATUS="${STEP_STATUS}, STEP1_SKIPPED=scratch_lock_held"
+[[ "$STEP1_SKIPPED" == true ]] && STEP_STATUS="${STEP_STATUS}, STEP1_SKIPPED=checkpoint_busy"
 
 if [[ "$STEP1_TIMEOUT" == true || "$STEP2_TIMEOUT" == true || "$STEP3_TIMEOUT" == true ]]; then
   OUTCOME="timeout"
@@ -517,7 +512,7 @@ elif [[ $STEP1_RC -ne 0 || $STEP2_RC -ne 0 || $STEP3_RC -ne 0 ]]; then
   REASON="step execution failed (${STEP_STATUS})"
 elif [[ "$STEP1_SKIPPED" == true && "$SWEEP_MODE" == "tmp-only" ]]; then
   OUTCOME="skipped_lock"
-  REASON="tmp-only sweep skipped: scratch lock held (${STEP_STATUS})"
+  REASON="tmp-only sweep skipped: checkpoint busy (${STEP_STATUS})"
 elif [[ "$DRY_RUN" == true ]]; then
   OUTCOME="success_noop"
   REASON="dry-run sweep completed without deletions (${STEP_STATUS})"

@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -373,12 +375,13 @@ fn unavailable_first_volume_read_persists_the_exact_queue_for_resume() {
 }
 
 #[test]
-fn existing_scratch_cleanup_lock_defers_without_touching_the_queue() {
-    let fixture = Fixture::new(2);
+fn one_checkpoint_lock_defers_same_checkpoint_but_not_another() {
+    let mut fixture = Fixture::new(2);
     let lock_dir = fixture.root.join(".disk_magician_locks");
     fs::create_dir(&lock_dir).unwrap();
     fs::set_permissions(&lock_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    let lock_path = lock_dir.join("scratch_cleanup.lock");
+    let checkpoint_id = Sha256::digest(fixture.resume.as_os_str().as_bytes());
+    let lock_path = lock_dir.join(format!("checkpoint-{checkpoint_id:x}.lock"));
     let ready = fixture.root.join("lock-ready");
     let mut holder = Command::new("python3")
         .args([
@@ -398,9 +401,19 @@ fn existing_scratch_cleanup_lock_defers_without_touching_the_queue() {
 
     let output = fixture.run(&[101 * GIB], &["volume-a"], &["--all"]);
     let result = report(&output);
-    assert_eq!(result["status"], "deferred:scratch-cleanup-in-progress");
+    assert_eq!(result["status"], "deferred:checkpoint-in-progress");
     assert_eq!(result["pending_paths"], json!(fixture.entries));
     assert!(!fixture.applies.exists());
+
+    fixture.resume = fixture.root.join("other-resume.json");
+    let output = fixture.run(&[101 * GIB, 99 * GIB], &["volume-a"], &["--all"]);
+    let result = report(&output);
+    assert_eq!(result["complete"], true, "{result}");
+    assert_eq!(
+        result["receipts"][0]["result"], "removed:fixture",
+        "{result}"
+    );
+    assert!(fixture.applies.exists());
 
     holder.kill().unwrap();
     holder.wait().unwrap();

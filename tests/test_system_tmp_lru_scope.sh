@@ -78,10 +78,22 @@ if grep -F -e "$OTHER_TMP" "$OUT"; then
 fi
 [[ -z "$(find "$ARCHIVE" -mindepth 1 -print -quit)" ]]
 for path in "$PRIVATE_TMP"/pr1_* "$OTHER_TMP/pr1_unrelated"; do [[ -f "$path/payload.txt" ]]; done
-if ! env "${ENV_ARGS[@]}" bash "$REPO_ROOT/disk_magician.sh" cleanup-tmp \
-  --system-tmp-budget-pct 50 --budget-floor-minutes 360 --clean >"$OUT" 2>&1; then
+if ! env "${ENV_ARGS[@]}" python3 - "$REPO_ROOT" >"$OUT" 2>&1 <<'PYLOCK'
+import fcntl, os, pathlib, subprocess, sys
+
+legacy = pathlib.Path.home() / ".disk_magician_locks" / "scratch_cleanup.lock"
+with legacy.open("wb") as holder:
+    os.fchmod(holder.fileno(), 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    result = subprocess.run([
+        "bash", pathlib.Path(sys.argv[1]) / "disk_magician.sh", "cleanup-tmp",
+        "--system-tmp-budget-pct", "50", "--budget-floor-minutes", "360", "--clean",
+    ], timeout=90)
+    raise SystemExit(result.returncode)
+PYLOCK
+then
   cat "$OUT"
-  echo "scoped test cleanup failed" >&2
+  echo "scoped test cleanup failed while the unrelated legacy lock was held" >&2
   exit 1
 fi
 [[ ! -e "$PRIVATE_TMP/pr1_big_1" && ! -e "$PRIVATE_TMP/pr1_big_2" ]]

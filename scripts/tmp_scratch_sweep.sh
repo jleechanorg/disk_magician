@@ -297,7 +297,7 @@ PY
     SCRATCH_PRUNE_REMOVED=null
     SCRATCH_PRUNE_SCANNED=null
     rc=1
-  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && { grep -q '\[scratch_prune\] skipped, scratch lock held' <<<"$SCRATCH_PRUNE_OUTPUT" || grep -q '^skipped:lease-busy' <<<"$SCRATCH_PRUNE_OUTPUT"; }; then
+  elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && { grep -Eq '\[scratch_prune\] skipped, (scratch|cursor) lock held' <<<"$SCRATCH_PRUNE_OUTPUT" || grep -q '^skipped:lease-busy' <<<"$SCRATCH_PRUNE_OUTPUT"; }; then
     SCRATCH_PRUNE_LOCK_SKIPPED=true
     SCRATCH_PRUNE_OUTCOME=skipped_lock
   elif [[ "$SCRATCH_PRUNE_RC" == 75 ]] && { grep -q '^partial:budget-target-unmet' <<<"$SCRATCH_PRUNE_OUTPUT" || { [[ -n "$SCRATCH_PRUNE_SUMMARY" ]] && grep -qE '^deferred:(measurement-unfinished|budget-result-unmeasurable)' <<<"$SCRATCH_PRUNE_OUTPUT"; }; }; then
@@ -362,7 +362,7 @@ if [[ "$VOLUME_OUTPUT" == skipped:deadline-before-volume-reclaim && "$SCRATCH_PR
   DEFERRED_DEADLINE_SKIP=true
 fi
 VOLUME_LOCK_SKIPPED=false
-if [[ $VOLUME_RC -eq 75 ]] && grep -q 'scratch lock held' <<<"$VOLUME_OUTPUT"; then
+if [[ $VOLUME_RC -eq 75 ]] && grep -Eq '(scratch|cursor) lock held' <<<"$VOLUME_OUTPUT"; then
   VOLUME_LOCK_SKIPPED=true
   VOLUME_RC=0
 fi
@@ -389,7 +389,7 @@ elif stripped_output == "skipped:measurement-unavailable":
  print(json.dumps({"valid":False,"outcome":"error","aged_scanned":None,"removed":None,"target_reached":None,"top_kept_reason":"measurement-unavailable"},separators=(",",":")))
 elif stripped_output == "skipped:unavailable" or stripped_output.startswith("skipped:below-trigger:"):
  print(json.dumps({"valid":True,"outcome":"skipped","skip_reason":stripped_output,"aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":None},separators=(",",":")))
-elif "scratch lock held" in volume_output:
+elif "scratch lock held" in volume_output or "cursor lock held" in volume_output:
  print(json.dumps({"valid":True,"outcome":"skipped_lock","skip_reason":"scratch-lock-held","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scratch-lock-held"},separators=(",",":")))
 elif stripped_output == "skipped:scheduler-interrupted":
  print(json.dumps({"valid":True,"outcome":"timeout","skip_reason":"scheduler-interrupted","aged_scanned":0,"removed":0,"target_reached":None,"top_kept_reason":"scheduler-interrupted"},separators=(",",":")))

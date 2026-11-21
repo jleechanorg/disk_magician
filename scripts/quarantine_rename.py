@@ -354,7 +354,8 @@ def parse_expected_root_identity(raw):
     return values
 def root_identity(st):
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-def phase1(path, inv_file, binding_file, deadline=None, expected_identity=None):
+def phase1(path, inv_file, binding_file, deadline=None, expected_identity=None,
+           owner_writable_directories=False):
     if deadline is not None and time.monotonic() >= deadline: return "deferred:deadline-before-phase1"
     path = os.path.abspath(path)
     parent, base = os.path.dirname(path), os.path.basename(path)
@@ -376,7 +377,8 @@ def phase1(path, inv_file, binding_file, deadline=None, expected_identity=None):
                    "dev": 18446744073709551615, "ino": 18446744073709551615,
                    "parent_dev": parent_id[0], "parent_ino": parent_id[1],
                    "quarantine_dev": 18446744073709551615, "quarantine_ino": 18446744073709551615,
-                   "inventory": inv, "phase": "intent"}
+                   "inventory": inv, "phase": "intent",
+                   "owner_writable_directories": owner_writable_directories}
         try: intent_bytes = json.dumps(preview).encode("utf-8")
         except (TypeError, ValueError, UnicodeError): return "kept:intent-too-large"
         if len(intent_bytes) > MAX_INTENT_BYTES:
@@ -414,7 +416,8 @@ def phase1(path, inv_file, binding_file, deadline=None, expected_identity=None):
     rec = {"id": qid, "original": path, "dev": st.st_dev, "ino": st.st_ino,
            "parent_dev": bound_parent.st_dev, "parent_ino": bound_parent.st_ino,
            "quarantine_dev": q.st_dev, "quarantine_ino": q.st_ino,
-           "inventory": inv, "phase": "intent"}
+           "inventory": inv, "phase": "intent",
+           "owner_writable_directories": owner_writable_directories}
     try:
         intent_text = json.dumps(rec)
         if len(intent_text.encode("utf-8")) > MAX_INTENT_BYTES:
@@ -614,7 +617,7 @@ def record_removed_path(qfd, side, record, rel, removed_paths=None):
 
 def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, deadline=None,
                            location_guard=None, root_label="", ancestors=(), qfd=-1, side="", record=None,
-                           removed_paths=()):
+                           removed_paths=(), owner_writable_directories=False):
     """Delete exactly one inventoried entry, using only its pinned parent fd."""
     if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, ancestors): return False
     if deadline_passed(deadline): raise DeadlineExceeded()
@@ -639,11 +642,21 @@ def unlink_inventory_entry(parent_fd, name, rel, expected, inventory, children, 
                 child_path = os.path.join(root_label, rel)
                 hook("DISK_MAGICIAN_TEST_AFTER_CHILD_OPEN", child_path, "")
                 if location_guard is not None and not tree_ancestry_still_quarantined(location_guard, child_ancestors): return False
+            if owner_writable_directories and not (opened.st_mode & stat.S_IWUSR):
+                # C14 already verified this exact tree and phase 1 moved it
+                # beneath the private quarantine. Adjust only the opened,
+                # inventoried directory descriptor; never chmod its old path.
+                os.fchmod(child_fd, stat.S_IMODE(opened.st_mode) | stat.S_IWUSR)
+                adjusted = os.fstat(child_fd)
+                if (entry_kind(adjusted), adjusted.st_dev, adjusted.st_ino) != (
+                        "dir", expected.get("dev"), expected.get("ino")):
+                    return False
+                opened = adjusted
             ok = True
             for child_name, child_rel in children.get(rel, []):
                 if not unlink_inventory_entry(child_fd, child_name, child_rel, inventory[child_rel], inventory, children,
                                               deadline, location_guard, root_label, child_ancestors,
-                                              qfd, side, record, removed_paths):
+                                              qfd, side, record, removed_paths, owner_writable_directories):
                     ok = False
             try: os.fsync(child_fd)
             except OSError: ok = False
@@ -788,7 +801,8 @@ def phase2(binding_file, qid, deadline=None):
         try:
             removed = unlink_inventory_entry(qfd, qid, ".", root, inventory, children, deadline,
                                              location_guard, os.path.join(parent, ".dm-quarantine", qid), (),
-                                             qfd, side, record, removed_paths)
+                                             qfd, side, record, removed_paths,
+                                             record.get("owner_writable_directories") is True)
         except DeadlineExceeded:
             try: update_sidecar(qfd, side, record)
             except OSError: pass
@@ -1035,9 +1049,11 @@ def parse_deadline(raw):
     try: value = float(raw)
     except (TypeError, ValueError): return None
     return value if math.isfinite(value) and value >= 0 else None
-def combined_remove(path, inv_file, binding_file, deadline=None, expected_identity=None):
+def combined_remove(path, inv_file, binding_file, deadline=None, expected_identity=None,
+                    owner_writable_directories=False):
     """Phase 1 + phase 2 for one candidate under the caller's single operation lock."""
-    verdict = phase1(path, inv_file, binding_file, deadline, expected_identity)
+    verdict = phase1(path, inv_file, binding_file, deadline, expected_identity,
+                     owner_writable_directories)
     if not verdict.startswith("quarantined:"): return verdict
     qid = verdict.split(":", 1)[1]
     result = phase2(binding_file, qid, deadline)
@@ -1070,6 +1086,7 @@ if __name__ == "__main__":
     elif args[:1] == ["remove"] and len(args) >= 4:
         deadline = None
         expected_identity = None
+        owner_writable_directories = False
         tail = args[4:]
         while tail:
             if len(tail) >= 2 and tail[0] == "--deadline-at" and deadline is None:
@@ -1080,13 +1097,17 @@ if __name__ == "__main__":
                 expected_identity = parse_expected_root_identity(tail[1])
                 if expected_identity is False: print("kept:check-failed"); sys.exit(0)
                 tail = tail[2:]
+            elif tail[0] == "--owner-writable-directories" and not owner_writable_directories:
+                owner_writable_directories = True
+                tail = tail[1:]
             else:
                 print("kept:check-failed"); sys.exit(0)
-        # Exact manifest apply can resume when another transaction is active.
-        # Keep its operation deadline separate from the immediate lock attempt.
-        lock = operation_lock(time.monotonic() if expected_identity is not None else deadline)
+        # Cleanup callers can retry a busy transaction on the next pass. The
+        # operation deadline still bounds the work once the lock is acquired.
+        lock = operation_lock(time.monotonic())
         if lock is None: print("deferred:operation-lock"); sys.exit(0)
-        try: print(combined_remove(args[1], args[2], args[3], deadline, expected_identity))
+        try: print(combined_remove(args[1], args[2], args[3], deadline, expected_identity,
+                                   owner_writable_directories))
         finally: operation_unlock(lock)
     elif args[:1] == ["restore"] and len(args) == 2:
         lock = operation_lock()

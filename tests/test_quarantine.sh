@@ -149,14 +149,13 @@ for bad in nan inf -1; do
   check "phase1 rejects $bad deadline before lock" [ "$(python3 "$ROOT/scripts/quarantine_rename.py" phase1 "$A" "$INV" "$BINDING" --deadline-at "$bad")" = kept:check-failed ]
 done
 
-# quarantine_remove's shared lease-registry lock retry must honor the caller's
-# monotonic deadline. Keep the busy lock inside this fixture's isolated state.
+# A busy lease registry defers immediately even with time left in the sweep.
 fixture
 mkdir -p "$DISK_MAGICIAN_STATE_DIR/worktree_leases/.owner-mutation.reuse-lock"
 read -r LOCK_RESULT LOCK_ELAPSED <<<"$(python3 - "$ROOT" "$A" "$TMP" <<'PY'
 import os, subprocess, sys, time
 root, artifact, tmp = sys.argv[1:]
-deadline = time.monotonic() + 0.2
+deadline = time.monotonic() + 5.0
 command = (
     f"source '{root}/scripts/lib/quarantine.sh'; "
     f"quarantine_remove '{artifact}' --deadline-at {deadline:.6f}"
@@ -168,10 +167,10 @@ proc = subprocess.run(["bash", "-c", command], env=env, capture_output=True, tex
 print(f"{proc.stdout.strip()} {time.monotonic() - started:.6f}")
 PY
 )"
-check "registry-lock contention returns at the caller deadline (elapsed ${LOCK_ELAPSED}s)" python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)" "$LOCK_ELAPSED"
-check 'registry-lock deadline contention keeps the original artifact' bash -c '[[ "$1" == kept:lease-busy && -f "$2/report.md" && "$(cat "$2/report.md")" == AAAA ]]' _ "$LOCK_RESULT" "$A"
+check "registry-lock contention defers immediately (elapsed ${LOCK_ELAPSED}s)" python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) < 2.0 else 1)" "$LOCK_ELAPSED"
+check 'registry-lock contention keeps the original artifact' bash -c '[[ "$1" == kept:lease-busy && -f "$2/report.md" && "$(cat "$2/report.md")" == AAAA ]]' _ "$LOCK_RESULT" "$A"
 
-# TERM during a deadline-bounded registry-lock retry is deferred and redelivered
+# TERM during the registry-lock attempt is deferred and redelivered
 # after fail-closed cleanup; the contended lock is not owned and must remain.
 fixture
 BUSY_LOCK="$DISK_MAGICIAN_STATE_DIR/worktree_leases/.owner-mutation.reuse-lock"
@@ -186,6 +185,7 @@ deadline = time.monotonic() + 5.0
 command = f'''source '{root}/scripts/lib/quarantine.sh'
 lease_registry_mutation_lock_enter() {{
   : > '{marker}'
+  sleep 0.2
   mkdir -p "$(lease_dir)" || return 1
   lease_reuse_lock_acquire "$(lease_dir)/.owner-mutation"
 }}
@@ -206,7 +206,7 @@ if proc.returncode != -signal.SIGTERM:
 print(f"{stdout.strip()} {proc.returncode} {time.monotonic() - started:.6f}")
 PY
 )"
-check 'TERM during deadline retry is promptly redelivered after fail-closed return' python3 -c 'import sys; sys.exit(0 if sys.argv[1] == "kept:lease-busy" and int(sys.argv[2]) == -15 and float(sys.argv[3]) < 3.0 else 1)' "$TERM_RESULT" "$TERM_RC" "$TERM_ELAPSED"
+check 'TERM during lock attempt is promptly redelivered after fail-closed return' python3 -c 'import sys; sys.exit(0 if sys.argv[1] == "kept:lease-busy" and int(sys.argv[2]) == -15 and float(sys.argv[3]) < 3.0 else 1)' "$TERM_RESULT" "$TERM_RC" "$TERM_ELAPSED"
 BUSY_STAMP="$(cat "$BUSY_LOCK/acquired_at")"
 check 'TERM retry retains candidate and the unowned busy lock metadata' bash -c '[[ -f "$1/report.md" && "$(cat "$1/report.md")" == AAAA && -d "$2" && "$(cat "$2/pid")" == "$3" && "$(cat "$2/acquired_at")" == "$4" ]]' _ "$A" "$BUSY_LOCK" "$$" "$BUSY_STAMP"
 
@@ -225,6 +225,15 @@ check 'malformed reconcile deadline fails closed without traceback' bash -c '[[ 
 prepare_inputs; JOURNAL_READY="$TMP/combined-ready"; LOCK_RELEASE="$TMP/combined-release"
 env DISK_MAGICIAN_TEST_AFTER_ENTRY_JOURNAL="touch '$JOURNAL_READY'; while [[ ! -e '$LOCK_RELEASE' ]]; do sleep 0.02; done" python3 "$ROOT/scripts/quarantine_rename.py" remove "$A" "$INV" "$BINDING" >"$TMP/combined-out" & CPID=$!
 for _ in $(seq 1 250); do [[ -e "$JOURNAL_READY" ]] && break; sleep 0.02; done
+check 'unbounded remove defers immediately on another transaction' python3 - "$ROOT" "$A" "$INV" "$BINDING" <<'PY'
+import pathlib, subprocess, sys
+root, path, inventory, binding = sys.argv[1:]
+result = subprocess.run(
+    [sys.executable, pathlib.Path(root) / "scripts/quarantine_rename.py", "remove", path, inventory, binding],
+    capture_output=True, text=True, check=True, timeout=2,
+)
+assert result.stdout.strip() == "deferred:operation-lock", result.stdout
+PY
 RECON_LOCK="$(python3 "$ROOT/scripts/quarantine_rename.py" reconcile --deadline-at "$(python3 -c 'import time; print(time.monotonic()+0.15)')")"
 touch "$LOCK_RELEASE"; wait "$CPID"
 check 'concurrent reconcile cannot roll back an in-flight combined remove' bash -c '[[ "$1" == deferred:operation-lock && "$2" == removed:* && ! -e "$3" ]]' _ "$RECON_LOCK" "$(cat "$TMP/combined-out")" "$A"

@@ -192,7 +192,7 @@ def verify(root, root_dev, entry, cutoff):
     return target, None
 
 
-def remove_exact(path, entry, cutoff, lock_fd):
+def remove_exact(path, entry, cutoff):
     repo = Path(__file__).resolve().parent.parent
     encoded = ",".join(str(entry[k]) for k in FIELDS)
     shell = 'source "$1/scripts/lib/quarantine.sh"; shift; quarantine_remove "$@"'
@@ -204,14 +204,14 @@ def remove_exact(path, entry, cutoff, lock_fd):
     env = dict(os.environ, C14_NO_RESCUE_PUSH="1")
     env.pop("DISK_MAGICIAN_AGE_FLOOR_MINUTES", None)
     env.pop("DISK_MAGICIAN_OPERATOR_TARGETS", None)
-    result = subprocess.run(args, capture_output=True, text=True, env=env, pass_fds=(lock_fd,))
+    result = subprocess.run(args, capture_output=True, text=True, env=env)
     verdict = result.stdout.strip()
     if result.returncode or verdict == "remove" or not verdict.startswith(("removed:", "kept:", "deferred:")):
         return "deferred:quarantine-error"
     return verdict
 
 
-def apply(manifest_path, digest, paths, all_entries, lock_fd):
+def apply(manifest_path, digest, paths, all_entries):
     manifest = load_manifest(manifest_path, digest)
     root, dev, ino = scratch_root()
     recorded = manifest["root"]
@@ -229,7 +229,7 @@ def apply(manifest_path, digest, paths, all_entries, lock_fd):
     for relative in paths:
         entry = entries[relative]
         target, reason = verify(root, dev, entry, manifest["before_epoch_seconds"])
-        result = reason if reason else remove_exact(target, entry, manifest["before_epoch_seconds"], lock_fd)
+        result = reason if reason else remove_exact(target, entry, manifest["before_epoch_seconds"])
         results.append({"path": relative, "result": result})
     return {"manifest_sha256": digest, "before_epoch_seconds": manifest["before_epoch_seconds"], "results": results}
 
@@ -263,15 +263,8 @@ def main(args):
     if len(manifests) != 1 or len(digests) != 1 or not manifests[0] or not digests[0] or (all_entries and paths):
         return 2
     try:
-        try:
-            fd = int(os.environ.get(scratch_lock.ENV_FD, ""))
-        except ValueError:
-            fd = -1
-        if not 0 <= fd <= 2**31 - 1 or not scratch_lock.verify_fd(fd):
-            os.environ["DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS"] = "0"
-            return scratch_lock.run("scratch-apply", sys.executable, [__file__, *args])
         scratch_lock.disable_implicit_git_fsmonitor()
-        result = apply(manifests[0], digests[0], paths, all_entries, fd)
+        result = apply(manifests[0], digests[0], paths, all_entries)
     except (OSError, ValueError, TypeError) as error:
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 2

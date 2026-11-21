@@ -8,8 +8,8 @@ use std::collections::VecDeque;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -19,9 +19,6 @@ const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
-const F_GETFD: i32 = 1;
-const F_SETFD: i32 = 2;
-const FD_CLOEXEC: i32 = 1;
 #[cfg(target_os = "linux")]
 const O_NOFOLLOW: i32 = 0o400000;
 #[cfg(target_os = "macos")]
@@ -29,7 +26,6 @@ const O_NOFOLLOW: i32 = 0x100;
 
 unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
-    fn fcntl(fd: i32, command: i32, ...) -> i32;
     fn geteuid() -> u32;
 }
 
@@ -104,17 +100,17 @@ impl Drop for ResumeLock {
     }
 }
 
-fn acquire_scratch_lock() -> io::Result<ResumeLock> {
+fn acquire_checkpoint_lock(resume_path: &Path) -> io::Result<ResumeLock> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .ok_or_else(|| io::Error::other("HOME unavailable for Scratch lock"))?;
+        .ok_or_else(|| io::Error::other("HOME unavailable for checkpoint lock"))?;
     let home_meta = fs::symlink_metadata(&home)?;
     if !home_meta.is_dir()
         || home_meta.uid() != unsafe { geteuid() }
         || home_meta.mode() & 0o022 != 0
     {
-        return Err(io::Error::other("unsafe HOME for Scratch lock"));
+        return Err(io::Error::other("unsafe HOME for checkpoint lock"));
     }
     let lock_dir = home.join(".disk_magician_locks");
     match DirBuilder::new()
@@ -128,9 +124,12 @@ fn acquire_scratch_lock() -> io::Result<ResumeLock> {
     }
     let dir_meta = fs::symlink_metadata(&lock_dir)?;
     if !dir_meta.is_dir() || dir_meta.uid() != home_meta.uid() || dir_meta.mode() & 0o077 != 0 {
-        return Err(io::Error::other("unsafe Scratch lock directory"));
+        return Err(io::Error::other("unsafe checkpoint lock directory"));
     }
-    let lock_path = lock_dir.join("scratch_cleanup.lock");
+    // Checkpoints can be replaced atomically, so lock a stable name derived
+    // from the canonical checkpoint path, not the checkpoint's inode.
+    let path_id = Sha256::digest(resume_path.as_os_str().as_bytes());
+    let lock_path = lock_dir.join(format!("checkpoint-{path_id:x}.lock"));
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -142,18 +141,16 @@ fn acquire_scratch_lock() -> io::Result<ResumeLock> {
     let current = fs::symlink_metadata(&lock_path)?;
     if !metadata.is_file()
         || metadata.uid() != home_meta.uid()
+        || metadata.nlink() != 1
         || metadata.mode() & 0o077 != 0
         || metadata.dev() != current.dev()
         || metadata.ino() != current.ino()
     {
-        return Err(io::Error::other("unsafe Scratch cleanup lock"));
+        return Err(io::Error::other("unsafe checkpoint lock"));
     }
     let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
     if result != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "Scratch cleanup is already in progress",
-        ));
+        return Err(io::Error::last_os_error());
     }
     Ok(ResumeLock(file))
 }
@@ -277,24 +274,12 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
-fn legacy_apply(manifest: &Path, digest: &str, relative: &str, lock_fd: i32) -> io::Result<String> {
+fn legacy_apply(manifest: &Path, digest: &str, relative: &str) -> io::Result<String> {
     let mut command = Command::new(crate::legacy_cli()?);
     command
-        .env("DISK_MAGICIAN_SCRATCH_LOCK_FD", lock_fd.to_string())
         .args(["quarantine", "scratch-apply", "--manifest"])
         .arg(manifest)
         .args(["--manifest-sha256", digest, "--path", relative]);
-    // Keep the writer alive across an interrupted parent only in the actuator.
-    // Metadata and volume probes have no need to inherit the descriptor.
-    unsafe {
-        command.pre_exec(move || {
-            let flags = fcntl(lock_fd, F_GETFD);
-            if flags < 0 || fcntl(lock_fd, F_SETFD, flags & !FD_CLOEXEC) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let output = command.output()?;
     if !output.status.success() {
         return Err(io::Error::other("exact manifest apply failed"));
@@ -340,7 +325,7 @@ pub fn apply(
     if fs::canonicalize(manifest_path)?.as_path() == resume_path {
         return Err(io::Error::other("resume state cannot replace the manifest"));
     }
-    let writer = acquire_scratch_lock();
+    let writer = acquire_checkpoint_lock(resume_path);
     let existing_state = if resume_path.exists() {
         let meta = fs::symlink_metadata(resume_path)?;
         if !meta.is_file() {
@@ -413,12 +398,12 @@ pub fn apply(
     } else {
         None
     };
-    let lock = match writer {
+    let _checkpoint = match writer {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             if let Some(state) = existing_state.as_ref() {
                 return Ok(Report {
-                    status: "deferred:scratch-cleanup-in-progress".into(),
+                    status: "deferred:checkpoint-in-progress".into(),
                     complete: false,
                     target_reached: false,
                     target_used_bytes,
@@ -430,7 +415,7 @@ pub fn apply(
                 });
             }
             return Ok(Report {
-                status: "deferred:scratch-cleanup-in-progress".into(),
+                status: "deferred:checkpoint-in-progress".into(),
                 complete: false,
                 target_reached: false,
                 target_used_bytes,
@@ -535,7 +520,7 @@ pub fn apply(
         state.in_flight_quarantine_id = None;
         state.used_after_bytes = Some(used_before);
         write_state(resume_path, &state)?;
-        let result = match legacy_apply(manifest_path, digest, &path, lock.0.as_raw_fd()) {
+        let result = match legacy_apply(manifest_path, digest, &path) {
             Ok(result) => result,
             Err(_) => return Ok(report_recovery_required(&state, &manifest.entries, true)),
         };

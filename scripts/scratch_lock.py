@@ -1,33 +1,45 @@
 #!/usr/bin/env python3
-"""Kernel-backed serialization for destructive scratch cleanup entrypoints."""
+"""Kernel coordination for writers of the same cleanup checkpoint."""
 
 from __future__ import annotations
 
 import argparse
 import fcntl
-import math
+import hashlib
 import os
 from pathlib import Path
 import re
 import stat
 import sys
-import time
+
+ENV_FD = "DISKM_CLEANUP_CURSOR_FD"
+ENV_PID = "DISKM_CLEANUP_CURSOR_PID"
+ENV_KEY = "DISKM_CLEANUP_CURSOR_KEY"
 
 
-ENV_FD = "DISK_MAGICIAN_SCRATCH_LOCK_FD"
-ENV_PID = "DISK_MAGICIAN_SCRATCH_LOCK_PID"
-# Contention is a skip, not a failure: EX_TEMPFAIL lets callers tell it apart from rc=1.
-EXIT_LOCK_HELD = 75
+def canonical_cursor_path(raw: str | os.PathLike[str]) -> str:
+    value = Path(raw)
+    if not value.is_absolute():
+        value = Path.cwd() / value
+    if value.is_symlink():
+        raise ValueError("cursor lock key cannot be a symlink")
+    parent = value.parent.resolve(strict=False)
+    canonical = parent / value.name
+    if canonical.exists() and not canonical.is_file():
+        raise ValueError("cursor lock key must name a regular file")
+    return os.fspath(canonical)
 
 
-def lock_path() -> Path:
+def lock_path(key: str) -> Path:
     home = os.environ.get("HOME", "")
     if not home or not Path(home).is_absolute():
-        raise PermissionError("unsafe HOME for scratch lock")
+        raise PermissionError("unsafe HOME for cursor lock")
     home_stat = os.lstat(home)
     if not stat.S_ISDIR(home_stat.st_mode) or home_stat.st_uid != os.geteuid() or home_stat.st_mode & 0o022:
-        raise PermissionError("unsafe HOME for scratch lock")
-    return Path(home) / ".disk_magician_locks" / "scratch_cleanup.lock"
+        raise PermissionError("unsafe HOME for cursor lock")
+    canonical = canonical_cursor_path(key)
+    digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()
+    return Path(home) / ".disk_magician_locks" / f"checkpoint-{digest}.lock"
 
 
 def open_lock(path: Path, create: bool) -> int:
@@ -58,9 +70,9 @@ def open_lock(path: Path, create: bool) -> int:
         os.close(dir_fd)
 
 
-def verify_fd(fd: int) -> bool:
+def verify_fd(fd: int, key: str) -> bool:
     try:
-        canonical_fd = open_lock(lock_path(), create=False)
+        canonical_fd = open_lock(lock_path(key), create=False)
         try:
             opened = os.fstat(fd)
             canonical = os.fstat(canonical_fd)
@@ -72,15 +84,6 @@ def verify_fd(fd: int) -> bool:
         return True
     except (OSError, ValueError):
         return False
-
-
-def parse_wait(raw: str | None) -> float:
-    """Seconds to wait for the lock; non-numeric or non-finite input falls back to 20."""
-    try:
-        value = float(raw) if raw is not None else 20.0
-    except ValueError:
-        return 20.0
-    return max(0.0, value) if math.isfinite(value) else 20.0
 
 
 def disable_implicit_git_fsmonitor() -> None:
@@ -109,140 +112,64 @@ def disable_implicit_git_fsmonitor() -> None:
     os.environ["GIT_CONFIG_COUNT"] = str(count + 1)
 
 
-def holder_path() -> Path:
-    """Sidecar record naming the live lock holder, for staleness diagnosis."""
-    return lock_path().with_suffix(".holder")
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
+def run(caller: str, script: str, args: list[str], key: str) -> int:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True          # exists, owned by someone else
-    return True
-
-
-def write_holder(fd: int) -> None:
-    """Best-effort holder record. Never fail the run because of it."""
+        canonical = canonical_cursor_path(key)
+        fd = open_lock(lock_path(canonical), create=True)
+    except (OSError, ValueError) as error:
+        print(f"[{caller}] cannot open cursor lock: {error}", file=sys.stderr)
+        return 1
     try:
-        path = holder_path()
-        tmp = path.with_suffix(f".holder.{os.getpid()}")
-        tmp.write_text(f"pid={os.getpid()}\nsince={int(time.time())}\nfd_locked=1\n")
-        os.replace(tmp, path)
-    except OSError:
-        pass
-
-
-def clear_holder() -> None:
-    try:
-        holder_path().unlink()
-    except OSError:
-        pass
-
-
-def stale_holder_report() -> str:
-    """Human-readable diagnosis when the lock is held.
-
-    Reports whether the recorded holder is still alive. This is diagnostic only:
-    it never breaks a live lock, because a kernel flock is authoritative and a
-    dead holder releases it automatically. What it removes is the silent case
-    where a WEDGED-but-alive holder (a stalled child, not a dead process) holds
-    the lock for hours with nothing explaining why -- measured 2026-11-19: a
-    frozen cleanup held this lock 8h+ with orphaned children and every later
-    cleanup reported only "scratch lock held".
-    """
-    try:
-        raw = holder_path().read_text()
-    except OSError:
-        return "holder=unknown (no holder record)"
-    info = {}
-    for line in raw.splitlines():
-        if "=" in line:
-            k, v = line.split("=", 1)
-            info[k.strip()] = v.strip()
-    pid_raw = info.get("pid", "")
-    if not pid_raw.isdigit():
-        return "holder=unknown (malformed holder record)"
-    pid = int(pid_raw)
-    since = info.get("since", "")
-    age = ""
-    if since.isdigit():
-        age = f" held_s={int(time.time()) - int(since)}"
-    if _pid_alive(pid):
-        return f"holder=pid {pid} alive{age}"
-    return f"holder=pid {pid} DEAD (stale record; flock must have been released){age}"
-
-
-def run(caller: str, script: str, args: list[str]) -> int:
-    path = lock_path()
-    try:
-        fd = open_lock(path, create=True)
-    except OSError as exc:
-        print(f"[{caller}] failed to open scratch lock {path}: {exc}", file=sys.stderr)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        print(f"[{caller}] skipped, cursor lock held", file=sys.stderr)
+        return 75
+    except OSError as error:
+        os.close(fd)
+        print(f"[{caller}] cannot acquire cursor lock: {error}", file=sys.stderr)
         return 1
 
-    wait = parse_wait(os.environ.get("DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS"))
-    deadline = time.monotonic() + wait
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            break
-        except (BlockingIOError, OSError) as exc:
-            if isinstance(exc, BlockingIOError) and time.monotonic() < deadline:
-                time.sleep(0.25)
-                continue
-            os.close(fd)
-            if isinstance(exc, BlockingIOError):
-                note = f"after waiting {wait:g}s" if wait > 0 else "— not queuing"
-                print(
-                    f"[{caller}] skipped, scratch lock held {note}; {stale_holder_report()}",
-                    file=sys.stderr,
-                )
-                return EXIT_LOCK_HELD
-            print(f"[{caller}] failed to acquire scratch lock {path}: {exc}", file=sys.stderr)
-            return 1
-
-    write_holder(fd)
     os.set_inheritable(fd, True)
     os.environ[ENV_FD] = str(fd)
     os.environ[ENV_PID] = str(os.getpid())
+    os.environ[ENV_KEY] = canonical
     disable_implicit_git_fsmonitor()
     os.execvpe(script, [script, *args], os.environ)
     return 127
 
 
 def main() -> int:
-    if len(sys.argv) >= 2 and sys.argv[1] == "run":
-        try:
-            caller = sys.argv[sys.argv.index("--caller") + 1]
-            script = sys.argv[sys.argv.index("--script") + 1]
-            marker = sys.argv.index("--args")
-            args = sys.argv[marker + 1 :]
-            if args[:1] == ["--"]:
-                args = args[1:]
-        except (ValueError, IndexError):
-            print("scratch_lock.py: invalid run arguments", file=sys.stderr)
-            return 2
-        return run(caller, script, args)
-
     parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers(dest="mode", required=True)
-    verify_parser = sub.add_parser("verify")
-    verify_parser.add_argument("--fd", type=int, required=True)
-    run_parser = sub.add_parser("run")
-    run_parser.add_argument("--caller", required=True)
-    run_parser.add_argument("--script", required=True)
-    run_parser.add_argument("--args", nargs=argparse.REMAINDER, default=[])
-    ns = parser.parse_args()
-
-    if ns.mode == "verify":
-        return 0 if verify_fd(ns.fd) else 1
-    args = ns.args[1:] if ns.args[:1] == ["--"] else ns.args
-    return run(ns.caller, ns.script, args)
+    commands = parser.add_subparsers(dest="mode", required=True)
+    canonical = commands.add_parser("key")
+    canonical.add_argument("cursor")
+    verify = commands.add_parser("verify")
+    verify.add_argument("--fd", type=int, required=True)
+    verify.add_argument("--key", required=True)
+    invoke = commands.add_parser("run")
+    invoke.add_argument("--caller", required=True)
+    invoke.add_argument("--script", required=True)
+    invoke.add_argument("--key", required=True)
+    args = sys.argv[1:]
+    child_args = []
+    if args[:1] == ["run"] and "--args" in args:
+        separator = args.index("--args")
+        child_args = args[separator + 1:]
+        if child_args[:1] == ["--"]:
+            child_args = child_args[1:]
+        args = args[:separator]
+    options = parser.parse_args(args)
+    if options.mode == "key":
+        try:
+            print(canonical_cursor_path(options.cursor))
+            return 0
+        except (OSError, ValueError) as error:
+            print(f"invalid cursor path: {error}", file=sys.stderr)
+            return 2
+    if options.mode == "verify":
+        return 0 if verify_fd(options.fd, options.key) else 1
+    return run(options.caller, options.script, child_args, options.key)
 
 
 if __name__ == "__main__":

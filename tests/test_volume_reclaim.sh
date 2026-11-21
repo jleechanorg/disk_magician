@@ -104,6 +104,28 @@ esac
 MOCK
 chmod +x "$DISK_MAGICIAN_DISKM_BIN"
 
+if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == unrelated-cleanup-lock ]]; then
+  export BALLAST_LOG="$T/ballast.log"
+  python3 - "$ROOT" <<'PYLOCK'
+import fcntl, os, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
+import scratch_lock
+fd = scratch_lock.open_lock(Path.home() / ".disk_magician_locks/scratch_cleanup.lock", create=True)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    env = dict(os.environ, TEST_USED="600", DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS="0")
+    result = subprocess.run([os.path.join(sys.argv[1], "scripts/volume_reclaim.sh"), "--clean"],
+                            env=env, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert "below-trigger" in result.stdout, result.stdout
+finally:
+    os.close(fd)
+PYLOCK
+  echo 'PASS: an unrelated cleanup writer did not suppress volume reclaim'
+  exit 0
+fi
+
 if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == target-met-broken-pipe || "${VOLUME_RECLAIM_TEST_FILTER:-}" == target-met-real-error ]]; then
   export BALLAST_LOG="$T/ballast.log"
   export REAL_PYTHON3="$(command -v python3)"
@@ -346,14 +368,15 @@ grep -q 'trim_target_not_reached before_bytes=900 after_bytes=900 quota_bytes=10
 [[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
 python3 "$ROOT/scripts/job_receipt.py" read --job volume_reclaim --last | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"]=="partial" and r["candidates"]["aged_scanned"]==2 and r["candidates"]["removed"]==0 and not r["postcondition"]["target_reached"] and r["candidates"]["top_kept_reason"]=="protected"'
 touch "$TEST_ROOT/repo/build/younger/content"
-# An external holder of the real Scratch lock yields rc 75, zero removals and
-# untouched candidates; the holder's FD is a real flock, not a mock.
+# A legacy Scratch-wide lock does not block a new volume reclaim scan.
+# Existing protection still prevents mutation in this fixture.
 ROOT_DIR="$ROOT" python3 - "$HOME" <<'PYH' &
 import fcntl,os,sys,time
+from pathlib import Path
 os.environ["HOME"]=sys.argv[1]
 sys.path.insert(0,os.path.join(os.environ["ROOT_DIR"],"scripts"))
 import scratch_lock
-fd=scratch_lock.open_lock(scratch_lock.lock_path(),create=True)
+fd=scratch_lock.open_lock(Path.home() / ".disk_magician_locks/scratch_cleanup.lock", create=True)
 fcntl.flock(fd,fcntl.LOCK_EX)
 print("held",flush=True)
 time.sleep(30)
@@ -361,13 +384,14 @@ PYH
 LOCK_HOLDER=$!
 sleep 1
 set +e
-ROOT_DIR="$ROOT" DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/real-lock.out" 2>"$T/real-lock.err"
+DISK_MAGICIAN_SAFETY_FILE="$T/protected.json" TEST_STATUS_SEQUENCE="900 900 900 900" \
+ "$ROOT/scripts/volume_reclaim.sh" --clean >"$T/real-lock.out" 2>"$T/real-lock.err"
 REAL_LOCK_RC=$?
 set -e
 kill "$LOCK_HOLDER" 2>/dev/null || true; wait "$LOCK_HOLDER" 2>/dev/null || true
-[[ "$REAL_LOCK_RC" == 75 ]] && grep -q 'scratch lock held' "$T/real-lock.err"
+[[ "$REAL_LOCK_RC" == 0 ]] && grep -q 'trim_target_not_reached' "$T/real-lock.out"
 [[ -e "$TEST_ROOT/repo/evidence/oldest" && -e "$TEST_ROOT/repo/build/younger" && ! -s "$DISK_MAGICIAN_DELETION_LOG" ]]
-echo 'real external lock holder: rc 75, zero removals, candidates untouched'
+echo 'unrelated legacy lock: volume reclaim scanned and preserved protected candidates'
 # A pre-expired governor deadline defers before any bounded scan starts: no
 # grace, no scan of any candidate (a wedged-mount find would hold the lock ~5s
 # per candidate), nothing removed, truthful deferral receipt.
