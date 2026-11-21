@@ -561,6 +561,7 @@ fn main() -> ExitCode {
                     eprintln!("{}", error.reason());
                     ExitCode::from(match error {
                         artifact_discovery::DiscoveryError::Deadline => 124,
+                        artifact_discovery::DiscoveryError::LegacyRequired => 76,
                         artifact_discovery::DiscoveryError::MalformedInput
                         | artifact_discovery::DiscoveryError::Io(_) => 1,
                     })

@@ -147,8 +147,9 @@ DISK_MAGICIAN_RUST_ARTIFACT_BIN to the absolute path of the matching Rust
 candidate for a read-only `diskm scratch-prune --dry-run` invocation.
 The Rust candidate handles batched artifact discovery and validation. The
 wrapper still owns mount verification, the shared deadline, ordering,
-qualification, and the existing quarantine path. A failed native phase
-defers the batch. With the environment variable unset, the installed
+qualification, and the existing quarantine path. Marked dated runs with
+Unicode digits use the existing discovery parser. Other failed native phases
+defer the batch. With the environment variable unset, the installed
 scheduler keeps its existing path.
 
 The native `diskm reclaim-ledger --read-existing` command reads the published

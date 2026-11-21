@@ -654,16 +654,20 @@ if (( ${#candidates[@]} )); then
       emit_discovery_deferred_summary native-artifact-binary-unavailable
       exit 75
     fi
+    # The native producer can request the canonical legacy discovery for a
+    # marked run name whose Unicode digit rules depend on the legacy runtime.
+    _artifact_rc=76
     if [[ "$root_registered" == true && -n "$_artifact_rust_bin" ]]; then
-      # The registered-root native discovery emits the existing batch frame.
+      _artifact_rc=0
       printf '%s\0' "${candidate_dirs[@]}" | act_run_bounded \
-        "$_artifact_rust_bin" scratch-artifact-discover "$artifact_blocked_file" >"$artifact_batch_output_file"
-    else
+        "$_artifact_rust_bin" scratch-artifact-discover "$artifact_blocked_file" >"$artifact_batch_output_file" || _artifact_rc=$?
+    fi
+    if (( _artifact_rc == 76 )); then
       _artifact_mode=batch
       [[ "$root_registered" == true ]] && _artifact_mode=batch-generic
-      printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" "$artifact_blocked_file" >"$artifact_batch_output_file"
+      _artifact_rc=0
+      printf '%s\0' "${candidate_dirs[@]}" | scratch_budget_artifact_children_batch 3 "$_artifact_mode" "$artifact_blocked_file" >"$artifact_batch_output_file" || _artifact_rc=$?
     fi
-    _artifact_rc=$?
     if (( _artifact_rc != 0 )); then
       rm -f "$artifact_batch_output_file" "$artifact_blocked_file"
       artifact_batch_output_file=""

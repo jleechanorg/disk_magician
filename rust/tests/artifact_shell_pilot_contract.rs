@@ -107,6 +107,29 @@ fn registered_preview_uses_native_artifact_pilot_only_when_selected() {
         assert!(stdout.contains("kept:recent-activity"), "{stdout}");
     }
 
+    let fallback = root.executable(
+        "fixture-legacy-fallback",
+        r#"#!/bin/sh
+if [ "$1" = scratch-artifact-discover ]; then
+  printf '%s\n' legacy-required >> "$CALL_LOG"
+  exit 76
+fi
+printf '%s\n' "$1" >> "$CALL_LOG"
+exec "$NATIVE_BINARY" "$@"
+"#,
+    );
+    let fallback = preview(&root, Some(&fallback), false);
+    assert_eq!(fallback.status.code(), legacy.status.code());
+    let fallback_stdout = String::from_utf8_lossy(&fallback.stdout);
+    assert!(fallback_stdout.contains("lru: stop="), "{fallback_stdout}");
+    assert!(
+        fallback_stdout.contains("kept:recent-activity"),
+        "{fallback_stdout}"
+    );
+    assert!(fs::read_to_string(root.0.join("native.log"))
+        .unwrap()
+        .ends_with("legacy-required\nscratch-artifact-validate\n"));
+
     let failed = preview(&root, Some(&native), true);
     let stdout = String::from_utf8_lossy(&failed.stdout);
     assert_eq!(failed.status.code(), Some(75), "{stdout}");
