@@ -293,5 +293,75 @@ echo "$OUT17" | grep -q "timed out" && ok "timeout message is clear" || bad "tim
 [[ $((SECONDS-T0)) -lt 20 ]] && ok "scan bounded by timeout" || bad "bounded" "took $((SECONDS-T0))s"
 [[ -z "$(git -C "$BARE" rev-list --all 2>/dev/null)" ]] && ok "nothing pushed after timeout" || bad "remote clean after timeout" "commits pushed"
 
+
+echo "Test 18: generated path renamed to an ordinary path remains in the outgoing secret scan"
+mk_scan_repo h18
+mkdir -p "$SD/evidence"
+GENERATED18="$SD/evidence/frontier-20261117.json"
+ORDINARY18="$SD/notes-renamed-from-generated.txt"
+printf '{"payload":"%s"}\n' "$FAKE_SECRET" > "$GENERATED18"
+sr_commit "$SD" "generated frontier"
+mv "$GENERATED18" "$ORDINARY18"
+sr_commit "$SD" "rename generated path into ordinary notes"
+OUT18=$(run_sr "$H" - push 2>&1); RC18=$?
+[[ $RC18 -ne 0 ]] && ok "renamed generated secret blocks push" || bad "renamed generated secret" "rc=0: $OUT18"
+[[ -z "$(git -C "$BARE" rev-list --all 2>/dev/null)" ]] && ok "renamed secret was not published" || bad "renamed remote clean" "commits pushed"
+
+echo "Test 19: nested evidence and ledger JSON remain inside the scan"
+for scoped_path in evidence/frontier-subdir/ordinary.json ledger/nested/ordinary.json; do
+  mk_scan_repo "h19-${scoped_path%%/*}"
+  mkdir -p "$(dirname "$SD/$scoped_path")"
+  printf '{"payload":"%s"}\n' "$FAKE_SECRET" > "$SD/$scoped_path"
+  sr_commit "$SD" "nested generated-looking path"
+  OUT19=$(run_sr "$H" - push 2>&1); RC19=$?
+  [[ $RC19 -ne 0 ]] && ok "nested secret blocks push: $scoped_path" || bad "nested secret remains scanned: $scoped_path" "rc=0: $OUT19"
+  [[ -z "$(git -C "$BARE" rev-list --all 2>/dev/null)" ]] && ok "nested secret was not published" || bad "nested remote clean" "commits pushed"
+done
+
+echo "Test 20: Git receives exact generated-file exclusions before patch generation"
+mk_scan_repo h20
+run_sr "$H" - push >/dev/null 2>&1 || bad "pathspec fixture seed push" "could not publish clean baseline"
+mkdir -p "$SD/evidence" "$SD/ledger"
+printf '{"payload":"%s"}\n' "$FAKE_SECRET" > "$SD/evidence/frontier-20261117.json"
+printf '{"payload":"%s"}\n' "$FAKE_SECRET" > "$SD/ledger/topdown-5g.partial.json"
+sr_commit "$SD" "generated direct files"
+WRAP20="$TMP_ROOT/wrap20"; mkdir -p "$WRAP20"
+cat > "$WRAP20/gitleaks" <<'EOF20'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == git ]] || exit 2
+shift
+log_opts=""; repository=""
+for arg in "${@}"; do
+  case "$arg" in --log-opts=*) log_opts="${arg#--log-opts=}" ;; esac
+  if [[ -d "$arg/.git" ]]; then repository="$arg"; fi
+done
+[[ -n "$repository" && -n "$log_opts" ]] || exit 3
+read -r -a git_options <<< "$log_opts"
+printf '%s\0' -C "$repository" log -p "${git_options[@]}" > "$HOME/git-log-argv.bin"
+/usr/bin/git -C "$repository" log -p "${git_options[@]}" > "$HOME/generated-patch.log"
+EOF20
+chmod +x "$WRAP20/gitleaks"
+ORIGINAL_GITLEAKS_BIN="${DISK_MAGICIAN_GITLEAKS_BIN:-}"
+DISK_MAGICIAN_GITLEAKS_BIN="$WRAP20/gitleaks"
+OUT20=$(run_sr "$H" - push 2>&1); RC20=$?
+DISK_MAGICIAN_GITLEAKS_BIN="$ORIGINAL_GITLEAKS_BIN"
+[[ $RC20 -eq 0 ]] && ok "Git pathspec scan lets the direct generated files through" || bad "Git pathspec exclusions" "rc=$RC20: $OUT20"
+python3 -c '
+import pathlib,sys
+argv=pathlib.Path(sys.argv[1]).read_bytes().split(b"\0")
+argv=argv[:-1] if argv and not argv[-1] else argv
+separator=argv.index(b"--")
+assert argv.index(b"-p") < argv.index(b"--no-renames") < separator
+assert argv[separator+1:] == [
+ b":(top,glob,exclude)evidence/frontier-*.json",
+ b":(top,glob,exclude)ledger/*.json",
+]
+' "$H/git-log-argv.bin" \
+  && ok "both exclusions reached git log before patch generation" \
+  || bad "Git argv pathspec/order" "unexpected captured log arguments"
+[[ -f "$H/generated-patch.log" && ! -s "$H/generated-patch.log" ]] \
+  && ok "generated-only commit produced no patches" || bad "generated Git patch was not empty" "excluded blobs reached the scan"
+
 echo; echo "=== Result: $PASS pass, $FAIL fail ==="
 [[ "$FAIL" -eq 0 ]]

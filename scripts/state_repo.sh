@@ -6,6 +6,8 @@ set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 
 SR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/actuator_deadline.sh
+source "$SR_SCRIPT_DIR/lib/actuator_deadline.sh"
 STATE_DIR="$(python3 "$SR_SCRIPT_DIR/resolve_state_repo_path.py")"
 INVENTORY_STATE_DIR="${DISK_MAGICIAN_STATE_DIR:-${HOME}/.disk_magician_state}"
 log() { echo "[state_repo] $*"; }
@@ -56,13 +58,16 @@ find_gitleaks() {
   return 1
 }
 
-# timeout(1) is absent from macOS /usr/bin; fall back to gtimeout, then perl alarm.
-# The perl path dies by SIGALRM (rc 142), which callers treat like rc 124.
 bounded() {
-  local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
-  else perl -e 'alarm shift; exec @ARGV or exit 127' "$secs" "$@"; fi
+  local secs="$1" deadline; shift
+  deadline="$(python3 -c '
+import math, sys, time
+seconds = float(sys.argv[1])
+if not math.isfinite(seconds) or seconds <= 0:
+    sys.exit(2)
+print(time.monotonic() + seconds)
+' "$secs")" || return 2
+  ACT_DEADLINE_AT="$deadline" act_run_bounded "$@"
 }
 
 remote_has_embedded_credentials() {
@@ -155,9 +160,11 @@ guard_state_repo_push() {
     echo "Snapshot history guard: gitleaks is unavailable; refusing unscanned push." >&2
     return 1
   }
-  # Machine-generated frontier/ledger JSON (millions of lines, no human-authored
-  # secrets) is excluded; every other path stays scanned. The scan is bounded
-  # and a timeout fails closed (bead disk_magician-2cpy).
+  # Apply the same allowlist to the Git pathspec before Git generates patches.
+  # Gitleaks applies its TOML allowlist after reading patches, so the TOML
+  # alone still makes Git inflate and diff these large generated blobs.
+  # Disabling rename detection keeps additions into scanned paths visible.
+  local log_opts="$scan_range --full-history --no-renames -- :(top,glob,exclude)evidence/frontier-*.json :(top,glob,exclude)ledger/*.json"
   gl_dir="$(mktemp -d "${TMPDIR:-/tmp}/dm-gitleaks.XXXXXX")"
   gl_conf="$gl_dir/gitleaks.toml"  # gitleaks infers the format from the .toml suffix
   cat >"$gl_conf" <<'TOML'
@@ -169,7 +176,7 @@ paths = ['^evidence/frontier-[^/]*\.json$', '^ledger/[^/]*\.json$']
 TOML
   gl_rc=0
   bounded "${DISK_MAGICIAN_GITLEAKS_TIMEOUT:-600}" "$gitleaks_bin" git --no-banner --no-color --redact=100 \
-    --config "$gl_conf" --log-opts="$scan_range" "$STATE_DIR" >/dev/null 2>&1 || gl_rc=$?
+    --config "$gl_conf" --log-opts="$log_opts" "$STATE_DIR" >/dev/null 2>&1 || gl_rc=$?
   rm -f "$gl_conf"; rmdir "$gl_dir"
   if [[ "$gl_rc" -eq 124 || "$gl_rc" -eq 142 ]]; then
     echo "Snapshot history guard: secret scan timed out after ${DISK_MAGICIAN_GITLEAKS_TIMEOUT:-600}s; refusing unscanned push." >&2
