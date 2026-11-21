@@ -55,11 +55,17 @@ source "$_SCRATCH_BUDGET_LIB/quarantine.sh"
 #   - an invalid/stale scope fails closed (no candidate is processed).
 scratch_budget_quarantine_remove() {
   local cursor_step="" cursor_index=0 cursor_item_index=0 cursor_items="[]" cursor_visit_complete=false result
-  local keep_unproven_content=false
-  if (($# > 1)); then
-    [[ "$#" == 2 && "$2" == --keep-unproven-content ]] || { echo 'kept:invalid-option'; return 0; }
-    keep_unproven_content=true
-  fi
+  local keep_unproven_content=false min_idle_minutes=""
+  case "$#" in
+    1) ;;
+    2)
+      [[ "$2" == --keep-unproven-content ]] || { echo 'kept:invalid-option'; return 0; }
+      keep_unproven_content=true ;;
+    3)
+      [[ "$2" == --min-idle-minutes && "$3" =~ ^[0-9]+$ ]] || { echo 'kept:invalid-option'; return 0; }
+      min_idle_minutes="$3" ;;
+    *) echo 'kept:invalid-option'; return 0 ;;
+  esac
   if [[ -n "${ACT_CURSOR:-}" && -n "${ACT_CURSOR_SOURCE:-}" ]]; then
     local _cursor_state _cursor_plan _cursor_rest
     _cursor_state="$(act_cursor_load "$ACT_CURSOR" "$ACT_CURSOR_SOURCE")" || { echo 'kept:cursor-invalid'; return 0; }
@@ -115,6 +121,7 @@ print("ready\t" + str(i) + "\t" + str(idx) + "\t" + json.dumps(items, separators
     result=kept:unproven-content
   else
     local args=(--kind ephemeral)
+    [[ -n "$min_idle_minutes" ]] && args+=(--min-idle-minutes "$min_idle_minutes")
     [[ -n "${ACT_DEADLINE_AT:-}" ]] && args+=(--deadline-at "$ACT_DEADLINE_AT")
     result="$(quarantine_remove "$1" "${args[@]}")" || result=kept:check-failed
   fi
@@ -433,9 +440,9 @@ _scratch_budget_contains_git() {
   [[ -n "$found" ]]
 }
 
-# scratch_budget_evict_root <root> <budget_kb> <floor_minutes>
+# scratch_budget_evict_root <root> <budget_kb> <floor_minutes> [retained_pct]
 scratch_budget_evict_root() {
-  local root="$1" budget_kb="$2" floor_minutes="$3"
+  local root="$1" budget_kb="$2" floor_minutes="$3" target_pct="${4:-0}"
   [[ -d "$root" ]] || return 0
 
   # Hard production guard (bead disk_magician-ka4): abort before any
@@ -443,7 +450,10 @@ scratch_budget_evict_root() {
   # outside it. No-op in production (env unset).
   sandbox_guard_roots "$root"
 
-  if ! [[ "$budget_kb" =~ ^[0-9]+$ ]] || (( budget_kb <= 0 )); then
+  if [[ "$target_pct" != 0 && ( ! "$target_pct" =~ ^[1-9][0-9]?$ || "$budget_kb" != 0 ) ]]; then
+    return 2
+  fi
+  if ! [[ "$budget_kb" =~ ^[0-9]+$ ]] || (( target_pct == 0 && budget_kb <= 0 )); then
     return 0
   fi
   if ! [[ "$floor_minutes" =~ ^[0-9]+$ ]]; then
@@ -466,6 +476,10 @@ scratch_budget_evict_root() {
   while IFS= read -r -d '' item; do
     base="$(basename "$item")"
     [[ -n "$base" ]] || continue
+    if (( target_pct > 0 )) && [[ "$item" == *$'\t'* || "$item" == *$'\n'* ]]; then
+      log "scratch_budget: preserving path with unsupported control characters"
+      continue
+    fi
     case "$base" in
       com.apple.*|system-*|PowerlogHelperd*|TemporaryItems|_disk_magician_archive*) continue ;;
     esac
@@ -482,7 +496,12 @@ scratch_budget_evict_root() {
       continue
     fi
     mtime="$(scratch_budget_content_mtime "$item")"
-    kb="$( { path_size_kb "$item" || true; } | awk '$1 ~ /^-?[0-9]+$/ {f=$1} END{print f+0}' )"
+    if (( target_pct > 0 )); then
+      kb="$(path_size_kb "$item" strict)" || kb=-1
+      [[ "$kb" =~ ^[0-9]+$ ]] || kb=-1
+    else
+      kb="$( { path_size_kb "$item" || true; } | awk '$1 ~ /^-?[0-9]+$/ {f=$1} END{print f+0}' )"
+    fi
     if (( kb < 0 )); then
       log "scratch_budget: size unknown for $item — preserving (excluded from eviction and total)."
       continue
@@ -503,6 +522,9 @@ scratch_budget_evict_root() {
     printf '%s\t%s\t%s\n' "$mtime" "$kb" "$item" >>"$candidates_file"
   done < <(find "$root" -xdev -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) -print0 2>/dev/null || true)
 
+  if (( target_pct > 0 )); then
+    budget_kb=$(( (total_kb * target_pct + 99) / 100 ))
+  fi
   if (( total_kb <= budget_kb )); then
     log "scratch_budget: $root total ${total_kb} KB <= budget ${budget_kb} KB — nothing to evict."
     rm -f "$snapshot_file" "$candidates_file"
@@ -521,7 +543,7 @@ scratch_budget_evict_root() {
     (( freed_kb >= over_kb )) && break
     [[ -e "$item_i" ]] || continue  # already gone (e.g. removed by an earlier pass)
 
-    if (( mtime_i > floor_epoch )); then
+    if (( mtime_i > floor_epoch || (target_pct > 0 && mtime_i == floor_epoch) )); then
       continue  # too young — hard floor, never evict
     fi
     if _scratch_budget_snapshot_has_prefix "$snapshot_file" "$item_i"; then
@@ -542,11 +564,35 @@ scratch_budget_evict_root() {
     was_dir=false
     [[ -d "$item_i" && ! -L "$item_i" ]] && was_dir=true
 
+    if (( target_pct > 0 )); then
+      local -a budget_verdict_args=(--kind ephemeral --min-idle-minutes "$floor_minutes")
+      [[ -n "${ACT_DEADLINE_AT:-}" ]] && budget_verdict_args+=(--deadline-at "$ACT_DEADLINE_AT")
+      result="$(C14_NO_RESCUE_PUSH=1 DISK_MAGICIAN_AGE_FLOOR_MINUTES="$floor_minutes" artifact_removal_verdict "$item_i" "${budget_verdict_args[@]}" 2>/dev/null)" || result=kept:check-failed
+      if [[ "$result" != remove ]]; then
+        log "scratch_budget: preserved by C14 ($result): $item_i"
+        continue
+      fi
+      if [[ "$DRY_RUN" != true ]]; then
+        kb_i="$(path_size_kb "$item_i" strict)" || kb_i=-1
+        if ! [[ "$kb_i" =~ ^[0-9]+$ ]]; then
+          log "scratch_budget: current size uncertain, preserving: $item_i"
+          continue
+        fi
+      fi
+      if (( kb_i > over_kb - freed_kb )); then
+        log "scratch_budget: oldest eligible unit would exceed remaining budget: $item_i"
+        break
+      fi
+    fi
     if [[ "$DRY_RUN" == true ]]; then
       log "DRY RUN: would evict (budget): $item_i  (${kb_i} KB)"
     else
       log "Requesting C14 eviction: $item_i  (${kb_i} KB)"
-      result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$item_i")"
+      if (( target_pct > 0 )); then
+        result="$(C14_NO_RESCUE_PUSH=1 DISK_MAGICIAN_AGE_FLOOR_MINUTES="$floor_minutes" DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$item_i" --min-idle-minutes "$floor_minutes")"
+      else
+        result="$(DM_DELETION_LOGGED=1 scratch_budget_quarantine_remove "$item_i")"
+      fi
       if [[ "${CANDIDATE_REMOVED_COUNT+x}" == x ]]; then
         case "$result" in
           removed:*) CANDIDATE_REMOVED_COUNT=$((CANDIDATE_REMOVED_COUNT + 1)) ;;
@@ -577,6 +623,10 @@ scratch_budget_evict_root() {
     fi
     BUDGET_KB_FREED=$(( BUDGET_KB_FREED + kb_i ))
   done < <(sort -t $'\t' -k1,1n "$candidates_file")
+
+  if (( target_pct > 0 && freed_kb < over_kb )); then
+    log "scratch_budget: target estimate unmet by $((over_kb - freed_kb)) KB."
+  fi
 
   rm -f "$snapshot_file" "$candidates_file"
 }
