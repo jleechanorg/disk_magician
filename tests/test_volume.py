@@ -2251,7 +2251,7 @@ raise SystemExit(volume.ballast_cmd('recover','scratch'))
         self.assertTrue(volume.unlink_ballast_verified(self.mp))
         self.assertFalse(volume.ballast_ok(self.mp))
         self.assertNotIn("ballast_recovery", volume.registry()["volumes"]["scratch"])
-        fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+        fd = scratch_lock.open_lock(pathlib.Path.home() / ".disk_magician_locks/scratch_cleanup.lock", create=True)
         volume.fcntl.flock(fd, volume.fcntl.LOCK_EX | volume.fcntl.LOCK_NB)
         try:
             command = [sys.executable, str(ROOT / "scripts/volume.py"), "ballast", "ensure", "scratch"]
@@ -2280,7 +2280,7 @@ raise SystemExit(volume.ballast_cmd('recover','scratch'))
 
         self.make_fit()
         self.assertEqual(volume.ballast_cmd("release", "scratch"), 0)
-        fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+        fd = scratch_lock.open_lock(pathlib.Path.home() / ".disk_magician_locks/scratch_cleanup.lock", create=True)
         volume.fcntl.flock(fd, volume.fcntl.LOCK_EX | volume.fcntl.LOCK_NB)
         try:
             self.assertEqual(volume.ballast_cmd("recover", "scratch"), 0)

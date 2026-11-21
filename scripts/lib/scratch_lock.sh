@@ -1,23 +1,5 @@
 # shellcheck shell=bash
-# Shared kernel lock for destructive scratch cleanup passes.
-# Dry-run skips this helper; Python owns the inherited flock descriptor.
-SCRATCH_LOCK_FD="${DISK_MAGICIAN_SCRATCH_LOCK_FD:-}"
-
-scratch_lock_acquire() {
-  local caller="$1" script_path="${BASH_SOURCE[1]}"
-  local helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scratch_lock.py"
-
-  # This PID guard prevents accidental descendant reuse; same-user code can
-  # forge its environment, so the lock coordinates cooperating cleanup callers.
-  if [[ "$SCRATCH_LOCK_FD" =~ ^[0-9]+$ && "${DISK_MAGICIAN_SCRATCH_LOCK_PID:-}" == "${BASHPID:-$$}" ]] && \
-      python3 "$helper" verify --fd "$SCRATCH_LOCK_FD" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  unset DISK_MAGICIAN_SCRATCH_LOCK_FD DISK_MAGICIAN_SCRATCH_LOCK_PID
-  shift
-  exec python3 "$helper" run --caller "$caller" --script "$script_path" --args -- "$@"
-}
+# Guard only writers of the same cleanup cursor.
 
 # Serialize updates only when multiple callers share one resume cursor.
 scratch_cursor_lock_acquire() {
@@ -26,22 +8,21 @@ scratch_cursor_lock_acquire() {
   helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scratch_lock.py"
   local cursor_key
   cursor_key="$(python3 "$helper" key "$cursor")" || return 2
-  if [[ "${DISK_MAGICIAN_SCRATCH_LOCK_FD:-}" =~ ^[0-9]+$ &&
-        "${DISK_MAGICIAN_SCRATCH_LOCK_PID:-}" == "${BASHPID:-$$}" &&
-        "${DISK_MAGICIAN_SCRATCH_LOCK_SCOPE:-}" == cursor &&
-        "${DISK_MAGICIAN_SCRATCH_LOCK_KEY:-}" == "$cursor_key" ]] &&
-      python3 "$helper" verify --fd "$DISK_MAGICIAN_SCRATCH_LOCK_FD" \
-        --scope cursor --key "$cursor_key" >/dev/null 2>&1; then
+  if [[ "${DISKM_CLEANUP_CURSOR_FD:-}" =~ ^[0-9]+$ &&
+        "${DISKM_CLEANUP_CURSOR_PID:-}" == "${BASHPID:-$$}" &&
+        "${DISKM_CLEANUP_CURSOR_KEY:-}" == "$cursor_key" ]] &&
+      python3 "$helper" verify --fd "$DISKM_CLEANUP_CURSOR_FD" \
+        --key "$cursor_key" >/dev/null 2>&1; then
     return 0
   fi
-  unset DISK_MAGICIAN_SCRATCH_LOCK_FD DISK_MAGICIAN_SCRATCH_LOCK_PID
+  unset DISKM_CLEANUP_CURSOR_FD DISKM_CLEANUP_CURSOR_PID
   if (($#)); then
-    DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 exec python3 "$helper" run \
-      --caller "$caller" --script "$script_path" --scope cursor --key "$cursor_key" \
+    exec python3 "$helper" run \
+      --caller "$caller" --script "$script_path" --key "$cursor_key" \
       --args -- "$@"
   else
-    DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 exec python3 "$helper" run \
-      --caller "$caller" --script "$script_path" --scope cursor --key "$cursor_key" --args --
+    exec python3 "$helper" run \
+      --caller "$caller" --script "$script_path" --key "$cursor_key" --args --
   fi
 }
 

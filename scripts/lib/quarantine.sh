@@ -24,7 +24,7 @@ quarantine_remove() {
   if ! _lease_scope_is_owner; then
     if _lease_lock_scope release quarantine_remove "$@"; then return 0; else return $?; fi
   fi
-  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 expected_target='' expected_inventory='' identity_kind=regular_file dkb=0 dact=remove lease_lock_held=0
+  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 expected_target='' expected_inventory='' identity_kind=regular_file dkb=0 dact=remove lease_lock_held=0 owner_writable_directories=0
   [[ $# -ge 1 ]] || { echo kept:check-failed; return 0; }
   path_arg="$1"; verdict_path="$1"; shift
   local -a caller_verdict_args=()
@@ -47,6 +47,9 @@ quarantine_remove() {
       --min-idle-minutes)
         [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || { echo kept:check-failed; return 0; }
         caller_verdict_args+=("$1" "$2"); shift 2 ;;
+      --owner-writable-directories)
+        [[ "$owner_writable_directories" == 0 ]] || { echo kept:check-failed; return 0; }
+        owner_writable_directories=1; shift ;;
       *) echo kept:check-failed; return 0 ;;
     esac
   done
@@ -127,6 +130,7 @@ PY
     [[ -z "$expected_target" ]] || remove_error=deferred:quarantine-error
     local -a remove_args=("$path_arg" "$inv" "$binding")
     [[ -z "$expected_target" ]] || remove_args+=(--expected-root-identity "$expected_target")
+    if [[ "$owner_writable_directories" == 1 ]]; then remove_args+=(--owner-writable-directories); fi
     if [[ "$deadline_seen" == 1 ]]; then
       remove_args+=(--deadline-at "$deadline")
       v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v="$remove_error"

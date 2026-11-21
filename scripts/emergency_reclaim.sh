@@ -108,7 +108,7 @@ fi
 LAST_OUT=""
 run_cleaner() {
   local label="$1"; shift
-  LAST_OUT="$(DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 "$@" 2>&1)"
+  LAST_OUT="$("$@" 2>&1)"
   local rc=$?
   [[ -n "$LAST_OUT" ]] && sed "s/^/  [$label] /" <<<"$LAST_OUT"
   echo "  [$label] rc=$rc"

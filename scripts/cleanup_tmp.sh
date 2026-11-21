@@ -298,9 +298,11 @@ if [[ "$INCLUDE_OPENCODE_DYLIBS" == true && "$DRY_RUN" != true && "${OPENCODE_DY
   exit 0
 fi
 
-# Shared lock invariant: serialize destructive sweep against cleanup_pr_scratch.
-# Dry-run (--dry-run) is read-only and skips the lock.
-[[ "$DRY_RUN" == false ]] && { scratch_lock_acquire "cleanup_tmp" ${SCRATCH_LOCK_ORIGINAL_ARGS[@]+"${SCRATCH_LOCK_ORIGINAL_ARGS[@]}"} || exit 1; }
+# Independent temp scans can overlap. Only a shared explicit cursor needs
+# protection around its progress updates.
+if [[ "$DRY_RUN" == false && -n "$ACT_CURSOR" ]]; then
+  scratch_cursor_lock_acquire cleanup_tmp "$ACT_CURSOR" ${SCRATCH_LOCK_ORIGINAL_ARGS[@]+"${SCRATCH_LOCK_ORIGINAL_ARGS[@]}"} || exit $?
+fi
 
 # Root list (bead disk_magician-d45): /private/tmp, /tmp, and the
 # canonicalized macOS per-user temp dir, all owned by scripts/lib/scratch_roots.sh
@@ -1058,10 +1060,41 @@ archive_classify() {  # <path>: sets _ARCH_CANON/_ARCH_RETENTION; rc 1 on refusa
   return 0
 }
 
+archive_lease_scope_clear() {
+  local path="$1" candidate lease state scope_done=0
+  declare -F _av_lease_scope >/dev/null 2>&1 && declare -F lease_path_for >/dev/null 2>&1 &&
+    declare -F lease_owner_state >/dev/null 2>&1 || return 1
+  while IFS= read -r -d '' candidate; do
+    if [[ "$candidate" == __C14_SCOPE_COMPLETE__ ]]; then scope_done=1; continue; fi
+    lease="$(lease_path_for "$candidate")" || return 1
+    if [[ -e "$lease" || -L "$lease" ]]; then
+      state="$(lease_owner_state "$lease")" || return 1
+      case "$state" in dead|released) ;; *) return 1 ;; esac
+    fi
+  done < <(_av_lease_scope "$path" && printf '__C14_SCOPE_COMPLETE__\0')
+  [[ "$scope_done" == 1 ]]
+}
+
 archive_path() {
-  local path="$1" kb="$2" sub="${3:-}" recovery_hours="${4:-0}" ts dest entry receipt safety_reason canon="" retention=""
+  if [[ "${DRY_RUN:-false}" == true ]]; then
+    _archive_path_impl "$@"
+  else
+    _lease_lock_scope release _archive_path_impl "$@"
+  fi
+}
+
+_archive_path_impl() {
+  local path="$1" kb="$2" sub="${3:-}" recovery_hours="${4:-0}" ts dest entry receipt safety_reason canon="" retention="" binding="" destination_binding="" active_hours="$LARGE_TMP_ACTIVE_HOURS"
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   dest="$ARCHIVE_ROOT/$ts${sub:+/$sub}"
+
+  if [[ "$DRY_RUN" != true ]]; then
+    binding="$(python3 "$SCRIPT_DIR/c14_probe.py" archive-bind "$path")" || {
+      log "Skipping archive candidate (C14 kept:archive-identity): $path"
+      cleanup_tmp_count_candidate_result kept:archive-identity
+      return 1
+    }
+  fi
 
   # Every refusal gate runs for BOTH dry-run and clean so a preview reports
   # exactly what a clean run would do (CodeRabbit #207). The safety gate is
@@ -1089,22 +1122,53 @@ archive_path() {
       log "ERROR: could not create archive destination: $dest"
       return 2
     fi
+    destination_binding="$(python3 "$SCRIPT_DIR/c14_probe.py" archive-parent-bind "$dest")" || {
+      log "ERROR: could not bind archive destination: $dest"
+      return 2
+    }
     entry="$dest/${path##*/}"
     receipt="$entry.c14-origin.json"
+    if [[ "$recovery_hours" =~ ^[0-9]+$ ]] && (( 10#$recovery_hours > 0 )); then
+      active_hours="$AGED_TMP_ACTIVE_HOURS"
+    fi
+    if has_recent_activity "$path" "$active_hours" false ||
+        has_active_marker "$path" || has_open_files "$path"; then
+      log "Skipping recently active or open archive candidate: $path"
+      cleanup_tmp_count_candidate_result kept:final-recheck
+      return 1
+    fi
+    if ! lease_registry_mutation_lock_enter; then
+      log "Archive deferred:lease-busy $path"
+      cleanup_tmp_count_candidate_result deferred:lease-busy
+      return 1
+    fi
+    if ! safety_gate "$path" >/dev/null 2>&1 || ! archive_lease_scope_clear "$canon"; then
+      lease_registry_mutation_lock_exit || true
+      log "Skipping archive candidate after final activity/lease recheck: $path"
+      cleanup_tmp_count_candidate_result kept:final-recheck
+      return 1
+    fi
     if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-receipt "$canon" "$receipt" "" "$retention" "$recovery_hours"; then
+      lease_registry_mutation_lock_exit || true
       log "ERROR: could not write archive origin receipt: $receipt"
       return 2
     fi
     # Receipt preparation can consume the remaining budget. Keep its evidence
     # (as on a failed mv), but never relocate the source after that expiry.
     if ! act_unit_fits 0; then
+      lease_registry_mutation_lock_exit || true
       log "Archive deferred:deadline-before-unit $path"
       cleanup_tmp_count_candidate_result deferred:deadline-before-unit
       return 1
     fi
     log "Archiving: $path -> $dest/  (${kb} KB)"
-    if ! mv "$path" "$dest/"; then
+    if ! python3 "$SCRIPT_DIR/c14_probe.py" archive-move "$binding" "$destination_binding" "$entry" "$receipt"; then
+      lease_registry_mutation_lock_exit || true
       log "ERROR: could not archive: $path -> $dest/"
+      return 2
+    fi
+    if ! lease_registry_mutation_lock_exit; then
+      log "ERROR: archive completed but C14 lease registry lock release failed: $path"
       return 2
     fi
     deletion_log "cleanup_tmp.sh" "archive" "$kb" "$path -> $dest/"

@@ -18,15 +18,15 @@ chmod +x "$TMP/holder.sh"
 cursor_one="$TMP/cursors/one.json"
 cursor_two="$TMP/cursors/two.json"
 READY="$TMP/ready" HOME="$HOME" python3 "$ROOT/scripts/scratch_lock.py" run \
-  --caller cursor-test --script "$TMP/holder.sh" --scope cursor --key "$cursor_one" --args -- &
+  --caller cursor-test --script "$TMP/holder.sh" --key "$cursor_one" --args -- &
 holder=$!
 for _ in {1..50}; do [[ -e "$TMP/ready" ]] && break; sleep 0.02; done
 [[ -e "$TMP/ready" ]]
 
 set +e
-HOME="$HOME" DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS=0 \
+HOME="$HOME" \
   python3 "$ROOT/scripts/scratch_lock.py" run --caller same-cursor --script /usr/bin/true \
-  --scope cursor --key "$TMP/cursors/../cursors/one.json" --args --
+  --key "$TMP/cursors/../cursors/one.json" --args --
 same_rc=$?
 set -e
 [[ "$same_rc" == 75 ]]
@@ -34,8 +34,8 @@ set -e
 cat >"$TMP/reenter.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if python3 "$LOCK_HELPER" verify --fd "$DISK_MAGICIAN_SCRATCH_LOCK_FD"; then
-  echo "cursor lock was accepted as the global cleanup lock" >&2
+if python3 "$LOCK_HELPER" verify --fd "$DISKM_CLEANUP_CURSOR_FD" --key "$OTHER_CURSOR"; then
+  echo "cursor FD was accepted for a different checkpoint" >&2
   exit 1
 fi
 source "$LOCK_LIB"
@@ -45,9 +45,15 @@ printf 'reentered\n' >> "$TRACE"
 SH
 chmod +x "$TMP/reenter.sh"
 LOCK_HELPER="$ROOT/scripts/scratch_lock.py" LOCK_LIB="$ROOT/scripts/lib/scratch_lock.sh" \
-  CURSOR="$cursor_two" TRACE="$TMP/reenter.log" HOME="$HOME" \
+  CURSOR="$cursor_two" OTHER_CURSOR="$cursor_one" TRACE="$TMP/reenter.log" HOME="$HOME" \
   python3 "$ROOT/scripts/scratch_lock.py" run --caller other-cursor \
-  --script "$TMP/reenter.sh" --scope cursor --key "$cursor_two" --args --
+  --script "$TMP/reenter.sh" --key "$cursor_two" --args --
 [[ "$(cat "$TMP/reenter.log")" == reentered ]]
 wait "$holder"
+git_bin="$(command -v git)"
+git_check="$(GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=tool.marker GIT_CONFIG_VALUE_0=preserve \
+  GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=true \
+  python3 "$ROOT/scripts/scratch_lock.py" run --caller git-test --script "$git_bin" \
+  --key "$cursor_two" --args -- config --get core.fsmonitor)"
+[[ "$git_check" == false ]]
 echo "PASS: separate cursors proceed while the same cursor defers"

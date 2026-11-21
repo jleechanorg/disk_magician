@@ -322,7 +322,7 @@ HELP_OUT=$(bash "$TARGET_SCRIPT" --help 2>&1)
 assert_contains "T10: --help displays usage" "Usage: cleanup_pr_scratch.sh" "$HELP_OUT"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 11: Read-only entry does not abort the whole sweep (bead disk_magician-qap)
+# Test 11: Read-only entry is prepared only after C14 binds it (bead disk_magician-qap)
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Test 11: Read-Only Entry Does Not Abort Sweep"
 T11_DIR="$TMP_TEST_ROOT/t11_tmp"
@@ -344,8 +344,23 @@ T11_RC=$?
 set -e
 chmod -R u+w "$T11_DIR" 2>/dev/null || true
 assert_rc "T11: sweep exits 0 despite a read-only entry" 0 "$T11_RC"
-assert_missing "T11: read-only dir still removed (chmod u+w recovers it)" "$T11_DIR/pr-readonly-dir"
+assert_missing "T11: C14-bound read-only dir is removed" "$T11_DIR/pr-readonly-dir"
 assert_missing "T11: sibling dir also removed (sweep did not abort)" "$T11_DIR/pr-normal-dir"
+
+# A candidate that C14 rejects must keep its original permissions. The old
+# pre-verdict chmod widened this nested directory before the secret veto.
+T11_HOLD_DIR="$TMP_TEST_ROOT/t11_c14_hold"
+mkdir -p "$T11_HOLD_DIR/pr-secret-dir/nested"
+touch "$T11_HOLD_DIR/pr-secret-dir/nested/.env"
+chmod 555 "$T11_HOLD_DIR/pr-secret-dir/nested"
+set_old_mtime "$T11_HOLD_DIR"
+T11_HOLD_PERMS_BEFORE="$(stat -f '%Lp' "$T11_HOLD_DIR/pr-secret-dir/nested" 2>/dev/null || stat -c '%a' "$T11_HOLD_DIR/pr-secret-dir/nested")"
+T11_HOLD_OUT=$(DISK_MAGICIAN_TEST_CONTEXT=1 DISK_MAGICIAN_TEST_SANDBOX="$T11_HOLD_DIR" DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE="$T11_HOLD_DIR" bash "$TARGET_SCRIPT" --clean --tmp-dir "$T11_HOLD_DIR" 2>&1)
+T11_HOLD_PERMS_AFTER="$(stat -f '%Lp' "$T11_HOLD_DIR/pr-secret-dir/nested" 2>/dev/null || stat -c '%a' "$T11_HOLD_DIR/pr-secret-dir/nested")"
+assert_exists "T11: C14-rejected secret candidate remains" "$T11_HOLD_DIR/pr-secret-dir"
+assert_contains "T11: C14 secret veto remains visible" "secret-like" "$T11_HOLD_OUT"
+[[ "$T11_HOLD_PERMS_BEFORE" == "$T11_HOLD_PERMS_AFTER" ]] && record_pass "T11: rejected tree permissions stay unchanged" || record_fail "T11: rejected tree permissions stay unchanged" "before=$T11_HOLD_PERMS_BEFORE after=$T11_HOLD_PERMS_AFTER"
+chmod -R u+w "$T11_HOLD_DIR" 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 12: chmod-immune entry (chflags uchg) is SKIP-logged, not fatal (bead disk_magician-qap)

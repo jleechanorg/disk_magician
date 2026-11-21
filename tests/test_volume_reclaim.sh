@@ -108,9 +108,10 @@ if [[ "${VOLUME_RECLAIM_TEST_FILTER:-}" == unrelated-cleanup-lock ]]; then
   export BALLAST_LOG="$T/ballast.log"
   python3 - "$ROOT" <<'PYLOCK'
 import fcntl, os, subprocess, sys
+from pathlib import Path
 sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
 import scratch_lock
-fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+fd = scratch_lock.open_lock(Path.home() / ".disk_magician_locks/scratch_cleanup.lock", create=True)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     env = dict(os.environ, TEST_USED="600", DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS="0")
@@ -371,10 +372,11 @@ touch "$TEST_ROOT/repo/build/younger/content"
 # Existing protection still prevents mutation in this fixture.
 ROOT_DIR="$ROOT" python3 - "$HOME" <<'PYH' &
 import fcntl,os,sys,time
+from pathlib import Path
 os.environ["HOME"]=sys.argv[1]
 sys.path.insert(0,os.path.join(os.environ["ROOT_DIR"],"scripts"))
 import scratch_lock
-fd=scratch_lock.open_lock(scratch_lock.lock_path(),create=True)
+fd=scratch_lock.open_lock(Path.home() / ".disk_magician_locks/scratch_cleanup.lock", create=True)
 fcntl.flock(fd,fcntl.LOCK_EX)
 print("held",flush=True)
 time.sleep(30)
