@@ -36,6 +36,14 @@ struct IndexRecord {
     entry: IndexEntry,
 }
 
+pub(crate) fn restore_is_settled(original: &Path, identity: (u64, u64)) -> io::Result<bool> {
+    let (status, entry) = find_entry(original, identity, None)?;
+    Ok(status == "no_match"
+        || entry.is_some_and(|entry| {
+            entry.phase == "terminal" && entry.terminal.as_deref() == Some("restored")
+        }))
+}
+
 pub(crate) fn is_quarantine_id(id: &str) -> bool {
     id.len() == 16
         && id

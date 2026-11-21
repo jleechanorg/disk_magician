@@ -439,6 +439,66 @@ fn interrupted_in_flight_quarantine_requires_exact_recovery_without_global_recon
 }
 
 #[test]
+fn acknowledging_a_restored_entry_advances_the_checkpoint_without_calling_apply() {
+    let fixture = Fixture::new(2);
+    let path = &fixture.entries[0];
+    let other = &fixture.entries[1];
+    let first = fixture.run_result(
+        &[101 * GIB],
+        &["volume-a"],
+        &["--all"],
+        "deferred:quarantine-error",
+    );
+    assert!(report(&first)["status"]
+        .as_str()
+        .unwrap()
+        .starts_with("recovery_required:"));
+    let previous = fs::read_to_string(&fixture.applies).unwrap();
+
+    let wrong_path = fixture.run(&[101 * GIB], &["volume-a"], &["--ack-restored", other]);
+    assert!(!wrong_path.status.success());
+    assert_eq!(fs::read_to_string(&fixture.applies).unwrap(), previous);
+
+    let blocked = fixture.scratch.join(path);
+    let parked = fixture.scratch.join("temporarily-quarantined");
+    fs::rename(&blocked, &parked).unwrap();
+    let missing = fixture.run(&[101 * GIB], &["volume-a"], &["--ack-restored", path]);
+    assert!(!missing.status.success());
+    fs::rename(&parked, &blocked).unwrap();
+
+    let id = "0123456789abcdef";
+    fixture.write_recovery_entry(id, path);
+    let active = fixture.run(&[101 * GIB], &["volume-a"], &["--ack-restored", path]);
+    assert!(!active.status.success());
+    assert_eq!(fs::read_to_string(&fixture.applies).unwrap(), previous);
+    fs::remove_file(
+        fixture
+            .root
+            .join("state/quarantine-index/0123456789abcdef.json"),
+    )
+    .unwrap();
+
+    let acknowledged = fixture.run(&[101 * GIB], &["volume-a"], &["--ack-restored", path]);
+    assert!(
+        acknowledged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&acknowledged.stderr)
+    );
+    let acknowledged = report(&acknowledged);
+    assert_eq!(acknowledged["pending_paths"], json!([other]));
+    assert_eq!(acknowledged["receipts"][0]["path"], *path);
+    assert_eq!(acknowledged["receipts"][0]["result"], "kept:restored");
+    assert_eq!(fs::read_to_string(&fixture.applies).unwrap(), previous);
+
+    let resumed = fixture.run(&[101 * GIB, 99 * GIB], &["volume-a"; 2], &[]);
+    let resumed = report(&resumed);
+    assert_eq!(resumed["status"], "target_reached");
+    assert_eq!(resumed["receipts"].as_array().unwrap().len(), 2);
+    assert_eq!(resumed["receipts"][1]["path"], *other);
+    assert!(blocked.exists());
+}
+
+#[test]
 fn unverified_or_oversized_manifest_never_reaches_the_volume_or_actuator() {
     let fixture = Fixture::new(1);
     fs::write(&fixture.manifest, b"changed manifest bytes").unwrap();
