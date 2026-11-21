@@ -199,6 +199,9 @@ LARGE_TMP_MIN_KB="${LARGE_TMP_MIN_KB:-102400}"
 # Size-budget mode (bead disk_magician-d45): 0 disables. Env default lets
 # pressure_sweep.sh and launchd jobs enable it without a CLI edit.
 BUDGET_GB="${DISK_MAGICIAN_SCRATCH_BUDGET_GB:-0}"
+BUDGET_GB_EXPLICIT=false
+SYSTEM_TMP_BUDGET_PCT=0
+SYSTEM_TMP_BUDGET_PCT_EXPLICIT=false
 # Hard floor (minutes): never evict anything younger than this, regardless
 # of budget pressure. Default 48h; explicit operator floors retain the 1h minimum.
 BUDGET_FLOOR_MINUTES="${DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_MINUTES:-$(safety_disposable_recency_floor_minutes)}"
@@ -211,7 +214,7 @@ act_parse_deadline_args "$@" || exit 2
 if ((${#ACT_ARGS[@]})); then set -- "${ACT_ARGS[@]}"; else set --; fi
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--aged] [--opencode-dylibs] [--budget-gb N] [--budget-floor-minutes N] [--help]
+Usage: $(basename "$0") [--clean] [--dry-run] [--large] [--aged] [--opencode-dylibs] [--budget-gb N] [--system-tmp-budget-pct N] [--budget-floor-minutes N] [--help]
 
 Delete stale agent git clones and temp files from system temp paths.
 
@@ -231,6 +234,9 @@ Options:
                candidates, evict oldest-first (by content mtime) until
                under budget. 0 disables (default; env
                DISK_MAGICIAN_SCRATCH_BUDGET_GB).
+  --system-tmp-budget-pct N
+               Retain N percent of matched physical system-/tmp allocation
+               and evict oldest-first (1..99). Isolated /tmp-only mode.
   --budget-floor-minutes N
                Never evict anything younger than N minutes under budget
                mode (default 2880, hard minimum 60; env
@@ -252,9 +258,18 @@ while [[ $# -gt 0 ]]; do
         echo "Error: --budget-gb requires a numeric argument" >&2
         exit 2
       fi
-      BUDGET_GB="$2"; shift
+      BUDGET_GB="$2"; BUDGET_GB_EXPLICIT=true; shift
       ;;
-    --budget-gb=*) BUDGET_GB="${1#*=}" ;;
+    --budget-gb=*) BUDGET_GB="${1#*=}"; BUDGET_GB_EXPLICIT=true ;;
+    --system-tmp-budget-pct)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: --system-tmp-budget-pct requires an integer from 1 to 99" >&2
+        exit 2
+      fi
+      SYSTEM_TMP_BUDGET_PCT="$2"; SYSTEM_TMP_BUDGET_PCT_EXPLICIT=true; shift
+      ;;
+    --system-tmp-budget-pct=*) SYSTEM_TMP_BUDGET_PCT="${1#*=}"; SYSTEM_TMP_BUDGET_PCT_EXPLICIT=true ;;
+
     --budget-floor-minutes)
       if [[ $# -lt 2 || -z "$2" ]]; then
         echo "Error: --budget-floor-minutes requires a numeric argument" >&2
@@ -287,7 +302,24 @@ if ! [[ "$BUDGET_FLOOR_MINUTES" =~ ^[0-9]+$ ]]; then
   echo "Error: --budget-floor-minutes must be a non-negative integer, got '$BUDGET_FLOOR_MINUTES'" >&2
   exit 2
 fi
-
+if [[ "$SYSTEM_TMP_BUDGET_PCT_EXPLICIT" == true ]]; then
+  if ! [[ "$SYSTEM_TMP_BUDGET_PCT" =~ ^([1-9]|[1-9][0-9])$ ]]; then
+    echo "Error: --system-tmp-budget-pct must be an integer from 1 to 99" >&2
+    exit 2
+  fi
+  if [[ -n "${ACT_CURSOR:-}" ]]; then
+    echo "Error: --system-tmp-budget-pct cannot resume an actuator cursor" >&2
+    exit 2
+  fi
+  if [[ "$INCLUDE_LARGE" == true || "$INCLUDE_AGED" == true || "$INCLUDE_OPENCODE_DYLIBS" == true ]]; then
+    echo "Error: --system-tmp-budget-pct is exclusive with --large, --aged, and --opencode-dylibs" >&2
+    exit 2
+  fi
+  if [[ "$BUDGET_GB_EXPLICIT" == true && "$BUDGET_GB" =~ [1-9] ]]; then
+    echo "Error: --system-tmp-budget-pct is exclusive with nonzero --budget-gb" >&2
+    exit 2
+  fi
+fi
 if [[ ( "$INCLUDE_LARGE" == true || "$INCLUDE_AGED" == true ) && "$DRY_RUN" != true && "${LARGE_TMP_APPROVED:-0}" != "1" ]]; then
   echo "Refusing /private/tmp deletion: set LARGE_TMP_APPROVED=1 after reviewing dry-run output." >&2
   exit 0
@@ -320,6 +352,23 @@ USER_TMP="$(scratch_roots_get_user_tmp)"
 # tests can confine --large to a fixture root instead of hardcoding
 # `find /private/tmp` (bead disk_magician-ka4).
 PRIVATE_TMP_ROOT="$(scratch_roots_get_private_tmp)"
+SYSTEM_TMP_ROOT=""
+if [[ "$SYSTEM_TMP_BUDGET_PCT_EXPLICIT" == true ]]; then
+  if [[ "${DISK_MAGICIAN_TEST_CONTEXT:-}" == 1 && -n "${DISK_MAGICIAN_PRIVATE_TMP_ROOT_OVERRIDE:-}" ]]; then
+    [[ -n "$PRIVATE_TMP_ROOT" && -d "$PRIVATE_TMP_ROOT" ]] &&
+      SYSTEM_TMP_ROOT="$(cd "$PRIVATE_TMP_ROOT" 2>/dev/null && pwd -P)" || SYSTEM_TMP_ROOT=""
+  else
+    SYSTEM_TMP_ROOT="$(cd /tmp 2>/dev/null && pwd -P)" || SYSTEM_TMP_ROOT=""
+  fi
+  if [[ "$SYSTEM_TMP_ROOT" != /* || "$SYSTEM_TMP_ROOT" == / || ! -d "$SYSTEM_TMP_ROOT" ]]; then
+    echo "Error: system /tmp root is unavailable; refusing budget mode" >&2
+    exit 2
+  fi
+  # Test-context root overrides are checked against the standard sandbox guard.
+  TMP_DIRS=("$SYSTEM_TMP_ROOT")
+  PRIVATE_TMP_ROOT="$SYSTEM_TMP_ROOT"
+  USER_TMP=""
+fi
 
 # Candidate scope/order is part of the resume contract. A cursor created for
 # different effective thresholds, modes, budgets, or roots fails closed.
@@ -505,9 +554,13 @@ path_size_kb() {
   # Any non-success du with no numeric total is unknown (-1), never 0. rc 1 WITH
   # a numeric total (EACCES/ENOENT partial) stays a lower bound.
   local tbin out rc=0 total
+  local -a probe_cmd=("${SIZE_CMD[@]}")
+  # The APFS private-size estimator omits unreadable descendants. A relative
+  # removal cap requires a complete probe rather than that lower bound.
+  [[ "${2:-}" != strict ]] || probe_cmd=(du -sk -x)
   tbin="$(resolve_timeout_bin "${DISK_MAGICIAN_PROBE_TIMEOUT_BIN:-}")"
   if [[ -n "$tbin" ]]; then
-    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" "${SIZE_CMD[@]}" "$1" 2>/dev/null)" || rc=$?
+    out="$("$tbin" --kill-after=2s "${PROBE_TIMEOUT_SEC}s" "${probe_cmd[@]}" "$1" 2>/dev/null)" || rc=$?
     if (( rc == 124 || rc == 137 )); then
       log "du exceeded ${PROBE_TIMEOUT_SEC}s, size unknown (preserving): $1"
       echo -1
@@ -520,7 +573,17 @@ path_size_kb() {
     fi
   else
     warn_unbounded_probes_once
-    out="$("${SIZE_CMD[@]}" "$1" 2>/dev/null)" || rc=$?
+    out="$("${probe_cmd[@]}" "$1" 2>/dev/null)" || rc=$?
+  fi
+  if [[ "${2:-}" == strict ]]; then
+    total="$(awk '$1 ~ /^[0-9]+$/ {f=$1} END {if (NR == 1 && f != "") print f}' <<<"$out")"
+    if (( rc != 0 )) || [[ -z "$total" ]]; then
+      log "incomplete size measurement, preserving: $1"
+      echo -1
+    else
+      echo "$total"
+    fi
+    return 0
   fi
   total="$(awk '$1 ~ /^[0-9]+$/ {f=$1; n=1} END{if (n) print f}' <<<"$out")"
   if [[ -z "$total" ]] && (( rc != 0 )); then
@@ -1336,6 +1399,17 @@ FILES_DELETED=0
 TOTAL_KB=0
 DIRS_ARCHIVED=0
 ARCHIVED_KB=0
+
+# Isolated system-/tmp budget mode preserves the shared lock, receipt, floor,
+# and canonical budget helper while skipping all other sweeps and temp roots.
+if [[ "$SYSTEM_TMP_BUDGET_PCT_EXPLICIT" == true ]]; then
+  BUDGET_DIRS_DELETED=0
+  BUDGET_FILES_DELETED=0
+  BUDGET_KB_FREED=0
+  scratch_budget_evict_root "$SYSTEM_TMP_ROOT" 0 "$BUDGET_FLOOR_MINUTES" "$SYSTEM_TMP_BUDGET_PCT"
+  log "$(dry_prefix)System /tmp budget done. Dirs evicted: ${BUDGET_DIRS_DELETED}  Files evicted: ${BUDGET_FILES_DELETED}  Estimated reclaimed: ${BUDGET_KB_FREED} KB"
+  exit 0
+fi
 
 # Scan all temp directories for git clones & validation scratch dirs
 if [[ "$INCLUDE_AGED" != true ]]; then
