@@ -638,6 +638,40 @@ fn selected_manifest_paths(
     Ok(paths)
 }
 
+fn restored_entry_metadata(root: &Root, relative: &str) -> io::Result<fs::Metadata> {
+    let components: Vec<_> = Path::new(relative).components().collect();
+    if components.is_empty()
+        || !components
+            .iter()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(io::Error::other("invalid restored manifest path"));
+    }
+    let root_metadata = fs::symlink_metadata(&root.path)?;
+    if !root_metadata.is_dir() || root_metadata.dev() != root.dev || root_metadata.ino() != root.ino
+    {
+        return Err(io::Error::other("Scratch root identity changed"));
+    }
+    let mut path = root.path.clone();
+    let mut result = None;
+    for (index, component) in components.iter().enumerate() {
+        path.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || metadata.dev() != root.dev {
+            return Err(io::Error::other(
+                "restored path crossed a symlink or filesystem boundary",
+            ));
+        }
+        if index + 1 < components.len() && !metadata.is_dir() {
+            return Err(io::Error::other(
+                "restored path has a non-directory ancestor",
+            ));
+        }
+        result = Some(metadata);
+    }
+    result.ok_or_else(|| io::Error::other("restored path is empty"))
+}
+
 fn acknowledge_restored(
     mut state: ResumeState,
     entries: &[Entry],
@@ -663,10 +697,10 @@ fn acknowledge_restored(
         .ok_or_else(|| io::Error::other("restored entry identity unavailable"))?;
     let (filesystem_id, used) = mounted_usage(&state.root, Some(state.filesystem_id.as_str()))?;
     let path = state.root.path.join(relative_path);
-    if fs::canonicalize(&path)? != path || !scratch_recovery::restore_is_settled(&path, identity)? {
+    if !scratch_recovery::restore_is_settled(&path, identity)? {
         return Err(io::Error::other("quarantine recovery is still unresolved"));
     }
-    let metadata = fs::symlink_metadata(&path)?;
+    let metadata = restored_entry_metadata(&state.root, relative)?;
     let expected_type = match entry.kind.as_str() {
         "regular_file" => metadata.is_file(),
         "managed_run" => metadata.is_dir(),
