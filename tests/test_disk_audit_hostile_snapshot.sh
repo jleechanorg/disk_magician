@@ -923,12 +923,12 @@ HOME="$FIXTURE_HOME" DISK_MAGICIAN_STATE_DIR="$FIXTURE_STATE" DISK_SNAPSHOT_JSON
   bash "$TARGET_SCRIPT" --no-history >"$OUT_AUDIT_COERCION" 2>&1
 
 # Assert float was rounded to 513K (not truncated to 512K) and numeric string was accepted at 2.0G
-if ! grep -qE "float_rounded[[:space:]]+513K" "$OUT_AUDIT_COERCION"; then
+if ! grep -qE "^[[:space:]]+float_rounded[[:space:]]+513K[[:space:]]*$" "$OUT_AUDIT_COERCION"; then
   echo "FAIL: expected float_rounded rounded to 513K in audit output" >&2
   cat "$OUT_AUDIT_COERCION" >&2
   exit 1
 fi
-if grep -qF "512K" "$OUT_AUDIT_COERCION"; then
+if grep -qE "^[[:space:]]+float_rounded[[:space:]]+512K[[:space:]]*$" "$OUT_AUDIT_COERCION"; then
   echo "FAIL: float_rounded was truncated to 512K instead of rounded" >&2
   cat "$OUT_AUDIT_COERCION" >&2
   exit 1
