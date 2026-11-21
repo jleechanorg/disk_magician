@@ -1,7 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
