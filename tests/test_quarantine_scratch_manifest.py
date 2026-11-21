@@ -132,6 +132,22 @@ class ScratchManifestApplyTests(unittest.TestCase):
         finally:
             os.close(fd)
 
+    def test_exact_apply_defers_while_another_quarantine_transaction_is_active(self):
+        index = self.state / "quarantine-index"
+        index.mkdir(mode=0o700)
+        fd = os.open(index / "operations.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_apply(self.selected.as_posix(), timeout=10)
+            self.assertIsInstance(result, dict, getattr(result, "stderr", ""))
+            self.assertEqual(result["results"], [{
+                "path": self.selected.as_posix(), "result": "deferred:operation-lock",
+            }])
+            self.assertTrue(self.target.exists())
+            self.assertFalse(self.log.exists())
+        finally:
+            os.close(fd)
+
     def test_target_coordinator_can_pass_the_canonical_writer_to_the_bridge(self):
         locks = self.fixture_home / ".disk_magician_locks"
         locks.mkdir(mode=0o700)

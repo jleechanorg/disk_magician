@@ -171,6 +171,12 @@ inode. It reports ambiguity or unavailability when a unique record cannot
 be established. The index phase describes that record alone. Recovery
 inspection leaves candidate and quarantine state intact.
 
+After restoring the exact in-flight entry, repeat the same target command with
+`--ack-restored RELATIVE_PATH` and the original manifest digest, target, and
+resume state. The acknowledgment verifies the restored identity, records
+`kept:restored`, and advances only that entry. It does not apply the remaining
+selection. Resume afterward if work remains and the target is still unmet.
+
 In standalone Linux mode, `volume path scratch` and
 `volume verify-mount PATH` read the configured registry and verify the
 ext4 image, mount record, and filesystem UUID. The native loop backend

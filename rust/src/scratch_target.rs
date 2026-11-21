@@ -53,6 +53,8 @@ struct Entry {
     kind: String,
     dev: Option<u64>,
     ino: Option<u64>,
+    size: Option<u64>,
+    mtime_ns: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -317,6 +319,7 @@ pub fn apply(
     target_used_bytes: u64,
     selected_paths: &[String],
     all_entries: bool,
+    ack_restored: Option<&str>,
 ) -> io::Result<Report> {
     if target_used_bytes == 0 {
         return Err(io::Error::other("target used bytes must be positive"));
@@ -360,6 +363,37 @@ pub fn apply(
         return Err(io::Error::other(
             "resume uses the persisted exact selection",
         ));
+    }
+    if let Some(path) = ack_restored {
+        if all_entries || !selected_paths.is_empty() {
+            return Err(io::Error::other(
+                "restored acknowledgment cannot select candidates",
+            ));
+        }
+        let state = existing_state
+            .ok_or_else(|| io::Error::other("restored acknowledgment needs a saved checkpoint"))?;
+        if state.status.strip_prefix("applying:") != Some(path)
+            || state.pending_paths.front().map(String::as_str) != Some(path)
+        {
+            return Err(io::Error::other(
+                "restored path must match the in-flight entry",
+            ));
+        }
+        let _writer = match writer {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(report_recovery_required(&state, &manifest.entries, false));
+            }
+            Err(error) => return Err(error),
+        };
+        let _transaction = match scratch_recovery::acquire_operation_lock() {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(report_recovery_required(&state, &manifest.entries, false));
+            }
+            Err(error) => return Err(error),
+        };
+        return acknowledge_restored(state, &manifest.entries, path, resume_path);
     }
     if let Some(state) = existing_state.as_ref() {
         if state.status.starts_with("applying:") {
@@ -602,6 +636,110 @@ fn selected_manifest_paths(
         ));
     }
     Ok(paths)
+}
+
+fn restored_entry_metadata(root: &Root, relative: &str) -> io::Result<fs::Metadata> {
+    let components: Vec<_> = Path::new(relative).components().collect();
+    if components.is_empty()
+        || !components
+            .iter()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(io::Error::other("invalid restored manifest path"));
+    }
+    let root_metadata = fs::symlink_metadata(&root.path)?;
+    if !root_metadata.is_dir() || root_metadata.dev() != root.dev || root_metadata.ino() != root.ino
+    {
+        return Err(io::Error::other("Scratch root identity changed"));
+    }
+    let mut path = root.path.clone();
+    let mut result = None;
+    for (index, component) in components.iter().enumerate() {
+        path.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || metadata.dev() != root.dev {
+            return Err(io::Error::other(
+                "restored path crossed a symlink or filesystem boundary",
+            ));
+        }
+        if index + 1 < components.len() && !metadata.is_dir() {
+            return Err(io::Error::other(
+                "restored path has a non-directory ancestor",
+            ));
+        }
+        result = Some(metadata);
+    }
+    result.ok_or_else(|| io::Error::other("restored path is empty"))
+}
+
+fn acknowledge_restored(
+    mut state: ResumeState,
+    entries: &[Entry],
+    relative: &str,
+    resume_path: &Path,
+) -> io::Result<Report> {
+    let relative_path = Path::new(relative);
+    if relative.is_empty()
+        || !relative_path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(io::Error::other("invalid restored manifest path"));
+    }
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == relative)
+        .ok_or_else(|| io::Error::other("restored path is missing from the manifest"))?;
+    let identity = entry
+        .dev
+        .zip(entry.ino)
+        .filter(|(dev, _)| *dev == state.root.dev)
+        .ok_or_else(|| io::Error::other("restored entry identity unavailable"))?;
+    let (filesystem_id, used) = mounted_usage(&state.root, Some(state.filesystem_id.as_str()))?;
+    let path = state.root.path.join(relative_path);
+    if !scratch_recovery::restore_is_settled(&path, identity)? {
+        return Err(io::Error::other("quarantine recovery is still unresolved"));
+    }
+    let metadata = restored_entry_metadata(&state.root, relative)?;
+    let expected_type = match entry.kind.as_str() {
+        "regular_file" => metadata.is_file(),
+        "managed_run" => metadata.is_dir(),
+        _ => false,
+    };
+    let modified = i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec());
+    if !expected_type
+        || (metadata.dev(), metadata.ino()) != identity
+        || entry.size != Some(metadata.size())
+        || entry.mtime_ns.map(i128::from) != Some(modified)
+    {
+        return Err(io::Error::other(
+            "restored path differs from the nominated entry",
+        ));
+    }
+    let used_before = state
+        .used_after_bytes
+        .or(state.used_before_bytes)
+        .unwrap_or(used);
+    state.filesystem_id = filesystem_id;
+    state.used_after_bytes = Some(used);
+    state.pending_paths.pop_front();
+    state.in_flight_quarantine_id = None;
+    state.receipts.push(Receipt {
+        path: relative.to_owned(),
+        result: "kept:restored".into(),
+        used_before_bytes: used_before,
+        used_after_bytes: Some(used),
+    });
+    state.status = if used <= state.target_used_bytes {
+        "target_reached"
+    } else if state.pending_paths.is_empty() {
+        "queue_exhausted"
+    } else {
+        "in_progress"
+    }
+    .into();
+    write_state(resume_path, &state)?;
+    Ok(report(state))
 }
 
 fn report(state: ResumeState) -> Report {

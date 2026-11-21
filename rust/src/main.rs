@@ -19,7 +19,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm history --state-dir DIR [--days 7|30] [--json]
   diskm scratch-dir [SUBPATH]
   diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_PATH [--path ...] | --paths-from FILE
-  diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all]
+  diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL]
   diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
 
 Preview --deadline-ms bounds Scratch discovery. With --resume-state, it supports
@@ -60,6 +60,7 @@ enum Operation {
         target_used_bytes: u64,
         paths: Vec<String>,
         all_entries: bool,
+        ack_restored: Option<String>,
     },
     Preview {
         scope: &'static str,
@@ -293,6 +294,7 @@ fn parse_scratch_target_apply(
     let mut target_used_bytes = None;
     let mut paths = Vec::new();
     let mut all_entries = false;
+    let mut ack_restored = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--manifest") if manifest.is_none() => {
@@ -312,14 +314,25 @@ fn parse_scratch_target_apply(
             Some("--target-used-bytes") if target_used_bytes.is_none() => {
                 target_used_bytes = Some(positive(&mut args, "--target-used-bytes")?);
             }
-            Some("--path") if !all_entries => {
+            Some("--path") if !all_entries && ack_restored.is_none() => {
                 paths.push(
                     required_value(&mut args, "--path")?
                         .into_string()
                         .map_err(|_| "manifest paths must be UTF-8")?,
                 );
             }
-            Some("--all") if !all_entries && paths.is_empty() => all_entries = true,
+            Some("--all") if !all_entries && paths.is_empty() && ack_restored.is_none() => {
+                all_entries = true
+            }
+            Some("--ack-restored")
+                if !all_entries && paths.is_empty() && ack_restored.is_none() =>
+            {
+                ack_restored = Some(
+                    required_value(&mut args, "--ack-restored")?
+                        .into_string()
+                        .map_err(|_| "restored path must be UTF-8")?,
+                );
+            }
             _ => return Err("invalid scratch-target-apply options".into()),
         }
     }
@@ -330,6 +343,7 @@ fn parse_scratch_target_apply(
         target_used_bytes: target_used_bytes.ok_or("--target-used-bytes is required")?,
         paths,
         all_entries,
+        ack_restored,
     })
 }
 
@@ -364,6 +378,7 @@ fn run(operation: Operation) -> io::Result<u8> {
             target_used_bytes,
             paths,
             all_entries,
+            ack_restored,
         } => {
             let report = scratch_target::apply(
                 &manifest,
@@ -372,10 +387,12 @@ fn run(operation: Operation) -> io::Result<u8> {
                 target_used_bytes,
                 &paths,
                 all_entries,
+                ack_restored.as_deref(),
             )?;
             let reached = report.target_reached;
+            let acknowledged = ack_restored.is_some() && report.recovery.is_none();
             print_json(&report)?;
-            if !reached {
+            if !reached && !acknowledged {
                 return Ok(TEMPORARY_FAILURE);
             }
         }
