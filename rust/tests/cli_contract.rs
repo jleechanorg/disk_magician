@@ -431,3 +431,66 @@ fn legacy_compat_rejects_self_recursion_and_preserves_signal_exit() {
     fs::remove_dir_all(&root).unwrap();
     assert_eq!(signaled.status.signal(), Some(15));
 }
+
+#[test]
+fn published_reclaim_ledger_reads_match_legacy_without_the_backend() {
+    let fixture = LegacyFixture::new("#!/bin/sh\nexit 91\n");
+    let reclaim = fixture.scratch.join("reclaim");
+    fs::create_dir(&reclaim).unwrap();
+    let report = reclaim.join("known-reclaim-dirs.md");
+    let legacy_script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/reclaim_ledger.py");
+    let native_args = ["reclaim-ledger", "--read-existing"];
+    let legacy_args = ["--read-existing"];
+    let configured_backend = fixture.backend.as_os_str();
+    let test_report = "# Known reclaim directories: fixture\nGenerated 2000-01-01 00:00 UTC by `diskm reclaim-ledger`\n> **STALE FULL-DISK LEDGER**\n### C. Cleaned\nnone\n### D. Regrowth\nnone\n### B1. Short\nnone\n### B2. Long\nnone\n### A. Attribution\nunavailable\n<!-- diskm reclaim-ledger complete -->\n";
+    for content in [None, Some(""), Some("incomplete"), Some(test_report)] {
+        if let Some(content) = content {
+            fs::write(&report, content).unwrap();
+        }
+        let settings = [
+            ("DISK_MAGICIAN_STATE_REPO", fixture.scratch.as_os_str()),
+            ("DISKM_LEGACY_COMPAT_CLI", configured_backend),
+        ];
+        let native = run_os(&native_args.map(OsString::from), &settings);
+        let legacy = Command::new("python3")
+            .arg(&legacy_script)
+            .args(legacy_args)
+            .envs(settings)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            legacy.status.success(),
+            "{}",
+            String::from_utf8_lossy(&legacy.stderr)
+        );
+        assert!(
+            native.status.success(),
+            "{}",
+            String::from_utf8_lossy(&native.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(native.stdout).unwrap(),
+            String::from_utf8(legacy.stdout).unwrap()
+        );
+        if let Some(content) = content {
+            assert_eq!(fs::read_to_string(&report).unwrap(), content);
+        } else {
+            assert!(!report.exists());
+        }
+    }
+    let explicit = run_os(
+        &[
+            "reclaim_ledger".into(),
+            "--state-dir".into(),
+            fixture.scratch.as_os_str().into(),
+            "--read-existing".into(),
+        ],
+        &[("DISKM_LEGACY_COMPAT_CLI", configured_backend)],
+    );
+    assert!(explicit.status.success());
+    assert!(String::from_utf8_lossy(&explicit.stdout).contains("STALE RECLAIM REPORT"));
+    let unsupported = fixture.run(&["reclaim-ledger".into(), "--stdout".into()]);
+    assert_eq!(unsupported.status.code(), Some(91));
+}

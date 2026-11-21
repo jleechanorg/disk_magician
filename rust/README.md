@@ -127,3 +127,8 @@ their nested volume calls to the adjacent `disk_magician.sh` dispatcher through
 `DISK_MAGICIAN_DISKM_BIN`. This keeps those nested calls on the legacy handler
 during the pilot. Scheduler transfer remains pending until their command,
 state, receipt, and rollback contracts have Rust implementations.
+
+The native `diskm reclaim-ledger --read-existing` command reads the published
+report and prints its completeness and generation-time warnings. It keeps the
+report's own coverage banners. Set `--state-dir DIR` to select a report
+explicitly. Publishing or regenerating the ledger uses the existing backend.
