@@ -1141,6 +1141,7 @@ pub fn scope_report_resumable(
     });
     scan_targets.dedup();
 
+    let scan_started = Instant::now();
     let (measured, scanned_targets) = scan_frontiers(&root, device, &scan_targets, scan_deadline)?;
     let old_frontier = saved
         .as_ref()
@@ -1163,7 +1164,15 @@ pub fn scope_report_resumable(
         if remaining_limit == 0 {
             break;
         }
-        retry_candidate(candidate, &root, device, min_hours, cutoff, scan_deadline);
+        let remaining_scan_time = scan_deadline.saturating_sub(scan_started.elapsed());
+        retry_candidate(
+            candidate,
+            &root,
+            device,
+            min_hours,
+            cutoff,
+            remaining_scan_time,
+        );
         remaining_limit -= 1;
     }
 

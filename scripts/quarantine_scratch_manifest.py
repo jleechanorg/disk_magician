@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Apply exact regular-file selections from a hashed Scratch inventory."""
 
-import fcntl
 import hashlib
 import json
 import os
@@ -138,16 +137,12 @@ def apply(manifest_path, digest, paths, all_entries, lock_fd):
     recorded = manifest["root"]
     if (recorded["path"], recorded["dev"], recorded["ino"]) != (str(root), dev, ino):
         raise ValueError("Scratch root identity changed")
-    entries = {}
-    for entry in manifest["entries"]:
-        path = entry.get("path") if isinstance(entry, dict) else None
-        if not isinstance(path, str) or path in entries:
-            raise ValueError("invalid or duplicate manifest entry")
-        entries[path] = entry
-    if all_entries:
-        if paths:
-            raise ValueError("--all cannot be combined with --path")
-        paths = list(entries)
+    rows = manifest["entries"]
+    entries = {row["path"]: row for row in rows
+               if isinstance(row, dict) and isinstance(row.get("path"), str)}
+    if len(entries) != len(rows):
+        raise ValueError("invalid or duplicate manifest entry")
+    paths = list(entries) if all_entries else paths
     if not paths or len(set(paths)) != len(paths) or any(path not in entries for path in paths):
         raise ValueError("select unique paths present in the manifest")
     results = []
@@ -159,60 +154,36 @@ def apply(manifest_path, digest, paths, all_entries, lock_fd):
     return {"manifest_sha256": digest, "before_epoch_seconds": manifest["before_epoch_seconds"], "results": results}
 
 
-def acquire_apply_lock():
-    # The target coordinator passes its open file description. The canonical
-    # verifier checks the descriptor's inode and the actual kernel lock.
-    inherited = os.environ.get(scratch_lock.ENV_FD, "")
-    if inherited.isascii() and inherited.isdecimal() and len(inherited) <= 10:
-        fd = int(inherited)
-        if fd <= 2**31 - 1 and scratch_lock.verify_fd(fd):
-            return fd
-    fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        raise
-    return fd
-
-
 def main(args):
     if args[:1] == ["--check-entry"] and len(args) == 3:
         return 0 if check_entry(args[1], args[2]) else 1
-    manifest = digest = None
-    paths = []
+    fields = {flag: [] for flag in ("--manifest", "--manifest-sha256", "--path")}
     all_entries = False
-    i = 0
-    while i < len(args):
-        if args[i] in ("--manifest", "--manifest-sha256", "--path") and i + 1 < len(args):
-            if args[i] == "--manifest":
-                if manifest is not None: return 2
-                manifest = args[i + 1]
-            elif args[i] == "--manifest-sha256":
-                if digest is not None: return 2
-                digest = args[i + 1]
-            else:
-                paths.append(args[i + 1])
-            i += 2
-        elif args[i] == "--all" and not all_entries:
+    options = iter(args)
+    for flag in options:
+        if flag in fields:
+            value = next(options, None)
+            if value is None:
+                return 2
+            fields[flag].append(value)
+        elif flag == "--all" and not all_entries:
             all_entries = True
-            i += 1
         else:
             return 2
-    if not manifest or not digest:
+    manifests, digests, paths = fields.values()
+    if len(manifests) != 1 or len(digests) != 1 or not manifests[0] or not digests[0] or (all_entries and paths):
         return 2
     try:
         try:
-            fd = acquire_apply_lock()
-        except BlockingIOError:
-            print("scratch-apply: Scratch cleanup is already in progress", file=sys.stderr)
-            return scratch_lock.EXIT_LOCK_HELD
-        try:
-            scratch_lock.disable_implicit_git_fsmonitor()
-            result = apply(manifest, digest, paths, all_entries, fd)
-        finally:
-            os.close(fd)
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            fd = int(os.environ.get(scratch_lock.ENV_FD, ""))
+        except ValueError:
+            fd = -1
+        if not 0 <= fd <= 2**31 - 1 or not scratch_lock.verify_fd(fd):
+            os.environ["DISK_MAGICIAN_SCRATCH_LOCK_WAIT_SECONDS"] = "0"
+            return scratch_lock.run("scratch-apply", sys.executable, [__file__, *args])
+        scratch_lock.disable_implicit_git_fsmonitor()
+        result = apply(manifests[0], digests[0], paths, all_entries, fd)
+    except (OSError, ValueError, TypeError) as error:
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 2
     print(json.dumps(result, separators=(",", ":")))

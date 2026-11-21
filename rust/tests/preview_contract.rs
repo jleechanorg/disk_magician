@@ -716,6 +716,48 @@ fn deferred_retry_refreshes_measurements_and_preserves_the_original_cutoff() {
 }
 
 #[test]
+fn deferred_directories_share_the_resume_scan_deadline() {
+    let fixture = Fixture::new();
+    fixture.install_diskm();
+    for name in ["removable-a", "removable-b", "removable-c"] {
+        let dir = fixture.scratch.join(name);
+        fs::create_dir(&dir).unwrap();
+        let payload = dir.join("old-output");
+        fs::write(&payload, b"old").unwrap();
+        Fixture::mark_old(&payload);
+    }
+    let checkpoint = fixture.root.join("directory-budget.json");
+    let checkpoint = checkpoint.to_str().unwrap();
+    let first = report(&fixture.run(&["--resume-state", checkpoint, "--max-candidates", "1"]));
+    let deferred = first["resumable"]["pending_verdict_paths"]
+        .as_array()
+        .unwrap();
+    assert_eq!(deferred.len(), 2);
+    let slow = Path::new(deferred[0].as_str().unwrap());
+    let other = deferred[1].as_str().unwrap();
+    // Exceed one small scan window in the first deferred directory.
+    for index in 0..10_000 {
+        fs::File::create(slow.join(format!("filler-{index}"))).unwrap();
+    }
+    let calls_before = fixture.calls();
+    let paused = report(&fixture.run(&[
+        "--resume-state",
+        checkpoint,
+        "--max-candidates",
+        "2",
+        "--deadline-ms",
+        "2",
+    ]));
+    assert!(paused["resumable"]["pending_verdict_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path == other));
+    let calls_after = fixture.calls();
+    assert!(!calls_after[calls_before.len()..].contains(other));
+}
+
+#[test]
 fn whole_scratch_discovery_outlives_an_explicit_verdict_limit() {
     let fixture = Fixture::new();
     let first = fixture.scratch_path("removable-a.cache");
