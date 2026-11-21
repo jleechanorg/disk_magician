@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
+mod scratch_index_cli;
+
 const USAGE: &str = "diskm — Disk Magician migration candidate; inventory output is JSON
 
   diskm status [PATH] [--state-dir DIR] [--json]
@@ -19,6 +21,8 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm reclaim-ledger --read-existing [--state-dir DIR]
   diskm history --state-dir DIR [--days 7|30] [--json]
   diskm scratch-dir [SUBPATH]
+  diskm scratch-index refresh [--root scratch|system-tmp] [--state-dir DIR]
+  diskm scratch-search (--older-than 6h | --before-epoch SECONDS) [--root scratch|system-tmp] [--state-dir DIR] [--type any|file|directory|symlink] [--limit N | --all]
   diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_PATH [--path ...] | --paths-from FILE
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL]
   diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
@@ -522,6 +526,9 @@ fn native_volume(args: &[OsString]) -> Option<ExitCode> {
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
+    if let Some(result) = scratch_index_cli::dispatch(&args) {
+        return result;
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "scratch-artifact-validate")

@@ -44,6 +44,37 @@ When the user invokes `/diskm`, asks why disk space is low, or requests a disk c
 
 ## Agent Scratch placement (Mac and Linux) — optional quota-bounded Scratch volume
 
+### Search the Scratch age index
+
+The Rust candidate can refresh a local read-only inventory of Scratch or
+system temp. Search opens the saved SQLite index and returns exact paths
+without re-walking the root. Use the native candidate's `diskm` executable
+for these commands until the Rust cutover ships it as the default.
+
+```bash
+diskm scratch-index refresh --root scratch
+diskm scratch-search --root scratch --older-than 6h --limit 100
+diskm scratch-search --root system-tmp --before-epoch 1795278715 --all
+```
+
+Refresh writes `scratch-age.sqlite3` in the configured local Disk Magician
+state directory. Search reports the generation and coverage gaps, including
+paths it could not read. An incomplete directory has unknown whole-tree age.
+Older files under newer directories can still appear individually. Record the
+exact cutoff and root when comparing results. An age row is pending cleanup
+qualification. Use the canonical verdict for a selected exact path.
+
+For an explicit NUL-separated path file, the packaged dispatcher can run the
+same read-only verdict in bounded parallel processes:
+
+```bash
+diskm quarantine scratch-qualify --paths-from candidate-paths.nul --jobs 4 --timeout-seconds 60 --kind ephemeral
+```
+
+The batch emits one JSON verdict per input, in input order. A timeout leaves
+affected paths deferred. Apply remains with the canonical cleaner and its
+scope, holds and live lock.
+
 Single source of truth: `.agents/skills/scratch-space/SKILL.md` (`~/.claude/skills/scratch-space/SKILL.md`).
 For disposable build output, test fixtures, ad-hoc helper files, and evidence on both macOS and Linux, resolve paths through `diskm` and standard scratch environment variables:
 - **Repo build & evidence directories**: Allocate via `diskm scratch-new <repo-path> <purpose> --kind build` (or `--kind evidence`).

@@ -715,6 +715,9 @@ case "$CMD" in
   quarantine)
     subcommand="${1:-}"; shift || true
     case "$subcommand" in
+      scratch-qualify)
+        exec python3 "$SCRIPT_DIR/scripts/scratch_qualify_batch.py" "$@"
+        ;;
       restore) [[ $# -eq 1 ]] || { echo "Usage: diskm quarantine restore <id>" >&2; exit 2; }; exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" restore "$1" ;;
       reconcile) exec python3 "$SCRIPT_DIR/scripts/quarantine_rename.py" reconcile "$@" ;;
       scratch-apply) exec python3 "$SCRIPT_DIR/scripts/quarantine_scratch_manifest.py" "$@" ;;
@@ -743,7 +746,7 @@ case "$CMD" in
           DISK_MAGICIAN_C14_LEDGER= DISK_MAGICIAN_C14_PROOF_OUT= artifact_removal_verdict "$verdict_path" --no-rescue-push
         fi
         ;;
-      *) echo "Usage: diskm quarantine {restore <id>|reconcile [--deadline-at T] [--cursor F]|verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]|scratch-apply --manifest FILE --manifest-sha256 SHA [--path REL...|--paths-from FILE|--all]}" >&2; exit 2 ;;
+      *) echo "Usage: diskm quarantine {scratch-qualify --paths-from FILE [--jobs N] [--timeout-seconds N]|restore <id>|reconcile [--deadline-at T] [--cursor F]|verdict <path> [--kind rebuildable|ephemeral] [--deadline-at T]|scratch-apply --manifest FILE --manifest-sha256 SHA [--path REL...|--paths-from FILE|--all]}" >&2; exit 2 ;;
     esac
     ;;
   worktree_quarantine|worktree-quarantine)

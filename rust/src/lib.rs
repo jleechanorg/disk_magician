@@ -101,6 +101,7 @@ pub mod preview_worktrees;
 pub mod reclaim_report;
 pub mod scan;
 pub mod scratch_dir;
+pub mod scratch_index;
 pub mod scratch_manifest;
 mod scratch_recovery;
 pub mod scratch_target;

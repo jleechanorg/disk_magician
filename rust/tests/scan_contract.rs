@@ -58,6 +58,10 @@ fn options(max_entries: usize) -> ScanOptions {
     }
 }
 
+fn epoch_nanos(time: std::time::SystemTime) -> Option<i64> {
+    i64::try_from(time.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos()).ok()
+}
+
 fn has_file(report: &diskm_shadow::scan::ScanReport, path: &Path) -> bool {
     report
         .files
@@ -287,6 +291,111 @@ fn unreadable_directory_is_a_gap_when_running_unprivileged() {
     assert!(report.gaps.iter().any(|gap| {
         gap.kind == ScanGapKind::ReadDirectory && gap.path == blocked.to_string_lossy().as_ref()
     }));
+}
+
+#[cfg(unix)]
+#[test]
+fn age_inventory_keeps_nested_old_entries_and_unknown_birthtime() {
+    use diskm_shadow::scan::{scan_with_age_inventory, AgeKind};
+    use std::os::unix::fs::MetadataExt;
+
+    let fixture = Fixture::new("age-inventory");
+    let nested = fixture.path().join("nested");
+    fs::create_dir(&nested).expect("create nested directory");
+    let old_leaf = nested.join("old.bin");
+    fs::write(&old_leaf, b"old data").expect("create nested file");
+    let empty_directory = fixture.path().join("empty");
+    fs::create_dir(&empty_directory).expect("create empty directory");
+
+    let (_, inventory) = scan_with_age_inventory(fixture.path(), options(32))
+        .expect("age inventory shares the bounded filesystem walk");
+
+    assert!(inventory.complete, "gaps: {:?}", inventory.gaps);
+    let root_metadata = fs::symlink_metadata(fixture.path()).expect("read root metadata");
+    assert_eq!(
+        inventory.root_path_bytes,
+        fixture.path().as_os_str().as_encoded_bytes().to_vec()
+    );
+    assert_eq!(inventory.root_device, root_metadata.dev());
+    assert_eq!(inventory.root_inode, root_metadata.ino());
+
+    let find = |path: &Path| {
+        let path_bytes = path.as_os_str().as_encoded_bytes();
+        inventory
+            .entries
+            .iter()
+            .find(|entry| entry.path_bytes.as_slice() == path_bytes)
+            .expect("age inventory includes this observed path")
+    };
+    let root = find(fixture.path());
+    let nested_entry = find(&nested);
+    let empty_entry = find(&empty_directory);
+    let file_entry = find(&old_leaf);
+
+    assert_eq!(root.kind, AgeKind::Directory);
+    assert_eq!(nested_entry.kind, AgeKind::Directory);
+    assert_eq!(empty_entry.kind, AgeKind::Directory);
+    assert_eq!(file_entry.kind, AgeKind::File);
+    assert!(root.complete && nested_entry.complete && empty_entry.complete && file_entry.complete);
+    assert_eq!(
+        file_entry.created_epoch_nanos,
+        fs::symlink_metadata(&old_leaf)
+            .expect("read file metadata")
+            .created()
+            .ok()
+            .and_then(epoch_nanos),
+        "birth time may be unavailable and remains an explicit None"
+    );
+
+    let maximum_observed_mtime = [
+        fixture.path(),
+        nested.as_path(),
+        empty_directory.as_path(),
+        old_leaf.as_path(),
+    ]
+    .into_iter()
+    .map(|path| {
+        fs::symlink_metadata(path)
+            .expect("read fixture metadata")
+            .modified()
+            .ok()
+            .and_then(epoch_nanos)
+    })
+    .flatten()
+    .max();
+    let nested_maximum_mtime = [nested.as_path(), old_leaf.as_path()]
+        .into_iter()
+        .map(|path| {
+            fs::symlink_metadata(path)
+                .expect("read nested metadata")
+                .modified()
+                .ok()
+                .and_then(epoch_nanos)
+        })
+        .flatten()
+        .max();
+    assert_eq!(root.effective_modified_epoch_nanos, maximum_observed_mtime);
+    assert_eq!(
+        nested_entry.effective_modified_epoch_nanos,
+        nested_maximum_mtime
+    );
+
+    let (_, partial) = scan_with_age_inventory(fixture.path(), options(1))
+        .expect("entry-limited inventory returns explicit partial coverage");
+    assert!(!partial.complete);
+    assert!(partial
+        .gaps
+        .iter()
+        .any(|gap| gap.kind == ScanGapKind::EntryLimit));
+    assert!(
+        !partial
+            .entries
+            .iter()
+            .find(|entry| entry.kind == AgeKind::Directory
+                && entry.path_bytes == inventory.root_path_bytes)
+            .expect("partial inventory retains its root row")
+            .complete
+    );
 }
 
 #[cfg(unix)]
