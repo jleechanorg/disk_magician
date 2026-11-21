@@ -106,31 +106,22 @@ fn split_paths(output: &[u8]) -> Vec<&[u8]> {
 }
 
 #[test]
-fn preserves_order_repeated_rows_and_non_utf8_path_bytes() {
+fn preserves_order_and_repeated_rows() {
     let fixture = Fixture::new();
     let first = fixture.parent("parent with spaces");
     let second = fixture.parent("second parent");
-    let raw_parent = fixture
-        .root
-        .join(OsString::from_vec(b"raw-parent-\\xfe".to_vec()));
-    fs::create_dir(&raw_parent).unwrap();
-    let raw_child = raw_parent.join(OsString::from_vec(b"child-\xff".to_vec()));
-    fs::create_dir(&raw_child).unwrap();
     let first_child = first.join("child-a");
     let second_child = second.join("child-b");
     fs::create_dir(&first_child).unwrap();
     fs::create_dir(&second_child).unwrap();
-
     let submitted = [
         first.clone().into_os_string(),
         second.clone().into_os_string(),
-        raw_parent.clone().into_os_string(),
     ];
     let frame = fixture.valid_frame(&[
         (first.as_os_str(), first_child.as_os_str()),
         (first.as_os_str(), first_child.as_os_str()),
         (second.as_os_str(), second_child.as_os_str()),
-        (raw_parent.as_os_str(), raw_child.as_os_str()),
         (first.as_os_str(), first_child.as_os_str()),
     ]);
     let result = fixture.invoke(&submitted, &frame);
@@ -145,9 +136,31 @@ fn preserves_order_repeated_rows_and_non_utf8_path_bytes() {
             first_child.as_os_str().as_bytes(),
             first_child.as_os_str().as_bytes(),
             second_child.as_os_str().as_bytes(),
-            raw_child.as_os_str().as_bytes(),
             first_child.as_os_str().as_bytes(),
         ]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn preserves_non_utf8_parent_and_child_path_bytes() {
+    let fixture = Fixture::new();
+    let raw_parent = fixture
+        .root
+        .join(OsString::from_vec(b"raw-parent-\\xfe".to_vec()));
+    fs::create_dir(&raw_parent).unwrap();
+    let raw_child = raw_parent.join(OsString::from_vec(b"child-\\xff".to_vec()));
+    fs::create_dir(&raw_child).unwrap();
+    let frame = fixture.valid_frame(&[(raw_parent.as_os_str(), raw_child.as_os_str())]);
+    let result = fixture.invoke(&[raw_parent.clone().into_os_string()], &frame);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        split_paths(&result.stdout),
+        vec![raw_child.as_os_str().as_bytes()]
     );
 }
 

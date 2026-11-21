@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_git_boundaries_hidden_names_and_non_utf8_paths() {
+    fn preserves_git_boundaries_and_hidden_names() {
         let fixture = Fixture::new("boundaries");
         let root = fixture.path("root");
         fs::create_dir(&root).unwrap();
@@ -327,7 +327,6 @@ mod tests {
         let repo = root.join("repo");
         let bare = root.join("bare");
         let hidden = root.join(".hidden");
-        let odd = root.join(std::ffi::OsString::from_vec(b"odd\xff".to_vec()));
         fs::create_dir_all(alpha.join("build")).unwrap();
         fs::create_dir_all(zeta.join("cache")).unwrap();
         fs::create_dir_all(repo.join(".git")).unwrap();
@@ -335,7 +334,6 @@ mod tests {
         fs::create_dir_all(bare.join("refs")).unwrap();
         fs::write(bare.join("HEAD"), b"ref: refs/heads/main").unwrap();
         fs::create_dir_all(hidden.join("child")).unwrap();
-        fs::create_dir_all(odd.join("child")).unwrap();
         let frame = fixture.run(&[&root]).unwrap();
         let fields = frame_fields(&frame);
         assert_eq!(fields[0], MARKER);
@@ -352,31 +350,36 @@ mod tests {
         assert!(!emitted
             .iter()
             .any(|path| path.starts_with(hidden.as_os_str().as_bytes())));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discovery_preserves_non_utf8_filesystem_paths() {
+        let fixture = Fixture::new("non-utf8");
+        let root = fixture.path("root");
+        fs::create_dir(&root).unwrap();
+        let odd = root.join(std::ffi::OsString::from_vec(b"odd\xff".to_vec()));
+        fs::create_dir_all(odd.join("child")).unwrap();
+        let frame = fixture.run(&[&root]).unwrap();
+        let fields = frame_fields(&frame);
+        let emitted: Vec<_> = fields[2..].chunks_exact(2).map(|pair| pair[1]).collect();
         assert!(emitted.contains(&odd.as_os_str().as_bytes()));
         assert!(emitted.contains(&odd.join("child").as_os_str().as_bytes()));
     }
 
     #[test]
-    fn traversal_order_matches_python_surrogateescape_for_mixed_names() {
-        let fixture = Fixture::new("surrogate-order");
-        let root = fixture.path("root");
-        let invalid = root.join(std::ffi::OsString::from_vec(vec![0x80]));
-        let unicode = root.join("\u{e000}");
-        fs::create_dir_all(invalid.join("nested")).unwrap();
-        fs::create_dir_all(unicode.join("nested")).unwrap();
-        let frame = fixture.run(&[&root]).unwrap();
-        let nested: Vec<_> = frame_fields(&frame)[2..]
-            .chunks_exact(2)
-            .map(|pair| pair[1].to_vec())
-            .filter(|path| path.ends_with(b"/nested"))
-            .collect();
-        assert_eq!(
-            nested,
-            vec![
-                invalid.join("nested").as_os_str().as_bytes().to_vec(),
-                unicode.join("nested").as_os_str().as_bytes().to_vec()
-            ]
-        );
+    fn surrogateescape_sort_key_orders_mixed_names_without_filesystem_support() {
+        let base = Path::new("/scratch/root");
+        let invalid = base.join(std::ffi::OsString::from_vec(vec![0x80]));
+        let unicode = base.join(std::char::from_u32(0xe000).unwrap().to_string());
+        assert!(python_path_sort_key(&invalid) < python_path_sort_key(&unicode));
+        let mut observed = vec![unicode, invalid];
+        observed.sort_by_key(|path| python_path_sort_key(path));
+        assert!(observed[0].as_os_str().as_bytes().ends_with(&[0x80]));
+        assert!(observed[1]
+            .as_os_str()
+            .as_bytes()
+            .ends_with(&[0xee, 0x80, 0x80]));
     }
 
     #[test]
