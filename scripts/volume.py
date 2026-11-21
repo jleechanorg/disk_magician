@@ -713,7 +713,6 @@ def ballast_retry_active(retry: dict) -> bool:
 def ballast_cmd(action: str, name: str) -> int:
     registry_file = None
     lock_handle = None
-    cleanup_fd = None
     try:
         registry_file, lock_handle = locked_registry()
         if linux_backend_enabled(name):
@@ -754,14 +753,6 @@ def ballast_cmd(action: str, name: str) -> int:
                 return 75
             if retry != owner and ballast_retry_active(retry):
                 return 76 if action == "recover" else 75
-        if action in {"ensure", "recover"} and pending is not None and retry is None:
-            # A release may be in use by an ENOSPC retry. Ordinary repair has
-            # no such handoff and is serialized solely by the volume registry.
-            import scratch_lock
-            inherited = os.environ.get(scratch_lock.ENV_FD, "")
-            if not (inherited.isdigit() and scratch_lock.verify_fd(int(inherited))):
-                cleanup_fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
-                fcntl.flock(cleanup_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if retry is not None:
             expected_intent["retry"] = retry
         def clear_intent():
@@ -839,8 +830,6 @@ def ballast_cmd(action: str, name: str) -> int:
     finally:
         if lock_handle is not None:
             lock_handle.close()
-        if cleanup_fd is not None:
-            os.close(cleanup_fd)
 
 
 def encryption_is_acknowledged(settings: dict[str, Any]) -> bool:
