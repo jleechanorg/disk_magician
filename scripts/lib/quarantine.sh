@@ -24,7 +24,7 @@ quarantine_remove() {
   if ! _lease_scope_is_owner; then
     if _lease_lock_scope release quarantine_remove "$@"; then return 0; else return $?; fi
   fi
-  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 expected_target='' dkb=0 dact=remove lease_lock_held=0
+  local v inv binding path_arg verdict_path qid deadline='' deadline_seen=0 expected_target='' expected_inventory='' identity_kind=regular_file dkb=0 dact=remove lease_lock_held=0
   [[ $# -ge 1 ]] || { echo kept:check-failed; return 0; }
   path_arg="$1"; verdict_path="$1"; shift
   local -a caller_verdict_args=()
@@ -38,6 +38,9 @@ quarantine_remove() {
       --expected-target-identity)
         [[ $# -ge 2 && -z "$expected_target" && "$2" =~ ^[0-9]+,[0-9]+,[0-9]+,-?[0-9]+,-?[0-9]+$ ]] || { echo kept:check-failed; return 0; }
         expected_target="$2"; shift 2 ;;
+      --expected-inventory)
+        [[ $# -ge 2 && -z "$expected_inventory" && "$2" =~ ^[0-9a-f]{64},[0-9]+$ ]] || { echo kept:check-failed; return 0; }
+        expected_inventory="$2"; identity_kind=managed_run; shift 2 ;;
       --kind|--frozen-identity|--frozen-parent-identity|--frozen-root-identity)
         [[ $# -ge 2 ]] || { echo kept:check-failed; return 0; }
         caller_verdict_args+=("$1" "$2"); shift 2 ;;
@@ -47,6 +50,7 @@ quarantine_remove() {
       *) echo kept:check-failed; return 0 ;;
     esac
   done
+  [[ -z "$expected_inventory" || -n "$expected_target" ]] || { echo kept:check-failed; return 0; }
   local -a verdict_args=(--inventory-out)
   # Bash 3.2 with nounset treats expanding an empty array as an unbound
   # variable. Keep the no-option caller contract portable without disabling
@@ -103,23 +107,31 @@ PY
     rm -f "$inv" "$binding"; echo kept:lease-busy; return 0
   fi
   lease_lock_held=1
-  if [[ -n "$expected_target" ]] && ! python3 "$_Q_LIB/../quarantine_scratch_manifest.py" --check-entry "$path_arg" "$expected_target" >/dev/null 2>&1; then
+  if [[ -n "$expected_target" ]] && ! python3 "$_Q_LIB/../quarantine_scratch_manifest.py" --check-entry "$path_arg" "$expected_target" "$identity_kind" >/dev/null 2>&1; then
     rm -f "$inv" "$binding"
     lease_registry_mutation_lock_exit || true
     echo kept:identity-mismatch
     return 0
   fi
   v="$(artifact_removal_verdict "$verdict_path" "${verdict_args[@]:0:1}" "$inv" "${verdict_args[@]:1}" 2>/dev/null)" || v=kept:check-failed
+  if [[ "$v" == remove && -n "$expected_inventory" ]] &&
+      ! python3 "$_Q_LIB/../quarantine_scratch_manifest.py" --check-inventory "$inv" "$expected_inventory" >/dev/null 2>&1; then
+    v=kept:inventory-mismatch
+  fi
   if [[ "$v" == remove ]]; then
     dkb="$(deletion_size_kb "$path_arg")" || dkb=0
     if [[ -L "$path_arg" ]]; then dact=remove_symlink; elif [[ -f "$path_arg" ]]; then dact=remove_file; fi
+    # A failed actuator process may have already renamed the exact target.
+    # Keep its manifest checkpoint in flight until recovery can inspect it.
+    local remove_error=kept:check-failed
+    [[ -z "$expected_target" ]] || remove_error=deferred:quarantine-error
     local -a remove_args=("$path_arg" "$inv" "$binding")
     [[ -z "$expected_target" ]] || remove_args+=(--expected-root-identity "$expected_target")
     if [[ "$deadline_seen" == 1 ]]; then
       remove_args+=(--deadline-at "$deadline")
-      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v=kept:check-failed
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v="$remove_error"
     else
-      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v=kept:check-failed
+      v="$(python3 "$_Q_LIB/../quarantine_rename.py" remove "${remove_args[@]}" 2>/dev/null)" || v="$remove_error"
     fi
   fi
   rm -f "$inv" "$binding" || true

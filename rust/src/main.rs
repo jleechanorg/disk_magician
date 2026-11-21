@@ -1,18 +1,24 @@
-use diskm_shadow::{history, preview, scan, scratch_manifest, scratch_target, status};
+use diskm_shadow::{
+    history, preview, reclaim_report, scan, scratch_dir, scratch_manifest, scratch_target, status,
+};
 use serde::Serialize;
 use std::env;
 use std::ffi::OsString;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::Duration;
 
-const USAGE: &str = "diskm — Disk Magician migration candidate; output is JSON
+const USAGE: &str = "diskm — Disk Magician migration candidate; inventory output is JSON
 
   diskm status [PATH] [--state-dir DIR] [--json]
   diskm scan PATH [--deadline-ms N] [--max-entries N] [--json]
+  diskm reclaim-ledger --read-existing [--state-dir DIR]
   diskm history --state-dir DIR [--days 7|30] [--json]
-  diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_FILE [--path ...] | --paths-from FILE
+  diskm scratch-dir [SUBPATH]
+  diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_PATH [--path ...] | --paths-from FILE
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all]
   diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
 
@@ -26,6 +32,8 @@ Preview defaults to the Scratch scope. Use --scope all for all supported locatio
 
 const TEMPORARY_FAILURE: u8 = 75;
 const USAGE_ERROR: u8 = 2;
+const LEGACY_COMPAT_CLI: &str = diskm_shadow::LEGACY_COMPAT_CLI;
+const LEGACY_COMPAT_ACTIVE: &str = "DISKM_LEGACY_COMPAT_ACTIVE";
 
 enum Operation {
     Help,
@@ -420,8 +428,80 @@ fn run(operation: Operation) -> io::Result<u8> {
     Ok(0)
 }
 
+fn dispatch_legacy(args: &[OsString]) -> Option<ExitCode> {
+    env::var_os(LEGACY_COMPAT_CLI)?;
+    if matches!(
+        args.first().and_then(|arg| arg.to_str()),
+        Some("preview" | "scan" | "scratch-manifest" | "scratch-target-apply")
+    ) {
+        return None;
+    }
+    // The legacy command may legitimately invoke diskm with different arguments.
+    // Store a fingerprint of each forwarded argv to catch repeated dispatch.
+    let mut hasher = DefaultHasher::new();
+    args.hash(&mut hasher);
+    let fingerprint = format!("{:016x}", hasher.finish());
+    let mut chain = env::var(LEGACY_COMPAT_ACTIVE).unwrap_or_default();
+    if chain.split(',').any(|previous| previous == fingerprint) {
+        eprintln!("diskm: refusing recursive legacy compatibility dispatch");
+        return Some(ExitCode::from(USAGE_ERROR));
+    }
+    if !chain.is_empty() {
+        chain.push(',');
+    }
+    chain.push_str(&fingerprint);
+    let legacy = match diskm_shadow::legacy_cli() {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+            eprintln!("diskm: legacy compatibility backend refused: {error}");
+            return Some(ExitCode::from(USAGE_ERROR));
+        }
+        Err(error) => {
+            eprintln!("diskm: legacy compatibility backend unavailable: {error}");
+            return Some(ExitCode::from(127));
+        }
+    };
+    let error = Command::new(legacy)
+        .arg0("diskm")
+        .args(args)
+        .env(LEGACY_COMPAT_ACTIVE, chain)
+        .exec();
+    eprintln!("diskm: cannot exec legacy compatibility backend: {error}");
+    Some(ExitCode::from(127))
+}
+
 fn main() -> ExitCode {
-    let operation = match parse(env::args_os().skip(1)) {
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    if matches!(
+        args.first().and_then(|arg| arg.to_str()),
+        Some("scratch-dir" | "scratch_dir")
+    ) {
+        return match scratch_dir::resolve(args.get(1).map(OsString::as_os_str), io::stdout().lock())
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("scratch-dir: {error}");
+                if error.kind() == io::ErrorKind::InvalidInput {
+                    ExitCode::from(USAGE_ERROR)
+                } else {
+                    ExitCode::from(TEMPORARY_FAILURE)
+                }
+            }
+        };
+    }
+    if let Some(request) = reclaim_report::read_request(&args) {
+        return match reclaim_report::print_existing(request, io::stdout().lock()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("diskm: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(status) = dispatch_legacy(&args) {
+        return status;
+    }
+    let operation = match parse(args.into_iter()) {
         Ok(operation) => operation,
         Err(message) => {
             eprintln!("diskm: {message}\n{USAGE}");

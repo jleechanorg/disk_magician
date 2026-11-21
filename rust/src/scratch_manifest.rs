@@ -1,10 +1,11 @@
-use crate::preview::registered_scratch;
+use crate::preview::{possible_dated_run, registered_scratch};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs::{self, Metadata};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
@@ -32,6 +33,8 @@ struct Entry {
     size: u64,
     mtime_ns: i64,
     ctime_ns: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inventory_sha256: Option<String>,
 }
 
 fn timestamp_ns(seconds: i64, nanos: i64) -> io::Result<i64> {
@@ -39,6 +42,35 @@ fn timestamp_ns(seconds: i64, nanos: i64) -> io::Result<i64> {
         .checked_mul(NANOS_PER_SECOND)
         .and_then(|n| n.checked_add(nanos))
         .ok_or_else(|| io::Error::other("filesystem timestamp is out of range"))
+}
+
+// Reuse the same canonical inventory writer as quarantine, so the digest
+// covers the file content and inventory metadata that apply will validate.
+fn fingerprint_run(path: &Path, cutoff: i64) -> io::Result<String> {
+    let output = Command::new(crate::legacy_cli()?)
+        .args(["quarantine", "scratch-apply", "--fingerprint-run"])
+        .arg(path)
+        .arg(cutoff.to_string())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "cannot bind managed run {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+    let digest = String::from_utf8(output.stdout).map_err(io::Error::other)?;
+    let digest = digest.trim();
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(io::Error::other(
+            "invalid managed-run inventory fingerprint",
+        ));
+    }
+    Ok(digest.to_owned())
 }
 
 // An exact path list is a nomination, never a cleanup verdict. The apply side
@@ -59,14 +91,27 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
         let relative = path.strip_prefix(&root).map_err(|_| {
             io::Error::other(format!("outside registered Scratch: {}", path.display()))
         })?;
-        let metadata = file_metadata(&root, relative, dev)?;
+        let metadata = entry_metadata(&root, relative, dev)?;
         let mtime_ns = timestamp_ns(metadata.mtime(), metadata.mtime_nsec())?;
-        if mtime_ns >= cutoff_ns {
+        let (kind, inventory_sha256) = if metadata.is_file() {
+            if mtime_ns >= cutoff_ns {
+                return Err(io::Error::other(format!(
+                    "file is at or after the cutoff: {}",
+                    path.display()
+                )));
+            }
+            ("regular_file", None)
+        } else if possible_dated_run(&root.join("runs"), path).is_some() {
+            (
+                "managed_run",
+                Some(fingerprint_run(path, before_epoch_seconds)?),
+            )
+        } else {
             return Err(io::Error::other(format!(
-                "file is at or after the cutoff: {}",
+                "manifest requires a regular file or exact managed run: {}",
                 path.display()
             )));
-        }
+        };
         if !seen.insert(relative) {
             return Err(io::Error::other(format!(
                 "duplicate file path: {}",
@@ -75,12 +120,13 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
         }
         entries.push(Entry {
             path: relative.into(),
-            kind: "regular_file",
+            kind,
             dev,
             ino: metadata.ino(),
             size: metadata.len(),
             mtime_ns,
             ctime_ns: timestamp_ns(metadata.ctime(), metadata.ctime_nsec())?,
+            inventory_sha256,
         });
     }
     let current = fs::symlink_metadata(&root)?;
@@ -101,7 +147,7 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
     })
 }
 
-fn file_metadata(root: &Path, relative: &Path, device: u64) -> io::Result<Metadata> {
+fn entry_metadata(root: &Path, relative: &Path, device: u64) -> io::Result<Metadata> {
     let mut current = root.to_path_buf();
     let mut parts = relative.components().peekable();
     if parts.peek().is_none() || relative.to_str().is_none() {
@@ -117,7 +163,7 @@ fn file_metadata(root: &Path, relative: &Path, device: u64) -> io::Result<Metada
                 "manifest path crosses a filesystem boundary",
             ));
         }
-        if parts.peek().is_none() && metadata.is_file() {
+        if parts.peek().is_none() && (metadata.is_file() || metadata.is_dir()) {
             return Ok(metadata);
         }
         if !metadata.is_dir() {
@@ -125,7 +171,7 @@ fn file_metadata(root: &Path, relative: &Path, device: u64) -> io::Result<Metada
         }
     }
     Err(io::Error::other(format!(
-        "manifest requires a regular file through real directories: {}",
+        "manifest requires a regular file or managed run through real directories: {}",
         relative.display()
     )))
 }

@@ -123,7 +123,7 @@ fn ledger_paths(state_dir: &Path, root: &Path) -> io::Result<Vec<(PathBuf, Strin
 }
 
 pub(crate) fn registered_scratch() -> io::Result<(PathBuf, u64)> {
-    let output = Command::new(crate::LEGACY_CLI)
+    let output = Command::new(crate::legacy_cli()?)
         .args(["volume", "path", "scratch"])
         .output()?;
     if !output.status.success() {
@@ -171,6 +171,10 @@ fn check_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
 fn current_verdict(path: &Path, min_hours: u32) -> String {
     // Use the checker's Python monotonic timebase and stop only the subprocess group
     // created for this read-only verdict. A stalled candidate cannot block siblings.
+    let legacy = match crate::legacy_cli() {
+        Ok(path) => path,
+        Err(_) => return "deferred:legacy-backend-unavailable".into(),
+    };
     let mut command = Command::new("python3");
     command
         .args([
@@ -196,7 +200,7 @@ else:
         ])
         .arg(CHECK_WINDOW_SECONDS.to_string())
         .arg(path)
-        .arg(crate::LEGACY_CLI)
+        .arg(legacy)
         .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")
         .env_remove("DISK_MAGICIAN_OPERATOR_TARGETS");
     if min_hours == 6 {
@@ -507,7 +511,7 @@ fn current_cutoff(min_hours: u32) -> io::Result<i64> {
 
 // Match the allocator's path shape for nomination. C14 validates the
 // calendar, quarantine marker, leases, and other removal safeguards.
-fn possible_dated_run(runs: &Path, path: &Path) -> Option<()> {
+pub(crate) fn possible_dated_run(runs: &Path, path: &Path) -> Option<()> {
     let mut parts = path.strip_prefix(runs).ok()?.components();
     let (
         Some(Component::Normal(day)),

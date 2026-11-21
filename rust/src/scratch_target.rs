@@ -1,17 +1,21 @@
 //! Bounded apply orchestration for one digest-bound Scratch manifest.
 
+use crate::scratch_recovery::{self, RecoveryHint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const LEGACY: &str = crate::LEGACY_CLI;
+// Match the existing quarantine actuator's 256 MiB manifest limit.
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
+
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
@@ -47,6 +51,8 @@ struct Root {
 struct Entry {
     path: String,
     kind: String,
+    dev: Option<u64>,
+    ino: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -67,6 +73,8 @@ struct ResumeState {
     pending_paths: VecDeque<String>,
     receipts: Vec<Receipt>,
     status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    in_flight_quarantine_id: Option<String>,
     used_before_bytes: Option<u64>,
     used_after_bytes: Option<u64>,
 }
@@ -81,6 +89,8 @@ pub struct Report {
     pub used_after_bytes: Option<u64>,
     pub pending_paths: Vec<String>,
     pub receipts: Vec<Receipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryHint>,
 }
 
 struct ResumeLock(File);
@@ -147,21 +157,27 @@ fn acquire_scratch_lock() -> io::Result<ResumeLock> {
 }
 
 fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
-    let metadata = fs::symlink_metadata(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::other("manifest must be a regular file"));
     }
-    let result = Command::new("python3")
-        .args([
-            "-c",
-            "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())",
-        ])
-        .arg(path)
-        .output()?;
-    if !result.status.success() || String::from_utf8_lossy(&result.stdout).trim() != digest {
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Err(io::Error::other("manifest exceeds the actuator size limit"));
+    }
+    // Hash and parse the same bytes, even if the path is replaced after open.
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(io::Error::other("manifest exceeds the actuator size limit"));
+    }
+    if format!("{:x}", Sha256::digest(&bytes)) != digest {
         return Err(io::Error::other("manifest digest mismatch"));
     }
-    let manifest: Manifest = serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     if manifest.version != 1 {
         return Err(io::Error::other("unsupported manifest version"));
     }
@@ -169,7 +185,7 @@ fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
 }
 
 fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String, u64)> {
-    let output = Command::new(LEGACY)
+    let output = Command::new(crate::legacy_cli()?)
         .args(["volume", "status", "--snapshot"])
         .output()?;
     if !output.status.success() {
@@ -193,7 +209,7 @@ fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String
     if filesystem_id.is_some_and(|expected| expected != observed_filesystem_id) {
         return Err(io::Error::other("Scratch filesystem identity changed"));
     }
-    let verify = Command::new(LEGACY)
+    let verify = Command::new(crate::legacy_cli()?)
         .args(["volume", "verify-mount", current_path])
         .output()?;
     if !verify.status.success() {
@@ -239,7 +255,7 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
 }
 
 fn legacy_apply(manifest: &Path, digest: &str, relative: &str, lock_fd: i32) -> io::Result<String> {
-    let mut command = Command::new(LEGACY);
+    let mut command = Command::new(crate::legacy_cli()?);
     command
         .env("DISK_MAGICIAN_SCRATCH_LOCK_FD", lock_fd.to_string())
         .args(["quarantine", "scratch-apply", "--manifest"])
@@ -326,7 +342,11 @@ pub fn apply(
     }
     if let Some(state) = existing_state.as_ref() {
         if state.status.starts_with("applying:") {
-            return Ok(report_recovery_required(state));
+            return Ok(report_recovery_required(
+                state,
+                &manifest.entries,
+                writer.is_ok(),
+            ));
         }
     }
     let initial_paths = if existing_state.is_none() {
@@ -351,6 +371,7 @@ pub fn apply(
                     used_after_bytes: state.used_after_bytes,
                     pending_paths: state.pending_paths.iter().cloned().collect(),
                     receipts: state.receipts.clone(),
+                    recovery: None,
                 });
             }
             return Ok(Report {
@@ -362,6 +383,7 @@ pub fn apply(
                 used_after_bytes: None,
                 pending_paths: initial_paths.clone().unwrap_or_default(),
                 receipts: Vec::new(),
+                recovery: None,
             });
         }
         Err(error) => return Err(error),
@@ -391,6 +413,7 @@ pub fn apply(
                 pending_paths: initial_paths.unwrap_or_default().into(),
                 receipts: Vec::new(),
                 status: format!("deferred:{}", error),
+                in_flight_quarantine_id: None,
                 used_before_bytes: None,
                 used_after_bytes: None,
             };
@@ -419,6 +442,7 @@ pub fn apply(
             pending_paths: paths.into(),
             receipts: Vec::new(),
             status: "in_progress".into(),
+            in_flight_quarantine_id: None,
             used_before_bytes: Some(start_used),
             used_after_bytes: Some(start_used),
         }
@@ -453,22 +477,26 @@ pub fn apply(
             return Ok(report(state));
         }
         state.status = format!("applying:{path}");
+        state.in_flight_quarantine_id = None;
         state.used_after_bytes = Some(used_before);
         write_state(resume_path, &state)?;
         let result = match legacy_apply(manifest_path, digest, &path, lock.0.as_raw_fd()) {
             Ok(result) => result,
-            Err(_) => return Ok(report_recovery_required(&state)),
+            Err(_) => return Ok(report_recovery_required(&state, &manifest.entries, true)),
         };
-        if result.starts_with("deferred:") {
-            if result == "deferred:operation-lock" {
-                state.status = result;
-                write_state(resume_path, &state)?;
-                return Ok(report(state));
-            }
-            return Ok(report_recovery_required(&state));
+        if result == "deferred:operation-lock" {
+            state.status = result;
+            write_state(resume_path, &state)?;
+            return Ok(report(state));
         }
-        if result.starts_with("kept:quarantine_partial_kept") {
-            return Ok(report_recovery_required(&state));
+        if result.starts_with("deferred:") || result.starts_with("kept:quarantine_partial_kept") {
+            if let Some((_, id)) = result.rsplit_once(':') {
+                if scratch_recovery::is_quarantine_id(id) {
+                    state.in_flight_quarantine_id = Some(id.to_owned());
+                    write_state(resume_path, &state)?;
+                }
+            }
+            return Ok(report_recovery_required(&state, &manifest.entries, true));
         }
         state.pending_paths.pop_front();
         state.receipts.push(Receipt {
@@ -541,9 +569,12 @@ fn selected_manifest_paths(
     }
     if paths.is_empty()
         || paths.iter().collect::<std::collections::HashSet<_>>().len() != paths.len()
-        || paths
-            .iter()
-            .any(|path| manifest_paths.get(path.as_str()).copied() != Some("regular_file"))
+        || paths.iter().any(|path| {
+            !matches!(
+                manifest_paths.get(path.as_str()).copied(),
+                Some("regular_file" | "managed_run")
+            )
+        })
     {
         return Err(io::Error::other(
             "select unique paths present in the manifest",
@@ -564,10 +595,28 @@ fn report(state: ResumeState) -> Report {
         used_after_bytes: state.used_after_bytes,
         pending_paths: state.pending_paths.into_iter().collect(),
         receipts: state.receipts,
+        recovery: None,
     }
 }
 
-fn report_recovery_required(state: &ResumeState) -> Report {
+fn report_recovery_required(
+    state: &ResumeState,
+    entries: &[Entry],
+    writer_available: bool,
+) -> Report {
+    let recovery = state.pending_paths.front().map(|path| {
+        let identity = entries
+            .iter()
+            .find(|entry| &entry.path == path)
+            .and_then(|entry| entry.dev.zip(entry.ino));
+        scratch_recovery::hint(
+            &state.root.path,
+            path,
+            identity,
+            state.in_flight_quarantine_id.as_deref(),
+            writer_available,
+        )
+    });
     Report {
         status: "recovery_required:check exact in-flight quarantine before resume".into(),
         complete: false,
@@ -577,5 +626,6 @@ fn report_recovery_required(state: &ResumeState) -> Report {
         used_after_bytes: state.used_after_bytes,
         pending_paths: state.pending_paths.iter().cloned().collect(),
         receipts: state.receipts.clone(),
+        recovery,
     }
 }

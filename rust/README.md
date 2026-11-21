@@ -82,10 +82,10 @@ Ledger rows are historical leads. With `--scope all --state-dir DIR`, the JSON
 includes the Scratch, temp, worktree, and ledger views. A failed view is reported
 under its own scope.
 
-### Exact-file Scratch manifest
+### Exact Scratch manifest
 
-Use the built candidate's `scratch-manifest --before-epoch SECONDS --path ABSOLUTE_FILE`
-to turn selected regular files into an identity-bound JSON manifest. Repeat
+Use the built candidate's `scratch-manifest --before-epoch SECONDS --path ABSOLUTE_PATH`
+to turn selected regular files or exact managed runs into an identity-bound JSON manifest. Repeat
 `--path` or pass a NUL-terminated UTF-8 path list with `--paths-from FILE`.
 The cutoff is exclusive. Outside paths, symlinks, nonregular entries, duplicate
 paths and files at or after the cutoff are rejected. A manifest records selected
@@ -95,8 +95,8 @@ and evaluate live protection and cleanup policy before removing anything.
 The compatibility apply route is `disk-magician quarantine scratch-apply
 --manifest FILE --manifest-sha256 SHA --path RELATIVE_FILE`. Repeat
 `--path` for an exact subset, or explicitly use `--all` for all rows in
-the referenced digest. This first apply slice targets regular files in
-existing Scratch. Managed dated runs are reclaimed as lease-backed units.
+the referenced digest. Regular files use a file identity. Managed dated
+runs use a full content inventory and stay lease-backed cleanup units.
 Files with path characters the canonical deletion log cannot represent
 remain in place. Direct apply defers immediately when another Scratch writer is active.
 Both staged executables are required until the Rust
@@ -123,12 +123,53 @@ An interrupted mutation reports `recovery_required` and leaves the in-flight
 entry in the checkpoint. The existing legacy writer lock returns immediately
 under contention.
 
+### Legacy command bridge
+
+An installer may opt into an absolute compatibility executable with
+`DISKM_LEGACY_COMPAT_CLI`. Unsupported commands, plus ambiguous `status`,
+`history`, help, and empty invocations, exec that exact path with the original
+arguments. Rust-native `preview`, `scan`, and Scratch manifest commands stay
+native, while their volume, temp-policy, worktree-policy, and exact-apply calls
+resolve through the same compatibility setting. A self-path check and
+`DISKM_LEGACY_COMPAT_ACTIVE` guard prevent fallback recursion. Without the
+setting, unknown commands remain usage errors.
+
+The retained legacy `tmp-scratch-sweep` and `volume_reclaim` scripts default
+their nested volume calls to the adjacent `disk_magician.sh` dispatcher through
+`DISK_MAGICIAN_DISKM_BIN`. This keeps those nested calls on the legacy handler
+during the pilot. Scheduler transfer remains pending until their command,
+state, receipt, and rollback contracts have Rust implementations.
+
+The native `diskm reclaim-ledger --read-existing` command reads the published
+report and prints its completeness and generation-time warnings. It keeps the
+report's own coverage banners. Set `--state-dir DIR` to select a report
+explicitly. Publishing or regenerating the ledger uses the existing backend.
+
+The native `diskm scratch-dir [SUBPATH]` command retains the volume
+authority's active, absent, and unavailable outcomes. It opens each physical
+child directory relative to its verified parent before creating anything.
+Volume discovery still uses the configured backend.
+
 Pass repeatable `--recheck ABSOLUTE_PATH` arguments with `--resume-state`
 to obtain fresh verdicts for selected regular files already in that
 checkpoint. The recheck honors `--max-candidates` and the checkpoint's
 original age cutoff. It preserves the checkpoint and reports only the
 selected paths. An eligible result can be nominated via the exact
 manifest command, whose apply path independently revalidates it.
+
+A manifest can also nominate an exact managed run directory. The legacy
+quarantine inventory writer fingerprints its full contents at nomination.
+Apply checks the fingerprint and original content cutoff against the
+inventory produced by C14 under the lease mutation guard. Quarantine
+recovery and deletion receipts use the existing engine. Structural
+containers and paths without an allocator marker remain ineligible.
+
+When an apply remains in flight, its `recovery` field reports the selected
+path and any quarantine ID returned by the actuator. The native lookup
+matches canonical index records on the exact original path, device, and
+inode. It reports ambiguity or unavailability when a unique record cannot
+be established. The index phase describes that record alone. Recovery
+inspection leaves candidate and quarantine state intact.
 
 The default 48-hour ledger preview reports incomplete filesystem coverage. It
 reports the total missing nominations and the number of verdicts deferred,

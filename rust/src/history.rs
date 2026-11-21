@@ -440,7 +440,7 @@ fn small_directory_leaves(ledger: &Value) -> bool {
     true
 }
 
-fn parse_utc(value: &str) -> Option<i64> {
+pub(crate) fn parse_utc(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() != 20
         || bytes[4] != b'-'
@@ -506,7 +506,7 @@ fn days_from_civil(year: u32, month: u32, day: u32) -> Option<i64> {
 fn is_leap(year: u32) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64)

@@ -74,6 +74,11 @@ impl Fixture {
             .output()
             .expect("hash fixture manifest");
         let digest = String::from_utf8(digest.stdout).unwrap().trim().to_owned();
+        let blocked_python = bin.join("python3");
+        fs::write(&blocked_python, "#!/bin/sh\nexit 91\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&blocked_python, fs::Permissions::from_mode(0o755)).unwrap();
+
         let script = bin.join("disk-magician");
         fs::write(
             &script,
@@ -115,7 +120,6 @@ fi
         )
         .unwrap();
         let mut permissions = fs::metadata(&script).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
         permissions.set_mode(0o755);
         fs::set_permissions(script, permissions).unwrap();
         Self {
@@ -129,6 +133,26 @@ fi
             entries,
             digest,
         }
+    }
+
+    fn write_recovery_entry(&self, id: &str, path: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let index = self.root.join("state/quarantine-index");
+        fs::create_dir_all(&index).unwrap();
+        fs::set_permissions(&index, fs::Permissions::from_mode(0o700)).unwrap();
+        let original = self.scratch.join(path);
+        let metadata = original.metadata().unwrap();
+        let row = json!({
+            "schema": 1,
+            "id": id,
+            "original": original,
+            "root_dev": metadata.dev(),
+            "root_ino": metadata.ino(),
+            "phase": "preparing",
+        });
+        let record = index.join(format!("{id}.json"));
+        fs::write(&record, serde_json::to_vec(&row).unwrap()).unwrap();
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     fn run(&self, used: &[u64], ids: &[&str], extra: &[&str]) -> Output {
@@ -174,6 +198,7 @@ fi
             .args(extra)
             .env("PATH", search_path)
             .env("HOME", &self.root)
+            .env("DISK_MAGICIAN_STATE_DIR", self.root.join("state"))
             .env("FAKE_SCRATCH_ROOT", &self.scratch)
             .env("STATUS_INDEX", &self.status_index)
             .env("APPLIES", &self.applies)
@@ -251,6 +276,9 @@ fn volume_identity_change_stops_before_the_next_manifest_entry() {
 #[test]
 fn partial_quarantine_requires_recovery_and_keeps_the_in_flight_path() {
     let fixture = Fixture::new(2);
+    let id = "deadbeefdeadbeef";
+    fixture.write_recovery_entry(id, &fixture.entries[0]);
+    fixture.write_recovery_entry("0123456789abcdef", &fixture.entries[1]);
     let output = fixture.run_result(
         &[101 * GIB],
         &["volume-a"],
@@ -268,6 +296,13 @@ fn partial_quarantine_requires_recovery_and_keeps_the_in_flight_path() {
     );
     let apply_calls = fs::read_to_string(&fixture.applies).unwrap();
     assert_eq!(apply_calls, format!("{}\n", fixture.entries[0]));
+    assert_eq!(result["recovery"]["path"], fixture.entries[0]);
+    assert_eq!(result["recovery"]["recorded_id"], id);
+    assert_eq!(result["recovery"]["index_status"], "matched");
+    assert_eq!(result["recovery"]["entry"]["id"], id);
+    assert_eq!(result["recovery"]["entry"]["index_phase"], "preparing");
+    let saved: Value = serde_json::from_slice(&fs::read(&fixture.resume).unwrap()).unwrap();
+    assert_eq!(saved["in_flight_quarantine_id"], id);
 
     let resumed = fixture.run(&[101 * GIB], &["volume-a"], &[]);
     assert!(report(&resumed)["status"]
@@ -335,6 +370,9 @@ fn interrupted_in_flight_quarantine_requires_exact_recovery_without_global_recon
     let mut state: Value = serde_json::from_slice(&fs::read(&fixture.resume).unwrap()).unwrap();
     state["status"] = json!(format!("applying:{}", fixture.entries[1]));
     fs::write(&fixture.resume, serde_json::to_vec(&state).unwrap()).unwrap();
+    fixture.write_recovery_entry("deadbeefdeadbeef", &fixture.entries[1]);
+    fixture.write_recovery_entry("0123456789abcdef", &fixture.entries[1]);
+
     let previous_apply_count = fs::read_to_string(&fixture.applies)
         .unwrap()
         .lines()
@@ -347,6 +385,9 @@ fn interrupted_in_flight_quarantine_requires_exact_recovery_without_global_recon
         "recovery_required:check exact in-flight quarantine before resume"
     );
     assert_eq!(result["pending_paths"], json!([fixture.entries[1]]));
+    assert_eq!(result["recovery"]["index_status"], "ambiguous");
+    assert!(result["recovery"]["entry"].is_null());
+
     assert_eq!(
         fs::read_to_string(&fixture.applies)
             .unwrap()
@@ -354,4 +395,29 @@ fn interrupted_in_flight_quarantine_requires_exact_recovery_without_global_recon
             .count(),
         previous_apply_count
     );
+}
+
+#[test]
+fn unverified_or_oversized_manifest_never_reaches_the_volume_or_actuator() {
+    let fixture = Fixture::new(1);
+    fs::write(&fixture.manifest, b"changed manifest bytes").unwrap();
+    let invalid = fixture.run(&[101 * GIB], &["fixture-volume"], &["--all"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("manifest digest mismatch"));
+    assert!(!fixture.status_index.exists());
+    assert!(!fixture.applies.exists());
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&fixture.manifest)
+        .unwrap()
+        .set_len(256 * 1024 * 1024 + 1)
+        .unwrap();
+    let large = fixture.run(&[101 * GIB], &["fixture-volume"], &["--all"]);
+    assert!(!large.status.success());
+    assert!(
+        String::from_utf8_lossy(&large.stderr).contains("manifest exceeds the actuator size limit")
+    );
+    assert!(!fixture.status_index.exists());
+    assert!(!fixture.applies.exists());
 }

@@ -23,7 +23,17 @@ impl Fixture {
         let diskm = root.join("disk-magician");
         fs::write(
             &diskm,
-            "#!/bin/sh\n[ \"$*\" = 'volume path scratch' ] || exit 64\nprintf '%s\\n' \"$TEST_SCRATCH\"\n",
+            r#"#!/bin/sh
+if [ "$*" = 'volume path scratch' ]; then
+  printf '%s\n' "$TEST_SCRATCH"
+  exit 0
+fi
+if [ "$1 $2 $3" = 'quarantine scratch-apply --fingerprint-run' ]; then
+  printf '%064d\n' 0
+  exit 0
+fi
+exit 64
+"#,
         )
         .unwrap();
         fs::set_permissions(&diskm, fs::Permissions::from_mode(0o700)).unwrap();
@@ -130,4 +140,19 @@ fn exact_manifest_records_identity_and_excludes_boundary_and_symlinks() {
         .status
         .success());
     assert!(file.exists());
+
+    let repo = fixture.scratch.join("runs/20261120/disk-magician");
+    let run = repo.join("build-20261120T120000Z-123-456");
+    fs::create_dir_all(&run).unwrap();
+    let output = fixture.plan(&run, cutoff);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entry = &manifest["entries"][0];
+    assert_eq!(entry["kind"], "managed_run");
+    assert_eq!(entry["inventory_sha256"], "0".repeat(64));
+    assert!(!fixture.plan(&repo, cutoff).status.success());
 }
