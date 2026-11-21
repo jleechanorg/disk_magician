@@ -11,6 +11,9 @@ mkdir -p "$PRIVATE_TMP" "$OTHER_TMP" "$ARCHIVE" "$TEST_HOME/.disk_magician_locks
 chmod 700 "$WORK_ROOT" "$TEST_HOME" "$TEST_HOME/.disk_magician_locks"
 cat > "$WORK_ROOT/bin/lsof" <<'LSOF_EOF'
 #!/bin/bash
+case " $* " in
+  *" -d cwd "*) printf 'p1\nfcwd\nn/\n'; exit 0 ;;
+esac
 for arg in "$@"; do
   [[ "$arg" == +D ]] && exit 1
 done
