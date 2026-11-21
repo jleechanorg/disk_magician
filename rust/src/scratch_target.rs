@@ -241,6 +241,7 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
 fn legacy_apply(manifest: &Path, digest: &str, relative: &str, lock_fd: i32) -> io::Result<String> {
     let mut command = Command::new(LEGACY);
     command
+        .env("DISK_MAGICIAN_SCRATCH_LOCK_FD", lock_fd.to_string())
         .args(["quarantine", "scratch-apply", "--manifest"])
         .arg(manifest)
         .args(["--manifest-sha256", digest, "--path", relative]);

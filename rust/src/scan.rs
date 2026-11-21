@@ -14,7 +14,7 @@ pub struct ScanOptions {
     pub max_entries: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileKind {
     File,
@@ -33,7 +33,7 @@ pub enum ScanGapKind {
     CrossDevice,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FileMeasurement {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,7 +48,7 @@ pub struct FileMeasurement {
     pub special_type: Option<SpecialFileKind>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecialFileKind {
     Fifo,

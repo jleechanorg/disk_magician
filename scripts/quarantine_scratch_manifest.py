@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Apply exact regular-file selections from a hashed Scratch inventory."""
 
+import fcntl
 import hashlib
 import json
 import os
@@ -10,6 +11,8 @@ import shutil
 import stat
 import subprocess
 import sys
+
+import scratch_lock
 
 MAX_BYTES = 256 * 1024 * 1024
 FIELDS = ("dev", "ino", "size", "mtime_ns", "ctime_ns")
@@ -113,7 +116,7 @@ def verify(root, root_dev, entry, cutoff):
     return target, None
 
 
-def remove_exact(path, entry):
+def remove_exact(path, entry, lock_fd):
     repo = Path(__file__).resolve().parent.parent
     encoded = ",".join(str(entry[k]) for k in FIELDS)
     shell = 'source "$1/scripts/lib/quarantine.sh"; shift; quarantine_remove "$@"'
@@ -122,14 +125,14 @@ def remove_exact(path, entry):
     env = dict(os.environ, C14_NO_RESCUE_PUSH="1")
     env.pop("DISK_MAGICIAN_AGE_FLOOR_MINUTES", None)
     env.pop("DISK_MAGICIAN_OPERATOR_TARGETS", None)
-    result = subprocess.run(args, capture_output=True, text=True, env=env)
+    result = subprocess.run(args, capture_output=True, text=True, env=env, pass_fds=(lock_fd,))
     verdict = result.stdout.strip()
     if result.returncode or verdict == "remove" or not verdict.startswith(("removed:", "kept:", "deferred:")):
         return "deferred:quarantine-error"
     return verdict
 
 
-def apply(manifest_path, digest, paths, all_entries):
+def apply(manifest_path, digest, paths, all_entries, lock_fd):
     manifest = load_manifest(manifest_path, digest)
     root, dev, ino = scratch_root()
     recorded = manifest["root"]
@@ -151,9 +154,26 @@ def apply(manifest_path, digest, paths, all_entries):
     for relative in paths:
         entry = entries[relative]
         target, reason = verify(root, dev, entry, manifest["before_epoch_seconds"])
-        result = reason if reason else remove_exact(target, entry)
+        result = reason if reason else remove_exact(target, entry, lock_fd)
         results.append({"path": relative, "result": result})
     return {"manifest_sha256": digest, "before_epoch_seconds": manifest["before_epoch_seconds"], "results": results}
+
+
+def acquire_apply_lock():
+    # The target coordinator passes its open file description. The canonical
+    # verifier checks the descriptor's inode and the actual kernel lock.
+    inherited = os.environ.get(scratch_lock.ENV_FD, "")
+    if inherited.isascii() and inherited.isdecimal() and len(inherited) <= 10:
+        fd = int(inherited)
+        if fd <= 2**31 - 1 and scratch_lock.verify_fd(fd):
+            return fd
+    fd = scratch_lock.open_lock(scratch_lock.lock_path(), create=True)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
 
 
 def main(args):
@@ -182,7 +202,16 @@ def main(args):
     if not manifest or not digest:
         return 2
     try:
-        result = apply(manifest, digest, paths, all_entries)
+        try:
+            fd = acquire_apply_lock()
+        except BlockingIOError:
+            print("scratch-apply: Scratch cleanup is already in progress", file=sys.stderr)
+            return scratch_lock.EXIT_LOCK_HELD
+        try:
+            scratch_lock.disable_implicit_git_fsmonitor()
+            result = apply(manifest, digest, paths, all_entries, fd)
+        finally:
+            os.close(fd)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 2

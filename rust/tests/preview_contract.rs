@@ -74,6 +74,10 @@ if [ "$#" -eq 7 ] && [ "$1" = quarantine ] && [ "$2" = verdict ] && [ "$4" = --k
       printf 'gitdir: /unavailable/admin\n' > "${3%/*}/.git"
       printf 'remove\n'
       ;;
+    retryable-*)
+      if [ -e "${CALL_LOG%/*}/retry-ready" ]; then printf 'remove\n'
+      else printf 'deferred:metadata\n'; fi
+      ;;
     removable*) printf 'remove\n' ;;
     *) printf 'kept:recent-activity\n' ;;
   esac
@@ -677,6 +681,41 @@ fn completed_checkpoint_reports_prior_remove_as_historical_after_replacement() {
 }
 
 #[test]
+fn deferred_retry_refreshes_measurements_and_preserves_the_original_cutoff() {
+    let fixture = Fixture::new();
+    let old = fixture.scratch_path("retryable-old");
+    let fresh = fixture.scratch_path("retryable-fresh");
+    Fixture::mark_old(&old);
+    Fixture::mark_old(&fresh);
+    fixture.install_diskm();
+    let checkpoint = fixture.root.join("transient-retry.json");
+
+    let first = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(first["deferred_verdicts"], 2);
+    let replacement = b"replacement with different sizes in the original date window";
+    fs::write(&old, replacement).unwrap();
+    Fixture::mark_old(&old);
+    fs::write(&fresh, b"replacement after the original cutoff").unwrap();
+    fs::write(fixture.root.join("retry-ready"), b"ready").unwrap();
+
+    let resumed = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(resumed["deferred_verdicts"], 0);
+    let rows = resumed["candidates"].as_array().unwrap();
+    let old_row = rows
+        .iter()
+        .find(|row| row["path"] == old.to_str().unwrap())
+        .unwrap();
+    let fresh_row = rows
+        .iter()
+        .find(|row| row["path"] == fresh.to_str().unwrap())
+        .unwrap();
+    assert_eq!(old_row["eligible"], true);
+    assert_eq!(old_row["apparent_bytes"], replacement.len());
+    assert_eq!(fresh_row["eligible"], false);
+    assert_eq!(fresh_row["verdict"], "kept:outside-date-window");
+}
+
+#[test]
 fn whole_scratch_discovery_outlives_an_explicit_verdict_limit() {
     let fixture = Fixture::new();
     let first = fixture.scratch_path("removable-a.cache");
@@ -882,6 +921,25 @@ fn large_dated_runs_keep_file_measurements_and_one_verdict_per_run() {
         .filter(|line| line.contains("\tquarantine\tverdict"))
         .collect();
     assert_eq!(checks.len(), 2);
+
+    let checkpoint = fixture.root.join("dated-run-files.json");
+    let checkpoint_args = [
+        "--resume-state",
+        checkpoint.to_str().unwrap(),
+        "--deadline-ms",
+        "2000",
+        "--max-candidates",
+        "1",
+    ];
+    let first = report(&fixture.run(&checkpoint_args));
+    assert_eq!(first["complete"], false);
+    assert_eq!(first["dated_run_files"].as_array().unwrap().len(), 3);
+    let resumed = report(&fixture.run(&checkpoint_args));
+    assert_eq!(resumed["complete"], true);
+    assert_eq!(resumed["dated_run_files"], first["dated_run_files"]);
+    let replay = report(&fixture.run(&checkpoint_args));
+    assert_eq!(replay["dated_run_files"], first["dated_run_files"]);
+
     assert!(checks.iter().all(|line| !line.contains("nested/")));
     assert!(!checks.iter().any(|line| line.contains("removable-recent")));
 }

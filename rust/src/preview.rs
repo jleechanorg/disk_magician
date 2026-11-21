@@ -79,6 +79,8 @@ struct ResumeCheckpoint {
     recorded_paths: usize,
     missing_paths: usize,
     candidates: Vec<Candidate>,
+    #[serde(default)]
+    dated_run_files: Vec<FileMeasurement>,
     unfinished_scan_paths: Vec<PendingScan>,
     discovery: Option<Discovery>,
     complete: bool,
@@ -1015,6 +1017,74 @@ fn recheck_file(candidate: &mut Candidate, root: &Path, device: u64, min_hours: 
     }
 }
 
+fn retry_candidate(
+    candidate: &mut Candidate,
+    root: &Path,
+    device: u64,
+    min_hours: u32,
+    cutoff: i64,
+    scan_deadline: Duration,
+) {
+    candidate.eligible = false;
+    if let Some(reason) = check_path(root, &candidate.path, device) {
+        candidate.verdict = reason.into();
+        return;
+    }
+    let Ok(before) = fs::symlink_metadata(&candidate.path) else {
+        candidate.verdict = "deferred:metadata".into();
+        return;
+    };
+    if before.is_file() {
+        recheck_file(candidate, root, device, min_hours, cutoff);
+        return;
+    }
+    if !before.is_dir() || before.dev() != device {
+        candidate.verdict = "deferred:identity-changed".into();
+        return;
+    }
+    let scan_options = ScanOptions {
+        deadline: scan_deadline.min(Duration::from_secs(CHECK_WINDOW_SECONDS)),
+        max_entries: usize::MAX,
+    };
+    let directory = scan(&candidate.path, scan_options)
+        .ok()
+        .and_then(|mut scan| {
+            scan.complete
+                .then(|| {
+                    scan.directories
+                        .drain(..)
+                        .find(|directory| Path::new(&directory.path) == candidate.path)
+                })
+                .flatten()
+        });
+    let Some(directory) = directory else {
+        candidate.verdict = "deferred:subtree-coverage".into();
+        return;
+    };
+    candidate.apparent_bytes = Some(directory.apparent_bytes);
+    candidate.allocated_bytes = Some(directory.path_allocated_bytes);
+    let verdict = if directory
+        .newest_content_epoch_seconds
+        .is_none_or(|epoch| epoch >= cutoff)
+    {
+        "kept:outside-date-window".into()
+    } else if directory.must_itemize != Some(false)
+        && possible_dated_run(&root.join("runs"), &candidate.path).is_none()
+    {
+        "kept:requires-itemization".into()
+    } else {
+        live_candidate_verdict(root, &candidate.path, device, min_hours)
+    };
+    if fs::symlink_metadata(&candidate.path)
+        .is_ok_and(|after| file_identity(&after) == file_identity(&before))
+    {
+        candidate.eligible = verdict == "remove";
+        candidate.verdict = verdict;
+    } else {
+        candidate.verdict = "deferred:identity-changed".into();
+    }
+}
+
 pub fn scope_report_resumable(
     scope: &str,
     state_dir: Option<&Path>,
@@ -1086,21 +1156,14 @@ pub fn scope_report_resumable(
     // Retain the checkpoint observation without presenting a prior verdict as current.
     mark_prior_verdicts(&mut prior_candidates);
     // Previously unchecked exact paths receive the next available verdict slots.
-    for candidate in prior_candidates.iter_mut().filter(|candidate| {
-        matches!(
-            candidate.verdict.as_str(),
-            "deferred:verification-limit"
-                | "deferred:deadline"
-                | "deferred:verdict-unavailable"
-                | "deferred:repository-metadata"
-                | "deferred:subtree-coverage"
-        )
-    }) {
+    for candidate in prior_candidates
+        .iter_mut()
+        .filter(|candidate| candidate.verdict.starts_with("deferred:"))
+    {
         if remaining_limit == 0 {
             break;
         }
-        candidate.verdict = live_candidate_verdict(&root, &candidate.path, device, min_hours);
-        candidate.eligible = candidate.verdict == "remove";
+        retry_candidate(candidate, &root, device, min_hours, cutoff, scan_deadline);
         remaining_limit -= 1;
     }
 
@@ -1192,6 +1255,15 @@ pub fn scope_report_resumable(
             })
             .collect();
     }
+    let recorded_files = saved
+        .as_mut()
+        .map(|checkpoint| std::mem::take(&mut checkpoint.dated_run_files))
+        .unwrap_or_default();
+    let mut files_by_path = std::collections::BTreeMap::new();
+    for file in recorded_files.into_iter().chain(current.dated_run_files) {
+        files_by_path.insert((file.path.clone(), file.path_bytes_hex.clone()), file);
+    }
+    let dated_run_files: Vec<_> = files_by_path.into_values().collect();
     let report = Report {
         root: root.clone(),
         scratch_root: Some(root.clone()),
@@ -1201,7 +1273,7 @@ pub fn scope_report_resumable(
         missing_paths: current_missing,
         deferred_verdicts: pending_verdict_paths.len(),
         candidates: candidates.clone(),
-        dated_run_files: current.dated_run_files,
+        dated_run_files: dated_run_files.clone(),
         discovery: discovery.clone(),
         resumable: Some(ResumeSummary {
             checkpoint: checkpoint_path.to_path_buf(),
@@ -1220,6 +1292,7 @@ pub fn scope_report_resumable(
         scan_passes,
         recorded_paths: current_recorded,
         candidates,
+        dated_run_files,
         unfinished_scan_paths,
         missing_paths: current_missing,
         discovery,
@@ -1255,7 +1328,7 @@ fn report_from_checkpoint(path: &Path, mut saved: ResumeCheckpoint) -> Report {
         missing_paths: saved.missing_paths,
         deferred_verdicts: pending_verdict_paths.len(),
         candidates: saved.candidates,
-        dated_run_files: Vec::new(),
+        dated_run_files: saved.dated_run_files,
         discovery: saved.discovery,
         resumable: Some(ResumeSummary {
             checkpoint: path.to_path_buf(),
@@ -1322,6 +1395,11 @@ fn write_checkpoint(path: &Path, checkpoint: &ResumeCheckpoint) -> io::Result<()
         std::process::id()
     ));
     let bytes = serde_json::to_vec(checkpoint).map_err(io::Error::other)?;
+    if bytes.len() as u64 > CHECKPOINT_MAX_BYTES {
+        return Err(io::Error::other(
+            "updated resume checkpoint exceeds the size limit; previous checkpoint was preserved",
+        ));
+    }
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)

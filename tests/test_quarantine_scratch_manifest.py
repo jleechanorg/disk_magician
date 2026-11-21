@@ -1,3 +1,4 @@
+import fcntl
 import hashlib
 import json
 import os
@@ -20,6 +21,8 @@ class ScratchManifestApplyTests(unittest.TestCase):
         self.bin.mkdir()
         self.state = self.temp_root / "state"
         self.state.mkdir()
+        self.fixture_home = self.temp_root / 'home'
+        self.fixture_home.mkdir(mode=0o700)
         self.log = self.temp_root / "deletions.log"
         self.manifest = self.temp_root / "manifest.json"
         self.scratch_root = pathlib.Path(os.path.realpath("/tmp"))
@@ -74,7 +77,7 @@ class ScratchManifestApplyTests(unittest.TestCase):
         self.manifest.write_bytes(self.manifest_bytes)
         self.digest = hashlib.sha256(self.manifest_bytes).hexdigest()
 
-    def run_apply(self, *paths, extra_env=None, all_entries=False):
+    def run_apply(self, *paths, extra_env=None, all_entries=False, lock_fd=None, timeout=None):
         args = [
             "bash",
             str(DISKM),
@@ -94,19 +97,53 @@ class ScratchManifestApplyTests(unittest.TestCase):
             {
                 "PATH": str(self.bin) + os.pathsep + env.get("PATH", ""),
                 "BASH_ENV": "/dev/null",
+                "HOME": str(self.fixture_home),
                 "FIXTURE_SCRATCH_ROOT": str(self.scratch_root),
                 "DISK_MAGICIAN_STATE_DIR": str(self.state),
                 "DISK_MAGICIAN_DELETION_LOG": str(self.log),
             }
         )
+        env.pop("DISK_MAGICIAN_SCRATCH_LOCK_FD", None)
+        env.pop("DISK_MAGICIAN_SCRATCH_LOCK_PID", None)
         env.pop("DISK_MAGICIAN_AGE_FLOOR_MINUTES", None)
         env.pop("DISK_MAGICIAN_OPERATOR_TARGETS", None)
         if extra_env:
             env.update(extra_env)
-        process = subprocess.run(args, cwd=REPO, env=env, capture_output=True, text=True)
+        if lock_fd is not None:
+            env["DISK_MAGICIAN_SCRATCH_LOCK_FD"] = str(lock_fd)
+        process = subprocess.run(
+            args, cwd=REPO, env=env, capture_output=True, text=True,
+            pass_fds=() if lock_fd is None else (lock_fd,), timeout=timeout,
+        )
         if process.returncode == 0:
             return json.loads(process.stdout)
         return process
+
+    def test_direct_apply_skips_while_the_canonical_scratch_writer_is_held(self):
+        locks = self.fixture_home / ".disk_magician_locks"
+        locks.mkdir(mode=0o700)
+        fd = os.open(locks / "scratch_cleanup.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_apply(self.selected.as_posix(), timeout=3)
+            self.assertEqual(getattr(result, "returncode", 0), 75)
+            self.assertTrue(self.target.exists())
+            self.assertFalse(self.log.exists())
+        finally:
+            os.close(fd)
+
+    def test_target_coordinator_can_pass_the_canonical_writer_to_the_bridge(self):
+        locks = self.fixture_home / ".disk_magician_locks"
+        locks.mkdir(mode=0o700)
+        fd = os.open(locks / "scratch_cleanup.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_apply(self.selected.as_posix(), lock_fd=fd)
+            self.assertIsInstance(result, dict, getattr(result, "stderr", ""))
+            self.assertTrue(result["results"][0]["result"].startswith("removed:"))
+            self.assertFalse(self.target.exists())
+        finally:
+            os.close(fd)
 
     def test_exact_unchanged_selected_file_uses_quarantine_and_logs(self):
         result = self.run_apply(self.selected.as_posix())
