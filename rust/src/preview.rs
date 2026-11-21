@@ -730,6 +730,142 @@ fn merge_frontier(
     frontier
 }
 
+fn validate_checkpoint(
+    checkpoint: &ResumeCheckpoint,
+    root: &Path,
+    metadata: &fs::Metadata,
+    min_hours: u32,
+) -> io::Result<()> {
+    if checkpoint.version != CHECKPOINT_VERSION
+        || checkpoint.root != root
+        || !metadata.is_dir()
+        || checkpoint.root_device != metadata.dev()
+        || checkpoint.root_inode != metadata.ino()
+        || checkpoint.min_hours != min_hours
+    {
+        return Err(io::Error::other(
+            "resume checkpoint does not match the current Scratch identity and policy",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct CheckpointRecheck {
+    root: PathBuf,
+    checkpoint: PathBuf,
+    min_hours: u32,
+    before_epoch_seconds: i64,
+    candidates: Vec<Candidate>,
+}
+
+pub fn recheck_checkpoint_files(
+    checkpoint_path: &Path,
+    min_hours: u32,
+    limit: usize,
+    paths: &[PathBuf],
+) -> io::Result<CheckpointRecheck> {
+    if !checkpoint_path.is_absolute() {
+        return Err(io::Error::other("resume checkpoint path must be absolute"));
+    }
+    if paths.len() > limit {
+        return Err(io::Error::other("selected files exceed --max-candidates"));
+    }
+    let checkpoint = load_checkpoint(checkpoint_path)?
+        .ok_or_else(|| io::Error::other("recheck requires an existing checkpoint"))?;
+    let (root, device) = registered_scratch()?;
+    validate_checkpoint(&checkpoint, &root, &fs::symlink_metadata(&root)?, min_hours)?;
+    let known: HashMap<_, _> = checkpoint
+        .candidates
+        .iter()
+        .map(|row| (row.path.as_path(), row.source.as_str()))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = known.get(path.as_path()).ok_or_else(|| {
+            io::Error::other(format!(
+                "path is absent from the checkpoint: {}",
+                path.display()
+            ))
+        })?;
+        if !seen.insert(path) {
+            return Err(io::Error::other(format!(
+                "duplicate recheck path: {}",
+                path.display()
+            )));
+        }
+        candidates.push(Candidate {
+            path: path.clone(),
+            source: (*source).to_owned(),
+            verdict: String::new(),
+            eligible: false,
+            apparent_bytes: None,
+            allocated_bytes: None,
+        });
+    }
+    for candidate in &mut candidates {
+        recheck_file(candidate, &root, device, min_hours, checkpoint.cutoff_epoch);
+    }
+    validate_checkpoint(&checkpoint, &root, &fs::symlink_metadata(&root)?, min_hours)?;
+    Ok(CheckpointRecheck {
+        root,
+        checkpoint: checkpoint_path.to_path_buf(),
+        min_hours,
+        before_epoch_seconds: checkpoint.cutoff_epoch,
+        candidates,
+    })
+}
+
+fn file_identity(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.size(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
+}
+
+fn recheck_file(candidate: &mut Candidate, root: &Path, device: u64, min_hours: u32, cutoff: i64) {
+    let path = &candidate.path;
+    if let Some(reason) = check_path(root, path, device) {
+        candidate.verdict = reason.into();
+        return;
+    }
+    let before = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && metadata.dev() == device => metadata,
+        Ok(_) => {
+            candidate.verdict = "kept:not-regular-file".into();
+            return;
+        }
+        Err(_) => {
+            candidate.verdict = "deferred:metadata".into();
+            return;
+        }
+    };
+    if before.mtime() >= cutoff {
+        candidate.verdict = "kept:outside-date-window".into();
+        return;
+    }
+    let verdict = live_candidate_verdict(root, path, device, min_hours);
+    if let Some(reason) = check_path(root, path, device) {
+        candidate.verdict = reason.into();
+        return;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(after) if after.is_file() && file_identity(&before) == file_identity(&after) => {
+            candidate.apparent_bytes = Some(after.size());
+            candidate.allocated_bytes = Some(after.blocks().saturating_mul(512));
+            candidate.eligible = verdict == "remove";
+            candidate.verdict = verdict;
+        }
+        _ => candidate.verdict = "deferred:identity-changed".into(),
+    }
+}
+
 pub fn scope_report_resumable(
     scope: &str,
     state_dir: Option<&Path>,
@@ -748,7 +884,7 @@ pub fn scope_report_resumable(
     }
     let state_dir = state_dir.ok_or_else(|| io::Error::other("this scope requires --state-dir"))?;
     let (root, device) = registered_scratch()?;
-    let root_metadata = fs::metadata(&root)?;
+    let root_metadata = fs::symlink_metadata(&root)?;
     let history = match ledger_paths(state_dir, &root) {
         Ok(paths) => paths,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -756,16 +892,7 @@ pub fn scope_report_resumable(
     };
     let mut saved = load_checkpoint(checkpoint_path)?;
     let cutoff = if let Some(checkpoint) = saved.as_ref() {
-        if checkpoint.version != CHECKPOINT_VERSION
-            || checkpoint.root != root
-            || checkpoint.root_device != device
-            || checkpoint.root_inode != root_metadata.ino()
-            || checkpoint.min_hours != min_hours
-        {
-            return Err(io::Error::other(
-                "resume checkpoint does not match the current Scratch identity and policy",
-            ));
-        }
+        validate_checkpoint(checkpoint, &root, &root_metadata, min_hours)?;
         checkpoint.cutoff_epoch
     } else {
         current_cutoff(min_hours)?

@@ -668,3 +668,79 @@ fn six_hour_preview_preserves_checker_vetoes_and_evidence_scope() {
     }
     assert!(!fixture.calls().contains(container.to_str().unwrap()));
 }
+
+#[test]
+fn explicit_recheck_revalidates_only_selected_checkpoint_files() {
+    let fixture = Fixture::new();
+    let unchanged = fixture.scratch_path("removable-unchanged.cache");
+    let changed = fixture.scratch_path("removable-replaced.cache");
+    Fixture::mark_old(&unchanged);
+    Fixture::mark_old(&changed);
+    fixture.install_diskm();
+    let checkpoint = fixture.root.join("exact-recheck.json");
+    let initial = fixture.report_with_checkpoint(Duration::from_secs(2), &checkpoint);
+    assert_eq!(initial["complete"], true);
+    let original = fs::read(&checkpoint).unwrap();
+
+    fs::write(&changed, b"new content").unwrap();
+    let unrecorded = fixture.scratch_path("removable-unrecorded.cache");
+    Fixture::mark_old(&unrecorded);
+    let checkpoint_str = checkpoint.to_str().unwrap();
+    let unchanged_str = unchanged.to_str().unwrap();
+    let changed_str = changed.to_str().unwrap();
+    let before = fixture
+        .calls()
+        .lines()
+        .filter(|line| line.contains("quarantine"))
+        .count();
+
+    let fresh = report(&fixture.run(&[
+        "--resume-state",
+        checkpoint_str,
+        "--recheck",
+        unchanged_str,
+        "--recheck",
+        changed_str,
+    ]));
+    assert!(fresh["before_epoch_seconds"].as_i64().is_some());
+    assert_eq!(fresh["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(fresh["candidates"][0]["eligible"], true);
+    assert!(fresh["candidates"][0]["allocated_bytes"].as_u64().is_some());
+    assert_eq!(
+        fresh["candidates"][1]["verdict"],
+        "kept:outside-date-window"
+    );
+    assert_eq!(fresh["candidates"][1]["eligible"], false);
+
+    let invalid = fixture.run(&[
+        "--resume-state",
+        checkpoint_str,
+        "--recheck",
+        unchanged_str,
+        "--recheck",
+        unrecorded.to_str().unwrap(),
+    ]);
+    assert!(!invalid.status.success());
+    assert!(invalid.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("path is absent from the checkpoint"));
+
+    let over_budget = fixture.run(&[
+        "--resume-state",
+        checkpoint_str,
+        "--max-candidates",
+        "1",
+        "--recheck",
+        unchanged_str,
+        "--recheck",
+        changed_str,
+    ]);
+    assert!(!over_budget.status.success());
+    assert!(String::from_utf8_lossy(&over_budget.stderr).contains("exceed --max-candidates"));
+    let after = fixture
+        .calls()
+        .lines()
+        .filter(|line| line.contains("quarantine"))
+        .count();
+    assert_eq!(after, before + 1);
+    assert_eq!(fs::read(&checkpoint).unwrap(), original);
+}
