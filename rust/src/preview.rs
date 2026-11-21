@@ -28,6 +28,8 @@ pub struct Report {
     recorded_paths: usize,
     missing_paths: usize,
     candidates: Vec<Candidate>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dated_run_files: Vec<FileMeasurement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     discovery: Option<Discovery>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -297,6 +299,7 @@ pub fn preview(
         recorded_paths,
         missing_paths,
         candidates,
+        dated_run_files: Vec::new(),
         resumable: None,
     })
 }
@@ -332,6 +335,10 @@ fn live_candidate_verdict(root: &Path, path: &Path, device: u64, min_hours: u32)
     }
     if let Some(reason) = check_path(root, path, device) {
         return reason.into();
+    }
+    let runs = root.join("runs");
+    if path.starts_with(&runs) && possible_dated_run(&runs, path).is_none() {
+        return "kept:managed-run-boundary".into();
     }
     for ancestor in path.ancestors().skip(1).take_while(|p| p.starts_with(root)) {
         match fs::symlink_metadata(ancestor.join(".git")) {
@@ -386,6 +393,49 @@ fn current_cutoff(min_hours: u32) -> io::Result<i64> {
     )
     .map_err(io::Error::other)?;
     Ok(now - i64::from(min_hours) * 3600)
+}
+
+// Match the allocator's path shape for nomination. C14 validates the
+// calendar, quarantine marker, leases, and other removal safeguards.
+fn possible_dated_run(runs: &Path, path: &Path) -> Option<()> {
+    let mut parts = path.strip_prefix(runs).ok()?.components();
+    let (
+        Some(Component::Normal(day)),
+        Some(Component::Normal(repo)),
+        Some(Component::Normal(id)),
+        None,
+    ) = (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let day = day.to_str()?;
+    if day.len() != 8
+        || !day.bytes().all(|byte| byte.is_ascii_digit())
+        || repo.as_encoded_bytes().starts_with(b".")
+    {
+        return None;
+    }
+    let mut fields = id.to_str()?.rsplitn(4, '-');
+    let (nonce, pid, stamp, purpose) = (
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+    );
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    let stamp = stamp.as_bytes();
+    (digits(nonce)
+        && digits(pid)
+        && (1..=40).contains(&purpose.len())
+        && purpose
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && stamp.len() == 16
+        && stamp.starts_with(day.as_bytes())
+        && stamp[8] == b'T'
+        && stamp[9..15].iter().all(u8::is_ascii_digit)
+        && stamp[15] == b'Z')
+        .then_some(())
 }
 
 fn live_preview_from_measurement(
@@ -447,12 +497,20 @@ fn live_preview_from_measurement(
     let mut selected = HashSet::new();
     let mut protected = Vec::new();
     let inside_repo = |path: &Path| path.ancestors().any(|parent| repos.contains(parent));
+    let runs = root.join("runs");
+    let in_runs = |path: &Path| scratch_verdicts && path.starts_with(&runs);
     // Directories are lexically sorted by the scanner, so each parent precedes its children.
     for dir in &measured.directories {
         let path = Path::new(&dir.path);
+        // The leased run remains one candidate even when its files are itemized.
+        let can_nominate = if in_runs(path) {
+            dir.complete && possible_dated_run(&runs, path).is_some()
+        } else {
+            dir.must_itemize == Some(false)
+        };
         if dir.path_bytes_hex.is_some()
             || path == root
-            || dir.must_itemize != Some(false)
+            || !can_nominate
             || protected_scope(&root, path)
             || evidence_containers.contains(path)
             || dir
@@ -486,6 +544,7 @@ fn live_preview_from_measurement(
         let path = Path::new(&file.path);
         if file.kind == FileKind::File
             && file.path_bytes_hex.is_none()
+            && !in_runs(path)
             && !protected_scope(&root, path)
             && file
                 .modified_epoch_seconds
@@ -535,6 +594,13 @@ fn live_preview_from_measurement(
             candidate(path, apparent_bytes, allocated_bytes, reason.into())
         },
     ));
+    let files_measured = measured.files.len();
+    let repository_roots = repos.len();
+    let dated_run_files = measured
+        .files
+        .into_iter()
+        .filter(|file| in_runs(Path::new(&file.path)))
+        .collect();
     Ok(Report {
         scratch_root: scratch_verdicts.then(|| root.clone()),
         root,
@@ -543,11 +609,12 @@ fn live_preview_from_measurement(
         recorded_paths,
         missing_paths,
         candidates,
+        dated_run_files,
         discovery: Some(Discovery {
             complete: measured.complete,
-            files_measured: measured.files.len(),
+            files_measured,
             directories_measured: measured.directories.len(),
-            repository_roots: repos.len(),
+            repository_roots,
             measured_apparent_bytes: measured.apparent_bytes,
             allocated_bytes_semantics: "File values are inode-block allocations for the path. Directory values sum allocations per pathname, so hardlinks/shared blocks may be counted more than once and sibling values are not additive. These estimates prioritize checks but do not predict physical reclaim.".to_owned(),
             gaps: measured.gaps,
@@ -1044,6 +1111,7 @@ pub fn scope_report_resumable(
         recorded_paths: current_recorded,
         missing_paths: current_missing,
         candidates: candidates.clone(),
+        dated_run_files: current.dated_run_files,
         discovery: discovery.clone(),
         resumable: Some(ResumeSummary {
             checkpoint: checkpoint_path.to_path_buf(),
@@ -1096,6 +1164,7 @@ fn report_from_checkpoint(path: &Path, mut saved: ResumeCheckpoint) -> Report {
         recorded_paths: saved.recorded_paths,
         missing_paths: saved.missing_paths,
         candidates: saved.candidates,
+        dated_run_files: Vec::new(),
         discovery: saved.discovery,
         resumable: Some(ResumeSummary {
             checkpoint: path.to_path_buf(),

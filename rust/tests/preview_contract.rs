@@ -744,3 +744,58 @@ fn explicit_recheck_revalidates_only_selected_checkpoint_files() {
     assert_eq!(after, before + 1);
     assert_eq!(fs::read(&checkpoint).unwrap(), original);
 }
+
+#[test]
+fn large_dated_runs_keep_file_measurements_and_one_verdict_per_run() {
+    let fixture = Fixture::new();
+    let repo = fixture.scratch.join("runs/20261120/disk-magician");
+    let old_run = repo.join("removable-build-20261120T120000Z-1234-5678");
+    let leased_run = repo.join("held-live-test-20261120T120000Z-1234-9012");
+    let recent_run = repo.join("removable-recent-20261120T120000Z-1234-3456");
+    let paths = [&old_run, &leased_run, &recent_run];
+    let size = 128 * 1024 * 1024;
+    for run in paths {
+        fs::create_dir_all(run.join("nested")).unwrap();
+        let payload = run.join("nested/removable-output.cache");
+        fs::File::create(&payload).unwrap().set_len(size).unwrap();
+        if run != &recent_run {
+            Fixture::mark_old(&payload);
+        }
+    }
+    fixture.install_diskm();
+
+    let result = report(&fixture.run(&["--min-hours", "6"]));
+    let candidates = result["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    let old = candidates
+        .iter()
+        .find(|row| row["path"] == old_run.to_str().unwrap())
+        .unwrap();
+    let leased = candidates
+        .iter()
+        .find(|row| row["path"] == leased_run.to_str().unwrap())
+        .unwrap();
+    assert_eq!(old["verdict"], "remove");
+    assert_eq!(old["apparent_bytes"], size);
+    assert_eq!(leased["verdict"], "kept:live-owner");
+
+    let files = result["dated_run_files"].as_array().unwrap();
+    assert_eq!(files.len(), 3);
+    for run in paths {
+        let payload = run.join("nested/removable-output.cache");
+        let row = files
+            .iter()
+            .find(|row| row["path"] == payload.to_str().unwrap())
+            .unwrap();
+        assert_eq!(row["apparent_bytes"], size);
+        assert!(row["allocated_bytes"].as_u64().is_some());
+    }
+    let calls = fixture.calls();
+    let checks: Vec<_> = calls
+        .lines()
+        .filter(|line| line.contains("\tquarantine\tverdict"))
+        .collect();
+    assert_eq!(checks.len(), 2);
+    assert!(checks.iter().all(|line| !line.contains("nested/")));
+    assert!(!checks.iter().any(|line| line.contains("removable-recent")));
+}

@@ -31,6 +31,13 @@ regular files and complete artifact directories below 100 MiB are considered
 independently of newer siblings. Larger trees are itemized. Historical paths
 supply provenance, and live discovery works when the ledger is absent.
 
+Live Scratch discovery reports measured files under the dated runs
+namespace in `dated_run_files`. A complete dated run root can receive
+a C14 verdict as a single leased unit even at or above 100 MiB. Its
+children and shared containers stay out of the candidate list. File
+measurements describe the current scan pass and do not add to a
+candidate's reclaim estimate.
+
 The report separates discovery coverage and its filesystem gaps from verdicts.
 Each proposed path gets its own deadline with `diskm quarantine verdict`.
 Live preview ranks candidates by allocated bytes, with path order as a tie-break.
