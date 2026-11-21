@@ -373,7 +373,7 @@ mod tests {
         let invalid = base.join(std::ffi::OsString::from_vec(vec![0x80]));
         let unicode = base.join(std::char::from_u32(0xe000).unwrap().to_string());
         assert!(python_path_sort_key(&invalid) < python_path_sort_key(&unicode));
-        let mut observed = vec![unicode, invalid];
+        let mut observed = [unicode, invalid];
         observed.sort_by_key(|path| python_path_sort_key(path));
         assert!(observed[0].as_os_str().as_bytes().ends_with(&[0x80]));
         assert!(observed[1]

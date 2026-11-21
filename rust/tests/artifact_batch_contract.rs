@@ -147,9 +147,11 @@ fn preserves_non_utf8_parent_and_child_path_bytes() {
     let fixture = Fixture::new();
     let raw_parent = fixture
         .root
-        .join(OsString::from_vec(b"raw-parent-\\xfe".to_vec()));
+        .join(OsString::from_vec(b"raw-parent-\xfe".to_vec()));
+    assert!(raw_parent.as_os_str().as_bytes().ends_with(&[0xfe]));
     fs::create_dir(&raw_parent).unwrap();
-    let raw_child = raw_parent.join(OsString::from_vec(b"child-\\xff".to_vec()));
+    let raw_child = raw_parent.join(OsString::from_vec(b"child-\xff".to_vec()));
+    assert!(raw_child.as_os_str().as_bytes().ends_with(&[0xff]));
     fs::create_dir(&raw_child).unwrap();
     let frame = fixture.valid_frame(&[(raw_parent.as_os_str(), raw_child.as_os_str())]);
     let result = fixture.invoke(&[raw_parent.clone().into_os_string()], &frame);
