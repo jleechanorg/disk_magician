@@ -1,7 +1,8 @@
 //! Read the published reclaim report without regenerating it.
 
 use crate::history::{parse_utc, unix_now};
-use serde_json::{Map, Value};
+use crate::volume_config::{configuration, json_file};
+use serde_json::Value;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -43,18 +44,16 @@ pub fn read_request(args: &[OsString]) -> Option<ReadRequest> {
     read_existing.then_some(ReadRequest(state_dir))
 }
 
-fn config(path: &Path) -> Option<Map<String, Value>> {
-    serde_json::from_slice(&fs::read(path).ok()?).ok()
-}
-
-fn configured_state(config: &Map<String, Value>, home: &Path) -> Option<PathBuf> {
-    let value = config.get("state_repo_path")?.as_str()?;
-    let path = match value {
+fn configured_state(config: &Value, home: &Path) -> Option<PathBuf> {
+    let value = config
+        .get("state_repo_path")?
+        .as_str()
+        .filter(|path| !path.is_empty())?;
+    Some(match value {
         "~" => home.to_path_buf(),
         value if value.starts_with("~/") => home.join(&value[2..]),
         value => home.join(value),
-    };
-    Some(path)
+    })
 }
 
 fn default_state() -> PathBuf {
@@ -62,34 +61,27 @@ fn default_state() -> PathBuf {
         return path.into();
     }
     let home = env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-    let fallback = env::var_os("XDG_STATE_HOME")
-        .map_or_else(|| home.join(".local/state"), PathBuf::from)
-        .join("disk-magician");
-    if let Some(path) = env::var_os("DISK_MAGICIAN_CONFIG").filter(|path| !path.is_empty()) {
-        return config(Path::new(&path))
+    if env::var_os("DISK_MAGICIAN_CONFIG").is_none_or(|path| path.is_empty()) {
+        let xdg = env::var_os("XDG_CONFIG_HOME")
+            .map_or_else(|| home.join(".config"), PathBuf::from)
+            .join("disk-magician/config.json");
+        // An XDG snapshot overlay can select the state root independently of
+        // the state configuration it locates.
+        if let Some(root) = json_file(&xdg)
+            .ok()
             .and_then(|config| configured_state(&config, &home))
-            .unwrap_or(fallback);
-    }
-    let xdg = env::var_os("XDG_CONFIG_HOME")
-        .map_or_else(|| home.join(".config"), PathBuf::from)
-        .join("disk-magician/config.json");
-    if let Some(document) = config(&xdg) {
-        if let Some(root) = configured_state(&document, &home) {
+        {
             return root;
         }
-        let snapshot_overlay = !document.is_empty()
-            && document
-                .keys()
-                .all(|key| matches!(key.as_str(), "snapshot_measure" | "state_repo_path"));
-        if !snapshot_overlay {
-            return fallback;
-        }
-    } else if xdg.is_file() {
-        return fallback;
     }
-    config(&fallback.join("config/config.json"))
+    configuration(&home)
+        .ok()
         .and_then(|config| configured_state(&config, &home))
-        .unwrap_or(fallback)
+        .unwrap_or_else(|| {
+            env::var_os("XDG_STATE_HOME")
+                .map_or_else(|| home.join(".local/state"), PathBuf::from)
+                .join("disk-magician")
+        })
 }
 
 fn section_label(line: &str) -> Option<&str> {
