@@ -13,7 +13,7 @@ HOME_DIR="$WORK/home"
 BIN_DIR="$WORK/bin"
 BACKUP_REPO="$HOME_DIR/.disk_magician_backup"
 REMOTE_REPO="$WORK/remote.git"
-mkdir -p "$APP/scripts" "$HOME_DIR" "$BIN_DIR"
+mkdir -p "$APP/scripts/lib" "$HOME_DIR" "$BIN_DIR"
 cp "$REPO_ROOT/disk_magician.sh" "$APP/disk_magician.sh"
 cp "$REPO_ROOT/config.json.template" "$APP/config.json.template"
 # Snapshot dispatch now delegates to scripts/snapshot_commit.sh (design:
@@ -22,6 +22,7 @@ cp "$REPO_ROOT/config.json.template" "$APP/config.json.template"
 # scripts/ dir rather than hand-picking files that could silently drift.
 cp "$REPO_ROOT"/scripts/*.sh "$APP/scripts/"
 cp "$REPO_ROOT"/scripts/*.py "$APP/scripts/"
+cp "$REPO_ROOT/scripts/lib/actuator_deadline.sh" "$APP/scripts/lib/"
 
 # Grandfather $BACKUP_REPO via state_repo_path (same one-time setup
 # README.md's "Grandfathering an existing backup repo" section documents)
