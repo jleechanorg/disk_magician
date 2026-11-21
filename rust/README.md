@@ -82,6 +82,11 @@ paths and files at or after the cutoff are rejected. A manifest records selected
 file identities and is read-only. The applying cleaner must recheck every entry
 and evaluate live protection and cleanup policy before removing anything.
 
-The default 48-hour ledger preview reports incomplete filesystem coverage.
+The default 48-hour ledger preview reports incomplete filesystem coverage. It
+reports the total missing nominations and the number of verdicts deferred,
+including nominations after the output cap. Scratch verdicts recheck repository
+ancestry independently of discovery. A directory that would otherwise pass is
+checked for protected evidence and repository descendants within the candidate's
+remaining deadline. Incomplete checks stay deferred.
 Its discovery gap names the Scratch root because this mode checks recorded
 paths without walking the filesystem.

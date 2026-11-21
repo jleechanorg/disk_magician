@@ -1,4 +1,4 @@
-use crate::scan::{scan, FileKind, ScanGap, ScanGapKind, ScanOptions};
+use crate::scan::{scan, FileKind, ScanGap, ScanGapKind, ScanOptions, ScanReport};
 use crate::{preview_scopes, preview_worktrees};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -8,7 +8,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHECK_WINDOW_SECONDS: u64 = 12;
 
@@ -21,6 +21,7 @@ pub struct Report {
     pub complete: bool,
     recorded_paths: usize,
     missing_paths: usize,
+    deferred_verdicts: usize,
     candidates: Vec<Candidate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     discovery: Option<Discovery>,
@@ -156,12 +157,93 @@ else:
     }
 }
 
-fn checked_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> String {
+fn marker_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn check_verdict_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
     if let Some(reason) = check_path(root, path, device) {
+        return Some(reason);
+    }
+    if protected_scope(root, path) {
+        return Some("kept:protected-scope");
+    }
+    let first = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => path,
+        Ok(_) => path.parent()?,
+        Err(_) => return Some("deferred:metadata"),
+    };
+    // Partial discovery may miss repository markers even after seeing old files.
+    for ancestor in first
+        .ancestors()
+        .take_while(|ancestor| ancestor.starts_with(root))
+    {
+        let is_repository = marker_exists(&ancestor.join(".git")).and_then(|found| {
+            if found || !marker_exists(&ancestor.join("HEAD"))? {
+                Ok(found)
+            } else {
+                marker_exists(&ancestor.join("objects"))
+            }
+        });
+        match is_repository {
+            Ok(true) => return Some("kept:repository-use-worktree-route"),
+            Ok(false) => {}
+            Err(_) => return Some("deferred:repository-metadata"),
+        }
+    }
+    None
+}
+
+fn check_directory_contents(path: &Path, deadline: Duration) -> Option<&'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => return None,
+        Ok(_) => {}
+        Err(_) => return Some("deferred:metadata"),
+    }
+    // A legacy verdict can approve a parent directory without checking for
+    // protected evidence within it. Check only a directory that returned remove.
+    let Ok(measured) = scan(
+        path,
+        ScanOptions {
+            deadline,
+            max_entries: usize::MAX,
+        },
+    ) else {
+        return Some("deferred:subtree-coverage");
+    };
+    if measured
+        .directories
+        .iter()
+        .map(|dir| dir.path.as_str())
+        .chain(measured.files.iter().map(|file| file.path.as_str()))
+        .map(Path::new)
+        .any(|path| path.file_name().is_some_and(|name| name == "evidence"))
+    {
+        return Some("kept:protected-scope");
+    }
+    if !repository_roots(&measured).is_empty() {
+        return Some("kept:repository-use-worktree-route");
+    }
+    (!measured.complete).then_some("deferred:subtree-coverage")
+}
+
+fn checked_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> String {
+    if let Some(reason) = check_verdict_path(root, path, device) {
         return reason.into();
     }
+    let started = Instant::now();
     let verdict = current_verdict(path, min_hours);
-    check_path(root, path, device).map_or(verdict, str::to_owned)
+    if verdict == "remove" {
+        let remaining = Duration::from_secs(CHECK_WINDOW_SECONDS).saturating_sub(started.elapsed());
+        if let Some(reason) = check_directory_contents(path, remaining) {
+            return reason.into();
+        }
+    }
+    check_verdict_path(root, path, device).map_or(verdict, str::to_owned)
 }
 
 pub fn preview(
@@ -180,6 +262,7 @@ pub fn preview(
     }
     let recorded_paths = paths.len();
     let mut missing_paths = 0;
+    let mut deferred_verdicts = 0;
     let mut missing = Vec::new();
     let mut candidates = Vec::new();
     for (path, source) in paths {
@@ -199,13 +282,15 @@ pub fn preview(
             continue;
         }
         if candidates.len() == limit {
-            break;
+            deferred_verdicts += 1;
+            continue;
         }
         let verdict = checked.map_or_else(
             || checked_verdict(&root, &path, device, min_hours),
             str::to_owned,
         );
         let eligible = verdict == "remove";
+        deferred_verdicts += usize::from(verdict.starts_with("deferred:"));
         candidates.push(Candidate {
             path,
             source,
@@ -225,12 +310,12 @@ pub fn preview(
             repository_roots: 0,
             measured_apparent_bytes: 0,
             allocated_bytes_semantics:
-                "The ledger-only preview did not measure filesystem allocation.",
+                "The ledger-only preview does not report filesystem allocation.",
             gaps: vec![ScanGap {
                 path: root.to_string_lossy().into_owned(),
                 path_bytes_hex: None,
                 kind: ScanGapKind::NotScanned,
-                message: "Ledger-only preview did not scan the Scratch filesystem.".into(),
+                message: "Ledger-only preview did not scan the full Scratch filesystem.".into(),
             }],
         }),
         root,
@@ -238,6 +323,7 @@ pub fn preview(
         complete: false,
         recorded_paths,
         missing_paths,
+        deferred_verdicts,
         candidates,
     })
 }
@@ -265,6 +351,38 @@ fn protected_scope(root: &Path, path: &Path) -> bool {
         || relative
             .components()
             .any(|part| part.as_os_str() == "evidence")
+}
+
+fn repository_roots(measured: &ScanReport) -> HashSet<&Path> {
+    let mut repos: HashSet<_> = measured
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(measured.directories.iter().map(|dir| dir.path.as_str()))
+        .map(Path::new)
+        .filter(|path| path.file_name().is_some_and(|name| name == ".git"))
+        .filter_map(Path::parent)
+        .collect();
+
+    // A bare repository has HEAD and objects at its root, with no .git marker.
+    // Protect it as a unit because C14 sees an individual pack as just a file.
+    let heads: HashSet<_> = measured
+        .files
+        .iter()
+        .map(|file| Path::new(&file.path))
+        .filter(|path| path.file_name().is_some_and(|name| name == "HEAD"))
+        .filter_map(Path::parent)
+        .collect();
+    repos.extend(
+        measured
+            .directories
+            .iter()
+            .map(|dir| Path::new(&dir.path))
+            .filter(|path| path.file_name().is_some_and(|name| name == "objects"))
+            .filter_map(Path::parent)
+            .filter(|parent| heads.contains(parent)),
+    );
+    repos
 }
 
 fn live_preview(
@@ -297,34 +415,7 @@ fn live_preview(
         .keys()
         .filter(|path| check_path(&root, path, device) == Some("missing"))
         .count();
-    let mut repos: HashSet<_> = measured
-        .files
-        .iter()
-        .map(|file| file.path.as_str())
-        .chain(measured.directories.iter().map(|dir| dir.path.as_str()))
-        .map(Path::new)
-        .filter(|path| path.file_name().is_some_and(|name| name == ".git"))
-        .filter_map(Path::parent)
-        .collect();
-
-    // A bare repository has HEAD and objects at its root, with no .git marker.
-    // Protect it as a unit because C14 sees an individual pack as just a file.
-    let heads: HashSet<_> = measured
-        .files
-        .iter()
-        .map(|file| Path::new(&file.path))
-        .filter(|path| path.file_name().is_some_and(|name| name == "HEAD"))
-        .filter_map(Path::parent)
-        .collect();
-    repos.extend(
-        measured
-            .directories
-            .iter()
-            .map(|dir| Path::new(&dir.path))
-            .filter(|path| path.file_name().is_some_and(|name| name == "objects"))
-            .filter_map(Path::parent)
-            .filter(|parent| heads.contains(parent)),
-    );
+    let repos = repository_roots(&measured);
     let repo_containers: HashSet<_> = repos.iter().flat_map(|path| path.ancestors()).collect();
     let evidence_containers: HashSet<_> = measured
         .directories
@@ -393,6 +484,7 @@ fn live_preview(
         b_allocated.cmp(a_allocated).then_with(|| a.cmp(b))
     });
     let mut complete = measured.complete;
+    let mut deferred_verdicts = 0;
     let candidate =
         |path: &Path, apparent_bytes: u64, allocated_bytes: u64, verdict: String| Candidate {
             path: path.to_path_buf(),
@@ -416,7 +508,10 @@ fn live_preview(
             } else {
                 checked_verdict(&root, path, device, min_hours)
             };
-            complete &= !verdict.starts_with("deferred:");
+            if verdict.starts_with("deferred:") {
+                deferred_verdicts += 1;
+                complete = false;
+            }
             candidate(path, apparent_bytes, allocated_bytes, verdict)
         })
         .collect();
@@ -432,6 +527,7 @@ fn live_preview(
         complete,
         recorded_paths,
         missing_paths,
+        deferred_verdicts,
         candidates,
         discovery: Some(Discovery {
             complete: measured.complete,
