@@ -263,3 +263,38 @@ fn a_planted_temporary_link_is_never_followed() {
     assert!(committed.is_some());
     assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me\n");
 }
+
+/// Writes a manual hold into the holds file (passed as the query) mid-fetch.
+fn adds_manual_hold_while_fetching(holds_path: &str) -> io::Result<Fetched> {
+    let mut holds: Holds =
+        serde_json::from_slice(&fs::read(holds_path)?).map_err(io::Error::other)?;
+    holds.insert("/manual/added-during-fetch".into(), "operator note".into());
+    fs::write(
+        holds_path,
+        serde_json::to_vec(&holds).map_err(io::Error::other)?,
+    )?;
+    one_request(holds_path)
+}
+
+#[test]
+fn a_manual_hold_written_during_the_fetch_survives() {
+    let root = temp("reread");
+    let state = root.0.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let path = state.join("evidence-holds.json");
+    fs::write(&path, "{}").unwrap();
+    let (_, code) = evidence_holds::refresh(
+        Some(&state),
+        path.to_str().unwrap(),
+        &roots(),
+        adds_manual_hold_while_fetching,
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    let holds: Holds = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        holds.get(Path::new("/manual/added-during-fetch")).unwrap(),
+        "operator note"
+    );
+    assert!(holds.contains_key(Path::new("/private/tmp/held/file.txt")));
+}
