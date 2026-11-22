@@ -45,12 +45,13 @@ and an open-file observation depend on producer cooperation after the check.
 receipt locally. Git state publication and replacement scheduled workers remain
 open. The known inventory deferrals still apply to existing unmanaged data.
 
-Linux executable fixtures verified a selected old file was removed, changed
-and open files were preserved, and recovery refused to overwrite an existing
-replacement. macOS verified lease closure, Scratch and temp age qualification,
-and snapshot receipt publication. Its exact apply deferred at the APFS
-provisioned-capacity check. Keep the container's physical free-space floor and
-mount validation when separating reclaim preflight from quota provisioning.
+Mac and Linux executable fixtures verified that exact apply removed the selected
+old file and preserved changed and open files. Recovery refused to overwrite
+an existing replacement and restored the selected fixture after its name became
+available. Both hosts verified lease closure, age qualification, and local
+snapshot receipts. On Mac, reclaim now checks measured APFS headroom. The
+container's physical free-space floor, swap headroom, and mount validation still
+apply when the configured Scratch quota exceeds current provisioning headroom.
 
 ## Task 1 — Retire generic forwarding
 

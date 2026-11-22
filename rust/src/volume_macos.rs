@@ -101,10 +101,9 @@ pub(crate) fn verify_info(scratch: &ApfsScratch<'_>, info: &Value, path: &Path) 
     Ok(())
 }
 
-fn check_capacity(
+fn check_reclaim_headroom(
     listing: &Value,
     scratch: &ApfsScratch<'_>,
-    quota: u64,
     swap_headroom: u64,
     alarm_floor: u64,
 ) -> io::Result<()> {
@@ -157,8 +156,9 @@ fn check_capacity(
         .ok_or_else(|| invalid("Scratch APFS usage unavailable"))?;
     let fit =
         other + u128::from(vm.max(swap_headroom)) + u128::from(used) + u128::from(alarm_floor);
-    let provisioned = other + u128::from(vm) + u128::from(quota);
-    if counts != [1, 1, 1] || fit > u128::from(ceiling) || provisioned > u128::from(ceiling) {
+    // Reclaim releases blocks from the existing volume. The configured ceiling
+    // can exceed current free space during the growth this operation addresses.
+    if counts != [1, 1, 1] || fit > u128::from(ceiling) {
         return Err(invalid("APFS Scratch capacity alarm"));
     }
     Ok(())
@@ -313,10 +313,9 @@ fn verified_mount(expected: Option<&Path>, purpose: Purpose) -> io::Result<Optio
         return Ok(None);
     }
     if purpose == Purpose::Usage {
-        check_capacity(
+        check_reclaim_headroom(
             &listing,
             &scratch,
-            quota,
             in_bytes(&volumes["swap_headroom_gb"])?,
             in_bytes(&volumes["alarm_floor_gb"])?,
         )?;
