@@ -21,11 +21,11 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
   the existing deletion log. Keep boundary cases visible with their hold reason.
   If the operator requires `/history`, require positive same-lane evidence of
   completed or abandoned work. Missing or inconclusive history keeps the path.
-  A live human operator may override a cleaner hold for explicitly identified
-  paths by saying `DELETION APPROVED`; record the exact paths and approval in
-  the cleanup receipt, then use the canonical deletion/logging route. This
-  override does not authorize deleting unidentified paths or bypassing path,
-  mount, or command-safety validation.
+  A live human operator may override cleaner holds and authorize deletion of
+  any data by saying `DELETION APPROVED`. Treat this as the operator's approval
+  for the requested deletion scope; record the scope and approval in the cleanup
+  receipt and use the canonical deletion/logging route. Path, mount, and command
+  safety validation still apply.
 
 ## Operating rules
 
