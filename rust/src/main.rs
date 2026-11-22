@@ -1,7 +1,7 @@
 use diskm_shadow::{
     artifact_batch, artifact_discovery, evidence_holds, history, preview, reclaim_report, scan,
     scratch_dir, scratch_manifest, scratch_sweep, scratch_target, snapshot, state_commit,
-    state_publish, status,
+    state_publish, status, time_windows,
 };
 use serde::Serialize;
 use std::env;
@@ -147,11 +147,11 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
 
     let mut root = None;
     let mut state_dir = None;
-    let mut deadline_ms = 30_000;
+    let mut deadline_ms = time_windows::SCAN_DEADLINE.as_millis() as u64;
     let mut max_entries = 100_000;
-    let mut days = 7;
+    let mut days = time_windows::HISTORY_DAYS;
     let mut preview_scope = "scratch";
-    let mut min_hours = 48;
+    let mut min_hours = time_windows::CONTENT_FLOOR_HOURS;
     let mut max_candidates = None;
     let mut preview_deadline_ms = None;
     let mut preview_resume_state = None;
@@ -473,7 +473,7 @@ fn parse_scratch_nomination(
     let mut paths = Vec::new();
     let mut jobs = 1;
     let mut host_temp = false;
-    let mut deadline_ms = 30_000;
+    let mut deadline_ms = time_windows::SCAN_DEADLINE.as_millis() as u64;
     let mut max_entries = 100_000;
     while let Some(arg) = args.next() {
         match arg.to_str() {

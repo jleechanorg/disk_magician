@@ -5,4 +5,4 @@ After=local-fs.target
 [Service]
 Type=oneshot
 Environment=DISK_MAGICIAN_TRIGGER=timer
-ExecStart="%h/.local/bin/diskm" scratch-sweep --root system-tmp --clean --min-hours 72
+ExecStart="%h/.local/bin/diskm" scratch-sweep --root system-tmp --clean

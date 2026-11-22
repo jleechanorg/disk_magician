@@ -165,7 +165,7 @@ pub fn print_existing(request: ReadRequest, mut out: impl Write) -> io::Result<(
         .ok()
         .and_then(|value| value.trim().parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(48.0);
+        .unwrap_or(crate::time_windows::LEDGER_STALE_HOURS);
     match generation_time(&text) {
         None => writeln!(out, "UNKNOWN RECLAIM REPORT AGE; not evidence of no growth.")?,
         Some((generated, _)) if generated > now => writeln!(out, "FUTURE RECLAIM REPORT: generation time is ahead of current UTC; not evidence of no growth.")?,

@@ -34,9 +34,9 @@ impl Default for Options {
         Self {
             clean: false,
             system_tmp: false,
-            min_hours: 48,
+            min_hours: crate::time_windows::CONTENT_FLOOR_HOURS,
             limit: 20,
-            deadline: Duration::from_secs(30),
+            deadline: crate::time_windows::SCAN_DEADLINE,
             paths: Vec::new(),
         }
     }

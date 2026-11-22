@@ -404,7 +404,7 @@ fn diskutil_document(args: &[&str]) -> io::Result<Value> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     const LIMIT: u64 = 8 * 1024 * 1024;
     let mut diskutil = Command::new("/usr/sbin/diskutil")
@@ -439,10 +439,10 @@ fn diskutil_document(args: &[&str]) -> io::Result<Value> {
         match (diskutil.try_wait(), plutil.try_wait()) {
             (Ok(Some(disk)), Ok(Some(plist))) => break Ok((disk, plist)),
             (Err(error), _) | (_, Err(error)) => break Err(error),
-            _ if started.elapsed() >= Duration::from_secs(30) => {
+            _ if started.elapsed() >= crate::time_windows::VOLUME_PROBE_TIMEOUT => {
                 break Err(invalid("APFS Scratch identity probe timed out"));
             }
-            _ => thread::sleep(Duration::from_millis(20)),
+            _ => thread::sleep(crate::time_windows::PROBE_POLL),
         }
     };
     if status.is_err() {

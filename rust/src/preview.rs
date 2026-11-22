@@ -12,7 +12,6 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const CHECK_WINDOW_SECONDS: u64 = 12;
 const CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -215,7 +214,7 @@ fn checked_verdict(root: &Path, path: &Path, device: u64, cutoff: i64) -> String
         device,
         cutoff,
         ScanOptions {
-            deadline: Duration::from_secs(CHECK_WINDOW_SECONDS),
+            deadline: crate::time_windows::PREVIEW_CHECK_WINDOW,
             max_entries: usize::MAX,
         },
     );
@@ -925,7 +924,7 @@ fn retry_candidate(
         return;
     }
     let scan_options = ScanOptions {
-        deadline: scan_deadline.min(Duration::from_secs(CHECK_WINDOW_SECONDS)),
+        deadline: scan_deadline.min(crate::time_windows::PREVIEW_CHECK_WINDOW),
         max_entries: usize::MAX,
     };
     let directory = scan(&candidate.path, scan_options)

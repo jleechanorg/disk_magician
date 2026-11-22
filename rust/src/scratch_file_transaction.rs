@@ -10,7 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct FileIdentity {
@@ -499,11 +499,11 @@ pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
             }
             return Err(io::Error::other(format!("lsof failed: {}", stderr.trim())));
         }
-        if started.elapsed() > Duration::from_secs(3) {
+        if started.elapsed() > crate::time_windows::OPEN_FILE_PROBE_TIMEOUT {
             child.kill()?;
             child.wait()?;
             return Err(io::Error::new(io::ErrorKind::TimedOut, "lsof timeout"));
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(crate::time_windows::PROBE_POLL);
     }
 }

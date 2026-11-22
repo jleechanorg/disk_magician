@@ -44,7 +44,7 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
   Measure Git, source, and session trees read-only. Report symlinks as link
   leaves. Name any unfinished path and mark coverage incomplete. Never infer
   that there are zero candidates from parent mtime or aggregate size.
-- Default disposable cleanup uses **48 hours of content inactivity**.
+- Default disposable cleanup uses the content-inactivity floor `CONTENT_FLOOR_HOURS` in `rust/src/time_windows.rs`. Every default time window is defined only in that file; scheduler templates, docs and other code refer to it and never restate a value.
   A lower floor must be explicitly selected for the invocation through a
   supported override. Use the canonical worktree recency helpers. Age by
   itself grants neither deletion authority nor proof of safe removal.

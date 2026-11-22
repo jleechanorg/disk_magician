@@ -89,7 +89,7 @@ impl Options {
             limit: 100,
             all: false,
             cursor: None,
-            deadline: Duration::from_secs(120),
+            deadline: crate::time_windows::INDEX_REFRESH_DEADLINE,
             max_entries: usize::MAX,
         };
         let mut specified_limit = false;

@@ -38,6 +38,7 @@ pub mod snapshot;
 pub mod state_commit;
 pub mod state_publish;
 pub mod status;
+pub mod time_windows;
 mod volume_config;
 
 #[cfg(target_os = "linux")]

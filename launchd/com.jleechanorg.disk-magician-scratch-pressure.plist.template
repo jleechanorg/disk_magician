@@ -11,8 +11,6 @@
     <string>@HOME@/.local/bin/diskm</string>
     <string>scratch-sweep</string>
     <string>--clean</string>
-    <string>--min-hours</string>
-    <string>@SCRATCH_BUDGET_FLOOR_HOURS@</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
