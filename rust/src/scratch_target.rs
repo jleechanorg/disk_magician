@@ -467,7 +467,7 @@ pub fn apply(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(io::Error::other)?
                     .as_nanos();
-                let stage = format!(".diskm-remove-{}-{nonce}", std::process::id());
+                let stage = format!(".diskm-remove-{}-root-{nonce}", std::process::id());
                 state.status = format!("applying:{path}");
                 state.native_stage = Some(stage.clone());
                 state.native_stage_identity = None;
@@ -498,6 +498,9 @@ pub fn apply(
                     }
                     Ok(Outcome::DeferredOpen { .. }) => "deferred:open-file",
                     Ok(Outcome::DeferredCheck { .. }) => "deferred:open-file-check-unavailable",
+                    Ok(Outcome::Unsupported { reason }) if reason == "unsafe-staging-root" => {
+                        "kept:unsafe-staging-root"
+                    }
                     Ok(Outcome::Unsupported { .. }) => "kept:native-file-unsupported",
                     Ok(Outcome::Removed {
                         parent_synced: false,
@@ -718,7 +721,11 @@ fn acknowledge_restored(
         if !stage.starts_with(".diskm-remove-") || Path::new(stage).components().count() != 1 {
             return Err(io::Error::other("invalid native recovery stage name"));
         }
-        let stage_path = path.with_file_name(stage);
+        let stage_path = if scratch_file_transaction::root_stage(OsStr::new(stage)) {
+            state.root.path.join(stage)
+        } else {
+            path.with_file_name(stage)
+        };
         match fs::symlink_metadata(stage_path) {
             Ok(_) => return Err(io::Error::other("native recovery stage is still present")),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}

@@ -250,6 +250,11 @@ pub(crate) fn managed_file_verdict(
     if before.nlink() != 1 {
         return "kept:hardlink";
     }
+    match scratch_file_transaction::staging_root_protected(root) {
+        Ok(true) => {}
+        Ok(false) => return "kept:unsafe-staging-root",
+        Err(_) => return "deferred:staging-root",
+    }
     match scratch_file_transaction::open_file_processes(path) {
         Ok(pids) if pids.is_empty() => {}
         Ok(_) => return "deferred:open-file",

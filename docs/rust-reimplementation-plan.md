@@ -45,9 +45,15 @@ completed temp-file lease. The manifest and recovery checkpoint stay outside
 the temp root. This supports temporary files such as logs and markers.
 
 Each apply invocation uses its own resume file outside Scratch. Resume one
-checkpoint with one invocation at a time. The actuator records the identity
-of a private staging directory before moving the file into it. It checks the
-identity of the captured entry through the open directory descriptor.
+checkpoint with one invocation at a time. The actuator creates its private
+stage at the registered filesystem root and records the stage identity before
+capture. This keeps the stage outside shared source directories. The root must
+be owned by the current user or root and prevent other users from moving the
+stage through permission bits or the sticky bit. On macOS, an extended ACL
+also causes a hold. Preview and apply report `kept:unsafe-staging-root` when
+the root cannot protect the stage. The currently group-writable Mac Scratch
+root is held under this policy. Live mount permissions are unchanged.
+The actuator checks the captured identity through the stage descriptor.
 `--restore-staged` verifies the directory recorded in the checkpoint and
 restores the captured file if its original name is free. If a crash leaves
 neither name, the checkpoint reports an unresolved operation. A closed lease
