@@ -273,25 +273,20 @@ fn record_path(bundle: &Path) -> io::Result<(PathBuf, BundleLease)> {
             "bundle must be a real directory",
         ));
     }
-    for item in fs::read_dir(state_records()?)? {
-        let path = item?.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "json")
-        {
-            let lease: BundleLease =
-                serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?;
-            if lease.filepath == absolute
-                && (lease.device, lease.inode) == (metadata.dev(), metadata.ino())
-            {
-                return Ok((path, lease));
-            }
-        }
+    let digest = Sha256::digest(absolute.as_os_str().as_bytes());
+    let record = state_records()?.join(format!("{digest:x}.json"));
+    let lease: BundleLease =
+        serde_json::from_slice(&fs::read(&record)?).map_err(io::Error::other)?;
+    if lease.schema_version != 1
+        || lease.root != root
+        || lease.filepath != absolute
+        || (lease.device, lease.inode) != (metadata.dev(), metadata.ino())
+    {
+        return Err(io::Error::other(
+            "lease does not match the current bundle identity",
+        ));
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "no matching lease for the current bundle identity",
-    ))
+    Ok((record, lease))
 }
 
 fn create_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
