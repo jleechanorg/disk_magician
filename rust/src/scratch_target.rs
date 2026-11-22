@@ -202,6 +202,9 @@ fn legacy_apply(manifest: &Path, digest: &str, relative: &str) -> io::Result<Str
         .arg(manifest)
         .args(["--manifest-sha256", digest, "--path", relative])
         .output()?;
+    if output.status.code() == Some(75) {
+        return Ok("deferred:actuator-busy".into());
+    }
     if !output.status.success() {
         return Err(io::Error::other("exact manifest apply failed"));
     }
@@ -396,7 +399,10 @@ pub fn apply(
             Ok(result) => result,
             Err(_) => return Ok(report_recovery_required(&state, &manifest.entries)),
         };
-        if result == "deferred:operation-lock" {
+        if matches!(
+            result.as_str(),
+            "deferred:operation-lock" | "deferred:actuator-busy"
+        ) {
             state.status = result;
             write_state(resume_path, &state)?;
             return Ok(report(state));
