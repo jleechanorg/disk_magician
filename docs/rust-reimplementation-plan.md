@@ -70,8 +70,12 @@ The sweeps advance through held-only batches within the verification deadline.
 An unattended clean sweep records the next unchecked path and resumes from it
 at the same age cutoff setting. Reaching the end of the batch sequence resets
 the cursor. Dry runs and explicit path nominations leave that cursor untouched.
-Durable continuation of unfinished filesystem discovery, Git state publication,
-and qualification of existing unmanaged data remain open.
+Scratch discovery also records deferred directory paths against the current
+`runs` directory identity. A subsequent clean sweep resumes those paths,
+prioritizing the deepest paths already found. A directory whose enumeration was
+interrupted is re-enumerated, and each invocation qualifies its observed files
+against the current age and lease state. Git state publication and qualification
+of existing unmanaged data remain open.
 
 Mac and Linux executable fixtures verified that exact apply removed the selected
 old file and preserved changed and open files. Recovery refused to overwrite

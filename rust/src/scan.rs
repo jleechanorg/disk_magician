@@ -456,52 +456,15 @@ fn scan_internal(
     let mut apparent_total = 0;
     let mut allocated_total = 0;
 
-    if expired(start, options.deadline) {
-        gap(
-            &mut gaps,
-            &root,
-            ScanGapKind::Deadline,
-            "deadline before root inspection",
-        );
-        let report = report(
-            &root,
-            false,
-            apparent_total,
-            allocated_total,
-            files,
-            directories,
-            gaps,
-        );
-        let inventory = include_age_inventory.then(|| {
-            age_inventory_report(
-                &root,
-                &root_metadata,
-                vec![age_measurement(
-                    &root,
-                    &root_metadata,
-                    if root_metadata.is_dir() {
-                        AgeKind::Directory
-                    } else {
-                        age_kind(&root_metadata)
-                    },
-                    allocated_bytes(&root_metadata),
-                    root_metadata.len(),
-                    modified_epoch_nanos(&root_metadata),
-                    false,
-                )],
-                &report.gaps,
-                false,
-            )
-        });
-        return Ok((report, inventory));
-    }
-    if options.max_entries == 0 {
-        gap(
-            &mut gaps,
-            &root,
-            ScanGapKind::EntryLimit,
-            "entry limit is zero",
-        );
+    let early_gap = if expired(start, options.deadline) {
+        Some((ScanGapKind::Deadline, "deadline before root inspection"))
+    } else if options.max_entries == 0 {
+        Some((ScanGapKind::EntryLimit, "entry limit is zero"))
+    } else {
+        None
+    };
+    if let Some((kind, reason)) = early_gap {
+        gap(&mut gaps, &root, kind, reason);
         let report = report(
             &root,
             false,

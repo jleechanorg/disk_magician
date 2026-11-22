@@ -114,7 +114,15 @@ fn sweep(
             Vec::new(),
         )
     } else {
-        discover(&root, device, cutoff, scan_options, &mut holds)?
+        let checkpoint = options.clean.then(|| state.join("scratch-discovery.json"));
+        discover(
+            &root,
+            device,
+            cutoff,
+            scan_options,
+            &mut holds,
+            checkpoint.as_deref(),
+        )?
     };
     let cursor = (options.clean && options.paths.is_empty()).then(|| {
         state.join(if options.system_tmp {
@@ -309,16 +317,52 @@ fn discover(
     cutoff: i64,
     options: scan::ScanOptions,
     holds: &mut BTreeMap<&'static str, usize>,
+    checkpoint: Option<&Path>,
 ) -> io::Result<(Vec<PathBuf>, bool, Vec<scan::ScanGap>)> {
     let runs = root.join("runs");
-    match fs::symlink_metadata(&runs) {
-        Ok(metadata) if metadata.is_dir() && metadata.dev() == device => {}
+    let identity = match fs::symlink_metadata(&runs) {
+        Ok(metadata) if metadata.is_dir() && metadata.dev() == device => (device, metadata.ino()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok((Vec::new(), true, Vec::new()))
         }
         _ => return Err(io::Error::other("invalid native runs directory")),
-    }
-    let report = scan::scan(&runs, options)?;
+    };
+    let report = if let Some(path) = checkpoint {
+        let saved: Option<((u64, u64), Vec<scan::ScanGap>)> = preview::load_checkpoint(path)?;
+        let deferred = saved
+            .filter(|(scope, _)| *scope == identity)
+            .map(|(_, gaps)| gaps)
+            .unwrap_or_default();
+        let retryable = |gap: &scan::ScanGap| {
+            gap.path_bytes_hex.is_none() && gap.kind == scan::ScanGapKind::Deadline
+        };
+        let mut targets: Vec<_> = deferred
+            .iter()
+            .filter(|gap| retryable(gap))
+            .map(|gap| PathBuf::from(&gap.path))
+            .collect();
+        targets.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        targets.dedup();
+        let (mut report, _) = if targets.is_empty() {
+            (scan::scan(&runs, options)?, Vec::new())
+        } else {
+            preview::scan_frontiers(&runs, device, &targets, options.deadline)?
+        };
+        if !targets.is_empty() {
+            report
+                .gaps
+                .extend(deferred.into_iter().filter(|gap| !retryable(gap)));
+            report.complete &= report.gaps.is_empty();
+        }
+        let pending = report.gaps.iter().any(retryable);
+        preview::write_checkpoint(
+            path,
+            &(identity, if pending { report.gaps.as_slice() } else { &[] }),
+        )?;
+        report
+    } else {
+        scan::scan(&runs, options)?
+    };
     let mut old: Vec<_> = report
         .files
         .into_iter()

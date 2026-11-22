@@ -590,7 +590,7 @@ fn live_preview_from_measurement(
     })
 }
 
-fn scan_frontiers(
+pub(crate) fn scan_frontiers(
     root: &Path,
     device: u64,
     targets: &[PathBuf],
