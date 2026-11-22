@@ -701,12 +701,11 @@ pub(crate) fn build_bundle(root: &Path, relative: &Path) -> Result<PathBuf, &'st
 }
 
 pub fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static str> {
-    let verified = scratch_lease::lookup_bundle_under_root(bundle, root).map_err(|error| {
-        match error.kind() {
-            io::ErrorKind::NotFound => "kept:lease-missing",
-            _ => "deferred:lease-unavailable",
-        }
-    })?;
+    let verified = match scratch_lease::lookup_bundle_under_root(bundle, root) {
+        Ok(verified) => verified,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return check_legacy_build(bundle),
+        Err(_) => return Err("deferred:lease-unavailable"),
+    };
     if !matches!(
         verified.lease.kind,
         BundleKind::Build | BundleKind::TempFile
@@ -741,6 +740,27 @@ pub fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static 
         return Err("kept:live-working-directory");
     }
     Ok(())
+}
+
+/// Runs leased by the retired Python allocator follow the same rule as native
+/// build runs: a build run whose owner has exited qualifies unless a live
+/// process works in it.
+fn check_legacy_build(bundle: &Path) -> Result<(), &'static str> {
+    match scratch_lease::legacy_lease(bundle) {
+        Ok(None) => Err("kept:lease-missing"),
+        Ok(Some(scratch_lease::LegacyLease::OtherKind)) => Err("kept:protected-bundle-kind"),
+        Ok(Some(scratch_lease::LegacyLease::Build { owner_live: true })) => {
+            Err("kept:producer-still-live")
+        }
+        Ok(Some(scratch_lease::LegacyLease::Build { owner_live: false })) => {
+            if scratch_lease::live_cwd_in(bundle).map_err(|_| "deferred:consumer-scan")? {
+                Err("kept:live-working-directory")
+            } else {
+                Ok(())
+            }
+        }
+        Err(_) => Err("deferred:lease-unavailable"),
+    }
 }
 
 fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentity, &'static str> {
