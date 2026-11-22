@@ -45,10 +45,11 @@ completed temp-file lease. The manifest and recovery checkpoint stay outside
 the temp root. This supports temporary files such as logs and markers.
 
 Each apply invocation uses its own resume file outside Scratch. Resume one
-checkpoint with one invocation at a time. The actuator briefly renames a
-selected file within its parent while checking the captured identity. A crash
-can leave the transaction name recorded in the checkpoint. `--restore-staged`
-restores the exact artifact if its original name is free. If a crash leaves
+checkpoint with one invocation at a time. The actuator records the identity
+of a private staging directory before moving the file into it. It checks the
+identity of the captured entry through the open directory descriptor.
+`--restore-staged` verifies the directory recorded in the checkpoint and
+restores the captured file if its original name is free. If a crash leaves
 neither name, the checkpoint reports an unresolved operation. A closed lease
 and an open-file observation depend on producer cooperation after the check.
 

@@ -87,6 +87,8 @@ struct ResumeState {
     in_flight_quarantine_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_stage_identity: Option<(u64, u64)>,
     used_before_bytes: Option<u64>,
     used_after_bytes: Option<u64>,
 }
@@ -350,7 +352,7 @@ pub fn apply(
                 "restored path must match the in-flight entry",
             ));
         }
-        if matches!(action, RecoveryAction::Restore(_)) {
+        let captured = if matches!(action, RecoveryAction::Restore(_)) {
             let stage = state
                 .native_stage
                 .as_deref()
@@ -368,9 +370,12 @@ pub fn apply(
                 Path::new(path),
                 entry.file_identity()?,
                 OsStr::new(stage),
-            )?;
-        }
-        return acknowledge_restored(state, &manifest.entries, path, resume_path);
+                state.native_stage_identity,
+            )?
+        } else {
+            None
+        };
+        return acknowledge_restored(state, &manifest.entries, path, resume_path, captured);
     }
     let existing_state = match existing_state {
         Some(state) if state.status.starts_with("applying:") => {
@@ -405,6 +410,7 @@ pub fn apply(
         status: "in_progress".into(),
         in_flight_quarantine_id: None,
         native_stage: None,
+        native_stage_identity: None,
         used_before_bytes: None,
         used_after_bytes: None,
     });
@@ -464,16 +470,22 @@ pub fn apply(
                 let stage = format!(".diskm-remove-{}-{nonce}", std::process::id());
                 state.status = format!("applying:{path}");
                 state.native_stage = Some(stage.clone());
+                state.native_stage_identity = None;
                 state.used_after_bytes = Some(used);
                 write_state(resume_path, &state, create)?;
                 create = false;
+                let root = state.root.clone();
                 let result = scratch_file_transaction::remove_exact(
-                    &state.root.path,
-                    state.root.dev,
-                    state.root.ino,
+                    &root.path,
+                    root.dev,
+                    root.ino,
                     Path::new(&path),
                     expected,
                     OsStr::new(&stage),
+                    |identity| {
+                        state.native_stage_identity = Some(identity);
+                        write_state(resume_path, &state, false)
+                    },
                 );
                 match result {
                     Ok(Outcome::Removed {
@@ -497,6 +509,7 @@ pub fn apply(
             }
         };
         state.native_stage = None;
+        state.native_stage_identity = None;
         state.pending_paths.pop_front();
         if result.starts_with("deferred:") {
             state.pending_paths.push_back(path.clone());
@@ -680,6 +693,7 @@ fn acknowledge_restored(
     entries: &[Entry],
     relative: &str,
     resume_path: &Path,
+    captured: Option<FileIdentity>,
 ) -> io::Result<Report> {
     let relative_path = Path::new(relative);
     if relative.is_empty()
@@ -720,10 +734,14 @@ fn acknowledge_restored(
         _ => false,
     };
     let modified = i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec());
-    if !expected_type
-        || (metadata.dev(), metadata.ino()) != identity
-        || entry.size != Some(metadata.size())
-        || entry.mtime_ns.map(i128::from) != Some(modified)
+    let original_matches = expected_type
+        && (metadata.dev(), metadata.ino()) == identity
+        && entry.size == Some(metadata.size())
+        && entry.mtime_ns.map(i128::from) == Some(modified);
+    if !original_matches
+        && !captured.is_some_and(|file| {
+            metadata.is_file() && file.matches_after_rename(FileIdentity::read(&metadata))
+        })
     {
         return Err(io::Error::other(
             "restored path differs from the nominated entry",
@@ -738,9 +756,15 @@ fn acknowledge_restored(
     state.pending_paths.pop_front();
     state.in_flight_quarantine_id = None;
     state.native_stage = None;
+    state.native_stage_identity = None;
     state.receipts.push(Receipt {
         path: relative.to_owned(),
-        result: "kept:restored".into(),
+        result: if original_matches {
+            "kept:restored"
+        } else {
+            "kept:restored-replacement"
+        }
+        .into(),
         used_before_bytes: used_before,
         used_after_bytes: Some(used),
     });

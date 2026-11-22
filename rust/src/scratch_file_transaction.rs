@@ -25,7 +25,7 @@ pub struct FileIdentity {
 }
 
 impl FileIdentity {
-    fn read(meta: &fs::Metadata) -> Self {
+    pub(crate) fn read(meta: &fs::Metadata) -> Self {
         Self {
             device: meta.dev(),
             inode: meta.ino(),
@@ -49,7 +49,7 @@ impl FileIdentity {
             && self.link_count == current.link_count
     }
 
-    fn matches_after_rename(self, current: Self) -> bool {
+    pub(crate) fn matches_after_rename(self, current: Self) -> bool {
         self.device == current.device
             && self.inode == current.inode
             && self.size == current.size
@@ -81,6 +81,7 @@ pub fn remove_exact(
     relative: &Path,
     expected: FileIdentity,
     stage_name: &OsStr,
+    bind_stage: impl FnOnce((u64, u64)) -> io::Result<()>,
 ) -> io::Result<Outcome> {
     validate_basename(stage_name)?;
     if relative.as_os_str().is_empty()
@@ -103,23 +104,22 @@ pub fn remove_exact(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Outcome::AlreadyAbsent),
         Err(error) => return Err(error),
     };
-    let stage = CString::new(stage_name.as_bytes())?;
     remove_from_parent(
-        &parent, &source, &stage, root, relative, expected, stage_name,
+        &parent, &source, root, relative, expected, stage_name, bind_stage,
     )
 }
 
 fn remove_from_parent(
     parent: &File,
-    source_name: &CString,
-    stage: &CString,
+    original: &CString,
     root: &Path,
     relative: &Path,
     expected: FileIdentity,
-    stage_os: &OsStr,
+    stage_name: &OsStr,
+    bind_stage: impl FnOnce((u64, u64)) -> io::Result<()>,
 ) -> io::Result<Outcome> {
-    let fd = parent.as_raw_fd();
-    let source = match open_regular(fd, source_name) {
+    let parent_fd = parent.as_raw_fd();
+    let source = match open_regular(parent_fd, original) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Outcome::AlreadyAbsent),
         Err(error) => return Err(error),
@@ -127,135 +127,109 @@ fn remove_from_parent(
     if !expected.matches(FileIdentity::read(&source.metadata()?)) {
         return Ok(Outcome::Changed);
     }
-    if stage.as_bytes() == source_name.as_bytes() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "transaction stage must differ from the selected filename",
-        ));
-    }
+    let stage = CString::new(stage_name.as_bytes())?;
     verify_parent(root, relative, parent)?;
-    if let Err(error) = rename_exclusive(fd, source_name, stage) {
-        if error.kind() == io::ErrorKind::NotFound {
-            return Ok(Outcome::AlreadyAbsent);
-        }
-        if error.kind() == io::ErrorKind::AlreadyExists {
-            return Ok(Outcome::RecoveryRequired {
-                stage_created: false,
-                reason: "pre-recorded stage name is occupied".into(),
-            });
-        }
-        return Err(error);
+    if unsafe { libc::mkdirat(parent_fd, stage.as_ptr(), 0o700) } != 0 {
+        return Err(io::Error::last_os_error());
     }
-    if let Err(error) = parent.sync_all() {
-        return Ok(recovery(
-            stage_os,
-            true,
-            &format!("cannot sync staged rename: {error}"),
-        ));
-    }
-    // Rename changes ctime, so compare inode, link count, size, and mtime only.
-    if !expected.matches_after_rename(FileIdentity::read(&source.metadata()?)) {
-        return restore_or_recover(parent, stage, source_name, stage_os, &source);
-    }
-    if let Err(error) = verify_parent(root, relative, parent) {
-        return Ok(recovery(
-            stage_os,
-            true,
-            &format!("source parent changed: {error}"),
-        ));
-    }
-    let absolute_stage = root
-        .join(relative.parent().unwrap_or_else(|| Path::new("")))
-        .join(stage_os);
-    let open_pids = match open_file_processes(&absolute_stage) {
-        Ok(pids) => pids,
-        Err(error) => {
-            return match restore_original(parent, stage, source_name, &source) {
-                Ok(()) => Ok(Outcome::DeferredCheck {
-                    reason: format!("open-file check unavailable: {error}"),
-                }),
-                Err(restore) => Ok(recovery(
-                    stage_os,
-                    true,
-                    &format!("open-file check unavailable: {error}; restore failed: {restore}"),
-                )),
-            };
-        }
-    };
-    let current = std::process::id();
-    let other_pids: Vec<_> = open_pids
-        .into_iter()
-        .filter(|pid| *pid != current)
-        .collect();
-    if !other_pids.is_empty() {
-        return match restore_original(parent, stage, source_name, &source) {
-            Ok(()) => Ok(Outcome::DeferredOpen {
-                open_pids: other_pids,
-            }),
-            Err(error) => Ok(recovery(
-                stage_os,
-                true,
-                &format!("file open and restore failed: {error}"),
-            )),
+    let private = open_private(parent_fd, stage_name)?;
+    let private_fd = private.as_raw_fd();
+    parent.sync_all()?;
+    let metadata = private.metadata()?;
+    bind_stage((metadata.dev(), metadata.ino()))?;
+    if let Err(error) = rename_exclusive(parent_fd, original, private_fd, c"item") {
+        remove_stage_dir(parent, &stage)?;
+        return if error.kind() == io::ErrorKind::NotFound {
+            Ok(Outcome::AlreadyAbsent)
+        } else {
+            Err(error)
         };
     }
-    let staged = match open_regular(fd, stage) {
+    parent.sync_all()?;
+    private.sync_all()?;
+    let restore = |outcome| match restore_private(parent, &private, &stage, original) {
+        Ok(()) => Ok(outcome),
+        Err(error) => Ok(recovery(&format!("cannot restore captured entry: {error}"))),
+    };
+    let captured = match open_regular(private_fd, c"item") {
         Ok(file) => file,
+        Err(_) => return restore(Outcome::RestoredMismatch),
+    };
+    if !expected.matches_after_rename(FileIdentity::read(&captured.metadata()?)) {
+        return restore(Outcome::RestoredMismatch);
+    }
+    let stage_path = root
+        .join(relative.parent().unwrap_or_else(|| Path::new("")))
+        .join(stage_name);
+    verify_parent(root, relative, parent)?;
+    verify_parent(
+        root,
+        &relative.with_file_name(stage_name).join("item"),
+        &private,
+    )?;
+    let pids = match open_file_processes(&stage_path.join("item")) {
+        Ok(pids) => pids
+            .into_iter()
+            .filter(|pid| *pid != std::process::id())
+            .collect::<Vec<_>>(),
         Err(error) => {
-            return Ok(recovery(
-                stage_os,
-                true,
-                &format!("cannot verify staged identity: {error}"),
-            ))
+            return restore(Outcome::DeferredCheck {
+                reason: error.to_string(),
+            })
         }
     };
+    if !pids.is_empty() {
+        return restore(Outcome::DeferredOpen { open_pids: pids });
+    }
+    verify_parent(root, relative, parent)?;
+    verify_parent(
+        root,
+        &relative.with_file_name(stage_name).join("item"),
+        &private,
+    )?;
+    let staged = open_regular(private_fd, c"item")?;
     if !expected.matches_after_rename(FileIdentity::read(&staged.metadata()?)) {
-        drop(staged);
-        return restore_or_recover(parent, stage, source_name, stage_os, &source);
+        return restore(Outcome::RestoredMismatch);
     }
-    if let Err(error) = verify_parent(root, relative, parent) {
-        drop(staged);
-        return Ok(recovery(
-            stage_os,
-            true,
-            &format!("staged parent changed: {error}"),
-        ));
-    }
-    let named_staged = match open_regular(fd, stage) {
-        Ok(file) => file,
-        Err(error) => {
-            return Ok(recovery(
-                stage_os,
-                true,
-                &format!("cannot revalidate staged name: {error}"),
-            ))
-        }
-    };
-    if !expected.matches_after_rename(FileIdentity::read(&named_staged.metadata()?)) {
-        return Ok(recovery(
-            stage_os,
-            true,
-            "staged name now identifies another entry",
-        ));
-    }
-    drop(named_staged);
-    drop(staged);
-    drop(source);
-    if unsafe { libc::unlinkat(fd, stage.as_ptr(), 0) } != 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::NotFound {
-            return Ok(Outcome::AlreadyAbsent);
-        }
-        return Ok(recovery(
-            stage_os,
-            true,
-            &format!("staged unlink failed: {error}"),
-        ));
+    if unsafe { libc::unlinkat(private_fd, c"item".as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(Outcome::Removed {
         bytes: expected.size,
-        parent_synced: parent.sync_all().is_ok(),
+        parent_synced: private
+            .sync_all()
+            .and_then(|()| remove_stage_dir(parent, &stage))
+            .is_ok(),
     })
+}
+
+fn remove_stage_dir(parent: &File, stage: &CString) -> io::Result<()> {
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), stage.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    parent.sync_all()
+}
+
+fn restore_private(
+    parent: &File,
+    private: &File,
+    stage: &CString,
+    original: &CString,
+) -> io::Result<()> {
+    rename_exclusive(private.as_raw_fd(), c"item", parent.as_raw_fd(), original)?;
+    private.sync_all()?;
+    remove_stage_dir(parent, stage)
+}
+
+fn open_private(parent: libc::c_int, name: &OsStr) -> io::Result<File> {
+    let directory = open_child(parent, name)?;
+    let metadata = directory.metadata()?;
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+        return Err(io::Error::other(
+            "staging directory ownership or mode changed",
+        ));
+    }
+    Ok(directory)
 }
 
 /// Restore a captured stage entry to its original basename without replacement.
@@ -266,7 +240,8 @@ pub fn restore_exact(
     relative: &Path,
     expected: FileIdentity,
     stage_name: &OsStr,
-) -> io::Result<bool> {
+    stage_identity: Option<(u64, u64)>,
+) -> io::Result<Option<FileIdentity>> {
     validate_basename(stage_name)?;
     if relative.as_os_str().is_empty()
         || !relative
@@ -280,14 +255,36 @@ pub fn restore_exact(
     }
     let (parent, original) = match open_parent(root, root_device, root_inode, relative) {
         Ok(result) => result,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
     let stage = CString::new(stage_name.as_bytes())?;
     verify_parent(root, relative, &parent)?;
+    if let Ok(private) = open_private(parent.as_raw_fd(), stage_name) {
+        let metadata = private.metadata()?;
+        if stage_identity != Some((metadata.dev(), metadata.ino())) {
+            return Err(io::Error::other(
+                "staging directory identity differs from intent",
+            ));
+        }
+        let staged = match open_regular(private.as_raw_fd(), c"item") {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                remove_stage_dir(&parent, &stage)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let captured = FileIdentity::read(&staged.metadata()?);
+        restore_private(&parent, &private, &stage, &original)?;
+        return Ok(Some(captured));
+    }
+    if stage_identity.is_some() {
+        return Ok(None);
+    }
     let staged = match open_regular(parent.as_raw_fd(), &stage) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
     if !expected.matches_after_rename(FileIdentity::read(&staged.metadata()?)) {
@@ -296,9 +293,9 @@ pub fn restore_exact(
         ));
     }
     drop(staged);
-    rename_exclusive(parent.as_raw_fd(), &stage, &original)?;
+    rename_exclusive(parent.as_raw_fd(), &stage, parent.as_raw_fd(), &original)?;
     parent.sync_all()?;
-    Ok(true)
+    Ok(Some(expected))
 }
 
 fn open_parent(
@@ -328,24 +325,6 @@ fn open_parent(
     ))
 }
 
-fn restore_original(
-    parent: &File,
-    stage: &CString,
-    original: &CString,
-    opened: &File,
-) -> io::Result<()> {
-    let wanted = FileIdentity::read(&opened.metadata()?);
-    let staged = open_regular(parent.as_raw_fd(), stage)?;
-    if !wanted.matches_after_rename(FileIdentity::read(&staged.metadata()?)) {
-        return Err(io::Error::other(
-            "staged pathname was replaced before restore",
-        ));
-    }
-    drop(staged);
-    rename_exclusive(parent.as_raw_fd(), stage, original)?;
-    parent.sync_all()
-}
-
 fn verify_parent(root: &Path, relative: &Path, descriptor: &File) -> io::Result<()> {
     let parent = root.join(relative.parent().unwrap_or_else(|| Path::new("")));
     let path_metadata = fs::symlink_metadata(parent)?;
@@ -360,26 +339,9 @@ fn verify_parent(root: &Path, relative: &Path, descriptor: &File) -> io::Result<
     Ok(())
 }
 
-fn restore_or_recover(
-    parent: &File,
-    stage: &CString,
-    source: &CString,
-    stage_os: &OsStr,
-    opened: &File,
-) -> io::Result<Outcome> {
-    match restore_original(parent, stage, source, opened) {
-        Ok(()) => Ok(Outcome::RestoredMismatch),
-        Err(error) => Ok(recovery(
-            stage_os,
-            true,
-            &format!("identity mismatch and restore failed: {error}"),
-        )),
-    }
-}
-
-fn recovery(_stage: &OsStr, stage_created: bool, reason: &str) -> Outcome {
+fn recovery(reason: &str) -> Outcome {
     Outcome::RecoveryRequired {
-        stage_created,
+        stage_created: true,
         reason: reason.to_owned(),
     }
 }
@@ -406,7 +368,7 @@ fn open_child(parent_fd: libc::c_int, name: &OsStr) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn open_regular(parent_fd: libc::c_int, name: &CString) -> io::Result<File> {
+fn open_regular(parent_fd: libc::c_int, name: &std::ffi::CStr) -> io::Result<File> {
     let fd = unsafe {
         libc::openat(
             parent_fd,
@@ -438,28 +400,26 @@ fn validate_basename(value: &OsStr) -> io::Result<()> {
     Ok(())
 }
 
-fn rename_exclusive(parent: libc::c_int, old: &CString, new: &CString) -> io::Result<()> {
+fn rename_exclusive(
+    from: libc::c_int,
+    old: &std::ffi::CStr,
+    to: libc::c_int,
+    new: &std::ffi::CStr,
+) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
-            parent,
+            from,
             old.as_ptr(),
-            parent,
+            to,
             new.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
     };
     #[cfg(target_os = "macos")]
-    let result = unsafe {
-        libc::renameatx_np(
-            parent,
-            old.as_ptr(),
-            parent,
-            new.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    };
+    let result =
+        unsafe { libc::renameatx_np(from, old.as_ptr(), to, new.as_ptr(), libc::RENAME_EXCL) };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     return Err(io::Error::new(
         io::ErrorKind::Unsupported,
