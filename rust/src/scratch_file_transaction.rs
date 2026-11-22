@@ -457,11 +457,6 @@ fn rename_exclusive(
     #[cfg(target_os = "macos")]
     let result =
         unsafe { libc::renameatx_np(from, old.as_ptr(), to, new.as_ptr(), libc::RENAME_EXCL) };
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    return Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "exclusive rename unsupported",
-    ));
     if result == 0 {
         Ok(())
     } else {

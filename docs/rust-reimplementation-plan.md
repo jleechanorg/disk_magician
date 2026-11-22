@@ -35,7 +35,8 @@ files under the system temp root. Older unregistered temp files remain held.
 A preview grants no deletion authority. `scratch-target-apply` accepts a hash-pinned Scratch manifest and
 rechecks the exact file, cutoff, mount, producer lease and open-file status.
 The first actuator handles single-link files in completed native build bundles
-whose producer has exited. Evidence, unmanaged Scratch and whole-directory
+whose producer has exited. An observable process working directory inside a
+completed build bundle also holds its files. Evidence, unmanaged Scratch and whole-directory
 removal still need native policy and verification.
 
 `scratch-temp-file REPO PURPOSE` allocates one leased file in `/tmp` with mode

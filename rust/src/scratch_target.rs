@@ -710,7 +710,14 @@ pub(crate) fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'
         OwnerProcessState::Live => Err("kept:producer-still-live"),
         OwnerProcessState::Unavailable => Err("deferred:producer-identity-unavailable"),
         OwnerProcessState::Exited | OwnerProcessState::IdentityChanged => Ok(()),
+    }?;
+    if matches!(verified.lease.kind, BundleKind::Build)
+        && scratch_lease::live_cwd_in(&verified.lease.filepath)
+            .map_err(|_| "deferred:consumer-scan")?
+    {
+        return Err("kept:live-working-directory");
     }
+    Ok(())
 }
 
 fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentity, &'static str> {

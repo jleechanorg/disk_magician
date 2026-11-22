@@ -178,7 +178,7 @@ fn allocated_bytes(m: &Metadata) -> u64 {
     m.blocks().saturating_mul(512)
 }
 
-fn path_parts(path: &Path) -> (String, Option<String>) {
+pub fn path_parts_for_report(path: &Path) -> (String, Option<String>) {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
     let hex = std::str::from_utf8(bytes).err().map(|_| {
@@ -190,10 +190,6 @@ fn path_parts(path: &Path) -> (String, Option<String>) {
         output
     });
     (String::from_utf8_lossy(bytes).into_owned(), hex)
-}
-
-pub fn path_parts_for_report(path: &Path) -> (String, Option<String>) {
-    path_parts(path)
 }
 
 fn file_kind(metadata: &Metadata) -> FileKind {
@@ -342,7 +338,7 @@ fn add(a: u64, b: u64) -> io::Result<u64> {
         .ok_or_else(|| io::Error::other("scan measurement overflow"))
 }
 fn gap(gaps: &mut Vec<ScanGap>, path: &Path, kind: ScanGapKind, message: impl Into<String>) {
-    let (path, path_bytes_hex) = path_parts(path);
+    let (path, path_bytes_hex) = path_parts_for_report(path);
     gaps.push(ScanGap {
         path,
         path_bytes_hex,
@@ -707,7 +703,7 @@ fn scan_internal(
                 );
             }
             let node = &nodes[index];
-            let (path, path_bytes_hex) = path_parts(&node.path);
+            let (path, path_bytes_hex) = path_parts_for_report(&node.path);
             directories.push(DirectoryMeasurement {
                 path,
                 path_bytes_hex,
@@ -817,7 +813,7 @@ fn add_file(
     if seen.insert(inode(metadata)) {
         *allocated_total = add(*allocated_total, allocated)?;
     }
-    let (path, path_bytes_hex) = path_parts(path);
+    let (path, path_bytes_hex) = path_parts_for_report(path);
     files.push(FileMeasurement {
         path,
         path_bytes_hex,
@@ -839,7 +835,7 @@ fn report(
     directories: Vec<DirectoryMeasurement>,
     gaps: Vec<ScanGap>,
 ) -> ScanReport {
-    let (root, root_bytes_hex) = path_parts(root_path);
+    let (root, root_bytes_hex) = path_parts_for_report(root_path);
     ScanReport {
         root,
         root_bytes_hex,

@@ -1,7 +1,5 @@
 //! Lock-free metadata for managed Scratch bundles.
-//!
-//! Each bundle record and its optional finish event are immutable files
-//! created once. Independent producers never contend on a shared lease lock.
+//! Immutable bundle and finish records let producers operate independently.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -235,20 +233,58 @@ fn owner_details(pid: u32) -> io::Result<(u32, Option<String>, String, String)> 
     if start.is_empty() || command.is_empty() {
         return Err(io::Error::other("producer process identity is unavailable"));
     }
-    Ok((
-        uid,
-        None,
-        format!("macos:{}", start.trim()),
-        command.trim().to_owned(),
-    ))
+    Ok((uid, None, format!("macos:{start}"), command))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn owner_details(_: u32) -> io::Result<(u32, Option<String>, String, String)> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "native owner identity is unsupported",
-    ))
+#[cfg(target_os = "linux")]
+pub(crate) fn live_cwd_in(bundle: &Path) -> io::Result<bool> {
+    Ok(fs::read_dir("/proc")?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .as_encoded_bytes()
+                .iter()
+                .all(u8::is_ascii_digit)
+        })
+        .filter_map(|entry| fs::read_link(entry.path().join("cwd")).ok())
+        .any(|cwd| cwd.starts_with(bundle)))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn live_cwd_in(bundle: &Path) -> io::Result<bool> {
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Err(io::Error::other("process table unavailable"));
+    }
+    let mut pids = vec![0; count as usize * 2];
+    let bytes = std::mem::size_of_val(pids.as_slice()) as libc::c_int;
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if count <= 0 || count as usize >= pids.len() {
+        return Err(io::Error::other("incomplete process table"));
+    }
+    Ok(pids.into_iter().take(count as usize).any(|pid| {
+        let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        if unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        } != size
+        {
+            return false;
+        }
+        let path = unsafe { info.assume_init() }.pvi_cdir.vip_path;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(path.as_ptr().cast(), std::mem::size_of_val(&path))
+        };
+        std::ffi::CStr::from_bytes_until_nul(bytes)
+            .is_ok_and(|cwd| Path::new(OsStr::from_bytes(cwd.to_bytes())).starts_with(bundle))
+    }))
 }
 
 fn caller_owner() -> io::Result<ProcessOwner> {
