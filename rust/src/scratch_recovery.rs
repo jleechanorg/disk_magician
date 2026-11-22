@@ -2,10 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
 // An index record is a path pointer, not the potentially large sidecar inventory.
@@ -37,67 +36,6 @@ struct IndexRecord {
     entry: IndexEntry,
 }
 
-pub(crate) fn acquire_operation_lock() -> io::Result<File> {
-    let path = index_dir()?;
-    let open_directory = || {
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(&path)
-    };
-    let directory = match open_directory() {
-        Ok(directory) => directory,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            // An interrupted first apply can leave a checkpoint before the
-            // canonical quarantine actuator creates its private index.
-            DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&path)?;
-            open_directory()?
-        }
-        Err(error) => return Err(error),
-    };
-    let uid = unsafe { libc::geteuid() };
-    let directory_metadata = directory.metadata()?;
-    if directory_metadata.uid() != uid || directory_metadata.mode() & 0o077 != 0 {
-        return Err(io::Error::other("unsafe quarantine index directory"));
-    }
-    // Canonical remove, restore and reconcile lock this inode.
-    let fd = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            c"operations.lock".as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let lock = unsafe { File::from_raw_fd(fd) };
-    let metadata = lock.metadata()?;
-    if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-        return Err(io::Error::other("unsafe quarantine operation lock"));
-    }
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let named_lock = fs::symlink_metadata(path.join("operations.lock"))?;
-    let named_directory = fs::symlink_metadata(&path)?;
-    if !named_lock.is_file()
-        || !named_directory.is_dir()
-        || (named_lock.dev(), named_lock.ino()) != (metadata.dev(), metadata.ino())
-        || (named_directory.dev(), named_directory.ino())
-            != (directory_metadata.dev(), directory_metadata.ino())
-    {
-        return Err(io::Error::other(
-            "quarantine operation lock identity changed",
-        ));
-    }
-    Ok(lock)
-}
-
 pub(crate) fn restore_is_settled(original: &Path, identity: (u64, u64)) -> io::Result<bool> {
     let (status, entry) = find_entry(original, identity, None)?;
     Ok(status == "no_match"
@@ -118,7 +56,6 @@ pub(crate) fn hint(
     relative: &str,
     identity: Option<(u64, u64)>,
     recorded_id: Option<&str>,
-    writer_available: bool,
 ) -> RecoveryHint {
     let mut hint = RecoveryHint {
         path: relative.to_owned(),
@@ -129,8 +66,7 @@ pub(crate) fn hint(
         entry: None,
     };
     let path = Path::new(relative);
-    if !writer_available
-        || path.as_os_str().is_empty()
+    if path.as_os_str().is_empty()
         || !path
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
@@ -206,9 +142,25 @@ fn find_entry(
         matched = Some(record.entry);
     }
     let after = fs::symlink_metadata(directory)?;
-    if (before.dev(), before.ino(), before.mode(), before.uid())
-        != (after.dev(), after.ino(), after.mode(), after.uid())
-    {
+    if (
+        before.dev(),
+        before.ino(),
+        before.mode(),
+        before.uid(),
+        before.mtime(),
+        before.mtime_nsec(),
+        before.ctime(),
+        before.ctime_nsec(),
+    ) != (
+        after.dev(),
+        after.ino(),
+        after.mode(),
+        after.uid(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    ) {
         return Err(io::Error::other("quarantine index changed during lookup"));
     }
     Ok((

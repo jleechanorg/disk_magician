@@ -5,33 +5,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // Match the existing quarantine actuator's 256 MiB manifest limit.
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
-
-const LOCK_EX: i32 = 2;
-const LOCK_NB: i32 = 4;
-const LOCK_UN: i32 = 8;
-const F_GETFD: i32 = 1;
-const F_SETFD: i32 = 2;
-const FD_CLOEXEC: i32 = 1;
-#[cfg(target_os = "linux")]
-const O_NOFOLLOW: i32 = 0o400000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW: i32 = 0x100;
-
-unsafe extern "C" {
-    fn flock(fd: i32, operation: i32) -> i32;
-    fn fcntl(fd: i32, command: i32, ...) -> i32;
-    fn geteuid() -> u32;
-}
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -93,69 +74,6 @@ pub struct Report {
     pub receipts: Vec<Receipt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RecoveryHint>,
-}
-
-struct ResumeLock(File);
-
-impl Drop for ResumeLock {
-    fn drop(&mut self) {
-        // Closing the descriptor also releases the advisory lock on process exit.
-        unsafe { flock(self.0.as_raw_fd(), LOCK_UN) };
-    }
-}
-
-fn acquire_scratch_lock() -> io::Result<ResumeLock> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| io::Error::other("HOME unavailable for Scratch lock"))?;
-    let home_meta = fs::symlink_metadata(&home)?;
-    if !home_meta.is_dir()
-        || home_meta.uid() != unsafe { geteuid() }
-        || home_meta.mode() & 0o022 != 0
-    {
-        return Err(io::Error::other("unsafe HOME for Scratch lock"));
-    }
-    let lock_dir = home.join(".disk_magician_locks");
-    match DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&lock_dir)
-    {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    let dir_meta = fs::symlink_metadata(&lock_dir)?;
-    if !dir_meta.is_dir() || dir_meta.uid() != home_meta.uid() || dir_meta.mode() & 0o077 != 0 {
-        return Err(io::Error::other("unsafe Scratch lock directory"));
-    }
-    let lock_path = lock_dir.join("scratch_cleanup.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(O_NOFOLLOW)
-        .open(&lock_path)?;
-    let metadata = file.metadata()?;
-    let current = fs::symlink_metadata(&lock_path)?;
-    if !metadata.is_file()
-        || metadata.uid() != home_meta.uid()
-        || metadata.mode() & 0o077 != 0
-        || metadata.dev() != current.dev()
-        || metadata.ino() != current.ino()
-    {
-        return Err(io::Error::other("unsafe Scratch cleanup lock"));
-    }
-    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-    if result != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "Scratch cleanup is already in progress",
-        ));
-    }
-    Ok(ResumeLock(file))
 }
 
 fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
@@ -268,7 +186,7 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&temp)?;
     serde_json::to_writer(&mut file, state).map_err(io::Error::other)?;
     file.write_all(b"\n")?;
@@ -277,25 +195,13 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
-fn legacy_apply(manifest: &Path, digest: &str, relative: &str, lock_fd: i32) -> io::Result<String> {
-    let mut command = Command::new(crate::legacy_cli()?);
-    command
-        .env("DISK_MAGICIAN_SCRATCH_LOCK_FD", lock_fd.to_string())
+fn legacy_apply(manifest: &Path, digest: &str, relative: &str) -> io::Result<String> {
+    let output = Command::new(crate::legacy_cli()?)
+        .env_remove("DISK_MAGICIAN_SCRATCH_LOCK_FD")
         .args(["quarantine", "scratch-apply", "--manifest"])
         .arg(manifest)
-        .args(["--manifest-sha256", digest, "--path", relative]);
-    // Keep the writer alive across an interrupted parent only in the actuator.
-    // Metadata and volume probes have no need to inherit the descriptor.
-    unsafe {
-        command.pre_exec(move || {
-            let flags = fcntl(lock_fd, F_GETFD);
-            if flags < 0 || fcntl(lock_fd, F_SETFD, flags & !FD_CLOEXEC) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let output = command.output()?;
+        .args(["--manifest-sha256", digest, "--path", relative])
+        .output()?;
     if !output.status.success() {
         return Err(io::Error::other("exact manifest apply failed"));
     }
@@ -340,7 +246,6 @@ pub fn apply(
     if fs::canonicalize(manifest_path)?.as_path() == resume_path {
         return Err(io::Error::other("resume state cannot replace the manifest"));
     }
-    let writer = acquire_scratch_lock();
     let existing_state = if resume_path.exists() {
         let meta = fs::symlink_metadata(resume_path)?;
         if !meta.is_file() {
@@ -379,29 +284,11 @@ pub fn apply(
                 "restored path must match the in-flight entry",
             ));
         }
-        let _writer = match writer {
-            Ok(lock) => lock,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                return Ok(report_recovery_required(&state, &manifest.entries, false));
-            }
-            Err(error) => return Err(error),
-        };
-        let _transaction = match scratch_recovery::acquire_operation_lock() {
-            Ok(lock) => lock,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                return Ok(report_recovery_required(&state, &manifest.entries, false));
-            }
-            Err(error) => return Err(error),
-        };
         return acknowledge_restored(state, &manifest.entries, path, resume_path);
     }
     if let Some(state) = existing_state.as_ref() {
         if state.status.starts_with("applying:") {
-            return Ok(report_recovery_required(
-                state,
-                &manifest.entries,
-                writer.is_ok(),
-            ));
+            return Ok(report_recovery_required(state, &manifest.entries));
         }
     }
     let initial_paths = if existing_state.is_none() {
@@ -412,36 +299,6 @@ pub fn apply(
         )?)
     } else {
         None
-    };
-    let lock = match writer {
-        Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            if let Some(state) = existing_state.as_ref() {
-                return Ok(Report {
-                    status: "deferred:scratch-cleanup-in-progress".into(),
-                    complete: false,
-                    target_reached: false,
-                    target_used_bytes,
-                    used_before_bytes: state.used_before_bytes,
-                    used_after_bytes: state.used_after_bytes,
-                    pending_paths: state.pending_paths.iter().cloned().collect(),
-                    receipts: state.receipts.clone(),
-                    recovery: None,
-                });
-            }
-            return Ok(Report {
-                status: "deferred:scratch-cleanup-in-progress".into(),
-                complete: false,
-                target_reached: false,
-                target_used_bytes,
-                used_before_bytes: None,
-                used_after_bytes: None,
-                pending_paths: initial_paths.clone().unwrap_or_default(),
-                receipts: Vec::new(),
-                recovery: None,
-            });
-        }
-        Err(error) => return Err(error),
     };
     let measured = mounted_usage(
         &manifest.root,
@@ -535,9 +392,9 @@ pub fn apply(
         state.in_flight_quarantine_id = None;
         state.used_after_bytes = Some(used_before);
         write_state(resume_path, &state)?;
-        let result = match legacy_apply(manifest_path, digest, &path, lock.0.as_raw_fd()) {
+        let result = match legacy_apply(manifest_path, digest, &path) {
             Ok(result) => result,
-            Err(_) => return Ok(report_recovery_required(&state, &manifest.entries, true)),
+            Err(_) => return Ok(report_recovery_required(&state, &manifest.entries)),
         };
         if result == "deferred:operation-lock" {
             state.status = result;
@@ -551,7 +408,7 @@ pub fn apply(
                     write_state(resume_path, &state)?;
                 }
             }
-            return Ok(report_recovery_required(&state, &manifest.entries, true));
+            return Ok(report_recovery_required(&state, &manifest.entries));
         }
         state.pending_paths.pop_front();
         state.receipts.push(Receipt {
@@ -758,11 +615,7 @@ fn report(state: ResumeState) -> Report {
     }
 }
 
-fn report_recovery_required(
-    state: &ResumeState,
-    entries: &[Entry],
-    writer_available: bool,
-) -> Report {
+fn report_recovery_required(state: &ResumeState, entries: &[Entry]) -> Report {
     let recovery = state.pending_paths.front().map(|path| {
         let identity = entries
             .iter()
@@ -773,7 +626,6 @@ fn report_recovery_required(
             path,
             identity,
             state.in_flight_quarantine_id.as_deref(),
-            writer_available,
         )
     });
     Report {

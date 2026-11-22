@@ -97,7 +97,7 @@ The compatibility apply route is `disk-magician quarantine scratch-apply
 the referenced digest. Regular files use a file identity. Managed dated
 runs use a full content inventory and stay lease-backed cleanup units.
 Files with path characters the canonical deletion log cannot represent
-remain in place. Direct apply defers immediately when another Scratch writer is active.
+remain in place. The compatibility backend can report its own contention.
 Both staged executables are required until the Rust
 quarantine and recovery port is complete.
 
@@ -119,8 +119,8 @@ without selection flags to use its saved queue. The candidate measures the
 verified mount before applying and after each completed entry. It saves
 the remaining queue when usage reaches the target or measurement is unavailable.
 An interrupted mutation reports `recovery_required` and leaves the in-flight
-entry in the checkpoint. The existing legacy writer lock returns immediately
-under contention.
+entry in the checkpoint. Give each overlapping run a distinct resume file.
+The Rust coordinator takes no filesystem cleanup lock.
 
 ### Remaining compatibility adapters
 
