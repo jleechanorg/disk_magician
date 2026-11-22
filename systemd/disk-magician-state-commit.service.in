@@ -1,0 +1,9 @@
+[Unit]
+Description=Disk Magician backup commit and bounded publication
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=DISK_MAGICIAN_TRIGGER=timer
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart="%h/.local/bin/diskm" state-commit --repo "%h/.disk_magician_backup" --publish

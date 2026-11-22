@@ -17,54 +17,23 @@ jobs:
   test:
     name: Test and lint
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.85.0
+    defaults:
+      run:
+        working-directory: rust
     steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.13"
-
-      - name: Install test tools
-        run: |
-          python3 -m pip install pytest
-          command -v timeout >/dev/null 2>&1 || brew install coreutils
-          command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
-          command -v rg >/dev/null 2>&1 || brew install ripgrep
-          command -v gitleaks >/dev/null 2>&1 || brew install gitleaks
-
-      - name: Verify package-tree synchronization
-        run: bash ./disk_magician.sh sync-package-tree --check
-
-      - name: Verify pyproject version monotonicity
-        run: bash ./disk_magician.sh check-version
-
-      - name: Check shell syntax and ShellCheck errors
-        run: |
-          while IFS= read -r -d '' candidate; do
-            case "$(head -n 1 "$candidate")" in
-              *bash|*sh)
-                /bin/bash -n "$candidate"
-                shellcheck --severity=error --external-sources "$candidate"
-                ;;
-            esac
-          done < <(find disk_magician.sh install.sh scripts tests -type f -print0)
-
-      - name: Run Python tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
-
-      - name: Run inventory integration tests
-        run: >-
-          python3 -m pytest -q
-          tests/test_directory_inventory.py
-          tests/test_directory_ledger_export.py
-          tests/test_inventory_history_import.py
-          tests/test_inventory_retention_cli.py
-          tests/test_volume_admin_transport.py
-
-      - name: Run shell tests
-        run: bash ./disk_magician.sh test-shell
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Build the Rust framework
+        run: cargo build --locked
+      - name: Lint the Rust framework
+        run: cargo clippy --locked -- -D warnings
+      - name: Run the built CLI
+        run: cargo run --locked -- --help

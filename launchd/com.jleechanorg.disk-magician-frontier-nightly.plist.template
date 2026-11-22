@@ -33,7 +33,7 @@
     <string>@HOME@/.local/bin/diskm</string>
     <string>frontier-nightly</string>
     <string>--granularity-gib</string>
-    <string>5</string>
+    <string>0.09765625</string>
     <string>--wall-clock-cap</string>
     <string>43200</string>
     <string>--output-default</string>

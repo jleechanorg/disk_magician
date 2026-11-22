@@ -20,9 +20,14 @@ All temporary, disposable build, test scratch, and evidence paths resolve dynami
    # Allocate a managed build or evidence directory (auto-falls back to /tmp/<repo>/<kind>/... only if no Scratch volume is configured)
    OUT_DIR="$(diskm scratch-new <repo-path> <purpose> --kind build)"
    EVIDENCE_DIR="$(diskm scratch-new <repo-path> <purpose> --kind evidence)"
+   # ...produce output in "$OUT_DIR"...
+   diskm scratch-finish "$OUT_DIR" completed   # or: abandoned
    ```
-   - Pass `--owner-pid <PID>` when allocating for a long-lived background process.
-   - `diskm scratch-new` enforces volume health, admission control, 24-hour recency, and active-lease protection.
+   - Any process of the same user may run `scratch-finish`; it does not have to be the allocating shell.
+   - A build run that is never finished becomes removable once its recorded owner has exited and its files have been untouched for the default content floor (`CONTENT_FLOOR_HOURS` in diskm's `rust/src/time_windows.rs`). Open files, live working directories, repositories and PR-evidence holds still protect it. Evidence runs are never removed this way.
+   - Pass `--owner-pid <PID>` (a process of the same user) to bind the run to a long-lived producer; the run is then kept while that process lives.
+   - Put run output here, not under `scratch-dir`: files outside a leased run are never removed automatically.
+   - `diskm scratch-new --kind build|evidence` places new leased runs at `<Scratch>/runs/YYYYMMDD/<repo>/<purpose>-<UTC timestamp>-<allocator pid>-<nonce>/`. The lease records its kind and producer owner. Detached Git worktrees created with `--detach` stay under `~/.worktrees/<repo>/`. The ordinary cleanup floor is `CONTENT_FLOOR_HOURS` in `rust/src/time_windows.rs`. See the [operator playbook](../../../docs/operator-playbook.md#disposable-content-uses-the-default-content-floor) for cleanup policy and scoped overrides.
 
 2. **Ad-Hoc Helper Files, PR Bodies, Frame Dumps, Server Logs & Ephemeral Scripts**
    ```bash

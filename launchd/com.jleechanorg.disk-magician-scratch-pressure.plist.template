@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Every 20 minutes, run safe top-level Scratch pruning and the existing
-     quota reclaim. Each step requires the verified Scratch mount and the
-     available-space floor; the ordinary /tmp sweep keeps its hourly cadence. -->
+<!-- On the SCRATCH_PRESSURE_INTERVAL cadence (rust/src/time_windows.rs), check the registered Scratch quota and reclaim
+     qualified files in completed native build runs. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -10,8 +9,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>@HOME@/.local/bin/diskm</string>
-    <string>tmp-scratch-sweep</string>
-    <string>--scratch-only</string>
+    <string>scratch-sweep</string>
     <string>--clean</string>
   </array>
   <key>EnvironmentVariables</key>
@@ -22,7 +20,7 @@
     <string>@HOME@</string>
   </dict>
   <key>StartInterval</key>
-  <integer>1200</integer>
+  <integer>@SCRATCH_PRESSURE_INTERVAL_SECONDS@</integer>
   <key>StandardOutPath</key>
   <string>@HOME@/Library/Logs/disk-magician-scratch-pressure.log</string>
   <key>StandardErrorPath</key>

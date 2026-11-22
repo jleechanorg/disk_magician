@@ -1,0 +1,27 @@
+name: Production LOC budget
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-loc-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Production LOC budget
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Enforce Rust ceiling and legacy net-growth limit
+        run: node .github/scripts/check_loc_budget.js "$BASE_SHA" "$HEAD_SHA" 12000 250

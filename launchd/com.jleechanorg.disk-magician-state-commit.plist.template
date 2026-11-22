@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- On the STATE_COMMIT_INTERVAL cadence (rust/src/time_windows.rs), commit the latest native snapshot to the backup repository and publish a bounded, scanned fast-forward. git and gitleaks must be on PATH. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-state-commit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>state-commit</string>
+    <string>--repo</string>
+    <string>@HOME@/.disk_magician_backup</string>
+    <string>--publish</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DISK_MAGICIAN_TRIGGER</key>
+    <string>timer</string>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>PATH</key>
+    <string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>@STATE_COMMIT_INTERVAL_SECONDS@</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-state-commit.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-state-commit.log</string>
+</dict>
+</plist>

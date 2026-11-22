@@ -5,7 +5,7 @@
   (bead disk_magician-disk-fill-prevention-scheduled-cleanup-q6l.3).
 
   Action:    runs diskm cleanup-code-sign-clones --clean with CODE_SIGN_CLONES_APPROVED=1.
-             Enforces 600s minimum extraction age, verifies open file handles via lsof,
+             Enforces 172800s (48h) minimum extraction age, verifies open file handles via lsof,
              and fails closed on unverified paths.
 
   Schedule:  Every 12 hours (StartInterval=43200s).
