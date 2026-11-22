@@ -209,3 +209,47 @@ fn reports_up_to_date_without_pushing() {
     ));
     assert_eq!(remote_tip(&f.work), before);
 }
+
+#[test]
+fn replacement_objects_cannot_hide_an_oversized_commit() {
+    let f = fixture("replace");
+    let before = remote_tip(&f.work);
+    let big = add(&f.work, "big.bin", &[7u8; 2048]);
+    // A replacement commit with only a small file, standing in for `big`.
+    sh(&f.work, &["reset", "-q", "--hard", "HEAD~1"]);
+    let small = add(&f.work, "small.txt", b"small\n");
+    sh(&f.work, &["reset", "-q", "--hard", &big]);
+    sh(&f.work, &["replace", &big, &small]);
+    let plan = observe(&f.work, "origin", "main", 20, 1024, clean).unwrap();
+    assert!(
+        matches!(&plan, Plan::Hold { reason, .. } if reason == "oversize_first_pending"),
+        "{plan:?}"
+    );
+    assert_eq!(remote_tip(&f.work), before);
+}
+
+#[test]
+fn holds_on_a_shallow_repository() {
+    let f = fixture("shallow");
+    add(&f.work, "one.txt", b"one\n");
+    sh(&f.work, &["push", "-q", "origin", "main"]);
+    let shallow = f.root.join("shallow");
+    let url = format!("file://{}", f.root.join("remote.git").display());
+    sh(
+        &f.root,
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &url,
+            shallow.to_str().unwrap(),
+        ],
+    );
+    add(&shallow, "two.txt", b"two\n");
+    let plan = observe(&shallow, "origin", "main", 20, 1024, clean).unwrap();
+    assert!(
+        matches!(&plan, Plan::Hold { reason, .. } if reason == "substituted_history"),
+        "{plan:?}"
+    );
+}

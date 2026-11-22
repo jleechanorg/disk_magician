@@ -11,6 +11,11 @@ use std::time::SystemTime;
 /// GitHub rejects any pushed file above 100 MB.
 pub const MAX_BLOB_BYTES: u64 = 104_857_600;
 
+/// Replacement objects would let the size, ancestry and secret checks inspect
+/// different objects from the ones a push transfers, so every subprocess
+/// reads the original history.
+const NO_REPLACE: &str = "GIT_NO_REPLACE_OBJECTS";
+
 pub struct Options {
     pub repo: PathBuf,
     pub remote: String,
@@ -41,6 +46,7 @@ pub enum Plan {
 
 fn git(repo: &Path, args: &[&str]) -> io::Result<String> {
     let output = Command::new("git")
+        .env(NO_REPLACE, "1")
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -58,6 +64,7 @@ fn git(repo: &Path, args: &[&str]) -> io::Result<String> {
 
 fn git_ok(repo: &Path, args: &[&str]) -> io::Result<bool> {
     Ok(Command::new("git")
+        .env(NO_REPLACE, "1")
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -109,6 +116,7 @@ fn largest_blob(repo: &Path, commit: &str) -> io::Result<Option<(u64, String)>> 
         return Ok(None);
     }
     let mut child = Command::new("git")
+        .env(NO_REPLACE, "1")
         .arg("-C")
         .arg(repo)
         .args(["cat-file", "--batch-check=%(objectsize)"])
@@ -150,6 +158,7 @@ pub type Scanner = fn(&Path, &str) -> io::Result<Result<(), &'static str>>;
 
 fn secret_scan(repo: &Path, range: &str) -> io::Result<Result<(), &'static str>> {
     let status = Command::new("gitleaks")
+        .env(NO_REPLACE, "1")
         .args([
             "git",
             "--no-banner",
@@ -198,6 +207,14 @@ pub fn observe(
         reason: reason.to_owned(),
         detail,
     };
+    // Shallow boundaries and grafts also substitute history that a push does
+    // not, so the checks above cannot vouch for what would be sent.
+    let grafts = git(repo, &["rev-parse", "--git-path", "info/grafts"])?;
+    if git(repo, &["rev-parse", "--is-shallow-repository"])?.trim() != "false"
+        || repo.join(grafts.trim()).exists()
+    {
+        return Ok(hold("substituted_history", json!({"local": local})));
+    }
     if local == upstream {
         return Ok(Plan::UpToDate { upstream });
     }
