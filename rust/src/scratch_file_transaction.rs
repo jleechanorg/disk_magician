@@ -62,14 +62,26 @@ impl FileIdentity {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Outcome {
-    Removed { bytes: u64, parent_synced: bool },
+    Removed {
+        allocated_bytes: u64,
+        parent_synced: bool,
+    },
     AlreadyAbsent,
     Changed,
     RestoredMismatch,
-    DeferredOpen { open_pids: Vec<u32> },
-    DeferredCheck { reason: String },
-    RecoveryRequired { stage_created: bool, reason: String },
-    Unsupported { reason: String },
+    DeferredOpen {
+        open_pids: Vec<u32>,
+    },
+    DeferredCheck {
+        reason: String,
+    },
+    RecoveryRequired {
+        stage_created: bool,
+        reason: String,
+    },
+    Unsupported {
+        reason: String,
+    },
 }
 
 /// Remove one nominated single-link regular file from the captured Scratch root.
@@ -183,11 +195,12 @@ fn remove_from_parent(
     if !expected.matches_after_rename(FileIdentity::read(&staged.metadata()?)) {
         return restore(Outcome::RestoredMismatch);
     }
+    let allocated_bytes = staged.metadata()?.blocks().saturating_mul(512);
     if unsafe { libc::unlinkat(private_fd, c"item".as_ptr(), 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(Outcome::Removed {
-        bytes: expected.size,
+        allocated_bytes,
         parent_synced: private
             .sync_all()
             .and_then(|()| remove_stage_dir(anchor, &stage))

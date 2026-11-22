@@ -2,24 +2,56 @@
 
 use serde_json::{json, Value};
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn state_dir(override_path: Option<&Path>) -> io::Result<PathBuf> {
-    let root = match override_path {
-        Some(path) => path.to_path_buf(),
-        None => {
-            match std::env::var_os("DISK_MAGICIAN_STATE_DIR").filter(|value| !value.is_empty()) {
-                Some(path) => PathBuf::from(path),
-                None => PathBuf::from(std::env::var_os("HOME").ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "HOME is unavailable")
-                })?)
-                .join(".disk_magician_state"),
-            }
-        }
+pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(io::Error::other(
+            "JSON input must be a bounded regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::other("JSON input exceeds the size limit"));
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn read_json_if_exists<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    limit: u64,
+) -> io::Result<Option<T>> {
+    let bytes = match read_bounded(path, limit) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(io::Error::other)
+}
+
+pub fn state_dir(override_path: Option<&Path>) -> io::Result<PathBuf> {
+    let root = override_path
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os("DISK_MAGICIAN_STATE_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".disk_magician_state"))
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is unavailable"))?;
     if !root.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -166,17 +166,7 @@ pub fn canonical_temp_scopes(
 
 pub fn read_ledger(state_dir: &Path) -> io::Result<LedgerSummary> {
     let path = state_dir.join(LEDGER_PATH);
-    let metadata = fs::symlink_metadata(&path)?;
-    if !metadata.file_type().is_file() {
-        return Err(io::Error::other("directory ledger is not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_LEDGER_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_LEDGER_BYTES {
-        return Err(io::Error::other("directory ledger exceeds the read limit"));
-    }
+    let bytes = crate::job_receipt::read_bounded(&path, MAX_LEDGER_BYTES)?;
     let ledger: Ledger = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     Ok(LedgerSummary {
         rows: ledger

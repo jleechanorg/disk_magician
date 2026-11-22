@@ -1,5 +1,6 @@
 //! Bounded apply orchestration for one digest-bound Scratch manifest.
 
+use crate::job_receipt::read_json_if_exists;
 use crate::scratch_file_transaction::{self, FileIdentity, Outcome};
 use crate::scratch_lease::{self, BundleKind, FinishOutcome, OwnerProcessState};
 use crate::scratch_recovery::{self, RecoveryHint};
@@ -8,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -89,6 +90,8 @@ struct ResumeState {
     native_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_stage_identity: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_audit: Option<(PathBuf, String)>,
     used_before_bytes: Option<u64>,
     used_after_bytes: Option<u64>,
 }
@@ -109,28 +112,9 @@ pub struct Report {
     pub native_recovery_stage: Option<String>,
 }
 
-fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(io::Error::other(
-            "actuator input must be a bounded regular file",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(io::Error::other("actuator input exceeds the size limit"));
-    }
-    Ok(bytes)
-}
-
 fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
     // Hash and parse the same bytes, even if the path is replaced after open.
-    let bytes = read_bounded(path)?;
+    let bytes = crate::job_receipt::read_bounded(path, MAX_MANIFEST_BYTES)?;
     if format!("{:x}", Sha256::digest(&bytes)) != digest {
         return Err(io::Error::other("manifest digest mismatch"));
     }
@@ -198,7 +182,8 @@ pub(crate) fn recover_sweeps(state: &Path, root: &Path) -> io::Result<Vec<serde_
         let path = attempt.path();
         let resume = path.join("resume.json");
         let recover = || -> io::Result<Option<String>> {
-            let Some(saved) = read_state(&resume)? else {
+            let Some(saved) = read_json_if_exists::<ResumeState>(&resume, MAX_MANIFEST_BYTES)?
+            else {
                 return Ok(None);
             };
             let Some(relative) = saved.status.strip_prefix("applying:") else {
@@ -237,17 +222,6 @@ pub(crate) fn recover_sweeps(state: &Path, root: &Path) -> io::Result<Vec<serde_
         }
     }
     Ok(results)
-}
-
-fn read_state(path: &Path) -> io::Result<Option<ResumeState>> {
-    let bytes = match read_bounded(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(io::Error::other)
 }
 
 fn write_state(path: &Path, state: &ResumeState, create: bool) -> io::Result<()> {
@@ -318,7 +292,7 @@ pub fn apply(
     if fs::canonicalize(manifest_path)?.as_path() == resume_path {
         return Err(io::Error::other("resume state cannot replace the manifest"));
     }
-    let existing_state = read_state(resume_path)?;
+    let existing_state = read_json_if_exists::<ResumeState>(resume_path, MAX_MANIFEST_BYTES)?;
     if let Some(state) = &existing_state {
         if state.version != 1
             || state.manifest_sha256 != digest
@@ -411,9 +385,11 @@ pub fn apply(
         in_flight_quarantine_id: None,
         native_stage: None,
         native_stage_identity: None,
+        pending_audit: None,
         used_before_bytes: None,
         used_after_bytes: None,
     });
+    flush_audit(&mut state.pending_audit, true)?;
     let (filesystem_id, start_used) = match measured {
         Ok(usage) => usage,
         Err(error) => {
@@ -463,6 +439,8 @@ pub fn apply(
         let result = match cleanup_policy(&state.root, entry, manifest.before_epoch_seconds) {
             Err(reason) => reason,
             Ok(expected) => {
+                let log = deletion_log_path()?;
+                let timestamp = crate::job_receipt::timestamp(std::time::SystemTime::now())?;
                 let nonce = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(io::Error::other)?
@@ -490,8 +468,24 @@ pub fn apply(
                 match result {
                     Ok(Outcome::Removed {
                         parent_synced: true,
-                        ..
-                    }) => "removed",
+                        allocated_bytes,
+                    }) => {
+                        let path_field = root
+                            .path
+                            .join(&path)
+                            .to_string_lossy()
+                            .replace('\t', "\\t")
+                            .replace('\r', "\\r")
+                            .replace('\n', "\\n");
+                        state.pending_audit = Some((
+                            log,
+                            format!(
+                                "{timestamp}\tdiskm\tremove\t{}\t{path_field}\t{stage}\n",
+                                allocated_bytes.div_ceil(1024)
+                            ),
+                        ));
+                        "removed"
+                    }
                     Ok(Outcome::AlreadyAbsent) => "already-absent",
                     Ok(Outcome::Changed | Outcome::RestoredMismatch) => {
                         "kept:file-identity-changed"
@@ -526,6 +520,7 @@ pub fn apply(
         state.status = "receipt_pending_usage".into();
         write_state(resume_path, &state, create)?;
         create = false;
+        flush_audit(&mut state.pending_audit, false)?;
         if result == "removed" {
             match mounted_usage(&state.root, Some(&state.filesystem_id)) {
                 Ok((_, measured)) => used = measured,
@@ -545,6 +540,51 @@ pub fn apply(
     state.status = settled_status(&state, used, "deferred:pending-paths");
     write_state(resume_path, &state, create)?;
     Ok(report(state))
+}
+
+fn deletion_log_path() -> io::Result<PathBuf> {
+    if let Some(path) =
+        std::env::var_os("DISK_MAGICIAN_DELETION_LOG").filter(|path| !path.is_empty())
+    {
+        return Ok(path.into());
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is unavailable"))?;
+    Ok(PathBuf::from(home).join("Library/Logs/disk-magician-deletions.log"))
+}
+
+fn flush_audit(pending: &mut Option<(PathBuf, String)>, replay: bool) -> io::Result<()> {
+    let Some((path, row)) = pending.as_ref() else {
+        return Ok(());
+    };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let mut log = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !log.metadata()?.is_file() {
+        return Err(io::Error::other("deletion log must be a regular file"));
+    }
+    if replay {
+        for previous in io::BufReader::new(&log).split(b'\n') {
+            if previous? == row.trim_end_matches('\n').as_bytes() {
+                log.sync_all()?;
+                *pending = None;
+                return Ok(());
+            }
+        }
+    }
+    log.write_all(row.as_bytes())?;
+    log.sync_all()?;
+    *pending = None;
+    Ok(())
 }
 
 fn selected_manifest_paths(

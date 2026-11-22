@@ -58,6 +58,10 @@ The actuator checks the captured identity through the stage descriptor.
 restores the captured file if its original name is free. If a crash leaves
 neither name, the checkpoint reports an unresolved operation. A closed lease
 and an open-file observation depend on producer cooperation after the check.
+After a confirmed removal, the checkpoint saves its pending marked log row.
+The actuator appends that row to the existing deletion log. Resuming the
+same attempt replays a missing row and recognizes an already-present row.
+Recorded size is the inode allocation measured before removal.
 
 `snapshot --state-dir DIR` writes a partial capacity snapshot and a terminal
 receipt locally, including when the initial capacity probe fails. A failed run

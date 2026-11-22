@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io;
-use std::io::{Read, Write};
-use std::os::unix::fs::MetadataExt;
+use std::io::{self, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1227,27 +1226,7 @@ fn report_from_checkpoint(path: &Path, mut saved: ResumeCheckpoint) -> Report {
 pub(crate) fn load_checkpoint<T: serde::de::DeserializeOwned>(
     path: &Path,
 ) -> io::Result<Option<T>> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    if !metadata.file_type().is_file() {
-        return Err(io::Error::other("resume checkpoint must be a regular file"));
-    }
-    if metadata.len() > CHECKPOINT_MAX_BYTES {
-        return Err(io::Error::other("resume checkpoint exceeds the read limit"));
-    }
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(CHECKPOINT_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > CHECKPOINT_MAX_BYTES {
-        return Err(io::Error::other("resume checkpoint exceeds the read limit"));
-    }
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(io::Error::other)
+    crate::job_receipt::read_json_if_exists(path, CHECKPOINT_MAX_BYTES)
 }
 
 pub(crate) fn write_checkpoint(path: &Path, checkpoint: &impl Serialize) -> io::Result<()> {
@@ -1291,6 +1270,7 @@ pub(crate) fn write_checkpoint(path: &Path, checkpoint: &impl Serialize) -> io::
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&temp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
