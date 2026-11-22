@@ -639,3 +639,73 @@ fn inspect_bundle(args: &[OsString]) -> io::Result<String> {
     }))
     .map_err(io::Error::other)
 }
+
+/// What a lease written by the retired Python allocator says about a run.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LegacyLease {
+    Build { owner_live: bool },
+    OtherKind,
+}
+
+/// Reads `worktree_leases/*.json`, written by the retired Python allocator.
+/// A record counts only when both its path and its recorded directory identity
+/// match the run, so a replaced directory never inherits an old lease. Any
+/// process holding a recorded owner PID keeps the run; a PID reused by an
+/// unrelated process therefore errs toward keeping.
+pub(crate) fn legacy_lease(bundle: &Path) -> io::Result<Option<LegacyLease>> {
+    let directory = crate::job_receipt::state_dir(None)?.join("worktree_leases");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = fs::symlink_metadata(bundle)?;
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension() != Some(OsStr::new("json")) {
+            continue;
+        }
+        let Ok(bytes) = crate::job_receipt::read_bounded(&path, 1 << 20) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if record["path"].as_str().map(Path::new) != Some(bundle)
+            || record["checkout_dev"].as_u64() != Some(metadata.dev())
+            || record["checkout_ino"].as_u64() != Some(metadata.ino())
+        {
+            continue;
+        }
+        if record["kind"] != "build" {
+            return Ok(Some(LegacyLease::OtherKind));
+        }
+        // An owner entry without a usable PID is an unknown owner; keep the run.
+        // Only an absent top-level `owner` key is skipped; a null entry counts
+        // as an owner without a PID.
+        let owners: Vec<&serde_json::Value> = record["owners"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(record.get("owner"))
+            .collect();
+        let pids: Vec<u64> = owners
+            .iter()
+            .filter_map(|owner| owner["pid"].as_u64())
+            .collect();
+        if pids.len() != owners.len() {
+            return Ok(Some(LegacyLease::Build { owner_live: true }));
+        }
+        let alive = |pid: u64| {
+            let Ok(pid) = libc::pid_t::try_from(pid) else {
+                return true;
+            };
+            pid <= 1
+                || unsafe { libc::kill(pid, 0) } == 0
+                || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        };
+        let owner_live = pids.is_empty() || pids.into_iter().any(alive);
+        return Ok(Some(LegacyLease::Build { owner_live }));
+    }
+    Ok(None)
+}
