@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Hourly cleanup of completed native temp-file leases older than 72 hours. -->
+<!-- Cleanup of completed native temp-file leases past the default content floor (rust/src/time_windows.rs). -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -11,8 +11,6 @@
     <string>scratch-sweep</string>
     <string>--root</string>
     <string>system-tmp</string>
-    <string>--min-hours</string>
-    <string>72</string>
     <string>--clean</string>
   </array>
   <key>EnvironmentVariables</key>
@@ -21,7 +19,7 @@
     <string>@HOME@</string>
   </dict>
   <key>StartInterval</key>
-  <integer>3600</integer>
+  <integer>@TEMP_SWEEP_INTERVAL_SECONDS@</integer>
   <key>StandardOutPath</key>
   <string>@HOME@/Library/Logs/disk-magician-tmp-scratch.log</string>
   <key>StandardErrorPath</key>

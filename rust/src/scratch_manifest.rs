@@ -8,7 +8,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
@@ -371,7 +370,7 @@ pub fn create_in(
         paths,
         before_epoch_seconds,
         ScanOptions {
-            deadline: Duration::from_secs(30),
+            deadline: crate::time_windows::SCAN_DEADLINE,
             max_entries: 1_000_000,
         },
         1,

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Every 20 minutes, check the registered Scratch quota and reclaim
+<!-- On the SCRATCH_PRESSURE_INTERVAL cadence (rust/src/time_windows.rs), check the registered Scratch quota and reclaim
      qualified files in completed native build runs. -->
 <plist version="1.0">
 <dict>
@@ -11,8 +11,6 @@
     <string>@HOME@/.local/bin/diskm</string>
     <string>scratch-sweep</string>
     <string>--clean</string>
-    <string>--min-hours</string>
-    <string>@SCRATCH_BUDGET_FLOOR_HOURS@</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -22,7 +20,7 @@
     <string>@HOME@</string>
   </dict>
   <key>StartInterval</key>
-  <integer>1200</integer>
+  <integer>@SCRATCH_PRESSURE_INTERVAL_SECONDS@</integer>
   <key>StandardOutPath</key>
   <string>@HOME@/Library/Logs/disk-magician-scratch-pressure.log</string>
   <key>StandardErrorPath</key>

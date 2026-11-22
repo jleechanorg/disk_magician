@@ -1,7 +1,7 @@
 use diskm_shadow::{
     artifact_batch, artifact_discovery, evidence_holds, history, preview, reclaim_report, scan,
     scratch_dir, scratch_manifest, scratch_sweep, scratch_target, snapshot, state_commit,
-    state_publish, status,
+    state_publish, status, time_windows,
 };
 use serde::Serialize;
 use std::env;
@@ -26,6 +26,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-finish PATH [completed|abandoned]
   diskm scratch-index refresh [--root scratch|system-tmp]
   diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
+  diskm time-windows
   diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
   diskm state-publish --repo DIR [--remote NAME] [--branch NAME] [--max-commits N] [--state-dir DIR]
   diskm state-commit --repo DIR [--state-dir DIR] [--publish] [--max-commits N]
@@ -39,8 +40,8 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
 Preview --deadline-ms bounds Scratch discovery at any age. With --resume-state,
 preview can resume incomplete discovery. Verdict checks run after discovery.
 
-Status defaults to the current directory. Scan defaults to 30 seconds and
-100,000 visited paths. An incomplete scan emits a report and exits 75.
+Status defaults to the current directory. Scan defaults to 100,000 visited
+paths; `diskm time-windows` prints every default time window. An incomplete scan emits a report and exits 75.
 Preview defaults to the Scratch scope. Use --scope all for all supported locations.";
 
 const TEMPORARY_FAILURE: u8 = 75;
@@ -48,6 +49,7 @@ const USAGE_ERROR: u8 = 2;
 
 enum Operation {
     Help,
+    TimeWindows,
     Snapshot {
         root: PathBuf,
         output: Option<PathBuf>,
@@ -134,6 +136,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     match command {
         "-h" | "--help" | "help" => return Ok(Operation::Help),
         "snapshot" => return parse_snapshot(args),
+        "time-windows" => return Ok(Operation::TimeWindows),
         "state-publish" => return parse_state_publish(args),
         "state-commit" => return parse_state_commit(args),
         "evidence-holds" => return parse_evidence_holds(args),
@@ -147,11 +150,11 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
 
     let mut root = None;
     let mut state_dir = None;
-    let mut deadline_ms = 30_000;
+    let mut deadline_ms = time_windows::SCAN_DEADLINE.as_millis() as u64;
     let mut max_entries = 100_000;
-    let mut days = 7;
+    let mut days = time_windows::HISTORY_DAYS;
     let mut preview_scope = "scratch";
-    let mut min_hours = 48;
+    let mut min_hours = time_windows::CONTENT_FLOOR_HOURS;
     let mut max_candidates = None;
     let mut preview_deadline_ms = None;
     let mut preview_resume_state = None;
@@ -473,7 +476,7 @@ fn parse_scratch_nomination(
     let mut paths = Vec::new();
     let mut jobs = 1;
     let mut host_temp = false;
-    let mut deadline_ms = 30_000;
+    let mut deadline_ms = time_windows::SCAN_DEADLINE.as_millis() as u64;
     let mut max_entries = 100_000;
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -620,6 +623,20 @@ fn run(operation: Operation) -> io::Result<u8> {
                     print_json(&value)?;
                 }
             }
+        }
+        Operation::TimeWindows => {
+            let windows: serde_json::Map<String, serde_json::Value> = time_windows::listing()
+                .into_iter()
+                .map(|(name, window)| {
+                    let seconds = if window.subsec_nanos() == 0 {
+                        window.as_secs().into()
+                    } else {
+                        window.as_secs_f64().into()
+                    };
+                    (format!("{name}_SECONDS"), seconds)
+                })
+                .collect();
+            print_json(&windows)?;
         }
         Operation::Help => {
             writeln!(io::stdout().lock(), "{USAGE}")?;

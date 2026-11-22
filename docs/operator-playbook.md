@@ -67,7 +67,7 @@ This isolates disposable agent and CI artifacts so they cannot exhaust host free
 space. The automatic Scratch quota defaults trigger at 70% usage and aim for
 50%. Conservative cleanup and safety holds can leave usage above the target.
 Automatic pruning preserves the 64 MiB `.diskm-ballast` emergency reserve,
-48-hour content recency, live-PID, and active-lease protections.
+default content-floor recency, live-PID, and active-lease protections.
 
 Use the returned artifact directory rather than inventing paths under
 `/Volumes/diskm-scratch` or `~/Scratch`. A registered but unavailable, full or
@@ -170,7 +170,7 @@ underestimated cumulative-reservoir growth):
    `disk_used_gb` as a floor when `snapshot_coverage_pct` (or
    `snapshot_metadata.coverage_pct`) is **< 70%** — low-coverage mins
    are bogus (e.g. 714 GiB at 5.5% coverage). Prefer the ledger floor when
-   `ledger/topdown-5g.json` has a commit within **48h**; if the ledger is
+   `ledger/topdown-5g.json` has a commit within `LEDGER_STALE_HOURS` (`rust/src/time_windows.rs`); if the ledger is
    older, say so and do not invent bucket deltas from stale ledger HEAD.
    Live snapshot path:
    `<state-repo>/snapshots/disk_snapshot.json` (legacy
@@ -232,15 +232,17 @@ free-space alert, an investigation), do this **without being asked**, then act:
 
 ## 6-tier routine cleanup stack — unified safe maintenance
 
+> The jobs in this section belong to the retired Python runtime and are not installed. Their windows are historical; current defaults come only from `rust/src/time_windows.rs`, and the active native templates are rendered with `scripts/render_template.py`.
+
 **Emergency reclaim order:** Use the repo’s [diskm skill](../.agents/skills/diskm/SKILL.md) and the user-scope `disk-reclaim-playbook` skill. The first steps find the producer, apply per-worktree sparse exclusion where appropriate, and reclaim then trim Linux Scratch. Those steps accounted for ~108 of ~250 GiB recovered on 2026-11-13. The six tiers below cover routine maintenance.
 
 When cleaning or recommending disk cleanups on this workstation, execute the canonical 6-tier stack via `./disk_magician.sh clean` (or `--routine`), or fan out the tiers in parallel across `flash` subagents for large reclaims. Do not guess, write ad-hoc scripts, or require user steering to identify the primary high-yield cleanup targets:
 
 1. **Tier 1: Scratch Volume, Developer Caches & Temp (Safe, 10–150+ GiB)**:
    - Scripts: `cleanup_scratch_top_level.sh` (`scratch-prune`), `cleanup_tmp.sh`, `cleanup_pr_scratch.sh`, `cleanup_llm_inspector.sh`, `cleanup_dev_caches.sh`
-- Targets: C14-recognized top-level and managed Scratch entries older than the 48h default floor (preserving `.diskm-ballast`, live PIDs, active leases, secrets, and dirty/unpushed repositories), `/private/tmp` ephemera, and compiler/npm/cargo/test caches (`cleanup_dev_caches.sh` runs last so its `~/Library/Caches` walk does not hold `.owner-mutation.reuse-lock` ahead of fast cleaners).
+- Targets: C14-recognized top-level and managed Scratch entries older than the default content floor (preserving `.diskm-ballast`, live PIDs, active leases, secrets, and dirty/unpushed repositories), `/private/tmp` ephemera, and compiler/npm/cargo/test caches (`cleanup_dev_caches.sh` runs last so its `~/Library/Caches` walk does not hold `.owner-mutation.reuse-lock` ahead of fast cleaners).
 - `diskm clean` uses the measured host-free `<40 GiB` and Scratch-used `>=70%` thresholds only as triggers. Budget eviction is enabled only when the process also carries an operator-configured `DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=1..99`; pressure measurements never choose the percentage or create approval. A healthy host skips budget eviction even if the setting exists. If the trigger fires without a valid setting, `diskm clean` uses conservative `--available-floor` cleanup.
-- The automatic budget branch and `--budget-preserve-content-keeps` use the shared 48-hour default; only C14 `remove` verdicts are eligible there, so dirty, not-pushed, secret-like, ignored-data, unproven-content and unknown checks remain protected. Direct manual `scratch-prune --budget-pct` callers keep their explicit selected `--budget-floor-minutes` control, passed into C14 with the existing 60-minute minimum.
+- The automatic budget branch and `--budget-preserve-content-keeps` use the default content floor; only C14 `remove` verdicts are eligible there, so dirty, not-pushed, secret-like, ignored-data, unproven-content and unknown checks remain protected. Direct manual `scratch-prune --budget-pct` callers keep their explicit selected `--budget-floor-minutes` control, passed into C14 with the existing 60-minute minimum.
 - `diskm clean --dry-run` preserves the dry-run argument. Its budget projection uses candidate-size estimates and reports physical budget attainment as `unknown` when shared allocation cannot be ruled out. A completed clean measures Scratch usage after the pass; safe-candidate exhaustion above target reports `budget_unmet=1` with exit 75, while incomplete measurement reports `budget_unmet=unknown`. Data-volume free-space before/after is an observed interval delta, not bytes attributable to this cleanup alone.
 - Correct target arithmetic example: on a 200 GiB Scratch quota at 80% used (160 GiB allocated), a 20 GiB recovery target is 70% used; a 40 GiB recovery target is 60% used. Budget targets are percentages of quota usage.
 2. **Tier 2: Xcode & Simulator Caches (Safe, 10–50+ GiB)**:
@@ -251,14 +253,14 @@ When cleaning or recommending disk cleanups on this workstation, execute the can
    - Targets: Colima VM Docker prune (unused images/containers) + in-VM `fstrim -av` to shrink the host sparse disk (`~/.colima/_lima`).
 4. **Tier 4: Browser Sessions, Code-Sign Clones & Cloud Caches (Safe / Gated, 10–60+ GiB)**:
    - Scripts: `prune_aside_sessions.sh`, `cleanup_code_sign_clones.sh` (requires `CODE_SIGN_CLONES_APPROVED=1`), `evict_fileprovider.sh` (requires `FILEPROVIDER_EVICT_APPROVED=1`)
-   - Targets: Aside sessions with at least 48 hours of measured content inactivity (session-name dates do not establish age), dead macOS `code_sign_clone` bundles past the 48-hour default age, and uploaded/closed local CloudStorage FileProvider files past the 48-hour default. Explicit per-run age overrides remain available; C14, open-file, provider-state, and approval gates still apply.
+   - Targets: Aside sessions past the default content floor of measured content inactivity (session-name dates do not establish age), dead macOS `code_sign_clone` bundles past the default content floor, and uploaded/closed local CloudStorage FileProvider files past the default content floor. Explicit per-run age overrides remain available; C14, open-file, provider-state, and approval gates still apply.
 5. **Tier 5: Agent State Compaction, SQLite Vacuum & Rotated Logs (Safe, 5–20 GiB)**:
    - Scripts: `cleanup_antigravity_brain.sh`, `cleanup_codex_db.sh`, `vacuum_hermes_state.sh`, `cleanup_codex_documents.sh`, `cleanup_supervisor_logs.sh`, `cleanup_uv_cache.sh`
-   - Targets: retains Antigravity brain artifacts for 21 days and migration backups for 30 days, while preserving `conversations/` history; nested Antigravity worktrees and dormant Codex task documents use the 48-hour default. SQLite vacuum and orphaned uv-tool wheel cleanup retain their content-aware behavior. Rotated supervisor logs use the shared 48-hour floor; active logs and state remain protected.
+   - Targets: retains Antigravity brain artifacts for 21 days and migration backups for 30 days, while preserving `conversations/` history; nested Antigravity worktrees and dormant Codex task documents use the default content floor. SQLite vacuum and orphaned uv-tool wheel cleanup retain their content-aware behavior. Rotated supervisor logs use the default content floor; active logs and state remain protected.
 6. **Tier 6: Worktree Slimming, Dependency Stripping, Dormant Worktrees & Venvs (Safety-Gated, 30–180+ GiB)**:
    - Scripts (run in order): `slim_worktree_checkouts.sh` (`slim-worktrees`), `cleanup_worktree_deps.sh` (`cleanup-worktree-deps`), `cleanup_worktrees.sh` (`cleanup-worktrees`), `cleanup_worktree_venvs.sh` (`cleanup-worktree-venvs`), `cleanup_claude_state.sh`
-   - Targets: evaluates worktree inactivity at the shared 48-hour default for sparse checkout, rebuildable `node_modules`/`target`/`.mypy_cache`, merged/pushed worktree removal, and `.venv`/`venv` stripping.
-   - **GATING**: `WORKTREE_APPROVED=1` remains required where the command requires it. Recency never overrides live-cwd, C14 lease, hidden-state, source-preservation or AO ownership (`C` container vs `P` project `worktreeDir`) gates; AO-owned worktrees use the 48-hour content floor while retaining their separate ownership veto.
+   - Targets: evaluates worktree inactivity at the default content floor for sparse checkout, rebuildable `node_modules`/`target`/`.mypy_cache`, merged/pushed worktree removal, and `.venv`/`venv` stripping.
+   - **GATING**: `WORKTREE_APPROVED=1` remains required where the command requires it. Recency never overrides live-cwd, C14 lease, hidden-state, source-preservation or AO ownership (`C` container vs `P` project `worktreeDir`) gates; AO-owned worktrees use the default content floor while retaining their separate ownership veto.
 
 ## Cross-repo authority: dir switching is ALWAYS allowed from this repo
 
@@ -292,13 +294,13 @@ isolated dedup test alone is insufficient because the destructive behavior can
 occur only when a second tool later writes through the alias.
 ## Strict ban on ad-hoc cleanup scripts (hard)
 
-Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scripts (e.g. inline bash in /tmp or python one-liners) to prune worktrees, caches, or user data. ALL worktree cleanup operations MUST use established canonical scripts (`scripts/cleanup_worktrees.sh` or `scripts/worktree_hygiene.sh`) that strictly enforce the current 48-hour recency protection gate. Writing ad-hoc scripts bypasses safety gates and is strictly banned.
+Agents MUST NEVER write, execute, or substitute ad-hoc or temporary cleanup scripts (e.g. inline bash in /tmp or python one-liners) to prune worktrees, caches, or user data. ALL worktree cleanup operations MUST use established canonical scripts (`scripts/cleanup_worktrees.sh` or `scripts/worktree_hygiene.sh`) that strictly enforce the default content-floor recency gate. Writing ad-hoc scripts bypasses safety gates and is strictly banned.
 
-## Disposable content uses a 48-hour age floor
+## Disposable content uses the default content floor
 
-**Current default, operator decision 2026-11-13: 48 hours (2880 minutes) of content inactivity across disposable cleanup.** This applies to Scratch, temporary trees, generated build/cache artifacts, nested worktrees, dependency folders, venvs, and AO worktrees. Worktree recency uses `worktree_is_recently_active_minutes`; `.git` metadata is not content activity. `safety_worktree_floor_minutes` and `safety_disposable_recency_floor_minutes` provide the shared baseline; machine config or caller-selected larger floors may raise it.
+**The default is `CONTENT_FLOOR_HOURS` in `rust/src/time_windows.rs`, the single definition of every default time window** (operator decision 2026-11-22; it replaced the 2026-11-13 value). It applies to disposable cleanup. This applies to Scratch, temporary trees, generated build/cache artifacts, nested worktrees, dependency folders, venvs, and AO worktrees. Worktree recency uses `worktree_is_recently_active_minutes`; `.git` metadata is not content activity. `safety_worktree_floor_minutes` and `safety_disposable_recency_floor_minutes` provide the shared baseline; machine config or caller-selected larger floors may raise it.
 
-`diskm emergency` makes one 48-hour pass by default. Lower ages require an explicit operator option or environment on that invocation; no automatic 24/12/6/2-hour descent. Existing explicit 12-hour worktree and 2-hour ephemeral emergency overrides remain recorded and scoped to the calling cleanup.
+`diskm emergency` makes one pass at the default content floor. Lower ages require an explicit operator option or environment on that invocation; no automatic 24/12/6/2-hour descent. Existing explicit 12-hour worktree and 2-hour ephemeral emergency overrides remain recorded and scoped to the calling cleanup.
 
 Age is only one condition. Live cwd, open files, active/unknown leases, AO ownership, secret material, unmeasurable activity, and failed preservation checks still keep the affected content. Source files remain in the worktree when only an untracked rebuildable venv is stripped. Full worktree removal or stripping unrelated data still applies its current content/source-preservation checks.
 
@@ -306,7 +308,7 @@ Do not shorten retention for durable backups, session stores, history, credentia
 
 ### Historical worktree recency policy (superseded)
 
-The following records preserve earlier age-floor decisions. Their 3-day/7-day values and age shortcuts do not set current defaults; use the 48-hour rule above. Separate ownership and preservation vetoes remain active.
+The following records preserve earlier age-floor decisions. Their 3-day/7-day values and age shortcuts do not set current defaults; use the default content floor above. Separate ownership and preservation vetoes remain active.
 
 <details>
 <summary>Previous worktree age floor amendments (historical)</summary>
@@ -433,7 +435,7 @@ XDG default.
 | Path | Read by | Contents |
 |---|---|---|
 | `reclaim/known-reclaim-dirs.md` | humans + any investigation | **the ledger**: cleaned roots (C), fast regrowers (D), growth vs floor (B), uncovered/needs-decision (A). Regenerate with `diskm reclaim-ledger` (`--stdout` previews) |
-| `snapshots/disk_snapshot.json` | `diskm history`, `disk_status.py`, floor math | 2-hourly used/free + per-`monitored_dirs` sizes; coverage-gated (≥70%) |
+| `snapshots/disk_snapshot.json` | `diskm history`, `disk_status.py`, floor math | used/free + per-`monitored_dirs` sizes every `SNAPSHOT_INTERVAL`; coverage-gated (≥70%) |
 | `ledger/topdown-5g.json` | `diskm history diff`, `growth-top10`, ledger freshness | ≥5 GiB buckets from a **complete** `diskm frontier` run; empty until one succeeds |
 | `config/config.json` | config chain fallback | copy — see the trap below |
 
@@ -455,7 +457,7 @@ that are missing from it.
 
 **Skill (single source of truth):** `~/.claude/skills/fix-completion-deploy/SKILL.md` — durable fix promotion, origin-main verification, tracked templates, and deployed-revision proof.
 
-1. The 30-min snapshot launchd job (`com.jleechanorg.disk-magician`) runs the
+1. The retired Python snapshot launchd job (`com.jleechanorg.disk-magician`) ran the
    **uv-tool-packaged copy** at
    `~/.local/share/uv/tools/disk-magician/.../disk_magician/`, built from
    `src/disk_magician/` — NOT the repo root files.
@@ -566,7 +568,7 @@ live or unknown lease owner, AO ownership, live cwd, open file, volume identity,
 secret-like or ignored user data, an unverified/dependent remote, unreachable Git
 objects, content written within the last hour (`kept:recent-activity`), or
 unmeasurable mtime. Otherwise one
-proof suffices: age (class floor, worktrees 48 h, `DISK_MAGICIAN_AGE_FLOOR_MINUTES` >= 120),
+proof suffices: age (class floor, worktrees at the default content floor, `DISK_MAGICIAN_AGE_FLOOR_MINUTES` >= 120),
 on-origin, rescued (`scripts/lib/rescue_ref.sh` pushes `refs/diskm-rescue/...` first),
 rebuildable, producer-released, operator-named (`DISK_MAGICIAN_OPERATOR_TARGETS`).
 Dirty or unpushed repositories require a successful complete rescue to an
@@ -574,7 +576,7 @@ independent remote; age or producer release alone never preserves those changes.
 Secrets and ignored user data cannot be rescued by this helper. With no proof,
 the result is `kept:no-proof`. Read-only qualification never pushes a rescue ref.
 The original emergency design proposed stepping the age floor from 24 to 2 hours.
-The current default is the single 48-hour pass described above. Original design:
+The current default is the single default-content-floor pass described above. Original design:
 `~/roadmap/reclaim-safe-set-or-design-2026-11-12.md`. The bullets below predate this change.
 
 ### Why scratch reclaim "reports success" and frees nothing (2026-10-29 → 11-03)
@@ -640,12 +642,12 @@ contradicted it. Check them in this order before proposing a reclaim change:
 - Colima's sparse disk only shrinks via in-VM `fstrim`; when the HOST disk
   hits ~100% the guest wedges with I/O errors and can't trim — recover with
   `colima stop && colima start` then `colima ssh -- sudo fstrim -av`.
-  Prevention: the 2h pressure-sweep job (free < 40G gate).
+  Prevention: the retired Python pressure-sweep job (free < 40G gate).
 - Snapshot JSON is schema_version 2: coverage_pct is dedup-corrected
   (raw value preserved at `snapshot_metadata.coverage_pct_raw_v1`);
   `residual_gb`/`residual_delta_gb` track unmeasured space;
   `topdown_coverage` embeds the nightly frontier scan when
-  `~/.disk_magician_state/frontier_last.json` is <36h old.
+  `~/.disk_magician_state/frontier_last.json` is younger than `SNAPSHOT_STALE_AFTER` (`rust/src/time_windows.rs`).
 - Backup/history repo: `~/.disk_magician_backup` (host profile
   `backup/jeffreys-macbook-pro/`); full history is anchored by branch
   `archive/pre-reset-20260711` — do not `git gc --prune` there casually.

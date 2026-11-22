@@ -1,8 +1,9 @@
 [Unit]
-Description=Commit and publish backup state every two hours
+Description=Commit and publish backup state
 
 [Timer]
-OnCalendar=*-*-* 00/2:25:00
+OnBootSec=@STATE_COMMIT_INTERVAL_SECONDS@s
+OnUnitActiveSec=@STATE_COMMIT_INTERVAL_SECONDS@s
 Persistent=true
 
 [Install]

@@ -10,7 +10,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -150,12 +150,12 @@ fn probe_filesystem(path: &Path) -> io::Result<String> {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if started.elapsed() >= Duration::from_secs(30) {
+        if started.elapsed() >= crate::time_windows::VOLUME_PROBE_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
             return Err(invalid("Scratch UUID probe timed out"));
         }
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(crate::time_windows::PROBE_POLL);
     };
     if !status.success() {
         return Err(invalid("Scratch UUID probe failed"));
