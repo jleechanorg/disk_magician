@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Every 20 minutes, check the registered Scratch quota and reclaim
+<!-- On the SCRATCH_PRESSURE_INTERVAL cadence (rust/src/time_windows.rs), check the registered Scratch quota and reclaim
      qualified files in completed native build runs. -->
 <plist version="1.0">
 <dict>

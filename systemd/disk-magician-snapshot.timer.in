@@ -1,5 +1,5 @@
 [Unit]
-Description=Capture local disk capacity every two hours
+Description=Capture local disk capacity
 
 [Timer]
 OnBootSec=@SNAPSHOT_INTERVAL_SECONDS@s

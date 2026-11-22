@@ -1,5 +1,5 @@
 [Unit]
-Description=Hourly cleanup of managed temp files
+Description=Cleanup of managed temp files
 
 [Timer]
 OnBootSec=@TEMP_SWEEP_INTERVAL_SECONDS@s

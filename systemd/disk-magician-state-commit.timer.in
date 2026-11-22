@@ -1,5 +1,5 @@
 [Unit]
-Description=Commit and publish backup state every two hours
+Description=Commit and publish backup state
 
 [Timer]
 OnBootSec=@STATE_COMMIT_INTERVAL_SECONDS@s

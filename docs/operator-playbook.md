@@ -435,7 +435,7 @@ XDG default.
 | Path | Read by | Contents |
 |---|---|---|
 | `reclaim/known-reclaim-dirs.md` | humans + any investigation | **the ledger**: cleaned roots (C), fast regrowers (D), growth vs floor (B), uncovered/needs-decision (A). Regenerate with `diskm reclaim-ledger` (`--stdout` previews) |
-| `snapshots/disk_snapshot.json` | `diskm history`, `disk_status.py`, floor math | 2-hourly used/free + per-`monitored_dirs` sizes; coverage-gated (≥70%) |
+| `snapshots/disk_snapshot.json` | `diskm history`, `disk_status.py`, floor math | used/free + per-`monitored_dirs` sizes every `SNAPSHOT_INTERVAL`; coverage-gated (≥70%) |
 | `ledger/topdown-5g.json` | `diskm history diff`, `growth-top10`, ledger freshness | ≥5 GiB buckets from a **complete** `diskm frontier` run; empty until one succeeds |
 | `config/config.json` | config chain fallback | copy — see the trap below |
 

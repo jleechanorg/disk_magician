@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Hourly cleanup of completed native temp-file leases past the default content floor (rust/src/time_windows.rs). -->
+<!-- Cleanup of completed native temp-file leases past the default content floor (rust/src/time_windows.rs). -->
 <plist version="1.0">
 <dict>
   <key>Label</key>

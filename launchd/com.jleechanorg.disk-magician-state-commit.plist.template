@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Every 30 minutes, commit the latest native snapshot to the backup repository and publish a bounded, scanned fast-forward. git and gitleaks must be on PATH. -->
+<!-- On the STATE_COMMIT_INTERVAL cadence (rust/src/time_windows.rs), commit the latest native snapshot to the backup repository and publish a bounded, scanned fast-forward. git and gitleaks must be on PATH. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>

@@ -38,7 +38,7 @@ pub const LEDGER_STALE_HOURS: f64 = 48.0;
 pub const SNAPSHOT_STALE_AFTER: Duration = Duration::from_secs(36 * 60 * 60);
 
 /// Scheduler cadences and run budgets. Templates in `launchd/` and `systemd/`
-/// carry `@<NAME>_SECONDS@` placeholders that `scripts/render_template.sh`
+/// carry `@<NAME>_SECONDS@` placeholders that `scripts/render_template.py`
 /// fills from `diskm time-windows`.
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 pub const SCRATCH_PRESSURE_INTERVAL: Duration = Duration::from_secs(20 * 60);

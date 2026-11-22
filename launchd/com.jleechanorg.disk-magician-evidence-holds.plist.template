@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Hourly, hold Scratch and temp paths that the operator's open pull requests link to. gh must be on PATH and authenticated. -->
+<!-- On the EVIDENCE_HOLDS_INTERVAL cadence (rust/src/time_windows.rs), hold Scratch and temp paths that the operator's open pull requests link to. gh must be on PATH and authenticated. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
