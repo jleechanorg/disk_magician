@@ -84,8 +84,8 @@ fn commit(repo: &Path, reference: &str) -> io::Result<String> {
     .to_owned())
 }
 
-/// Largest added or modified blob in one commit, with its path.
-fn largest_blob(repo: &Path, commit: &str) -> io::Result<Option<(u64, String)>> {
+/// Added or modified blobs in one commit as (object id, path, size).
+fn commit_blobs(repo: &Path, commit: &str) -> io::Result<Vec<(String, String, u64)>> {
     let listing = git(
         repo,
         &[
@@ -113,7 +113,7 @@ fn largest_blob(repo: &Path, commit: &str) -> io::Result<Option<(u64, String)>> 
         }
     }
     if blobs.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let mut child = Command::new("git")
         .env(NO_REPLACE, "1")
@@ -138,46 +138,65 @@ fn largest_blob(repo: &Path, commit: &str) -> io::Result<Option<(u64, String)>> 
         return Err(io::Error::other("git cat-file failed"));
     }
     let sizes = String::from_utf8(output.stdout).map_err(io::Error::other)?;
-    let mut largest: Option<(u64, String)> = None;
-    for (line, (_, path)) in sizes.lines().zip(&blobs) {
-        let size: u64 = line
-            .trim()
-            .parse()
-            .map_err(|_| io::Error::other(format!("unsized object for {path}")))?;
-        if largest.as_ref().is_none_or(|(best, _)| size > *best) {
-            largest = Some((size, path.clone()));
-        }
+    let sizes: Vec<&str> = sizes.lines().collect();
+    if sizes.len() != blobs.len() {
+        return Err(io::Error::other(
+            "git cat-file returned the wrong row count",
+        ));
     }
-    Ok(largest)
+    blobs
+        .into_iter()
+        .zip(sizes)
+        .map(|((sha, path), line)| {
+            let size = line
+                .trim()
+                .parse()
+                .map_err(|_| io::Error::other(format!("unsized object for {path}")))?;
+            Ok((sha, path, size))
+        })
+        .collect()
 }
 
-/// Exit 0 is clean, 1 is a finding; anything else (including a missing
-/// binary) means the scan is unavailable and publication holds.
-/// Scans a commit range; `Err(reason)` holds publication.
-pub type Scanner = fn(&Path, &str) -> io::Result<Result<(), &'static str>>;
+/// Scans blob contents; `Err(reason)` holds publication.
+pub type Scanner = fn(&Path, &[String]) -> io::Result<Result<(), &'static str>>;
 
-fn secret_scan(repo: &Path, range: &str) -> io::Result<Result<(), &'static str>> {
-    let status = Command::new("gitleaks")
-        .env(NO_REPLACE, "1")
-        .args([
-            "git",
-            "--no-banner",
-            "--redact",
-            "--exit-code",
-            "1",
-            "--log-opts",
-            range,
-        ])
-        .arg(repo)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    Ok(match status.map(|status| status.code()) {
-        Ok(Some(0)) => Ok(()),
-        Ok(Some(1)) => Err("secret_scan_finding"),
-        _ => Err("secret_scan_unavailable"),
-    })
+/// Feeds each blob's raw bytes to `gitleaks stdin`, so no diff configuration,
+/// attribute or text conversion can narrow what is scanned. Exit 0 is clean and
+/// 1 is a finding; anything else, including a missing binary, holds.
+fn secret_scan(repo: &Path, blobs: &[String]) -> io::Result<Result<(), &'static str>> {
+    for blob in blobs {
+        let content = Command::new("git")
+            .env(NO_REPLACE, "1")
+            .arg("-C")
+            .arg(repo)
+            .args(["cat-file", "blob", blob])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()?;
+        if !content.status.success() {
+            return Err(io::Error::other("git cat-file blob failed"));
+        }
+        let Ok(mut child) = Command::new("gitleaks")
+            .args(["stdin", "--no-banner", "--redact", "--exit-code", "1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return Ok(Err("secret_scan_unavailable"));
+        };
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("gitleaks stdin"))?
+            .write_all(&content.stdout)?;
+        match child.wait()?.code() {
+            Some(0) => {}
+            Some(1) => return Ok(Err("secret_scan_finding")),
+            _ => return Ok(Err("secret_scan_unavailable")),
+        }
+    }
+    Ok(Ok(()))
 }
 
 /// Steps 1-5: fresh fetch, ancestry, bounded size walk and secret scan.
@@ -189,6 +208,8 @@ pub fn observe(
     max_blob: u64,
     scan: Scanner,
 ) -> io::Result<Plan> {
+    let top = PathBuf::from(git(repo, &["rev-parse", "--show-toplevel"])?.trim());
+    let repo = top.as_path();
     let tracking = format!("refs/remotes/{remote}/{branch}");
     git(
         repo,
@@ -234,14 +255,22 @@ pub fn observe(
         .collect();
     let mut accepted = 0;
     let mut stop = json!({"reason": "max_commits"});
+    let mut scanned = Vec::new();
     for commit in pending.iter().take(max_commits) {
-        if let Some((size, path)) = largest_blob(repo, commit)?.filter(|(size, _)| *size > max_blob)
+        let blobs = commit_blobs(repo, commit)?;
+        if let Some((_, path, size)) = blobs
+            .iter()
+            .filter(|(_, _, size)| *size > max_blob)
+            .max_by_key(|(_, _, size)| *size)
         {
             stop = json!({"reason": "oversize", "commit": commit, "path": path, "bytes": size});
             break;
         }
+        scanned.extend(blobs.into_iter().map(|(sha, _, _)| sha));
         accepted += 1;
     }
+    scanned.sort_unstable();
+    scanned.dedup();
     if accepted == pending.len() {
         stop = json!({"reason": "all_pending"});
     }
@@ -249,7 +278,7 @@ pub fn observe(
         return Ok(hold("oversize_first_pending", stop));
     }
     let candidate = pending[accepted - 1].clone();
-    if let Err(reason) = scan(repo, &format!("{upstream}..{candidate}"))? {
+    if let Err(reason) = scan(repo, &scanned)? {
         return Ok(hold(reason, json!({"candidate": candidate})));
     }
     Ok(Plan::Publish {

@@ -2,7 +2,7 @@ use super::*;
 use std::fs;
 
 /// Stands in for gitleaks where a test covers size, prefix or lease logic.
-fn clean(_: &Path, _: &str) -> io::Result<Result<(), &'static str>> {
+fn clean(_: &Path, _: &[String]) -> io::Result<Result<(), &'static str>> {
     Ok(Ok(()))
 }
 
@@ -252,4 +252,35 @@ fn holds_on_a_shallow_repository() {
         matches!(&plan, Plan::Hold { reason, .. } if reason == "substituted_history"),
         "{plan:?}"
     );
+}
+
+#[test]
+fn diff_configuration_cannot_hide_a_secret_from_the_scan() {
+    let f = fixture("relative");
+    let before = remote_tip(&f.work);
+    sh(&f.work, &["config", "diff.relative", "true"]);
+    fs::create_dir(f.work.join("sub")).unwrap();
+    add(&f.work, "sub/readme.txt", b"sub\n");
+    add(&f.work, ".gitattributes", b"* -diff\n");
+    let token = format!("ghp_{}{}", "Zq8mN2vX4bL7tR1yK9wE", "3hJ6pC5sD0fG8aU2");
+    add(
+        &f.work,
+        "config.env",
+        format!("GITHUB_TOKEN={token}\n").as_bytes(),
+    );
+    let plan = observe(&f.work.join("sub"), "origin", "main", 20, 1024, secret_scan).unwrap();
+    let scanner = Command::new("gitleaks")
+        .arg("version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    let expected = if scanner {
+        "secret_scan_finding"
+    } else {
+        "secret_scan_unavailable"
+    };
+    assert!(
+        matches!(&plan, Plan::Hold { reason, .. } if reason == expected),
+        "{plan:?}"
+    );
+    assert_eq!(remote_tip(&f.work), before);
 }
