@@ -159,7 +159,14 @@ fn merge_keeps_manual_holds_and_replaces_automatic_ones() {
     let mut fresh = BTreeMap::new();
     fresh.insert(PathBuf::from("/new"), "https://pr/2".to_owned());
     fresh.insert(PathBuf::from("/m"), "https://pr/3".to_owned());
-    let merged = evidence_holds::merge(&existing, &fresh);
+    existing.insert("/elsewhere/kept".into(), format!("{AUTO}https://pr/4"));
+    let roots = vec![
+        ("/m".to_owned(), "/m".to_owned()),
+        ("/old".to_owned(), "/old".to_owned()),
+        ("/new".to_owned(), "/new".to_owned()),
+    ];
+    let merged = evidence_holds::merge(&existing, &fresh, &roots);
+    assert!(merged.contains_key(Path::new("/elsewhere/kept")));
     assert_eq!(merged.get(Path::new("/m")).unwrap(), "manual note");
     assert_eq!(
         merged.get(Path::new("/new")).unwrap(),
@@ -226,4 +233,33 @@ fn refuses_an_oversized_or_non_regular_source() {
     fs::remove_file(&source).unwrap();
     fs::create_dir(&source).unwrap();
     assert_held_unchanged(&repo, &state, "main", "source_unreadable");
+}
+
+#[test]
+fn keeps_automatic_holds_under_an_unscanned_root() {
+    let mut existing = Holds::new();
+    existing.insert(
+        "/Volumes/scratch/runs/x".into(),
+        format!("{AUTO}https://pr/1"),
+    );
+    existing.insert("/private/tmp/old".into(), format!("{AUTO}https://pr/2"));
+    // Only the temp root was available for this refresh.
+    let roots = vec![("/tmp".to_owned(), "/private/tmp".to_owned())];
+    let merged = evidence_holds::merge(&existing, &BTreeMap::new(), &roots);
+    assert!(merged.contains_key(Path::new("/Volumes/scratch/runs/x")));
+    assert!(!merged.contains_key(Path::new("/private/tmp/old")));
+}
+
+#[test]
+fn a_planted_temporary_link_is_never_followed() {
+    let (root, repo, state) = repo_and_state("templink");
+    let victim = root.0.join("victim.txt");
+    fs::write(&victim, "keep me\n").unwrap();
+    fs::create_dir_all(repo.join("snapshots")).unwrap();
+    std::os::unix::fs::symlink(&victim, repo.join("snapshots/disk_snapshot.diskm-tmp")).unwrap();
+    let committed = state_commit::commit(&repo, &state, "main")
+        .unwrap()
+        .unwrap();
+    assert!(committed.is_some());
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me\n");
 }

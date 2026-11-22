@@ -4,7 +4,8 @@ use crate::job_receipt::{self, Completion};
 use crate::state_publish;
 use serde_json::{json, Value};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -67,8 +68,20 @@ pub fn commit(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        let temporary = target.with_extension("diskm-tmp");
-        fs::write(&temporary, &bytes)?;
+        // A fresh, exclusively created name: an existing file or link at the
+        // temporary path is never followed or overwritten.
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let temporary = target.with_extension(format!("diskm-tmp-{}-{nonce}", std::process::id()));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
         fs::rename(&temporary, &target)?;
     }
     let mut add = vec!["add", "--"];

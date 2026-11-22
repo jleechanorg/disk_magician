@@ -90,11 +90,18 @@ pub fn extract(text: &str, roots: &[Root]) -> BTreeSet<PathBuf> {
     found
 }
 
-/// Keeps manual holds and replaces every automatic one with the fresh set.
-pub fn merge(existing: &Holds, fresh: &BTreeMap<PathBuf, String>) -> Holds {
+/// Keeps manual holds and automatic holds outside the scanned roots, and
+/// replaces automatic holds under those roots with the fresh set. A root that
+/// was unavailable during the refresh therefore keeps its previous holds.
+pub fn merge(existing: &Holds, fresh: &BTreeMap<PathBuf, String>, roots: &[Root]) -> Holds {
+    let scanned = |path: &Path| {
+        roots
+            .iter()
+            .any(|(_, canonical)| path.starts_with(canonical))
+    };
     let mut merged: Holds = existing
         .iter()
-        .filter(|(_, value)| !value.starts_with(AUTO))
+        .filter(|(path, value)| !value.starts_with(AUTO) || !scanned(path))
         .map(|(path, value)| (path.clone(), value.clone()))
         .collect();
     for (path, url) in fresh {
@@ -315,10 +322,9 @@ pub fn refresh(
         )?;
         Ok((json!({"result": result, "receipt": receipt}), 75))
     };
-    let Ok(existing) = job_receipt::read_json_if_exists::<Holds>(&path, MAX_HOLDS_BYTES) else {
+    if job_receipt::read_json_if_exists::<Holds>(&path, MAX_HOLDS_BYTES).is_err() {
         return hold("existing_holds_unreadable");
-    };
-    let existing = existing.unwrap_or_default();
+    }
     let Ok(Fetched {
         requests,
         partitions,
@@ -326,6 +332,11 @@ pub fn refresh(
     else {
         return hold("fetch_failed");
     };
+    // Re-read after the slow fetch so holds written meanwhile are merged.
+    let Ok(existing) = job_receipt::read_json_if_exists::<Holds>(&path, MAX_HOLDS_BYTES) else {
+        return hold("existing_holds_unreadable");
+    };
+    let existing = existing.unwrap_or_default();
     let mut fresh = BTreeMap::new();
     for request in &requests {
         for text in &request.texts {
@@ -334,7 +345,7 @@ pub fn refresh(
             }
         }
     }
-    let merged = merge(&existing, &fresh);
+    let merged = merge(&existing, &fresh, roots);
     write_atomic(&path, &merged)?;
     let manual = merged
         .values()
