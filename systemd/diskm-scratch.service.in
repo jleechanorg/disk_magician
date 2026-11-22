@@ -2,14 +2,14 @@
 Description=Disk Magician Scratch volume
 After=local-fs.target
 
+# Mounts the registered Scratch image through its /etc/fstab `user,noauto`
+# loop entry, then verifies it is the registered volume.
 [Service]
-Type=simple
-Environment=DISK_MAGICIAN_CONFIG=@CONFIG_PATH@
-Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
-ExecStart=/usr/bin/bash @ORCHESTRATOR@ volume mount scratch --foreground
-ExecStop=/usr/bin/bash @ORCHESTRATOR@ volume unmount scratch
-Restart=on-failure
-RestartSec=5
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'mountpoint -q "$$1" || mount "$$1"' sh @MOUNTPOINT@
+ExecStartPost="%h/.local/bin/diskm" volume verify-mount @MOUNTPOINT@
+ExecStop=/bin/umount @MOUNTPOINT@
 
 [Install]
 WantedBy=default.target
