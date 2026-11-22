@@ -63,9 +63,13 @@ preserves any replacement at the destination. The receipt reports unresolved
 stages for manual recovery with `scratch-target-apply`. The launchd and systemd
 Scratch templates call this binary directly.
 
-Before enabling the timers, verify forward progress past persistent holds or
-discovery deadlines. Host-temp scheduling,
-Git state publication, and qualification of existing unmanaged data remain open.
+The hourly macOS and Linux temp jobs use
+`scratch-sweep --root system-tmp --clean --min-hours 72`. They scan direct
+leased temp files and apply the age cutoff independently of Scratch quota.
+The sweeps advance through held-only batches within the verification deadline.
+An unfinished discovery or verification budget still needs a durable continuation
+across invocations. Git state publication and qualification of existing unmanaged
+data remain open.
 
 Mac and Linux executable fixtures verified that exact apply removed the selected
 old file and preserved changed and open files. Recovery refused to overwrite

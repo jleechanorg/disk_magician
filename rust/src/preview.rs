@@ -140,7 +140,7 @@ pub(crate) fn registered_scratch() -> io::Result<(PathBuf, u64)> {
     Ok((root, info.dev()))
 }
 
-fn check_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
+pub(crate) fn check_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
     let Ok(relative) = path.strip_prefix(root) else {
         return Some("kept:outside-scratch");
     };
@@ -291,7 +291,7 @@ struct Discovery {
     gaps: Vec<ScanGap>,
 }
 
-fn protected_scope(root: &Path, path: &Path) -> bool {
+pub(crate) fn protected_scope(root: &Path, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return true;
     };

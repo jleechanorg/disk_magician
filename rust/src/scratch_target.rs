@@ -633,8 +633,12 @@ pub(crate) fn build_bundle(root: &Path, relative: &Path) -> Result<PathBuf, &'st
 }
 
 pub(crate) fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static str> {
-    let verified = scratch_lease::lookup_bundle_under_root(bundle, root)
-        .map_err(|_| "deferred:lease-unavailable")?;
+    let verified = scratch_lease::lookup_bundle_under_root(bundle, root).map_err(|error| {
+        match error.kind() {
+            io::ErrorKind::NotFound => "kept:lease-missing",
+            _ => "deferred:lease-unavailable",
+        }
+    })?;
     if !matches!(
         verified.lease.kind,
         BundleKind::Build | BundleKind::TempFile

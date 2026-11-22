@@ -26,7 +26,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-index refresh [--root scratch|system-tmp]
   diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
   diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
-  diskm scratch-sweep [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
+  diskm scratch-sweep [--root scratch|system-tmp] [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
   diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp]
   diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
@@ -265,6 +265,7 @@ fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Opera
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--clean") => options.clean = true,
+            Some("--root") => options.system_tmp = parse_temp_root(&mut args)?,
             Some("--min-hours") => options.min_hours = positive(&mut args, "--min-hours")?,
             Some("--max-candidates") => options.limit = positive(&mut args, "--max-candidates")?,
             Some("--deadline-ms") => {
@@ -327,6 +328,14 @@ fn relative_age_cutoff(value: OsString) -> Result<i64, String> {
         .ok_or_else(|| "age cutoff must be after the Unix epoch".to_owned())
 }
 
+fn parse_temp_root(args: &mut impl Iterator<Item = OsString>) -> Result<bool, String> {
+    match required_value(args, "--root")?.to_str() {
+        Some("scratch") => Ok(false),
+        Some("system-tmp") => Ok(true),
+        _ => Err("--root must be scratch or system-tmp".into()),
+    }
+}
+
 fn parse_scratch_nomination(
     mut args: impl Iterator<Item = OsString>,
     qualify: bool,
@@ -347,13 +356,7 @@ fn parse_scratch_nomination(
             }
             Some("--path") => paths.push(PathBuf::from(required_value(&mut args, "--path")?)),
             Some("--jobs") if qualify => jobs = positive(&mut args, "--jobs")?,
-            Some("--root") => {
-                host_temp = match required_value(&mut args, "--root")?.to_str() {
-                    Some("scratch") => false,
-                    Some("system-tmp") => true,
-                    _ => return Err("--root must be scratch or system-tmp".into()),
-                };
-            }
+            Some("--root") => host_temp = parse_temp_root(&mut args)?,
             Some("--deadline-ms") if qualify => deadline_ms = positive(&mut args, "--deadline-ms")?,
             Some("--max-entries") if qualify => max_entries = positive(&mut args, "--max-entries")?,
             Some("--paths-from") => {

@@ -311,7 +311,7 @@ fn changed_epoch_nanos(_: &Metadata) -> Option<i64> {
 }
 
 #[cfg(unix)]
-fn same_directory_observation(before: &Metadata, after: &Metadata) -> bool {
+pub(crate) fn same_directory_observation(before: &Metadata, after: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     before.dev() == after.dev()
@@ -352,7 +352,7 @@ fn metadata_device_and_inode(metadata: &Metadata) -> (u64, u64) {
     (0, metadata.len())
 }
 
-fn age_measurement(
+pub(crate) fn age_measurement(
     path: &Path,
     metadata: &Metadata,
     kind: AgeKind,

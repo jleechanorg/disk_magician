@@ -1,6 +1,8 @@
 //! One native Scratch pressure pass. All mutation uses the exact actuator.
 
-use crate::{job_receipt, preview, scan, scratch_manifest, scratch_target, volume_config};
+use crate::{
+    job_receipt, preview, scan, scratch_lease, scratch_manifest, scratch_target, volume_config,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -8,10 +10,11 @@ use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Options {
     pub clean: bool,
+    pub system_tmp: bool,
     pub min_hours: u32,
     pub limit: usize,
     pub deadline: Duration,
@@ -22,6 +25,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             clean: false,
+            system_tmp: false,
             min_hours: 48,
             limit: 20,
             deadline: Duration::from_secs(30),
@@ -49,7 +53,11 @@ pub fn run(options: &Options) -> io::Result<(Value, bool)> {
     };
     job_receipt::publish_terminal(
         &state,
-        "scratch_sweep",
+        if options.system_tmp {
+            "tmp_sweep"
+        } else {
+            "scratch_sweep"
+        },
         started,
         completion,
         precondition,
@@ -65,37 +73,31 @@ fn sweep(
     started: SystemTime,
     precondition: &mut Value,
 ) -> io::Result<(Value, bool)> {
-    let (root, device) = preview::registered_scratch()?;
+    let (root, device) = if options.system_tmp {
+        let root = scratch_lease::temp_path()?;
+        let device = fs::symlink_metadata(&root)?.dev();
+        (root, device)
+    } else {
+        preview::registered_scratch()?
+    };
     let recovery = if options.clean && options.paths.is_empty() {
         scratch_target::recover_sweeps(state, &root)?
     } else {
         Vec::new()
     };
     let recovered = recovery.iter().all(|entry| entry.get("error").is_none());
-    let home = PathBuf::from(
-        std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is unavailable"))?,
-    );
-    let config = volume_config::configuration(&home)?;
-    let scratch = &config["volumes"]["classes"]["scratch"];
-    let quota = scratch["quota_gb"]
-        .as_u64()
-        .and_then(|amount| amount.checked_mul(1 << 30))
-        .ok_or_else(|| io::Error::other("invalid Scratch quota"))?;
-    let trigger = scratch["trigger_pct"].as_u64().unwrap_or(70);
-    let target = scratch["target_pct"].as_u64().unwrap_or(50);
-    if target == 0 || target > trigger || trigger > 100 || quota == 0 {
-        return Err(io::Error::other("invalid Scratch trigger or target"));
-    }
-    let percent = |pct: u64| (u128::from(quota) * u128::from(pct) / 100) as u64;
-    let used = scratch_target::measure_usage(&root, device)?;
-    let target_used = percent(target);
-    *precondition = json!({"root":root,"used_bytes":used,"quota_bytes":quota,"trigger_pct":trigger,"target_pct":target,"min_hours":options.min_hours});
-    if used <= percent(trigger) {
+    *precondition = json!({"root":root,"min_hours":options.min_hours});
+    let target_used = if options.system_tmp {
+        Some(1)
+    } else {
+        capacity_target(&root, device, precondition)?
+    };
+    let Some(target_used) = target_used else {
         return Ok((
             json!({"status":"below_trigger","removed":0,"freed_bytes":null,"recovery":recovery}),
             recovered,
         ));
-    }
+    };
 
     let cutoff = preview::current_cutoff(options.min_hours)?;
     let scan_options = scan::ScanOptions {
@@ -103,16 +105,43 @@ fn sweep(
         max_entries: usize::MAX,
     };
     let mut holds = BTreeMap::new();
-    let (mut paths, scan_complete, gaps) = if options.paths.is_empty() {
-        discover(&root, device, cutoff, scan_options, &mut holds)?
-    } else {
+    let (paths, scan_complete, gaps) = if !options.paths.is_empty() {
         (options.paths.clone(), true, Vec::new())
+    } else if options.system_tmp {
+        (
+            discover_temp(&root, device, cutoff, &mut holds)?,
+            true,
+            Vec::new(),
+        )
+    } else {
+        discover(&root, device, cutoff, scan_options, &mut holds)?
     };
-    let unchecked = paths.len().saturating_sub(options.limit);
-    paths.truncate(options.limit);
-    let qualification = (!paths.is_empty())
-        .then(|| scratch_manifest::qualify_exact(&paths, cutoff, scan_options, 1))
-        .transpose()?;
+    let start_checks = Instant::now();
+    let mut qualification: Option<scratch_manifest::QualificationReport> = None;
+    for batch in paths.chunks(options.limit) {
+        let report = scratch_manifest::qualify_under_roots(
+            batch,
+            cutoff,
+            scan_options,
+            1,
+            vec![root.clone()],
+            Some(root.clone()),
+        )?;
+        let ready = report.entries.iter().any(|row| row.verdict == "remove");
+        if let Some(total) = &mut qualification {
+            total.complete &= report.complete;
+            total.entries.extend(report.entries);
+        } else {
+            qualification = Some(report);
+        }
+        if ready || !options.paths.is_empty() || start_checks.elapsed() >= options.deadline {
+            break;
+        }
+    }
+    let unchecked = paths.len()
+        - qualification
+            .as_ref()
+            .map_or(0, |report| report.entries.len());
     let mut eligible: Vec<_> = qualification
         .iter()
         .flat_map(|report| &report.entries)
@@ -133,11 +162,15 @@ fn sweep(
         return Ok((result, plan_complete));
     }
     if eligible.is_empty() {
-        result["status"] = json!("pressure_unresolved");
-        return Ok((result, false));
+        result["status"] = json!(if options.system_tmp {
+            "age_pass"
+        } else {
+            "pressure_unresolved"
+        });
+        return Ok((result, options.system_tmp && plan_complete && recovered));
     }
     let paths: Vec<_> = eligible.iter().map(|row| row.path.clone()).collect();
-    let manifest = scratch_manifest::create(&paths, cutoff)?;
+    let manifest = scratch_manifest::create_in(&paths, cutoff, options.system_tmp)?;
     let state = state.canonicalize()?;
     if state.starts_with(&root) {
         return Err(io::Error::other("sweep state must be outside Scratch"));
@@ -183,7 +216,67 @@ fn sweep(
         .used_before_bytes
         .zip(applied.used_after_bytes)
         .map(|(before, after)| i128::from(after) - i128::from(before)));
-    Ok((result, applied.target_reached && recovered))
+    let complete = if options.system_tmp {
+        applied.complete && plan_complete
+    } else {
+        applied.target_reached
+    };
+    Ok((result, complete && recovered))
+}
+
+fn capacity_target(root: &Path, device: u64, precondition: &mut Value) -> io::Result<Option<u64>> {
+    let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is unavailable"))?;
+    let config = volume_config::configuration(Path::new(&home))?;
+    let scratch = &config["volumes"]["classes"]["scratch"];
+    let quota = scratch["quota_gb"]
+        .as_u64()
+        .and_then(|amount| amount.checked_mul(1 << 30))
+        .ok_or_else(|| io::Error::other("invalid Scratch quota"))?;
+    let trigger = scratch["trigger_pct"].as_u64().unwrap_or(70);
+    let target = scratch["target_pct"].as_u64().unwrap_or(50);
+    if target == 0 || target > trigger || trigger > 100 || quota == 0 {
+        return Err(io::Error::other("invalid Scratch trigger or target"));
+    }
+    let percent = |pct: u64| (u128::from(quota) * u128::from(pct) / 100) as u64;
+    let used = scratch_target::measure_usage(root, device)?;
+    precondition["used_bytes"] = json!(used);
+    precondition["quota_bytes"] = json!(quota);
+    precondition["trigger_pct"] = json!(trigger);
+    precondition["target_pct"] = json!(target);
+    Ok((used > percent(trigger)).then(|| percent(target)))
+}
+
+fn discover_temp(
+    root: &Path,
+    device: u64,
+    cutoff: i64,
+    holds: &mut BTreeMap<&'static str, usize>,
+) -> io::Result<Vec<PathBuf>> {
+    let mut old = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(b"diskm-temp-")
+        {
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.is_file() && metadata.dev() == device && metadata.mtime() < cutoff {
+            let path = entry.path();
+            match scratch_target::check_completed_build(root, &path) {
+                Ok(()) => old.push((metadata.mtime(), metadata.mtime_nsec(), path)),
+                Err(reason) => *holds.entry(reason).or_default() += 1,
+            }
+        }
+    }
+    old.sort_unstable();
+    Ok(old.into_iter().map(|(_, _, path)| path).collect())
 }
 
 fn discover(

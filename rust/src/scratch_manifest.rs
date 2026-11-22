@@ -79,15 +79,6 @@ fn epoch_nanos(seconds: i64, nanoseconds: i64) -> Option<i64> {
         .checked_add(nanoseconds)
 }
 
-fn creation_epoch_nanos(metadata: &Metadata) -> Option<i64> {
-    let duration = metadata
-        .created()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?;
-    i64::try_from(duration.as_nanos()).ok()
-}
-
 pub(crate) fn age_measurement(
     root: &Path,
     path: &Path,
@@ -95,7 +86,7 @@ pub(crate) fn age_measurement(
     cutoff_epoch_seconds: i64,
     scan_options: ScanOptions,
 ) -> Qualification {
-    let base = || Qualification {
+    let mut result = Qualification {
         path: path.to_path_buf(),
         kind: "unknown".into(),
         created_epoch_nanos: None,
@@ -111,58 +102,22 @@ pub(crate) fn age_measurement(
         verdict: "deferred:unmeasured".into(),
         deletion_authority: "none",
     };
-    let mut result = base();
-    let relative = match path.strip_prefix(root) {
-        Ok(relative) => relative,
-        Err(_) => {
-            result.verdict = "kept:outside-registered-scratch".into();
-            return result;
-        }
+    let scope = if path == root {
+        Some("kept:invalid-path")
+    } else {
+        crate::preview::check_path(root, path, device)
     };
-    let mut components = relative.components().peekable();
-    if components.peek().is_none()
-        || !components
-            .clone()
-            .all(|component| matches!(component, Component::Normal(_)))
-    {
-        result.verdict = "kept:invalid-scope".into();
+    if let Some(reason) = scope {
+        result.verdict = match reason {
+            "kept:outside-scratch" => "kept:outside-registered-scratch",
+            "kept:invalid-path" => "kept:invalid-scope",
+            "missing" => "kept:missing",
+            reason => reason,
+        }
+        .into();
         return result;
     }
-    let mut current = root.to_path_buf();
-    for component in components {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                result.verdict = "kept:symlink".into();
-                return result;
-            }
-            Ok(metadata) if metadata.dev() != device => {
-                result.verdict = "kept:filesystem-boundary".into();
-                return result;
-            }
-            Ok(metadata) if !metadata.is_file() && !metadata.is_dir() => {
-                result.verdict = "kept:unsupported-path".into();
-                return result;
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                result.verdict = "kept:missing".into();
-                return result;
-            }
-            Err(_) => {
-                result.verdict = "deferred:metadata".into();
-                return result;
-            }
-        }
-    }
-    let relative_components: Vec<_> = relative.components().collect();
-    let first = relative_components[0].as_os_str();
-    if first.as_encoded_bytes().starts_with(b".")
-        || first == ".diskm-ballast"
-        || relative_components
-            .iter()
-            .any(|part| part.as_os_str() == "evidence")
-    {
+    if crate::preview::protected_scope(root, path) {
         result.verdict = "kept:protected-scratch-scope".into();
         return result;
     }
@@ -192,87 +147,35 @@ pub(crate) fn age_measurement(
             .find(|entry| entry.path_bytes == path_bytes)
             .filter(|entry| report.complete && inventory.complete && entry.complete)
     } else {
-        let modified_ns = epoch_nanos(before.mtime(), before.mtime_nsec());
-        let created_ns = creation_epoch_nanos(&before);
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        #[cfg(unix)]
-        let (entry_device, inode, allocated_bytes) = (
-            before.dev(),
-            before.ino(),
+        let modified = epoch_nanos(before.mtime(), before.mtime_nsec());
+        let mut file = scan::age_measurement(
+            path,
+            &before,
+            scan::AgeKind::File,
             before.blocks().saturating_mul(512),
+            before.len(),
+            modified,
+            true,
         );
-        #[cfg(not(unix))]
-        let (entry_device, inode, allocated_bytes) = (device, before.len(), before.len());
-        let mut record = result.clone();
-        record.kind = "regular_file".into();
-        record.created_epoch_nanos = created_ns;
-        record.modified_epoch_nanos = modified_ns;
-        record.changed_epoch_nanos = epoch_nanos(before.ctime(), before.ctime_nsec());
-        record.effective_modified_epoch_nanos = modified_ns;
-        record.allocated_bytes = Some(allocated_bytes);
-        record.apparent_bytes = Some(before.len());
-        record.device = Some(entry_device);
-        record.inode = Some(inode);
-        record.coverage_complete = true;
-        record.verdict = if modified_ns.is_some_and(|mtime| mtime < cutoff_ns) {
-            "age_qualified_policy_pending".into()
-        } else {
-            "kept:recent-activity".into()
-        };
-        record.deletion_authority = "none";
-        match fs::symlink_metadata(path) {
-            Ok(after)
-                if (
-                    before.dev(),
-                    before.ino(),
-                    before.mtime(),
-                    before.mtime_nsec(),
-                    before.ctime(),
-                    before.ctime_nsec(),
-                ) == (
-                    after.dev(),
-                    after.ino(),
-                    after.mtime(),
-                    after.mtime_nsec(),
-                    after.ctime(),
-                    after.ctime_nsec(),
-                ) => {}
-            _ => {
-                record.coverage_complete = false;
-                record.verdict = "deferred:identity".into();
-            }
-        }
-        return record;
+        file.modified_epoch_nanos = modified;
+        Some(file)
     };
     let Some(measurement) = measurement else {
         result.verdict = "deferred:coverage-incomplete".into();
         return result;
     };
-    let Ok(after) = fs::symlink_metadata(path) else {
-        result.verdict = "deferred:identity".into();
-        return result;
-    };
-    #[cfg(unix)]
-    if (
-        before.dev(),
-        before.ino(),
-        before.mtime(),
-        before.mtime_nsec(),
-        before.ctime(),
-        before.ctime_nsec(),
-    ) != (
-        after.dev(),
-        after.ino(),
-        after.mtime(),
-        after.mtime_nsec(),
-        after.ctime(),
-        after.ctime_nsec(),
-    ) {
+    let stable = fs::symlink_metadata(path)
+        .is_ok_and(|after| scan::same_directory_observation(&before, &after));
+    if before.is_dir() && !stable {
         result.verdict = "deferred:identity".into();
         return result;
     }
-    result.kind = "directory".into();
+    result.kind = if before.is_dir() {
+        "directory"
+    } else {
+        "regular_file"
+    }
+    .into();
     result.created_epoch_nanos = measurement.created_epoch_nanos;
     result.modified_epoch_nanos = measurement.modified_epoch_nanos;
     result.changed_epoch_nanos = measurement.changed_epoch_nanos;
@@ -281,8 +184,10 @@ pub(crate) fn age_measurement(
     result.apparent_bytes = Some(measurement.apparent_bytes);
     result.device = Some(measurement.device);
     result.inode = Some(measurement.inode);
-    result.coverage_complete = measurement.complete;
-    result.verdict = if measurement
+    result.coverage_complete = stable && measurement.complete;
+    result.verdict = if !stable {
+        "deferred:identity".into()
+    } else if measurement
         .effective_modified_epoch_nanos
         .is_some_and(|modified| modified < cutoff_ns)
     {
@@ -290,7 +195,6 @@ pub(crate) fn age_measurement(
     } else {
         "kept:recent-activity".into()
     };
-    result.deletion_authority = "none";
     result
 }
 
@@ -331,7 +235,7 @@ pub fn qualify_host_temp(
     )
 }
 
-fn qualify_under_roots(
+pub(crate) fn qualify_under_roots(
     paths: &[PathBuf],
     cutoff_epoch_seconds: i64,
     scan_options: ScanOptions,
@@ -442,10 +346,6 @@ fn qualify_under_roots(
 
 // An exact path list is a nomination, never a cleanup verdict. The apply side
 // independently checks this identity, the exclusive cutoff, and all C14 holds.
-pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manifest> {
-    create_in(paths, before_epoch_seconds, false)
-}
-
 pub fn create_in(
     paths: &[PathBuf],
     before_epoch_seconds: i64,
