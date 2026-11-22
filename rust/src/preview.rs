@@ -2,7 +2,7 @@ use crate::scan::{
     self, scan, DirectoryMeasurement, FileKind, FileMeasurement, ScanGap, ScanGapKind, ScanOptions,
     ScanReport, ITEMIZATION_THRESHOLD_BYTES,
 };
-use crate::{preview_scopes, preview_worktrees};
+use crate::{preview_scopes, scratch_manifest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -11,7 +11,6 @@ use std::io;
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHECK_WINDOW_SECONDS: u64 = 12;
@@ -123,7 +122,7 @@ fn ledger_paths(state_dir: &Path, root: &Path) -> io::Result<Vec<(PathBuf, Strin
 }
 
 pub(crate) fn registered_scratch() -> io::Result<(PathBuf, u64)> {
-    let root = crate::scratch_volume_path(None)?
+    let root = crate::verified_scratch_volume(None, false)?
         .ok_or_else(|| io::Error::other("registered Scratch volume is unavailable"))?;
     if root.to_str().is_none()
         || !root.is_absolute()
@@ -164,61 +163,6 @@ fn check_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
         }
     }
     None
-}
-
-fn current_verdict(path: &Path, min_hours: u32) -> String {
-    // Use the checker's Python monotonic timebase and stop only the subprocess group
-    // created for this read-only verdict. A stalled candidate cannot block siblings.
-    let legacy = match crate::legacy_cli() {
-        Ok(path) => path,
-        Err(_) => return "deferred:legacy-backend-unavailable".into(),
-    };
-    let mut command = Command::new("python3");
-    command
-        .args([
-            "-c",
-            r#"
-import os, signal, subprocess, sys, time
-window = int(sys.argv[1])
-argv = [sys.argv[3], "quarantine", "verdict", sys.argv[2], "--kind", "ephemeral",
-        "--deadline-at", str(time.monotonic() + window)]
-child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
-try:
-    stdout, _ = child.communicate(timeout=window)
-except subprocess.TimeoutExpired:
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    print("deferred:deadline")
-else:
-    sys.stdout.buffer.write(stdout)
-    sys.exit(child.returncode)
-"#,
-        ])
-        .arg(CHECK_WINDOW_SECONDS.to_string())
-        .arg(path)
-        .arg(legacy)
-        .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")
-        .env_remove("DISK_MAGICIAN_OPERATOR_TARGETS");
-    if min_hours == 6 {
-        command.env("DISK_MAGICIAN_AGE_FLOOR_MINUTES", "360");
-    }
-    match command.output() {
-        Ok(output) if output.status.success() => {
-            let verdict = String::from_utf8_lossy(&output.stdout);
-            let verdict = verdict.trim();
-            if !verdict.contains(['\r', '\n'])
-                && (verdict == "remove"
-                    || verdict.starts_with("kept:")
-                    || verdict.starts_with("deferred:"))
-            {
-                return verdict.to_owned();
-            }
-            "deferred:unexpected-verdict".into()
-        }
-        _ => "deferred:verdict-unavailable".into(),
-    }
 }
 
 fn marker_exists(path: &Path) -> io::Result<bool> {
@@ -262,52 +206,24 @@ fn check_verdict_path(root: &Path, path: &Path, device: u64) -> Option<&'static 
     None
 }
 
-fn check_directory_contents(path: &Path, deadline: Duration) -> Option<&'static str> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.is_dir() => return None,
-        Ok(_) => {}
-        Err(_) => return Some("deferred:metadata"),
-    }
-    // A legacy verdict can approve a parent directory without checking for
-    // protected evidence within it. Check only a directory that returned remove.
-    let Ok(measured) = scan(
-        path,
-        ScanOptions {
-            deadline,
-            max_entries: usize::MAX,
-        },
-    ) else {
-        return Some("deferred:subtree-coverage");
-    };
-    if measured
-        .directories
-        .iter()
-        .map(|dir| dir.path.as_str())
-        .chain(measured.files.iter().map(|file| file.path.as_str()))
-        .map(Path::new)
-        .any(|path| path.file_name().is_some_and(|name| name == "evidence"))
-    {
-        return Some("kept:protected-scope");
-    }
-    if !repository_roots(&measured).is_empty() {
-        return Some("kept:repository-use-worktree-route");
-    }
-    (!measured.complete).then_some("deferred:subtree-coverage")
-}
-
 fn checked_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> String {
     if let Some(reason) = check_verdict_path(root, path, device) {
         return reason.into();
     }
-    let started = Instant::now();
-    let verdict = current_verdict(path, min_hours);
-    if verdict == "remove" {
-        let remaining = Duration::from_secs(CHECK_WINDOW_SECONDS).saturating_sub(started.elapsed());
-        if let Some(reason) = check_directory_contents(path, remaining) {
-            return reason.into();
-        }
-    }
-    check_verdict_path(root, path, device).map_or(verdict, str::to_owned)
+    let Ok(cutoff) = current_cutoff(min_hours) else {
+        return "deferred:cutoff".into();
+    };
+    scratch_manifest::age_measurement(
+        root,
+        path,
+        device,
+        cutoff,
+        ScanOptions {
+            deadline: Duration::from_secs(CHECK_WINDOW_SECONDS),
+            max_entries: usize::MAX,
+        },
+    )
+    .verdict
 }
 
 pub fn preview(
@@ -318,10 +234,10 @@ pub fn preview(
 ) -> io::Result<Report> {
     let (root, device) = registered_scratch()?;
     let paths = match ledger_paths(state_dir, &root) {
-        Err(error) if min_hours == 6 && error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) if min_hours != 48 && error.kind() == io::ErrorKind::NotFound => Vec::new(),
         result => result?,
     };
-    if min_hours == 6 {
+    if min_hours != 48 {
         return live_preview(root, device, paths, min_hours, limit, true, scan_deadline);
     }
     let recorded_paths = paths.len();
@@ -1095,9 +1011,9 @@ pub fn scope_report_resumable(
     scan_deadline: Duration,
     checkpoint_path: &Path,
 ) -> io::Result<Value> {
-    if scope != "scratch" || !matches!(min_hours, 6 | 48) {
+    if scope != "scratch" || min_hours == 0 {
         return Err(io::Error::other(
-            "resumable preview requires Scratch with a 6- or 48-hour floor",
+            "resumable preview requires Scratch with a positive age cutoff",
         ));
     }
     if !checkpoint_path.is_absolute() {
@@ -1465,20 +1381,21 @@ pub fn scope_report(
                     Err(error) => json!({"root": temp.path, "source": temp.source, "error": error.to_string()}),
                 });
             }
-            let policy = match preview_scopes::temp_policy_preview() {
-                Ok(report) => serde_json::to_value(report).map_err(io::Error::other)?,
-                Err(error) => json!({"error": error.to_string()}),
-            };
             Ok(json!({
                 "scope": "tmp",
                 "roots": reports,
                 "scratch_scope_availability": scopes.scratch_scope_availability,
-                "policy_preview": policy
+                "policy_preview": {
+                    "status": null,
+                    "verdict": "deferred:temp-policy",
+                    "reason": "native temp removal policy is pending"
+                }
             }))
         }
-        "worktrees" => {
-            serde_json::to_value(preview_worktrees::preview_worktrees()?).map_err(io::Error::other)
-        }
+        "worktrees" => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "native worktree qualification is pending",
+        )),
         "ledger" => serde_json::to_value(preview_scopes::read_ledger(required_state()?)?)
             .map_err(io::Error::other),
         "all" => {

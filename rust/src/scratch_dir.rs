@@ -1,6 +1,5 @@
 //! Scratch directory resolution and contained allocation.
 
-use std::env;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -12,10 +11,7 @@ use std::path::{Component, Path, PathBuf};
 const DIRECTORY_FLAGS: i32 = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 fn scratch_root() -> io::Result<PathBuf> {
-    let explicit = env::var_os("DISK_MAGICIAN_DISKM_BIN")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
-    Ok(crate::scratch_volume_path(explicit)?.unwrap_or_else(|| "/tmp".into()))
+    Ok(crate::verified_scratch_volume(None, false)?.unwrap_or_else(|| "/tmp".into()))
 }
 
 // Resolve existing inward symlinks without allowing a nonexistent suffix to

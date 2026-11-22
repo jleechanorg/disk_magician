@@ -2,14 +2,12 @@
 
 use crate::scratch_recovery::{self, RecoveryHint};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 // Match the existing quarantine actuator's 256 MiB manifest limit.
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
@@ -106,64 +104,13 @@ fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
 
 fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String, u64)> {
     #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::LEGACY_COMPAT_CLI).is_none() {
-        return crate::volume_linux::mounted_usage(&root.path, root.dev, root.ino, filesystem_id);
+    {
+        crate::volume_linux::mounted_usage(&root.path, root.dev, root.ino, filesystem_id)
     }
     #[cfg(target_os = "macos")]
-    if std::env::var_os(crate::LEGACY_COMPAT_CLI).is_none() {
-        return crate::volume_macos::mounted_usage(&root.path, root.dev, root.ino, filesystem_id);
-    }
-    let output = Command::new(crate::legacy_cli()?)
-        .args(["volume", "status", "--snapshot"])
-        .output()?;
-    let status = output.status.code();
-    if !matches!(status, Some(0 | 1)) {
-        return Err(io::Error::other("Scratch volume status unavailable"));
-    }
-    let document: Value = serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
-    // Scratch quota pressure is a reason to reclaim. Other alarms still
-    // defer target apply, even when an allocated-byte reading exists.
-    if status == Some(1)
-        && !document["alarms"].as_array().is_some_and(|alarms| {
-            !alarms.is_empty()
-                && alarms
-                    .iter()
-                    .all(|alarm| matches!(alarm.as_str(), Some("volume_high" | "volume_full")))
-        })
     {
-        return Err(io::Error::other("Scratch volume status unavailable"));
+        crate::volume_macos::mounted_usage(&root.path, root.dev, root.ino, filesystem_id)
     }
-    let row = document["volumes"]
-        .as_array()
-        .and_then(|rows| rows.iter().find(|row| row["class"] == "scratch"))
-        .ok_or_else(|| io::Error::other("Scratch status row unavailable"))?;
-    let current_path = row["path"]
-        .as_str()
-        .ok_or_else(|| io::Error::other("Scratch path unavailable"))?;
-    let observed_filesystem_id = row["filesystem_id"]
-        .as_str()
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| io::Error::other("Scratch filesystem identity unavailable"))?;
-    if Path::new(current_path) != root.path || row["status"] != "active" {
-        return Err(io::Error::other("Scratch mount identity changed"));
-    }
-    if filesystem_id.is_some_and(|expected| expected != observed_filesystem_id) {
-        return Err(io::Error::other("Scratch filesystem identity changed"));
-    }
-    let verify = Command::new(crate::legacy_cli()?)
-        .args(["volume", "verify-mount", current_path])
-        .output()?;
-    if !verify.status.success() {
-        return Err(io::Error::other("Scratch mount verification failed"));
-    }
-    let mounted = fs::symlink_metadata(current_path)?;
-    if !mounted.is_dir() || mounted.dev() != root.dev || mounted.ino() != root.ino {
-        return Err(io::Error::other("Scratch root identity changed"));
-    }
-    let used = row["allocated_bytes"]
-        .as_u64()
-        .ok_or_else(|| io::Error::other("Scratch used-byte measurement unavailable"))?;
-    Ok((observed_filesystem_id.to_owned(), used))
 }
 
 fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
@@ -193,32 +140,6 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
     file.sync_all()?;
     fs::rename(&temp, path)?;
     File::open(parent)?.sync_all()
-}
-
-fn legacy_apply(manifest: &Path, digest: &str, relative: &str) -> io::Result<String> {
-    let output = Command::new(crate::legacy_cli()?)
-        .env_remove("DISK_MAGICIAN_SCRATCH_LOCK_FD")
-        .args(["quarantine", "scratch-apply", "--manifest"])
-        .arg(manifest)
-        .args(["--manifest-sha256", digest, "--path", relative])
-        .output()?;
-    if output.status.code() == Some(75) {
-        return Ok("deferred:actuator-busy".into());
-    }
-    if !output.status.success() {
-        return Err(io::Error::other("exact manifest apply failed"));
-    }
-    let report: Value = serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
-    let rows = report["results"]
-        .as_array()
-        .ok_or_else(|| io::Error::other("exact manifest apply result missing"))?;
-    if rows.len() != 1 || rows[0]["path"] != relative {
-        return Err(io::Error::other("exact manifest apply path mismatch"));
-    }
-    rows[0]["result"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| io::Error::other("exact manifest apply verdict missing"))
 }
 
 pub fn apply(
@@ -363,18 +284,16 @@ pub fn apply(
         }
     };
 
-    let mut current_used = start_used;
     if state
         .receipts
         .last()
         .is_some_and(|receipt| receipt.used_after_bytes.is_none())
     {
-        current_used = start_used;
         if let Some(receipt) = state.receipts.last_mut() {
-            receipt.used_after_bytes = Some(current_used);
+            receipt.used_after_bytes = Some(start_used);
         }
-        state.used_after_bytes = Some(current_used);
-        state.status = if current_used <= target_used_bytes {
+        state.used_after_bytes = Some(start_used);
+        state.status = if start_used <= target_used_bytes {
             "target_reached".into()
         } else if state.pending_paths.is_empty() {
             "queue_exhausted".into()
@@ -383,78 +302,15 @@ pub fn apply(
         };
         write_state(resume_path, &state)?;
     }
-    while let Some(path) = state.pending_paths.front().cloned() {
-        let used_before = current_used;
-        if used_before <= target_used_bytes {
-            state.status = "target_reached".into();
-            state.used_after_bytes = Some(used_before);
-            write_state(resume_path, &state)?;
-            return Ok(report(state));
-        }
-        state.status = format!("applying:{path}");
-        state.in_flight_quarantine_id = None;
-        state.used_after_bytes = Some(used_before);
-        write_state(resume_path, &state)?;
-        let result = match legacy_apply(manifest_path, digest, &path) {
-            Ok(result) => result,
-            Err(_) => return Ok(report_recovery_required(&state, &manifest.entries)),
-        };
-        if matches!(
-            result.as_str(),
-            "deferred:operation-lock" | "deferred:actuator-busy"
-        ) {
-            state.status = result;
-            write_state(resume_path, &state)?;
-            return Ok(report(state));
-        }
-        if result.starts_with("deferred:") || result.starts_with("kept:quarantine_partial_kept") {
-            if let Some((_, id)) = result.rsplit_once(':') {
-                if scratch_recovery::is_quarantine_id(id) {
-                    state.in_flight_quarantine_id = Some(id.to_owned());
-                    write_state(resume_path, &state)?;
-                }
-            }
-            return Ok(report_recovery_required(&state, &manifest.entries));
-        }
-        state.pending_paths.pop_front();
-        state.receipts.push(Receipt {
-            path: path.clone(),
-            result: result.clone(),
-            used_before_bytes: used_before,
-            used_after_bytes: None,
-        });
-        state.status = format!("receipt_pending_usage:{path}");
-        write_state(resume_path, &state)?;
-        let (after_id, used_after) = match mounted_usage(&state.root, Some(&state.filesystem_id)) {
-            Ok(observation) => observation,
-            Err(error) => {
-                state.status = format!("deferred:{}", error);
-                state.used_after_bytes = None;
-                write_state(resume_path, &state)?;
-                return Ok(report(state));
-            }
-        };
-        if after_id != state.filesystem_id {
-            state.status = "deferred:Scratch filesystem identity changed".into();
-            write_state(resume_path, &state)?;
-            return Ok(report(state));
-        }
-        current_used = used_after;
-        if let Some(receipt) = state.receipts.last_mut() {
-            receipt.used_after_bytes = Some(used_after);
-        }
-        state.used_after_bytes = Some(used_after);
-        state.status = if used_after <= target_used_bytes {
-            "target_reached".into()
-        } else if state.pending_paths.is_empty() {
-            "queue_exhausted".into()
+    if !state.pending_paths.is_empty() {
+        state.status = if start_used <= target_used_bytes {
+            "target_reached"
         } else {
-            "in_progress".into()
-        };
-        write_state(resume_path, &state)?;
-        if state.status == "target_reached" || state.pending_paths.is_empty() {
-            break;
+            "deferred:native-actuator-unavailable"
         }
+        .into();
+        state.used_after_bytes = Some(start_used);
+        write_state(resume_path, &state)?;
     }
     Ok(report(state))
 }

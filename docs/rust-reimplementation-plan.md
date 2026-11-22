@@ -12,6 +12,17 @@
 
 Pin the active Rust baseline and reconcile overlapping cleanup changes before altering the same call paths. Use disposable registered Scratch fixtures for mutation tests. Live removal remains an explicit exact scope. Drain old scheduled writers before any installed writer switch and preserve existing recovery data.
 
+## Current cleanup baseline
+
+The operator’s November 22 six-hour inventory recorded 98,872 Scratch candidates
+and 17,176 temp candidates across three roots. Zero were confirmed eligible.
+Scratch had 98,852 verification-limit deferrals and 20 unavailable-verdict
+deferrals. All temp candidates were deferred by the retired policy backend.
+Use the saved candidate JSON as age input. Before any removal, qualify an exact
+batch with native lease, identity, evidence, and active-use checks. Persist the
+verified result separately from age observations. Deferred entries and coverage
+gaps remain visible.
+
 ## Task 1 — Retire generic forwarding
 
 Modify `rust/src/main.rs`, `rust/tests/cli_contract.rs`, and `rust/README.md`. Add `native_cli_rejects_unported_commands_without_launching_the_backend`. Run `cargo test --locked --manifest-path rust/Cargo.toml --test cli_contract` with the existing Scratch fixture environment. RED shows a missing Rust command starts the backend. Remove generic forwarding. GREEN shows native help and exit 2 for unsupported verbs with no backend calls. Existing named adapters remain testable. Commit the deletion.
