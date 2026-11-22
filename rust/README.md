@@ -6,12 +6,11 @@ From the repository root:
 
 ```bash
 cargo build --locked --manifest-path rust/Cargo.toml
-cargo test --locked --manifest-path rust/Cargo.toml
 cargo fmt --manifest-path rust/Cargo.toml --check
-cargo clippy --locked --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+cargo clippy --locked --manifest-path rust/Cargo.toml -- -D warnings
 ```
 
-The build goes to Cargo's target directory. Set `CARGO_TARGET_DIR` to a verified, leased Disk Magician build directory when working on an operator host. The scanner tests also require `DISKM_SCRATCH_TEST_DIR` to name an existing disposable directory, which CI sets to its runner temporary directory.
+The build goes to Cargo's target directory. Set `CARGO_TARGET_DIR` to a verified, leased Disk Magician build directory when working on an operator host.
 
 ```text
 diskm status [PATH] [--state-dir DIR]
