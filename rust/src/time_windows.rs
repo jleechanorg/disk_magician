@@ -40,7 +40,7 @@ pub const SNAPSHOT_STALE_AFTER: Duration = Duration::from_secs(36 * 60 * 60);
 /// Scheduler cadences and run budgets. Templates in `launchd/` and `systemd/`
 /// carry `@<NAME>_SECONDS@` placeholders that `scripts/render_template.py`
 /// fills from `diskm time-windows`.
-pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30 * 60);
+pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 pub const SCRATCH_PRESSURE_INTERVAL: Duration = Duration::from_secs(20 * 60);
 pub const TEMP_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub const STATE_COMMIT_INTERVAL: Duration = Duration::from_secs(30 * 60);
