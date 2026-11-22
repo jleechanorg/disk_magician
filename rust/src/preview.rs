@@ -1341,7 +1341,7 @@ pub fn scope_report(
                 "policy_preview": {
                     "status": null,
                     "verdict": "deferred:temp-policy",
-                    "reason": "native temp removal policy is pending"
+                    "reason": "bulk temp policy is pending; scratch-qualify checks exact leased system temp files"
                 }
             }))
         }

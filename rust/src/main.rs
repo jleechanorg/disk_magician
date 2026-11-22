@@ -20,13 +20,14 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm history --state-dir DIR [--days 7|30] [--json]
   diskm scratch-dir [SUBPATH]
   diskm scratch-new REPO PURPOSE [--kind build|evidence|scratch]
+  diskm scratch-temp-file REPO PURPOSE
   diskm scratch-lease PATH
   diskm scratch-finish PATH [completed|abandoned]
   diskm scratch-index refresh [--root scratch|system-tmp]
   diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
   diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
   diskm scratch-sweep [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
-  diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) --path ABSOLUTE_PATH [--path ...] | --paths-from FILE
+  diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp]
   diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
   diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours N] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
@@ -63,6 +64,7 @@ enum Operation {
     ScratchManifest {
         cutoff: i64,
         paths: Vec<PathBuf>,
+        host_temp: bool,
     },
     ScratchSweep(scratch_sweep::Options),
     ScratchQualify {
@@ -345,7 +347,7 @@ fn parse_scratch_nomination(
             }
             Some("--path") => paths.push(PathBuf::from(required_value(&mut args, "--path")?)),
             Some("--jobs") if qualify => jobs = positive(&mut args, "--jobs")?,
-            Some("--root") if qualify => {
+            Some("--root") => {
                 host_temp = match required_value(&mut args, "--root")?.to_str() {
                     Some("scratch") => false,
                     Some("system-tmp") => true,
@@ -391,7 +393,11 @@ fn parse_scratch_nomination(
             },
         });
     }
-    Ok(Operation::ScratchManifest { cutoff, paths })
+    Ok(Operation::ScratchManifest {
+        cutoff,
+        paths,
+        host_temp,
+    })
 }
 
 fn parse_scratch_target_apply(
@@ -520,8 +526,12 @@ fn run(operation: Operation) -> io::Result<u8> {
                 return Ok(TEMPORARY_FAILURE);
             }
         }
-        Operation::ScratchManifest { cutoff, paths } => {
-            print_json(&scratch_manifest::create(&paths, cutoff)?)?;
+        Operation::ScratchManifest {
+            cutoff,
+            paths,
+            host_temp,
+        } => {
+            print_json(&scratch_manifest::create_in(&paths, cutoff, host_temp)?)?;
         }
         Operation::ScratchTargetApply {
             manifest,

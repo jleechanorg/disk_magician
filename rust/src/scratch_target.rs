@@ -9,8 +9,9 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 // Match the existing quarantine actuator's 256 MiB manifest limit.
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
@@ -135,6 +136,27 @@ fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
 }
 
 fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String, u64)> {
+    if root.path == scratch_lease::temp_path()? {
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&root.path)?;
+        let meta = directory.metadata()?;
+        let id = format!("system-tmp:{}:{}", root.dev, root.ino);
+        if (meta.dev(), meta.ino()) != (root.dev, root.ino)
+            || filesystem_id.is_some_and(|value| value != id)
+        {
+            return Err(io::Error::other("managed temp root identity changed"));
+        }
+        let mut volume = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::fstatvfs(directory.as_raw_fd(), volume.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let volume = unsafe { volume.assume_init() };
+        let bytes =
+            volume.f_blocks.saturating_sub(volume.f_bfree) as u128 * volume.f_frsize as u128;
+        return Ok((id, u64::try_from(bytes).map_err(io::Error::other)?));
+    }
     #[cfg(target_os = "linux")]
     {
         crate::volume_linux::mounted_usage(&root.path, root.dev, root.ino, filesystem_id)
@@ -543,37 +565,12 @@ fn selected_manifest_paths(
 }
 
 fn restored_entry_metadata(root: &Root, relative: &str) -> io::Result<fs::Metadata> {
-    let components: Vec<_> = Path::new(relative).components().collect();
-    if components.is_empty()
-        || !components
-            .iter()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(io::Error::other("invalid restored manifest path"));
-    }
     let root_metadata = fs::symlink_metadata(&root.path)?;
     if !root_metadata.is_dir() || root_metadata.dev() != root.dev || root_metadata.ino() != root.ino
     {
         return Err(io::Error::other("Scratch root identity changed"));
     }
-    let mut path = root.path.clone();
-    let mut result = None;
-    for (index, component) in components.iter().enumerate() {
-        path.push(component.as_os_str());
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() || metadata.dev() != root.dev {
-            return Err(io::Error::other(
-                "restored path crossed a symlink or filesystem boundary",
-            ));
-        }
-        if index + 1 < components.len() && !metadata.is_dir() {
-            return Err(io::Error::other(
-                "restored path has a non-directory ancestor",
-            ));
-        }
-        result = Some(metadata);
-    }
-    result.ok_or_else(|| io::Error::other("restored path is empty"))
+    crate::scratch_manifest::entry_metadata(&root.path, Path::new(relative), root.dev)
 }
 
 pub(crate) fn check_build_lease(root: &Path, relative: &Path) -> Result<(), &'static str> {
@@ -583,6 +580,13 @@ pub(crate) fn check_build_lease(root: &Path, relative: &Path) -> Result<(), &'st
 
 pub(crate) fn build_bundle(root: &Path, relative: &Path) -> Result<PathBuf, &'static str> {
     let parts: Vec<_> = relative.components().collect();
+    if let [Component::Normal(name)] = parts.as_slice() {
+        if name.as_encoded_bytes().starts_with(b"diskm-temp-")
+            && scratch_lease::temp_path().is_ok_and(|temporary| root == temporary)
+        {
+            return Ok(root.join(name));
+        }
+    }
     if parts.len() < 5
         || parts[0].as_os_str() != "runs"
         || parts.iter().any(|part| {
@@ -599,7 +603,10 @@ pub(crate) fn build_bundle(root: &Path, relative: &Path) -> Result<PathBuf, &'st
 pub(crate) fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static str> {
     let verified = scratch_lease::lookup_bundle_under_root(bundle, root)
         .map_err(|_| "deferred:lease-unavailable")?;
-    if !matches!(verified.lease.kind, BundleKind::Build) {
+    if !matches!(
+        verified.lease.kind,
+        BundleKind::Build | BundleKind::TempFile
+    ) {
         return Err("kept:protected-bundle-kind");
     }
     if !verified
@@ -620,7 +627,6 @@ fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentit
         return Err("kept:native-file-only");
     }
     let relative = Path::new(&entry.path);
-    check_build_lease(&root.path, relative)?;
     if let Some(reason) =
         crate::preview::check_verdict_path(&root.path, &root.path.join(relative), root.dev)
     {
@@ -630,6 +636,7 @@ fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentit
             reason
         });
     }
+    check_build_lease(&root.path, relative)?;
     let metadata = match restored_entry_metadata(root, &entry.path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Err("already-absent"),

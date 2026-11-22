@@ -36,8 +36,6 @@ struct Entry {
     size: u64,
     mtime_ns: i64,
     ctime_ns: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inventory_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -310,8 +308,8 @@ pub fn qualify_exact(
         cutoff_epoch_seconds,
         scan_options,
         jobs,
-        vec![root],
-        true,
+        vec![root.clone()],
+        Some(root),
     )
 }
 
@@ -329,7 +327,7 @@ pub fn qualify_host_temp(
         scan_options,
         jobs,
         roots,
-        false,
+        Some(crate::scratch_lease::temp_path()?),
     )
 }
 
@@ -339,7 +337,7 @@ fn qualify_under_roots(
     scan_options: ScanOptions,
     jobs: usize,
     roots: Vec<PathBuf>,
-    managed_policy: bool,
+    policy_root: Option<PathBuf>,
 ) -> io::Result<QualificationReport> {
     if paths.is_empty() || jobs == 0 {
         return Err(io::Error::new(
@@ -373,6 +371,7 @@ fn qualify_under_roots(
             let next = &next;
             let sender = sender.clone();
             let identities = &identities;
+            let policy_root = &policy_root;
             scope.spawn(move || loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
                 let Some(path) = paths.get(index) else {
@@ -392,7 +391,9 @@ fn qualify_under_roots(
                     .unwrap_or(&identities[0]);
                 let mut qualification =
                     age_measurement(root, path, *device, cutoff_epoch_seconds, scan_options);
-                if managed_policy && qualification.verdict == "age_qualified_policy_pending" {
+                if policy_root.as_ref() == Some(*root)
+                    && qualification.verdict == "age_qualified_policy_pending"
+                {
                     qualification.verdict = if qualification.kind == "regular_file" {
                         crate::preview::managed_file_verdict(
                             root,
@@ -426,9 +427,9 @@ fn qualify_under_roots(
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| io::Error::other("qualification result missing"))?;
-    let complete = entries.iter().all(|entry| {
-        entry.coverage_complete && (!managed_policy || !entry.verdict.starts_with("deferred:"))
-    });
+    let complete = entries
+        .iter()
+        .all(|entry| entry.coverage_complete && !entry.verdict.starts_with("deferred:"));
     Ok(QualificationReport {
         root: (roots.len() == 1).then(|| roots[0].clone()),
         roots,
@@ -442,13 +443,26 @@ fn qualify_under_roots(
 // An exact path list is a nomination, never a cleanup verdict. The apply side
 // independently checks this identity, the exclusive cutoff, and all C14 holds.
 pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manifest> {
+    create_in(paths, before_epoch_seconds, false)
+}
+
+pub fn create_in(
+    paths: &[PathBuf],
+    before_epoch_seconds: i64,
+    system_tmp: bool,
+) -> io::Result<Manifest> {
     if paths.is_empty() {
         return Err(io::Error::other("scratch-manifest needs at least one path"));
     }
     let cutoff_ns = timestamp_ns(before_epoch_seconds, 0)?;
-    let (root, dev) = registered_scratch()?;
+    let root = if system_tmp {
+        crate::scratch_lease::temp_path()?
+    } else {
+        registered_scratch()?.0
+    };
     let root_meta = fs::symlink_metadata(&root)?;
-    if !root_meta.is_dir() || root_meta.dev() != dev {
+    let dev = root_meta.dev();
+    if !root_meta.is_dir() {
         return Err(io::Error::other("Scratch root changed during resolution"));
     }
     let mut seen = BTreeSet::new();
@@ -462,12 +476,13 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
         },
         1,
         vec![root.clone()],
-        false,
+        None,
     )?;
-    for (path, verdict) in paths.iter().zip(qualification.entries.iter()) {
-        let relative = path.strip_prefix(&root).map_err(|_| {
-            io::Error::other(format!("outside registered Scratch: {}", path.display()))
-        })?;
+    for verdict in &qualification.entries {
+        let path = &verdict.path;
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| io::Error::other(format!("outside manifest root: {}", path.display())))?;
         let metadata = entry_metadata(&root, relative, dev)?;
         if verdict.verdict != "age_qualified_policy_pending" || !verdict.coverage_complete {
             return Err(io::Error::other(format!(
@@ -522,7 +537,6 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
             size: metadata.len(),
             mtime_ns,
             ctime_ns,
-            inventory_sha256: None,
         });
     }
     let current = fs::symlink_metadata(&root)?;
@@ -543,7 +557,7 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
     })
 }
 
-fn entry_metadata(root: &Path, relative: &Path, device: u64) -> io::Result<Metadata> {
+pub(crate) fn entry_metadata(root: &Path, relative: &Path, device: u64) -> io::Result<Metadata> {
     let mut current = root.to_path_buf();
     let mut parts = relative.components().peekable();
     if parts.peek().is_none() || relative.to_str().is_none() {

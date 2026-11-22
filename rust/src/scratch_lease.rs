@@ -26,6 +26,7 @@ pub enum BundleKind {
     Scratch,
     Build,
     Evidence,
+    TempFile,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -91,7 +92,8 @@ pub struct VerifiedBundle {
 pub fn dispatch(args: &[OsString]) -> Option<ExitCode> {
     let command = args.first()?.to_str()?;
     let result = match command {
-        "scratch-new" => create_bundle(&args[1..]),
+        "scratch-new" => create_bundle(&args[1..], false),
+        "scratch-temp-file" => create_bundle(&args[1..], true),
         "scratch-finish" => finish_bundle(&args[1..]),
         "scratch-lease" => inspect_bundle(&args[1..]),
         _ => return None,
@@ -126,26 +128,6 @@ fn to_ns(time: SystemTime) -> Option<i64> {
     i64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok()
 }
 
-fn utc_date(seconds: i64) -> io::Result<String> {
-    let z = seconds.div_euclid(86_400) + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }).div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    if !(2000..=9999).contains(&year) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "clock outside supported date range",
-        ));
-    }
-    Ok(format!("{year:04}{month:02}{day:02}"))
-}
-
 fn valid_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 80
@@ -158,7 +140,11 @@ fn valid_slug(value: &str) -> bool {
 
 fn scratch_root() -> io::Result<PathBuf> {
     crate::verified_scratch_volume(None, false)?
-        .map_or_else(|| Ok(PathBuf::from("/tmp")), |root| root.canonicalize())
+        .map_or_else(|| fs::canonicalize("/tmp"), |root| root.canonicalize())
+}
+
+pub(crate) fn temp_path() -> io::Result<PathBuf> {
+    fs::canonicalize("/tmp")
 }
 
 fn state_records() -> io::Result<PathBuf> {
@@ -295,31 +281,28 @@ fn caller_owner() -> io::Result<ProcessOwner> {
 
 fn record_path(bundle: &Path, root: &Path) -> io::Result<(PathBuf, BundleLease)> {
     let supplied_metadata = fs::symlink_metadata(bundle)?;
-    if supplied_metadata.file_type().is_symlink() || !supplied_metadata.is_dir() {
+    if supplied_metadata.file_type().is_symlink() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "bundle path must be a real directory",
+            "lease path cannot be a symlink",
         ));
     }
     let absolute = bundle.canonicalize()?;
-    if !absolute.starts_with(root.join(RUNS_DIR)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path is not a managed Scratch bundle",
-        ));
-    }
     let metadata = fs::symlink_metadata(&absolute)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "bundle must be a real directory",
-        ));
-    }
     let digest = Sha256::digest(absolute.as_os_str().as_bytes());
     let record = state_records()?.join(format!("{digest:x}.json"));
     let lease: BundleLease =
         serde_json::from_slice(&fs::read(&record)?).map_err(io::Error::other)?;
-    if lease.schema_version != 1
+    let valid_kind = if matches!(lease.kind, BundleKind::TempFile) {
+        absolute.parent() == Some(root)
+            && root == temp_path()?
+            && metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+    } else {
+        absolute.starts_with(root.join(RUNS_DIR)) && metadata.is_dir()
+    };
+    if !valid_kind
+        || lease.schema_version != 1
         || lease.root != root
         || lease.filepath != absolute
         || (lease.device, lease.inode) != (metadata.dev(), metadata.ino())
@@ -335,6 +318,10 @@ fn record_path(bundle: &Path, root: &Path) -> io::Result<(PathBuf, BundleLease)>
 /// filesystem identity. A finish event is accepted only for this lease's exact
 /// identity and original producer incarnation.
 pub fn lookup_bundle(bundle: &Path) -> io::Result<VerifiedBundle> {
+    let temporary = temp_path()?;
+    if bundle.parent() == Some(temporary.as_path()) {
+        return lookup_bundle_under_root(bundle, &temporary);
+    }
     lookup_bundle_under_root(bundle, &scratch_root()?)
 }
 
@@ -402,8 +389,8 @@ fn create_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
     .sync_all()
 }
 
-fn create_bundle(args: &[OsString]) -> io::Result<String> {
-    if args.len() < 2 {
+fn create_bundle(args: &[OsString], system_tmp: bool) -> io::Result<String> {
+    if args.len() < 2 || (system_tmp && args.len() != 2) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "usage: diskm scratch-new <repo> <purpose> [--kind scratch|build|evidence]",
@@ -436,6 +423,7 @@ fn create_bundle(args: &[OsString]) -> io::Result<String> {
             )
         })?;
     let kind_value = match &args[2..] {
+        [] if system_tmp => "temp_file",
         [] => "scratch",
         [flag, value] if flag == "--kind" => value
             .to_str()
@@ -451,6 +439,7 @@ fn create_bundle(args: &[OsString]) -> io::Result<String> {
         }
     };
     let kind = match kind_value {
+        "temp_file" if system_tmp => BundleKind::TempFile,
         "scratch" => BundleKind::Scratch,
         "build" => BundleKind::Build,
         "evidence" => BundleKind::Evidence,
@@ -461,20 +450,36 @@ fn create_bundle(args: &[OsString]) -> io::Result<String> {
             ))
         }
     };
-    let root = scratch_root()?;
+    let root = if system_tmp {
+        temp_path()?
+    } else {
+        scratch_root()?
+    };
     let root_metadata = fs::metadata(&root)?;
     let owner = caller_owner()?;
     let created = now_ns()?;
-    let date = utc_date(created.div_euclid(1_000_000_000))?;
-    let repo_dir = root.join(RUNS_DIR).join(date).join(repo);
-    fs::create_dir_all(&repo_dir)?;
+    let date = crate::job_receipt::timestamp(SystemTime::now())?[..10].replace('-', "");
     let records = state_records()?;
-    let id = format!("{purpose}-{}-{}", owner.pid, created);
-    let path = repo_dir.join(&id);
-    fs::create_dir(&path)?;
+    let mut id = format!("{purpose}-{}-{}", owner.pid, created);
+    let path = if system_tmp {
+        id = format!("diskm-temp-{id}");
+        let path = root.join(&id);
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        path
+    } else {
+        let repo_dir = root.join(RUNS_DIR).join(date).join(repo);
+        fs::create_dir_all(&repo_dir)?;
+        let path = repo_dir.join(&id);
+        fs::create_dir(&path)?;
+        path
+    };
     let metadata = fs::symlink_metadata(&path)?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
+    if (system_tmp && !metadata.is_file())
+        || (!system_tmp && !metadata.is_dir())
         || metadata.dev() != root_metadata.dev()
     {
         return Err(io::Error::other(
@@ -584,7 +589,6 @@ fn inspect_bundle(args: &[OsString]) -> io::Result<String> {
     // freshness comes from the age scanner and has its own scan timestamp.
     let observed = fs::symlink_metadata(&lease.filepath)?;
     if observed.file_type().is_symlink()
-        || !observed.is_dir()
         || (observed.dev(), observed.ino()) != (lease.device, lease.inode)
     {
         return Err(io::Error::other("bundle directory identity changed"));

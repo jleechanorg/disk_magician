@@ -30,12 +30,19 @@ coverage for an exact list. Native build files also receive an advisory removal
 verdict from the completed lease, filesystem identity, and current open-file
 checks. The default Scratch preview scans at 48 hours, even when the ledger
 has no entries. Its verification cap applies to files in managed runs and any
-unchecked rows are marked deferred. Host-temp qualification reports age only.
+unchecked rows are marked deferred. Host-temp qualification checks exact leased
+files under the system temp root. Older unregistered temp files remain held.
 A preview grants no deletion authority. `scratch-target-apply` accepts a hash-pinned Scratch manifest and
 rechecks the exact file, cutoff, mount, producer lease and open-file status.
 The first actuator handles single-link files in completed native build bundles
-whose producer has exited. Evidence, unmanaged Scratch, whole-directory removal
-and host-temp mutation still need native policy and verification.
+whose producer has exited. Evidence, unmanaged Scratch and whole-directory
+removal still need native policy and verification.
+
+`scratch-temp-file REPO PURPOSE` allocates one leased file in `/tmp` with mode
+0600. Use `scratch-finish` after use and `scratch-manifest --root system-tmp` to
+nominate an old file. The existing exact apply and restore commands verify a
+completed temp-file lease. The manifest and recovery checkpoint stay outside
+the temp root. This supports temporary files such as logs and markers.
 
 Each apply invocation uses its own resume file outside Scratch. Resume one
 checkpoint with one invocation at a time. The actuator briefly renames a
@@ -55,7 +62,7 @@ recovery options. The launchd and systemd Scratch templates call this binary
 directly.
 
 Before enabling the timers, add recovery of old attempts and forward progress
-past persistent holds or discovery deadlines. Host-temp mutation and scheduling,
+past persistent holds or discovery deadlines. Host-temp scheduling,
 Git state publication, and qualification of existing unmanaged data remain open.
 
 Mac and Linux executable fixtures verified that exact apply removed the selected
