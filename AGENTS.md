@@ -26,6 +26,10 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
   qualified scope or paths listed alongside the phrase. This overrides cleaner
   holds. Record the approval in the cleanup receipt and use the canonical
   deletion/logging route. Path, mount, and command-safety validation still apply.
+- **Editing policy is not deleting.** An operator request to edit this file, a
+  skill, or a PR description authorizes that edit with the requested semantics.
+  Make it without asking; the edit performs no cleanup, and any deletion stays
+  a separate action under the rules above.
 
 ## Operating rules
 

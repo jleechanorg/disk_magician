@@ -98,39 +98,24 @@ Disk-fill investigations in this repo MUST follow a fixed pre-analysis
 sequence (added 2026-07-30 after four "200 GiB does not exist" misses that
 underestimated cumulative-reservoir growth):
 
--1. **Verify disk_magician's own launchd fleet is alive BEFORE trusting any
-    floor/history number.** Run `./disk_magician.sh check-launchd-fleet`
-    (also runs automatically as the first section of `audit`/`clean`).
-    Root cause (2026-09-06): up to 16 of this repo's launchd jobs — including
-    the `sweeper-health` watchdog whose entire purpose is to catch exactly
-    this — were found silently unloaded for 6+ days (mass event, zero visible
-    error; a malformed plist missing its `<dict>` wrapper is invisible even
-    to `launchctl list`). This has recurred under at least 3 different root
-    mechanisms (2026-07-22 shlock bug, 2026-07-29 interval-elapsed
-    false-negative, 2026-09-06 mass plist corruption). On 2026-09-06 the fleet
-    was also observed **actively flapping** — jobs transitioning
-    loaded/unloaded within tens of seconds to minutes of a fresh
-    `install_launchd_sweepers.sh` run, with plists confirmed valid throughout
-    and `sfltool dumpbtm` showing "enabled, allowed" disposition (i.e. macOS
-    Background Task Management is not the one disabling them). The exact
-    external trigger was NOT pinned down in that session — repair is not
-    durable; if the disk-fill pattern recurs shortly after a repair, re-run
-    `check-launchd-fleet` rather than assuming one clean run means it stays
-    clean. **Pinned 2026-09-11:** the corruption mechanism is
-    `plutil -extract <key> <fmt> <plist>` run WITHOUT `-o -` — plutil then
-    overwrites the plist with the extracted value (first byte becomes `[`/`{`),
-    and the auto-repair reinstall is what makes it look like flapping. Agents
-    inspecting a live plist MUST use `plutil -extract <key> raw -o - <plist>`
-    or `plutil -p <plist>`; never the bare form. If the fleet flips
-    healthy→corrupt inside a session, compare plist mtimes to your own
-    commands first
-    (`findings_wiki/2026-09-11-plutil-extract-in-place-rewrite-corrupts-plists.md`).
-    **Do not assume "installed" means
-    "running."** If the fleet check reports anything unhealthy, say so as the
-    PRIMARY finding before any accounting — a floor computed from a dead
-    collector is not a floor, and the underlying automation gap is the actual
-    answer to "why do I have to keep re-explaining this," not a symptom to
-    route around. Repair: `bash scripts/install_launchd_sweepers.sh`.
+-1. **Verify the scheduled jobs are alive BEFORE trusting any floor/history
+    number.** A floor computed from a dead collector is not a floor; report an
+    unhealthy fleet as the primary finding. Installed is not running.
+    - macOS: the five `launchd/com.jleechanorg.disk-magician-*.plist.template`
+      jobs must each show a `run interval` in
+      `launchctl print gui/$(id -u)/com.jleechanorg.disk-magician-<job>`.
+    - Linux: `systemctl --user list-timers` must list the five timers rendered
+      from `systemd/*.timer.in`, and `diskm volume path scratch` must succeed
+      (`diskm-scratch.service` mounts the Scratch image via its fstab entry).
+    - Install or repair: render each template with
+      `python3 scripts/render_template.py <template> <destination>` (it fills
+      windows from `diskm time-windows`; pass other placeholders with `--set`),
+      then `launchctl bootout`/`bootstrap` the job, or `systemctl --user
+      daemon-reload` and `enable --now` the timer.
+    - Inspect a live plist only with `plutil -p <plist>` or
+      `plutil -extract <key> raw -o - <plist>`; the bare `-extract` form
+      overwrites the plist
+      (`findings_wiki/2026-09-11-plutil-extract-in-place-rewrite-corrupts-plists.md`).
 
 0. **Consult prior memory files before live probes & recognize full disk readability.**
    Empirical verification on 2026-08-30/31 confirmed that **ALL user-data and TCC
