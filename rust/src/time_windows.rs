@@ -46,6 +46,11 @@ pub const TEMP_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub const STATE_COMMIT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 pub const EVIDENCE_HOLDS_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub const SCRATCH_RECLAIM_TIMEOUT: Duration = Duration::from_secs(950);
+pub const EXPIRED_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub const EXPIRED_SWEEP_DEADLINE: Duration = Duration::from_secs(600);
+
+/// Timeout for one `git ls-remote` probe during expired-sweep Git protection.
+pub const GIT_REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Every window above, by placeholder name.
 pub fn listing() -> Vec<(&'static str, Duration)> {
@@ -75,5 +80,8 @@ pub fn listing() -> Vec<(&'static str, Duration)> {
         ("STATE_COMMIT_INTERVAL", STATE_COMMIT_INTERVAL),
         ("EVIDENCE_HOLDS_INTERVAL", EVIDENCE_HOLDS_INTERVAL),
         ("SCRATCH_RECLAIM_TIMEOUT", SCRATCH_RECLAIM_TIMEOUT),
+        ("EXPIRED_SWEEP_INTERVAL", EXPIRED_SWEEP_INTERVAL),
+        ("EXPIRED_SWEEP_DEADLINE", EXPIRED_SWEEP_DEADLINE),
+        ("GIT_REMOTE_PROBE_TIMEOUT", GIT_REMOTE_PROBE_TIMEOUT),
     ]
 }

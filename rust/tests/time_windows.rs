@@ -64,3 +64,13 @@ fn active_templates_take_every_window_from_time_windows() {
         }
     }
 }
+
+#[test]
+fn expired_sweep_windows_are_listed() {
+    let listing: std::collections::HashMap<_, _> =
+        diskm_shadow::time_windows::listing().into_iter().collect();
+    let secs = |name: &str| listing[name].as_secs();
+    assert_eq!(secs("EXPIRED_SWEEP_INTERVAL"), 3600);
+    assert_eq!(secs("EXPIRED_SWEEP_DEADLINE"), 600);
+    assert_eq!(secs("GIT_REMOTE_PROBE_TIMEOUT"), 20);
+}
