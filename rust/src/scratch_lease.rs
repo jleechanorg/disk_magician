@@ -66,9 +66,15 @@ pub enum FinishOutcome {
 pub struct FinishEvent {
     pub bundle_id: String,
     pub filepath: PathBuf,
+    /// Always the lease's allocating owner, so readers can verify the record.
     pub owner: ProcessOwner,
     pub outcome: FinishOutcome,
     pub finished_epoch_nanos: i64,
+    /// The process that recorded the finish; any process of the owning user
+    /// may finish, because `$(diskm scratch-new ...)` makes the allocating
+    /// owner a subshell that exits at once.
+    #[serde(default)]
+    pub finished_by: Option<ProcessOwner>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -396,7 +402,7 @@ fn create_bundle(args: &[OsString], system_tmp: bool) -> io::Result<String> {
     if args.len() < 2 || (system_tmp && args.len() != 2) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: diskm scratch-new <repo> <purpose> [--kind scratch|build|evidence]",
+            "usage: diskm scratch-new <repo> <purpose> [--kind scratch|build|evidence] [--owner-pid PID]",
         ));
     }
     let repository = PathBuf::from(&args[0]).canonicalize()?;
@@ -425,7 +431,23 @@ fn create_bundle(args: &[OsString], system_tmp: bool) -> io::Result<String> {
                 "purpose must be a filesystem slug",
             )
         })?;
-    let kind_value = match &args[2..] {
+    let (kind_args, owner_pid) = match &args[2..] {
+        [rest @ .., flag, value] if flag == "--owner-pid" && !system_tmp => {
+            let pid = value
+                .to_str()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|pid| *pid > 1)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--owner-pid requires a process id",
+                    )
+                })?;
+            (rest, Some(pid))
+        }
+        rest => (rest, None),
+    };
+    let kind_value = match kind_args {
         [] if system_tmp => "temp_file",
         [] => "scratch",
         [flag, value] if flag == "--kind" => value
@@ -437,7 +459,7 @@ fn create_bundle(args: &[OsString], system_tmp: bool) -> io::Result<String> {
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: diskm scratch-new <repo> <purpose> [--kind scratch|build|evidence]",
+                "usage: diskm scratch-new <repo> <purpose> [--kind scratch|build|evidence] [--owner-pid PID]",
             ))
         }
     };
@@ -459,7 +481,25 @@ fn create_bundle(args: &[OsString], system_tmp: bool) -> io::Result<String> {
         scratch_root()?
     };
     let root_metadata = fs::metadata(&root)?;
-    let owner = caller_owner()?;
+    let owner = match owner_pid {
+        Some(pid) => {
+            let (uid, host_boot_id, started, command) = owner_details(pid)?;
+            if uid != unsafe { libc::getuid() } {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "--owner-pid must name a process of the current user",
+                ));
+            }
+            ProcessOwner {
+                pid,
+                uid,
+                host_boot_id,
+                started,
+                command,
+            }
+        }
+        None => caller_owner()?,
+    };
     let created = now_ns()?;
     let date = crate::job_receipt::timestamp(SystemTime::now())?[..10].replace('-', "");
     let records = state_records()?;
@@ -536,27 +576,20 @@ fn finish_bundle(args: &[OsString]) -> io::Result<String> {
     };
     let verified = lookup_bundle(Path::new(&args[0]))?;
     let lease = verified.lease;
-    let owner = caller_owner()?;
-    if (
-        owner.pid,
-        owner.host_boot_id.as_deref(),
-        owner.started.as_str(),
-    ) != (
-        lease.owner.pid,
-        lease.owner.host_boot_id.as_deref(),
-        lease.owner.started.as_str(),
-    ) {
+    let caller = caller_owner()?;
+    if caller.uid != lease.owner.uid {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "only the allocating producer may finish this run",
+            "only the owning user may finish this run",
         ));
     }
     let event = FinishEvent {
         bundle_id: lease.bundle_id.clone(),
         filepath: lease.filepath.clone(),
-        owner,
+        owner: lease.owner.clone(),
         outcome,
         finished_epoch_nanos: now_ns()?,
+        finished_by: Some(caller),
     };
     let name = Path::new(&lease.filepath).as_os_str().as_bytes();
     let event_name = format!("{:x}.finished.json", Sha256::digest(name));
