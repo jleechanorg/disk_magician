@@ -497,53 +497,6 @@ fn scan_internal(
         });
         return Ok((report, inventory));
     }
-    if root_metadata.file_type().is_symlink() {
-        if modified_epoch_seconds(&root_metadata).is_none() {
-            gap(
-                &mut gaps,
-                &root,
-                ScanGapKind::Metadata,
-                "modification time unavailable",
-            );
-        }
-        add_file(
-            &root,
-            &root_metadata,
-            FileKind::Symlink,
-            &mut files,
-            &mut seen_inodes,
-            &mut apparent_total,
-            &mut allocated_total,
-        )?;
-        let report = report(
-            &root,
-            gaps.is_empty(),
-            apparent_total,
-            allocated_total,
-            files,
-            directories,
-            gaps,
-        );
-        let inventory = include_age_inventory.then(|| {
-            let measurement = age_measurement(
-                &root,
-                &root_metadata,
-                AgeKind::Symlink,
-                allocated_bytes(&root_metadata),
-                root_metadata.len(),
-                modified_epoch_nanos(&root_metadata),
-                report.complete,
-            );
-            age_inventory_report(
-                &root,
-                &root_metadata,
-                vec![measurement],
-                &report.gaps,
-                report.complete,
-            )
-        });
-        return Ok((report, inventory));
-    }
     if !root_metadata.is_dir() {
         if modified_epoch_seconds(&root_metadata).is_none() {
             gap(

@@ -3,6 +3,7 @@
 use crate::{
     job_receipt, preview, scan, scratch_lease, scratch_manifest, scratch_target, volume_config,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -11,6 +12,13 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Deserialize, Serialize)]
+struct Discovery(
+    (u64, u64),
+    Vec<scan::ScanGap>,
+    #[serde(default)] Vec<PathBuf>,
+);
 
 pub struct Options {
     pub clean: bool,
@@ -105,6 +113,8 @@ fn sweep(
         max_entries: usize::MAX,
     };
     let mut holds = BTreeMap::new();
+    let checkpoint = (options.clean && !options.system_tmp && options.paths.is_empty())
+        .then(|| state.join("scratch-discovery.json"));
     let (mut paths, scan_complete, gaps) = if !options.paths.is_empty() {
         (options.paths.clone(), true, Vec::new())
     } else if options.system_tmp {
@@ -114,7 +124,6 @@ fn sweep(
             Vec::new(),
         )
     } else {
-        let checkpoint = options.clean.then(|| state.join("scratch-discovery.json"));
         discover(
             &root,
             device,
@@ -124,13 +133,8 @@ fn sweep(
             checkpoint.as_deref(),
         )?
     };
-    let cursor = (options.clean && options.paths.is_empty()).then(|| {
-        state.join(if options.system_tmp {
-            "tmp-cursor.json"
-        } else {
-            "scratch-cursor.json"
-        })
-    });
+    let cursor = (options.clean && options.system_tmp && options.paths.is_empty())
+        .then(|| state.join("tmp-cursor.json"));
     if let Some(path) = &cursor {
         if let Some(Some((hours, next))) = preview::load_checkpoint::<Option<(u32, PathBuf)>>(path)?
         {
@@ -194,6 +198,7 @@ fn sweep(
         return Ok((result, plan_complete));
     }
     if eligible.is_empty() {
+        advance_queue(checkpoint.as_deref(), &paths, checked, std::iter::empty())?;
         result["status"] = json!(if options.system_tmp {
             "age_pass"
         } else {
@@ -201,8 +206,8 @@ fn sweep(
         });
         return Ok((result, options.system_tmp && plan_complete && recovered));
     }
-    let paths: Vec<_> = eligible.iter().map(|row| row.path.clone()).collect();
-    let manifest = scratch_manifest::create_in(&paths, cutoff, options.system_tmp)?;
+    let nominated: Vec<_> = eligible.iter().map(|row| row.path.clone()).collect();
+    let manifest = scratch_manifest::create_in(&nominated, cutoff, options.system_tmp)?;
     let state = state.canonicalize()?;
     if state.starts_with(&root) {
         return Err(io::Error::other("sweep state must be outside Scratch"));
@@ -235,6 +240,15 @@ fn sweep(
         &[],
         true,
         None,
+    )?;
+    advance_queue(
+        checkpoint.as_deref(),
+        &paths,
+        checked,
+        applied
+            .pending_paths
+            .iter()
+            .map(|relative| root.join(relative)),
     )?;
     result["status"] = json!(&applied.status);
     result["attempt"] = json!(attempt);
@@ -328,11 +342,14 @@ fn discover(
         _ => return Err(io::Error::other("invalid native runs directory")),
     };
     let report = if let Some(path) = checkpoint {
-        let saved: Option<((u64, u64), Vec<scan::ScanGap>)> = preview::load_checkpoint(path)?;
-        let deferred = saved
-            .filter(|(scope, _)| *scope == identity)
-            .map(|(_, gaps)| gaps)
-            .unwrap_or_default();
+        let saved =
+            preview::load_checkpoint::<Discovery>(path)?.filter(|saved| saved.0 == identity);
+        if let Some(Discovery(_, gaps, pending)) =
+            saved.as_ref().filter(|saved| !saved.2.is_empty())
+        {
+            return Ok((pending.clone(), gaps.is_empty(), gaps.clone()));
+        }
+        let deferred = saved.map(|saved| saved.1).unwrap_or_default();
         let retryable = |gap: &scan::ScanGap| {
             gap.path_bytes_hex.is_none() && gap.kind == scan::ScanGapKind::Deadline
         };
@@ -354,11 +371,6 @@ fn discover(
                 .extend(deferred.into_iter().filter(|gap| !retryable(gap)));
             report.complete &= report.gaps.is_empty();
         }
-        let pending = report.gaps.iter().any(retryable);
-        preview::write_checkpoint(
-            path,
-            &(identity, if pending { report.gaps.as_slice() } else { &[] }),
-        )?;
         report
     } else {
         scan::scan(&runs, options)?
@@ -400,7 +412,27 @@ fn discover(
             Err(reason) => *holds.entry(reason).or_default() += 1,
         }
     }
+    if let Some(path) = checkpoint {
+        preview::write_checkpoint(path, &(identity, &report.gaps, &paths))?;
+    }
     Ok((paths, report.complete, report.gaps))
+}
+
+fn advance_queue(
+    checkpoint: Option<&Path>,
+    observed: &[PathBuf],
+    checked: usize,
+    retry: impl Iterator<Item = PathBuf>,
+) -> io::Result<()> {
+    if let Some(path) = checkpoint {
+        if let Some(mut saved) =
+            preview::load_checkpoint::<Discovery>(path)?.filter(|saved| saved.2 == observed)
+        {
+            saved.2 = observed[checked..].iter().cloned().chain(retry).collect();
+            preview::write_checkpoint(path, &saved)?;
+        }
+    }
+    Ok(())
 }
 
 fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
