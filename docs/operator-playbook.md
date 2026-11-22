@@ -102,6 +102,7 @@ underestimated cumulative-reservoir growth):
     number.** A floor computed from a dead collector is not a floor; report an
     unhealthy fleet as the primary finding. Installed is not running.
     - The native jobs are snapshot, scratch-pressure (Linux: scratch-reclaim),
+      scratch-expired (Linux: `diskm-scratch-expired.{service,timer}`),
       tmp-scratch (Linux: temp-clean), state-commit and evidence-holds. Other
       templates in `launchd/` belong to retired jobs and call commands native
       `diskm` does not have; do not install them.
@@ -496,6 +497,43 @@ Rules that follow, and that any new reclaim code must obey:
 - Tests live in `tests/test_scratch_budget_artifact_children.sh`: stale sibling
   discovered beside a fresh one, `.git` tree not descended, symlink not followed,
   ordinary directory ignored, depth bound respected.
+
+### Expired Scratch folders: the folder rule and protected descendants
+
+`diskm scratch-sweep --expired --clean` (job `scratch-expired`; interval and
+deadline are `EXPIRED_SWEEP_INTERVAL` and `EXPIRED_SWEEP_DEADLINE` in
+`rust/src/time_windows.rs`) is the one deliberate exception to per-file
+judgement, for direct children of the registered Scratch root (and each run
+under `runs/<date>/<repo>/<run>`), on the operator's 2026-11-22 instruction:
+
+- **Folder rule.** A candidate whose newest content (max of mtime and ctime
+  over everything strictly under it, excluding `.git` contents, plus the root's
+  own mtime) is past the content floor is removed **whole**, even when it holds
+  old files beside newer ones. Content is judged only from a complete walk; any
+  unreadable path, device crossing or deadline defers the candidate and all its
+  ancestors.
+- **Protected descendants.** A protected descendant blocks removal of every
+  ancestor up to the Scratch root and is an opaque, indivisible subtree: any
+  `evidence` component, any path equal to, inside or containing an
+  `evidence-holds.json` entry, evidence runs, runs whose lease owner is live or
+  unknown (any lease kind or completion state) or unreadable, and any Git
+  repository whose commits are not independently proven recoverable (every
+  remote an independent hosted remote, live `git ls-remote` tips, no unpushed
+  commits or stash; linked worktrees and repositories with external worktrees
+  or alternates are always protected). A mixed candidate is never removed
+  whole: the walk descends into it to a depth of 4 and judges each child, and
+  the descended parent is never removed by this job.
+- Removal is staged (`<root>/.diskm-expired/`), rechecked on the staged tree
+  (open files, holds, Git proof, newest content) and restored on any doubt;
+  interrupted stages are recovered at the next run. Dirty working-tree edits in
+  an otherwise unheld candidate are disposable (see `AGENTS.md`).
+- The native cleaner reads no machine-local safety config; protection is the
+  verified registered-root scope plus the holds above.
+- **Accepted residual risks** (operator, 2026-11-22): (a) a repository outside
+  Scratch that borrows objects from a Scratch clone (`git clone --shared` or
+  manual alternates) and needs objects no longer reachable from that clone's
+  refs or reflog; (b) a public-address remote that itself borrows objects from
+  the clone. The job cannot enumerate borrowers outside Scratch.
 
 ### The measurement rule — measure every file, 100 MiB stop floor (hard)
 

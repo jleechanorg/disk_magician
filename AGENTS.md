@@ -55,10 +55,32 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
 - Preserve live or unknown owners, active leases, open files, live working
   directories, AO-owned worktrees, secrets, unmeasurable paths, dirty or
   unpushed work, and evidence still referenced by an open PR. Honor machine
-  safety rules, mount identity, and preservation checks. The never-delete
+  safety rules, mount identity, and preservation checks. Scoped amendments
+  (operator decision 2026-11-22) are in the next bullet. The never-delete
   list includes `~/.codex/sessions*`, `~/.codex/state*.sqlite`,
   `~/.codex/log`, and `~/.claude/projects`. Never replace a mutable tool
   state root with a symlink to another live state root.
+- Expired Scratch sweep (operator decision 2026-11-22; scheduled on the
+  `EXPIRED_SWEEP_INTERVAL` cadence, `diskm scratch-sweep --expired --clean`):
+  idle Scratch content is removed on a schedule, whatever the Scratch fill
+  level. A registered-Scratch folder whose newest content is past the content
+  floor is removed whole unless a hold applies (live or unknown lease owner,
+  evidence, `evidence-holds.json`, open files or working directories,
+  unrecoverable Git work, incomplete observation).
+  - **Dirty-work scope, exactly:** uncommitted working-tree edits inside a
+    Scratch candidate that is otherwise unheld (every commit independently
+    proven recoverable, stale past the floor) are disposable. Leased runs are
+    governed by their lease verdicts first.
+  - **Secrets:** the secrets rule covers credential stores outside Scratch's
+    disposable namespace. Scratch is declared disposable; the job does no
+    keyword or pattern routing for secrets.
+  - **Machine-local safety rules:** the native cleaner reads none; protection
+    is the verified registered-Scratch-root scope plus the holds above.
+  - **Accepted residual risks:** (a) a repository outside Scratch that borrows
+    objects from a Scratch clone and needs objects no longer reachable from
+    that clone's refs or reflog; (b) a public-address remote that itself
+    borrows objects from the clone. Both need the operator to have shared a
+    clone's object store deliberately.
 - Allocate worktrees via `diskm worktree-new`. Use
   `diskm scratch-new <repo> <purpose> --kind build` for disposable run output
   and retain the returned producer lease until the run finishes. Publish

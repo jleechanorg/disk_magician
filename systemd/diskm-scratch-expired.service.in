@@ -1,0 +1,13 @@
+[Unit]
+Description=Disk Magician expired Scratch sweep
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=DISK_MAGICIAN_CONFIG=@CONFIG_PATH@
+Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
+Environment=DISK_MAGICIAN_TRIGGER=timer
+Environment=DISK_MAGICIAN_DELETION_LOG=@DELETION_LOG@
+ExecStart="%h/.local/bin/diskm" scratch-sweep --expired --clean
+TimeoutStartSec=@EXPIRED_SWEEP_DEADLINE_SECONDS@
+Restart=no
