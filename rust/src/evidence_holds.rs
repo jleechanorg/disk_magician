@@ -154,7 +154,6 @@ fn bodies(nodes: &[Value]) -> Vec<String> {
 pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
     let mut requests = Vec::new();
     let mut after: Option<String> = None;
-    let mut expected = None;
     loop {
         let mut variables = vec![("q", query)];
         if let Some(cursor) = after.as_deref() {
@@ -168,7 +167,6 @@ pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
         if total > SEARCH_LIMIT {
             return Err(io::Error::other("search exceeds GitHub's result limit"));
         }
-        expected = Some(total);
         let (nodes, next) = page(search)?;
         for node in nodes.iter().filter(|node| node["url"].is_string()) {
             let mut texts = vec![node["body"].as_str().unwrap_or_default().to_owned()];
@@ -196,7 +194,7 @@ pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
         match next {
             Some(cursor) => after = Some(cursor),
             // Replace automatic holds only from a verified complete result.
-            None if expected == Some(requests.len() as u64) => return Ok(requests),
+            None if total == requests.len() as u64 => return Ok(requests),
             None => {
                 return Err(io::Error::other(
                     "fetched fewer pull requests than the search reported",
