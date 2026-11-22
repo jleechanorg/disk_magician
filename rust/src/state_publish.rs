@@ -44,7 +44,7 @@ pub enum Plan {
     },
 }
 
-fn git(repo: &Path, args: &[&str]) -> io::Result<String> {
+pub fn git(repo: &Path, args: &[&str]) -> io::Result<String> {
     let output = Command::new("git")
         .env(NO_REPLACE, "1")
         .arg("-C")
@@ -62,7 +62,7 @@ fn git(repo: &Path, args: &[&str]) -> io::Result<String> {
     String::from_utf8(output.stdout).map_err(io::Error::other)
 }
 
-fn git_ok(repo: &Path, args: &[&str]) -> io::Result<bool> {
+pub fn git_ok(repo: &Path, args: &[&str]) -> io::Result<bool> {
     Ok(Command::new("git")
         .env(NO_REPLACE, "1")
         .arg("-C")

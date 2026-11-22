@@ -19,6 +19,7 @@ pub fn verified_scratch_volume(
 
 pub mod artifact_batch;
 pub mod artifact_discovery;
+pub mod evidence_holds;
 pub mod history;
 pub mod job_receipt;
 pub mod preview;
@@ -34,6 +35,7 @@ mod scratch_recovery;
 pub mod scratch_sweep;
 pub mod scratch_target;
 pub mod snapshot;
+pub mod state_commit;
 pub mod state_publish;
 pub mod status;
 mod volume_config;
