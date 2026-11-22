@@ -8,17 +8,18 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn state_dir(override_path: Option<&Path>) -> io::Result<PathBuf> {
-    let root =
-        match override_path {
-            Some(path) => path.to_path_buf(),
-            None => match std::env::var_os("DISK_MAGICIAN_STATE_DIR") {
+    let root = match override_path {
+        Some(path) => path.to_path_buf(),
+        None => {
+            match std::env::var_os("DISK_MAGICIAN_STATE_DIR").filter(|value| !value.is_empty()) {
                 Some(path) => PathBuf::from(path),
                 None => PathBuf::from(std::env::var_os("HOME").ok_or_else(|| {
                     io::Error::new(io::ErrorKind::NotFound, "HOME is unavailable")
                 })?)
                 .join(".disk_magician_state"),
-            },
-        };
+            }
+        }
+    };
     if !root.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

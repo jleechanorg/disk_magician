@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -148,19 +147,7 @@ pub(crate) fn temp_path() -> io::Result<PathBuf> {
 }
 
 fn state_records() -> io::Result<PathBuf> {
-    let state = env::var_os("DISK_MAGICIAN_STATE_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME").map(|home| PathBuf::from(home).join(".disk_magician_state"))
-        })
-        .ok_or_else(|| io::Error::other("HOME or DISK_MAGICIAN_STATE_DIR is required"))?;
-    if !state.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "state directory must be absolute",
-        ));
-    }
+    let state = crate::job_receipt::state_dir(None)?;
     match fs::symlink_metadata(&state) {
         Ok(metadata)
             if metadata.is_dir()

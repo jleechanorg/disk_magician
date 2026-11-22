@@ -66,6 +66,12 @@ fn sweep(
     precondition: &mut Value,
 ) -> io::Result<(Value, bool)> {
     let (root, device) = preview::registered_scratch()?;
+    let recovery = if options.clean && options.paths.is_empty() {
+        scratch_target::recover_sweeps(state, &root)?
+    } else {
+        Vec::new()
+    };
+    let recovered = recovery.iter().all(|entry| entry.get("error").is_none());
     let home = PathBuf::from(
         std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is unavailable"))?,
     );
@@ -86,8 +92,8 @@ fn sweep(
     *precondition = json!({"root":root,"used_bytes":used,"quota_bytes":quota,"trigger_pct":trigger,"target_pct":target,"min_hours":options.min_hours});
     if used <= percent(trigger) {
         return Ok((
-            json!({"status":"below_trigger","removed":0,"freed_bytes":null}),
-            true,
+            json!({"status":"below_trigger","removed":0,"freed_bytes":null,"recovery":recovery}),
+            recovered,
         ));
     }
 
@@ -122,7 +128,7 @@ fn sweep(
         && !holds.keys().any(|reason| reason.starts_with("deferred:"))
         && qualification.as_ref().is_none_or(|report| report.complete);
     let mut result = json!({"status":"dry_run","before_epoch_seconds":cutoff,"scan_complete":scan_complete,"gaps":gaps,"unchecked":unchecked,"discovery_holds":holds,
-        "qualification":qualification,"eligible":eligible.len(),"removed":0,"freed_bytes":null});
+        "qualification":qualification,"eligible":eligible.len(),"removed":0,"freed_bytes":null,"recovery":recovery});
     if !options.clean {
         return Ok((result, plan_complete));
     }
@@ -177,7 +183,7 @@ fn sweep(
         .used_before_bytes
         .zip(applied.used_after_bytes)
         .map(|(before, after)| i128::from(after) - i128::from(before)));
-    Ok((result, applied.target_reached))
+    Ok((result, applied.target_reached && recovered))
 }
 
 fn discover(

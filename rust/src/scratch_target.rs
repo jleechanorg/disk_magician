@@ -107,24 +107,28 @@ pub struct Report {
     pub native_recovery_stage: Option<String>,
 }
 
-fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
+fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::other("manifest must be a regular file"));
+    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
+        return Err(io::Error::other(
+            "actuator input must be a bounded regular file",
+        ));
     }
-    if metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(io::Error::other("manifest exceeds the actuator size limit"));
-    }
-    // Hash and parse the same bytes, even if the path is replaced after open.
     let mut bytes = Vec::new();
     file.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(io::Error::other("manifest exceeds the actuator size limit"));
+        return Err(io::Error::other("actuator input exceeds the size limit"));
     }
+    Ok(bytes)
+}
+
+fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
+    // Hash and parse the same bytes, even if the path is replaced after open.
+    let bytes = read_bounded(path)?;
     if format!("{:x}", Sha256::digest(&bytes)) != digest {
         return Err(io::Error::other("manifest digest mismatch"));
     }
@@ -176,27 +180,69 @@ pub(crate) fn measure_usage(path: &Path, device: u64) -> io::Result<u64> {
     mounted_usage(&root, None).map(|(_, used)| used)
 }
 
+pub(crate) fn recover_sweeps(state: &Path, root: &Path) -> io::Result<Vec<serde_json::Value>> {
+    use serde_json::json;
+    let attempts = match fs::read_dir(state.join("sweeps")) {
+        Ok(attempts) => attempts,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut results = Vec::new();
+    for attempt in attempts {
+        let attempt = attempt?;
+        if !attempt.file_type()?.is_dir() {
+            continue;
+        }
+        let path = attempt.path();
+        let resume = path.join("resume.json");
+        let recover = || -> io::Result<Option<String>> {
+            let Some(saved) = read_state(&resume)? else {
+                return Ok(None);
+            };
+            let Some(relative) = saved.status.strip_prefix("applying:") else {
+                return Ok(None);
+            };
+            if saved.root.path != root {
+                return Ok(None);
+            }
+            let pid: libc::pid_t = saved
+                .native_stage
+                .as_deref()
+                .and_then(|stage| stage.strip_prefix(".diskm-remove-")?.split_once('-'))
+                .and_then(|(pid, _)| pid.parse().ok())
+                .filter(|pid| *pid > 1)
+                .ok_or_else(|| io::Error::other("native stage producer identity unavailable"))?;
+            if unsafe { libc::kill(pid, 0) } != -1
+                || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Ok(None);
+            }
+            apply(
+                &path.join("manifest.json"),
+                &saved.manifest_sha256,
+                &resume,
+                saved.target_used_bytes,
+                &[],
+                false,
+                Some(&RecoveryAction::Restore(relative.into())),
+            )?;
+            Ok(Some(relative.into()))
+        };
+        match recover() {
+            Ok(Some(restored)) => results.push(json!({"attempt":path,"restored":restored})),
+            Ok(None) => {}
+            Err(error) => results.push(json!({"attempt":path,"error":error.to_string()})),
+        }
+    }
+    Ok(results)
+}
+
 fn read_state(path: &Path) -> io::Result<Option<ResumeState>> {
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => file,
+    let bytes = match read_bounded(path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(io::Error::other(
-            "resume state is not a bounded regular file",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(io::Error::other("resume state exceeds the size limit"));
-    }
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(io::Error::other)
@@ -326,11 +372,12 @@ pub fn apply(
         }
         return acknowledge_restored(state, &manifest.entries, path, resume_path);
     }
-    if let Some(state) = existing_state.as_ref() {
-        if state.status.starts_with("applying:") {
+    let existing_state = match existing_state {
+        Some(state) if state.status.starts_with("applying:") => {
             return Ok(report_recovery_required(state, &manifest.entries));
         }
-    }
+        other => other,
+    };
     let initial_paths = if existing_state.is_none() {
         Some(selected_manifest_paths(
             &manifest,
@@ -402,22 +449,14 @@ pub fn apply(
         }
     };
 
-    if state
+    if let Some(receipt) = state
         .receipts
-        .last()
-        .is_some_and(|receipt| receipt.used_after_bytes.is_none())
+        .last_mut()
+        .filter(|receipt| receipt.used_after_bytes.is_none())
     {
-        if let Some(receipt) = state.receipts.last_mut() {
-            receipt.used_after_bytes = Some(start_used);
-        }
+        receipt.used_after_bytes = Some(start_used);
         state.used_after_bytes = Some(start_used);
-        state.status = if start_used <= target_used_bytes {
-            "target_reached".into()
-        } else if state.pending_paths.is_empty() {
-            "queue_exhausted".into()
-        } else {
-            "in_progress".into()
-        };
+        state.status = settled_status(&state, start_used, "in_progress");
         write_state(resume_path, &state, false)?;
     }
     let mut create = new_checkpoint;
@@ -476,7 +515,7 @@ pub fn apply(
                         ..
                     })
                     | Ok(Outcome::RecoveryRequired { .. })
-                    | Err(_) => return Ok(report_recovery_required(&state, &manifest.entries)),
+                    | Err(_) => return Ok(report_recovery_required(state, &manifest.entries)),
                 }
             }
         };
@@ -510,14 +549,7 @@ pub fn apply(
         }
     }
     state.used_after_bytes = Some(used);
-    state.status = if used <= state.target_used_bytes {
-        "target_reached"
-    } else if state.pending_paths.is_empty() {
-        "queue_exhausted"
-    } else {
-        "deferred:pending-paths"
-    }
-    .into();
+    state.status = settled_status(&state, used, "deferred:pending-paths");
     write_state(resume_path, &state, create)?;
     Ok(report(state))
 }
@@ -731,16 +763,20 @@ fn acknowledge_restored(
         used_before_bytes: used_before,
         used_after_bytes: Some(used),
     });
-    state.status = if used <= state.target_used_bytes {
+    state.status = settled_status(&state, used, "in_progress");
+    write_state(resume_path, &state, false)?;
+    Ok(report(state))
+}
+
+fn settled_status(state: &ResumeState, used: u64, pending: &str) -> String {
+    if used <= state.target_used_bytes {
         "target_reached"
     } else if state.pending_paths.is_empty() {
         "queue_exhausted"
     } else {
-        "in_progress"
+        pending
     }
-    .into();
-    write_state(resume_path, &state, false)?;
-    Ok(report(state))
+    .into()
 }
 
 fn report(state: ResumeState) -> Report {
@@ -760,7 +796,7 @@ fn report(state: ResumeState) -> Report {
     }
 }
 
-fn report_recovery_required(state: &ResumeState, entries: &[Entry]) -> Report {
+fn report_recovery_required(state: ResumeState, entries: &[Entry]) -> Report {
     let recovery = state
         .pending_paths
         .front()
@@ -777,21 +813,13 @@ fn report_recovery_required(state: &ResumeState, entries: &[Entry]) -> Report {
                 state.in_flight_quarantine_id.as_deref(),
             )
         });
-    Report {
-        status: if state.native_stage.is_some() {
-            "recovery_required:check the recorded native stage before resume"
-        } else {
-            "recovery_required:check exact in-flight quarantine before resume"
-        }
-        .into(),
-        complete: false,
-        target_reached: false,
-        target_used_bytes: state.target_used_bytes,
-        used_before_bytes: state.used_before_bytes,
-        used_after_bytes: state.used_after_bytes,
-        pending_paths: state.pending_paths.iter().cloned().collect(),
-        receipts: state.receipts.clone(),
-        recovery,
-        native_recovery_stage: state.native_stage.clone(),
+    let mut report = report(state);
+    report.status = if report.native_recovery_stage.is_some() {
+        "recovery_required:check the recorded native stage before resume"
+    } else {
+        "recovery_required:check exact in-flight quarantine before resume"
     }
+    .into();
+    report.recovery = recovery;
+    report
 }
