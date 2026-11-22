@@ -181,21 +181,24 @@ pub(crate) fn recover_sweeps(state: &Path, root: &Path) -> io::Result<Vec<serde_
         }
         let path = attempt.path();
         let resume = path.join("resume.json");
-        let recover = || -> io::Result<Option<String>> {
-            let Some(saved) = read_json_if_exists::<ResumeState>(&resume, MAX_MANIFEST_BYTES)?
+        let recover = || -> io::Result<Option<serde_json::Value>> {
+            let Some(mut saved) = read_json_if_exists::<ResumeState>(&resume, MAX_MANIFEST_BYTES)?
             else {
-                return Ok(None);
-            };
-            let Some(relative) = saved.status.strip_prefix("applying:") else {
                 return Ok(None);
             };
             if saved.root.path != root {
                 return Ok(None);
             }
-            let pid: libc::pid_t = saved
-                .native_stage
-                .as_deref()
-                .and_then(|stage| stage.strip_prefix(".diskm-remove-")?.split_once('-'))
+            let audit_stage = saved
+                .pending_audit
+                .as_ref()
+                .and_then(|(_, row)| row.trim_end_matches('\n').rsplit('\t').next());
+            let Some(stage) = saved.native_stage.as_deref().or(audit_stage) else {
+                return Ok(None);
+            };
+            let pid: libc::pid_t = stage
+                .strip_prefix(".diskm-remove-")
+                .and_then(|stage| stage.split_once('-'))
                 .and_then(|(pid, _)| pid.parse().ok())
                 .filter(|pid| *pid > 1)
                 .ok_or_else(|| io::Error::other("native stage producer identity unavailable"))?;
@@ -204,6 +207,14 @@ pub(crate) fn recover_sweeps(state: &Path, root: &Path) -> io::Result<Vec<serde_
             {
                 return Ok(None);
             }
+            if audit_stage.is_some() {
+                flush_audit(&mut saved.pending_audit, true)?;
+                write_state(&resume, &saved, false)?;
+                return Ok(Some(json!({"attempt":path,"audit_replayed":true})));
+            }
+            let Some(relative) = saved.status.strip_prefix("applying:") else {
+                return Ok(None);
+            };
             apply(
                 &path.join("manifest.json"),
                 &saved.manifest_sha256,
@@ -213,10 +224,10 @@ pub(crate) fn recover_sweeps(state: &Path, root: &Path) -> io::Result<Vec<serde_
                 false,
                 Some(&RecoveryAction::Restore(relative.into())),
             )?;
-            Ok(Some(relative.into()))
+            Ok(Some(json!({"attempt":path,"restored":relative})))
         };
         match recover() {
-            Ok(Some(restored)) => results.push(json!({"attempt":path,"restored":restored})),
+            Ok(Some(result)) => results.push(result),
             Ok(None) => {}
             Err(error) => results.push(json!({"attempt":path,"error":error.to_string()})),
         }
@@ -572,16 +583,27 @@ fn flush_audit(pending: &mut Option<(PathBuf, String)>, replay: bool) -> io::Res
     if !log.metadata()?.is_file() {
         return Err(io::Error::other("deletion log must be a regular file"));
     }
+    let mut remaining = row.as_bytes();
     if replay {
-        for previous in io::BufReader::new(&log).split(b'\n') {
-            if previous? == row.trim_end_matches('\n').as_bytes() {
-                log.sync_all()?;
-                *pending = None;
-                return Ok(());
+        let mut reader = io::BufReader::new(&log);
+        let mut previous = Vec::new();
+        while reader.read_until(b'\n', &mut previous)? > 0 {
+            if previous == remaining {
+                remaining = &[];
+                break;
             }
+            if !previous.ends_with(b"\n") {
+                if let Some(suffix) = remaining.strip_prefix(previous.as_slice()) {
+                    remaining = suffix;
+                } else {
+                    log.write_all(b"\n")?;
+                }
+                break;
+            }
+            previous.clear();
         }
     }
-    log.write_all(row.as_bytes())?;
+    log.write_all(remaining)?;
     log.sync_all()?;
     *pending = None;
     Ok(())

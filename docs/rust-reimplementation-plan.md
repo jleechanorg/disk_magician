@@ -61,6 +61,8 @@ and an open-file observation depend on producer cooperation after the check.
 After a confirmed removal, the checkpoint saves its pending marked log row.
 The actuator appends that row to the existing deletion log. Resuming the
 same attempt replays a missing row and recognizes an already-present row.
+A later unattended sweep also replays pending rows from exited attempts.
+It can complete a truncated trailing row when it matches the saved row.
 Recorded size is the inode allocation measured before removal.
 
 `snapshot --state-dir DIR` writes a partial capacity snapshot and a terminal

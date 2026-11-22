@@ -162,7 +162,6 @@ struct Node {
     contains_git: bool,
 }
 
-#[cfg(unix)]
 fn inode(m: &Metadata) -> Inode {
     use std::os::unix::fs::MetadataExt;
     Inode {
@@ -170,33 +169,15 @@ fn inode(m: &Metadata) -> Inode {
         number: m.ino(),
     }
 }
-#[cfg(not(unix))]
-fn inode(m: &Metadata) -> Inode {
-    Inode {
-        device: 0,
-        number: m.len(),
-    }
-}
-#[cfg(unix)]
 fn device(m: &Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     m.dev()
 }
-#[cfg(not(unix))]
-fn device(_: &Metadata) -> u64 {
-    0
-}
-#[cfg(unix)]
 fn allocated_bytes(m: &Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     m.blocks().saturating_mul(512)
 }
-#[cfg(not(unix))]
-fn allocated_bytes(m: &Metadata) -> u64 {
-    m.len()
-}
 
-#[cfg(unix)]
 fn path_parts(path: &Path) -> (String, Option<String>) {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
@@ -209,10 +190,6 @@ fn path_parts(path: &Path) -> (String, Option<String>) {
         output
     });
     (String::from_utf8_lossy(bytes).into_owned(), hex)
-}
-#[cfg(not(unix))]
-fn path_parts(path: &Path) -> (String, Option<String>) {
-    (path.to_string_lossy().into_owned(), None)
 }
 
 pub fn path_parts_for_report(path: &Path) -> (String, Option<String>) {
@@ -245,24 +222,17 @@ fn special_file_type(metadata: &Metadata) -> Option<SpecialFileKind> {
     if file_kind(metadata) != FileKind::Special {
         return None;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        let file_type = metadata.file_type();
-        if file_type.is_fifo() {
-            Some(SpecialFileKind::Fifo)
-        } else if file_type.is_socket() {
-            Some(SpecialFileKind::Socket)
-        } else if file_type.is_char_device() {
-            Some(SpecialFileKind::CharacterDevice)
-        } else if file_type.is_block_device() {
-            Some(SpecialFileKind::BlockDevice)
-        } else {
-            Some(SpecialFileKind::Unknown)
-        }
-    }
-    #[cfg(not(unix))]
-    {
+    use std::os::unix::fs::FileTypeExt;
+    let file_type = metadata.file_type();
+    if file_type.is_fifo() {
+        Some(SpecialFileKind::Fifo)
+    } else if file_type.is_socket() {
+        Some(SpecialFileKind::Socket)
+    } else if file_type.is_char_device() {
+        Some(SpecialFileKind::CharacterDevice)
+    } else if file_type.is_block_device() {
+        Some(SpecialFileKind::BlockDevice)
+    } else {
         Some(SpecialFileKind::Unknown)
     }
 }
@@ -291,7 +261,6 @@ fn modified_epoch_nanos(metadata: &Metadata) -> Option<i64> {
     time_epoch_nanos(metadata.modified().ok()?)
 }
 
-#[cfg(unix)]
 fn changed_epoch_nanos(metadata: &Metadata) -> Option<i64> {
     use std::os::unix::fs::MetadataExt;
 
@@ -305,12 +274,6 @@ fn changed_epoch_nanos(metadata: &Metadata) -> Option<i64> {
     .ok()
 }
 
-#[cfg(not(unix))]
-fn changed_epoch_nanos(_: &Metadata) -> Option<i64> {
-    None
-}
-
-#[cfg(unix)]
 pub(crate) fn same_directory_observation(before: &Metadata, after: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
 
@@ -322,34 +285,14 @@ pub(crate) fn same_directory_observation(before: &Metadata, after: &Metadata) ->
         && before.ctime_nsec() == after.ctime_nsec()
 }
 
-#[cfg(not(unix))]
-fn same_directory_observation(before: &Metadata, after: &Metadata) -> bool {
-    before.len() == after.len()
-        && before.modified().ok() == after.modified().ok()
-        && before.created().ok() == after.created().ok()
-}
-
 fn path_bytes(path: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        path.to_string_lossy().as_bytes().to_vec()
-    }
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
 }
 
-#[cfg(unix)]
 fn metadata_device_and_inode(metadata: &Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     (metadata.dev(), metadata.ino())
-}
-
-#[cfg(not(unix))]
-fn metadata_device_and_inode(metadata: &Metadata) -> (u64, u64) {
-    (0, metadata.len())
 }
 
 pub(crate) fn age_measurement(
