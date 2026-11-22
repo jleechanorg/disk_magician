@@ -33,12 +33,10 @@ diskm scratch-qualify --older-than 6h --paths-from candidates.nul --jobs 4
 diskm scratch-manifest --before-epoch 1795300000 --path /path/to/selected/artifact
 ```
 
-The path file is NUL-delimited and contains exact absolute Scratch paths.
-Qualification preserves input order and reports age, identity and coverage.
-Its positive age verdict remains policy-pending and carries no deletion
-authority. Incomplete or inaccessible paths retain their hold reasons.
-Scratch and temp previews use the native scanner. Temp removal policy and
-worktree qualification are pending.
+The path file is NUL-delimited and contains exact absolute paths. Qualification
+preserves input order and reports age, identity and coverage. Managed files can
+receive an advisory `remove` verdict. Apply rechecks the lease, identity, active
+use, evidence holds, and staging-root protection.
 
 ## Managed bundles and capacity snapshots
 
@@ -46,6 +44,7 @@ worktree qualification are pending.
 diskm scratch-new "$PWD" build-run --kind build
 diskm scratch-lease /path/to/bundle
 diskm scratch-finish /path/to/bundle completed
+diskm scratch-temp-file "$PWD" temporary-log
 diskm snapshot --path / --output capacity.json
 ```
 
@@ -54,10 +53,29 @@ the exact path, owner identity, allocation time and observed filesystem
 times. Records are published atomically without application lock files.
 The latest descendant modification time is available through the index.
 
-Snapshots report capacity and mark coverage partial. Whole-disk attribution,
-snapshot publication and scheduled jobs remain separate work. The target
-coordinator preserves exact selections and previous recovery state and
-reports that the native mutation actuator is pending.
+The temp allocator creates a single leased file. Finish that file using the
+same `scratch-finish` command after use. For an exact host-temp manifest, select
+`--root system-tmp`. Scratch builds use the default root. Apply accepts the
+manifest SHA-256 and a resume file outside the cleanup scope. Keep the resume
+file with the manifest for interrupted-stage recovery.
+
+## Scheduled runs and installation
+
+Install the built `diskm` as a single executable. The `disk-magician` alias
+can be a symlink to it. Isolated installs on Mac and Linux verified both names
+with no legacy cleaner on PATH. The launchd and systemd templates invoke the
+native binary directly.
+
+`diskm scratch-sweep` previews by default. An explicit `--clean` run uses
+Scratch quota pressure or the selected system-temp age cutoff.
+`diskm snapshot --path / --state-dir DIR` publishes a local capacity sample
+and a terminal receipt. Capacity-only coverage is marked partial.
+
+Before enabling the timers, verify the installed executable and confirm the
+filesystem root protects its staging entries. The current Mac Scratch mount
+is group-writable and returns `kept:unsafe-staging-root`. Installed timer
+activation, automatic external evidence discovery, Git state publication and
+older unmanaged cleanup remain pending.
 
 See the [reimplementation plan](../docs/rust-reimplementation-plan.md) for
 the remaining policy, recovery and deployment work.
