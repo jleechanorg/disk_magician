@@ -297,7 +297,7 @@ pub(crate) fn age_measurement(
 }
 
 /// Inspect each exact Scratch path in parallel. Results preserve input order.
-/// This is age evidence only; owner, lease, evidence and deletion policy remain pending.
+/// Eligibility is advisory. Apply independently rechecks policy and identity.
 pub fn qualify_exact(
     paths: &[PathBuf],
     cutoff_epoch_seconds: i64,
@@ -305,7 +305,14 @@ pub fn qualify_exact(
     jobs: usize,
 ) -> io::Result<QualificationReport> {
     let (root, _) = registered_scratch()?;
-    qualify_under_roots(paths, cutoff_epoch_seconds, scan_options, jobs, vec![root])
+    qualify_under_roots(
+        paths,
+        cutoff_epoch_seconds,
+        scan_options,
+        jobs,
+        vec![root],
+        true,
+    )
 }
 
 pub fn qualify_host_temp(
@@ -316,7 +323,14 @@ pub fn qualify_host_temp(
 ) -> io::Result<QualificationReport> {
     let scopes = crate::preview_scopes::resolve_host_temp_scopes()?;
     let roots = scopes.roots.into_iter().map(|scope| scope.path).collect();
-    qualify_under_roots(paths, cutoff_epoch_seconds, scan_options, jobs, roots)
+    qualify_under_roots(
+        paths,
+        cutoff_epoch_seconds,
+        scan_options,
+        jobs,
+        roots,
+        false,
+    )
 }
 
 fn qualify_under_roots(
@@ -325,6 +339,7 @@ fn qualify_under_roots(
     scan_options: ScanOptions,
     jobs: usize,
     roots: Vec<PathBuf>,
+    managed_policy: bool,
 ) -> io::Result<QualificationReport> {
     if paths.is_empty() || jobs == 0 {
         return Err(io::Error::new(
@@ -375,8 +390,21 @@ fn qualify_under_roots(
                     .filter(|(root, _, _)| path.starts_with(root))
                     .max_by_key(|(root, _, _)| root.components().count())
                     .unwrap_or(&identities[0]);
-                let qualification =
+                let mut qualification =
                     age_measurement(root, path, *device, cutoff_epoch_seconds, scan_options);
+                if managed_policy && qualification.verdict == "age_qualified_policy_pending" {
+                    qualification.verdict = if qualification.kind == "regular_file" {
+                        crate::preview::managed_file_verdict(
+                            root,
+                            path,
+                            *device,
+                            cutoff_epoch_seconds,
+                        )
+                    } else {
+                        "kept:native-file-only"
+                    }
+                    .into();
+                }
                 if sender.send((index, qualification)).is_err() {
                     break;
                 }
@@ -398,7 +426,9 @@ fn qualify_under_roots(
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| io::Error::other("qualification result missing"))?;
-    let complete = entries.iter().all(|entry| entry.coverage_complete);
+    let complete = entries.iter().all(|entry| {
+        entry.coverage_complete && (!managed_policy || !entry.verdict.starts_with("deferred:"))
+    });
     Ok(QualificationReport {
         root: (roots.len() == 1).then(|| roots[0].clone()),
         roots,
@@ -423,7 +453,7 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
     }
     let mut seen = BTreeSet::new();
     let mut entries = Vec::with_capacity(paths.len());
-    let qualification = qualify_exact(
+    let qualification = qualify_under_roots(
         paths,
         before_epoch_seconds,
         ScanOptions {
@@ -431,6 +461,8 @@ pub fn create(paths: &[PathBuf], before_epoch_seconds: i64) -> io::Result<Manife
             max_entries: 1_000_000,
         },
         1,
+        vec![root.clone()],
+        false,
     )?;
     for (path, verdict) in paths.iter().zip(qualification.entries.iter()) {
         let relative = path.strip_prefix(&root).map_err(|_| {

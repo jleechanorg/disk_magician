@@ -293,7 +293,7 @@ fn caller_owner() -> io::Result<ProcessOwner> {
     })
 }
 
-fn record_path(bundle: &Path) -> io::Result<(PathBuf, BundleLease)> {
+fn record_path(bundle: &Path, root: &Path) -> io::Result<(PathBuf, BundleLease)> {
     let supplied_metadata = fs::symlink_metadata(bundle)?;
     if supplied_metadata.file_type().is_symlink() || !supplied_metadata.is_dir() {
         return Err(io::Error::new(
@@ -302,7 +302,6 @@ fn record_path(bundle: &Path) -> io::Result<(PathBuf, BundleLease)> {
         ));
     }
     let absolute = bundle.canonicalize()?;
-    let root = scratch_root()?;
     if !absolute.starts_with(root.join(RUNS_DIR)) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -336,7 +335,11 @@ fn record_path(bundle: &Path) -> io::Result<(PathBuf, BundleLease)> {
 /// filesystem identity. A finish event is accepted only for this lease's exact
 /// identity and original producer incarnation.
 pub fn lookup_bundle(bundle: &Path) -> io::Result<VerifiedBundle> {
-    let (record_path, lease) = record_path(bundle)?;
+    lookup_bundle_under_root(bundle, &scratch_root()?)
+}
+
+pub(crate) fn lookup_bundle_under_root(bundle: &Path, root: &Path) -> io::Result<VerifiedBundle> {
+    let (record_path, lease) = record_path(bundle, root)?;
     let finish_path = record_path.with_extension("finished.json");
     let finish = match fs::read(finish_path) {
         Ok(bytes) => {

@@ -567,11 +567,7 @@ fn restored_entry_metadata(root: &Root, relative: &str) -> io::Result<fs::Metada
     result.ok_or_else(|| io::Error::other("restored path is empty"))
 }
 
-fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentity, &'static str> {
-    if entry.kind != "regular_file" {
-        return Err("kept:native-file-only");
-    }
-    let relative = Path::new(&entry.path);
+pub(crate) fn check_build_lease(root: &Path, relative: &Path) -> Result<(), &'static str> {
     let parts: Vec<_> = relative.components().collect();
     if parts.len() < 5
         || parts[0].as_os_str() != "runs"
@@ -583,9 +579,9 @@ fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentit
     {
         return Err("kept:unmanaged-or-protected");
     }
-    let bundle = root.path.join(parts[..4].iter().collect::<PathBuf>());
-    let verified =
-        scratch_lease::lookup_bundle(&bundle).map_err(|_| "deferred:lease-unavailable")?;
+    let bundle = root.join(parts[..4].iter().collect::<PathBuf>());
+    let verified = scratch_lease::lookup_bundle_under_root(&bundle, root)
+        .map_err(|_| "deferred:lease-unavailable")?;
     if !matches!(verified.lease.kind, BundleKind::Build) {
         return Err("kept:protected-bundle-kind");
     }
@@ -596,9 +592,26 @@ fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentit
         return Err("kept:build-not-completed");
     }
     match verified.owner_process_state {
-        OwnerProcessState::Live => return Err("kept:producer-still-live"),
-        OwnerProcessState::Unavailable => return Err("deferred:producer-identity-unavailable"),
-        OwnerProcessState::Exited | OwnerProcessState::IdentityChanged => {}
+        OwnerProcessState::Live => Err("kept:producer-still-live"),
+        OwnerProcessState::Unavailable => Err("deferred:producer-identity-unavailable"),
+        OwnerProcessState::Exited | OwnerProcessState::IdentityChanged => Ok(()),
+    }
+}
+
+fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentity, &'static str> {
+    if entry.kind != "regular_file" {
+        return Err("kept:native-file-only");
+    }
+    let relative = Path::new(&entry.path);
+    check_build_lease(&root.path, relative)?;
+    if let Some(reason) =
+        crate::preview::check_verdict_path(&root.path, &root.path.join(relative), root.dev)
+    {
+        return Err(if reason == "missing" {
+            "already-absent"
+        } else {
+            reason
+        });
     }
     let metadata = match restored_entry_metadata(root, &entry.path) {
         Ok(metadata) => metadata,

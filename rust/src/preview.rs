@@ -2,7 +2,7 @@ use crate::scan::{
     self, scan, DirectoryMeasurement, FileKind, FileMeasurement, ScanGap, ScanGapKind, ScanOptions,
     ScanReport, ITEMIZATION_THRESHOLD_BYTES,
 };
-use crate::{preview_scopes, scratch_manifest};
+use crate::{preview_scopes, scratch_file_transaction, scratch_manifest, scratch_target};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -173,7 +173,7 @@ fn marker_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn check_verdict_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
+pub(crate) fn check_verdict_path(root: &Path, path: &Path, device: u64) -> Option<&'static str> {
     if let Some(reason) = check_path(root, path, device) {
         return Some(reason);
     }
@@ -206,14 +206,11 @@ fn check_verdict_path(root: &Path, path: &Path, device: u64) -> Option<&'static 
     None
 }
 
-fn checked_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> String {
+fn checked_verdict(root: &Path, path: &Path, device: u64, cutoff: i64) -> String {
     if let Some(reason) = check_verdict_path(root, path, device) {
         return reason.into();
     }
-    let Ok(cutoff) = current_cutoff(min_hours) else {
-        return "deferred:cutoff".into();
-    };
-    scratch_manifest::age_measurement(
+    let age = scratch_manifest::age_measurement(
         root,
         path,
         device,
@@ -222,8 +219,51 @@ fn checked_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> Str
             deadline: Duration::from_secs(CHECK_WINDOW_SECONDS),
             max_entries: usize::MAX,
         },
-    )
-    .verdict
+    );
+    if age.verdict != "age_qualified_policy_pending" {
+        return age.verdict;
+    }
+    if age.kind != "regular_file" {
+        return "kept:native-file-only".into();
+    }
+    managed_file_verdict(root, path, device, cutoff).into()
+}
+
+pub(crate) fn managed_file_verdict(
+    root: &Path,
+    path: &Path,
+    device: u64,
+    cutoff: i64,
+) -> &'static str {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return "kept:outside-scratch";
+    };
+    if let Err(reason) = scratch_target::check_build_lease(root, relative) {
+        return reason;
+    }
+    let Ok(before) = fs::symlink_metadata(path) else {
+        return "deferred:metadata";
+    };
+    if !before.is_file() || before.dev() != device || before.mtime() >= cutoff {
+        return "deferred:identity-changed";
+    }
+    if before.nlink() != 1 {
+        return "kept:hardlink";
+    }
+    match scratch_file_transaction::open_file_processes(path) {
+        Ok(pids) if pids.is_empty() => {}
+        Ok(_) => return "deferred:open-file",
+        Err(_) => return "deferred:open-file-check-unavailable",
+    }
+    if let Some(reason) = check_verdict_path(root, path, device) {
+        return reason;
+    }
+    if fs::symlink_metadata(path).is_ok_and(|after| file_identity(&before) == file_identity(&after))
+    {
+        "remove"
+    } else {
+        "deferred:identity-changed"
+    }
 }
 
 pub fn preview(
@@ -234,80 +274,10 @@ pub fn preview(
 ) -> io::Result<Report> {
     let (root, device) = registered_scratch()?;
     let paths = match ledger_paths(state_dir, &root) {
-        Err(error) if min_hours != 48 && error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         result => result?,
     };
-    if min_hours != 48 {
-        return live_preview(root, device, paths, min_hours, limit, true, scan_deadline);
-    }
-    let recorded_paths = paths.len();
-    let mut missing_paths = 0;
-    let mut deferred_verdicts = 0;
-    let mut missing = Vec::new();
-    let mut candidates = Vec::new();
-    for (path, source) in paths {
-        let checked = check_path(&root, &path, device);
-        if checked == Some("missing") {
-            missing_paths += 1;
-            if missing.len() < limit {
-                missing.push(Candidate {
-                    path,
-                    source,
-                    verdict: "missing".into(),
-                    eligible: false,
-                    apparent_bytes: None,
-                    allocated_bytes: None,
-                });
-            }
-            continue;
-        }
-        if candidates.len() == limit {
-            deferred_verdicts += 1;
-            continue;
-        }
-        let verdict = checked.map_or_else(
-            || checked_verdict(&root, &path, device, min_hours),
-            str::to_owned,
-        );
-        let eligible = verdict == "remove";
-        deferred_verdicts += usize::from(verdict.starts_with("deferred:"));
-        candidates.push(Candidate {
-            path,
-            source,
-            verdict,
-            eligible,
-            apparent_bytes: None,
-            allocated_bytes: None,
-        });
-    }
-    candidates.extend(missing.into_iter().take(limit - candidates.len()));
-    Ok(Report {
-        scratch_root: Some(root.clone()),
-        discovery: Some(Discovery {
-            complete: false,
-            files_measured: 0,
-            directories_measured: 0,
-            repository_roots: 0,
-            measured_apparent_bytes: 0,
-            allocated_bytes_semantics:
-                "The ledger-only preview does not report filesystem allocation.".into(),
-            gaps: vec![ScanGap {
-                path: root.to_string_lossy().into_owned(),
-                path_bytes_hex: None,
-                kind: ScanGapKind::NotScanned,
-                message: "Ledger-only preview did not scan the full Scratch filesystem.".into(),
-            }],
-        }),
-        root,
-        min_hours,
-        complete: false,
-        recorded_paths,
-        missing_paths,
-        deferred_verdicts,
-        candidates,
-        dated_run_files: Vec::new(),
-        resumable: None,
-    })
+    live_preview(root, device, paths, min_hours, limit, true, scan_deadline)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -333,20 +303,6 @@ fn protected_scope(root: &Path, path: &Path) -> bool {
         || relative
             .components()
             .any(|part| part.as_os_str() == "evidence")
-}
-
-fn live_candidate_verdict(root: &Path, path: &Path, device: u64, min_hours: u32) -> String {
-    if protected_scope(root, path) {
-        return "kept:protected-scratch-scope".into();
-    }
-    if let Some(reason) = check_path(root, path, device) {
-        return reason.into();
-    }
-    let runs = root.join("runs");
-    if path.starts_with(&runs) && possible_dated_run(&runs, path).is_none() {
-        return "kept:managed-run-boundary".into();
-    }
-    checked_verdict(root, path, device, min_hours)
 }
 
 fn repository_roots(measured: &ScanReport) -> HashSet<&Path> {
@@ -539,31 +495,32 @@ fn live_preview_from_measurement(
             continue;
         }
         selected.insert(path);
-        proposals.push((path, dir.apparent_bytes, dir.path_allocated_bytes));
+        proposals.push((path, dir.apparent_bytes, dir.path_allocated_bytes, false));
     }
     for file in &measured.files {
         let path = Path::new(&file.path);
         if file.kind == FileKind::File
             && file.path_bytes_hex.is_none()
-            && !in_runs(path)
             && !protected_scope(&root, path)
             && file
                 .modified_epoch_seconds
                 .is_some_and(|epoch| epoch <= cutoff)
             && !inside_repo(path)
-            && !path
-                .ancestors()
-                .skip(1)
-                .any(|parent| selected.contains(parent))
+            && (in_runs(path)
+                || !path
+                    .ancestors()
+                    .skip(1)
+                    .any(|parent| selected.contains(parent)))
         {
-            proposals.push((path, file.apparent_bytes, file.allocated_bytes));
+            proposals.push((path, file.apparent_bytes, file.allocated_bytes, true));
         }
     }
-    proposals.sort_unstable_by(|(a, _, a_allocated), (b, _, b_allocated)| {
+    proposals.sort_unstable_by(|(a, _, a_allocated, _), (b, _, b_allocated, _)| {
         b_allocated.cmp(a_allocated).then_with(|| a.cmp(b))
     });
     let mut complete = measured.complete;
     let mut deferred_verdicts = 0;
+    let mut remaining_checks = limit;
     let candidate =
         |path: &Path, apparent_bytes: u64, allocated_bytes: u64, verdict: String| Candidate {
             path: path.to_path_buf(),
@@ -578,14 +535,18 @@ fn live_preview_from_measurement(
         };
     let mut candidates: Vec<_> = proposals
         .into_iter()
-        .enumerate()
-        .map(|(index, (path, apparent_bytes, allocated_bytes))| {
+        .map(|(path, apparent_bytes, allocated_bytes, regular_file)| {
             let verdict = if !scratch_verdicts {
                 "deferred:temp-policy".into()
-            } else if index >= limit {
+            } else if !regular_file {
+                "kept:native-file-only".into()
+            } else if !in_runs(path) {
+                "kept:unmanaged-or-protected".into()
+            } else if remaining_checks == 0 {
                 "deferred:verification-limit".into()
             } else {
-                live_candidate_verdict(&root, path, device, min_hours)
+                remaining_checks -= 1;
+                checked_verdict(&root, path, device, cutoff)
             };
             if verdict.starts_with("deferred:") {
                 deferred_verdicts += 1;
@@ -874,7 +835,7 @@ pub fn recheck_checkpoint_files(
         });
     }
     for candidate in &mut candidates {
-        recheck_file(candidate, &root, device, min_hours, checkpoint.cutoff_epoch);
+        recheck_file(candidate, &root, device, checkpoint.cutoff_epoch);
     }
     validate_checkpoint(&checkpoint, &root, &fs::symlink_metadata(&root)?, min_hours)?;
     Ok(CheckpointRecheck {
@@ -898,7 +859,7 @@ fn file_identity(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64)
     )
 }
 
-fn recheck_file(candidate: &mut Candidate, root: &Path, device: u64, min_hours: u32, cutoff: i64) {
+fn recheck_file(candidate: &mut Candidate, root: &Path, device: u64, cutoff: i64) {
     let path = &candidate.path;
     if let Some(reason) = check_path(root, path, device) {
         candidate.verdict = reason.into();
@@ -919,7 +880,7 @@ fn recheck_file(candidate: &mut Candidate, root: &Path, device: u64, min_hours: 
         candidate.verdict = "kept:outside-date-window".into();
         return;
     }
-    let verdict = live_candidate_verdict(root, path, device, min_hours);
+    let verdict = checked_verdict(root, path, device, cutoff);
     if let Some(reason) = check_path(root, path, device) {
         candidate.verdict = reason.into();
         return;
@@ -939,7 +900,6 @@ fn retry_candidate(
     candidate: &mut Candidate,
     root: &Path,
     device: u64,
-    min_hours: u32,
     cutoff: i64,
     scan_deadline: Duration,
 ) {
@@ -953,7 +913,7 @@ fn retry_candidate(
         return;
     };
     if before.is_file() {
-        recheck_file(candidate, root, device, min_hours, cutoff);
+        recheck_file(candidate, root, device, cutoff);
         return;
     }
     if !before.is_dir() || before.dev() != device {
@@ -991,7 +951,7 @@ fn retry_candidate(
     {
         "kept:requires-itemization".into()
     } else {
-        live_candidate_verdict(root, &candidate.path, device, min_hours)
+        checked_verdict(root, &candidate.path, device, cutoff)
     };
     if fs::symlink_metadata(&candidate.path)
         .is_ok_and(|after| file_identity(&after) == file_identity(&before))
@@ -1083,14 +1043,7 @@ pub fn scope_report_resumable(
             break;
         }
         let remaining_scan_time = scan_deadline.saturating_sub(scan_started.elapsed());
-        retry_candidate(
-            candidate,
-            &root,
-            device,
-            min_hours,
-            cutoff,
-            remaining_scan_time,
-        );
+        retry_candidate(candidate, &root, device, cutoff, remaining_scan_time);
         remaining_limit -= 1;
     }
 

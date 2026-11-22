@@ -26,8 +26,12 @@ gaps remain visible.
 ## Native exact-file milestone
 
 `scratch-qualify --root scratch|system-tmp --older-than 6h` reports age and
-coverage for an exact list. A qualification report conveys no deletion
-authority. `scratch-target-apply` accepts a hash-pinned Scratch manifest and
+coverage for an exact list. Native build files also receive an advisory removal
+verdict from the completed lease, filesystem identity, and current open-file
+checks. The default Scratch preview scans at 48 hours, even when the ledger
+has no entries. Its verification cap applies to files in managed runs and any
+unchecked rows are marked deferred. Host-temp qualification reports age only.
+A preview grants no deletion authority. `scratch-target-apply` accepts a hash-pinned Scratch manifest and
 rechecks the exact file, cutoff, mount, producer lease and open-file status.
 The first actuator handles single-link files in completed native build bundles
 whose producer has exited. Evidence, unmanaged Scratch, whole-directory removal

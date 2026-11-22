@@ -30,9 +30,8 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
   diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours N] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
 
-Preview --deadline-ms bounds Scratch discovery. With --resume-state, it supports
-48-hour and six-hour live inventory. Verdict
-checks run afterward, up to 12 seconds per candidate, and the default scan is unlimited.
+Preview --deadline-ms bounds Scratch discovery at any age. With --resume-state,
+preview can resume incomplete discovery. Verdict checks run after discovery.
 
 Status defaults to the current directory. Scan defaults to 30 seconds and
 100,000 visited paths. An incomplete scan emits a report and exits 75.
@@ -223,14 +222,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             if preview_resume_state.is_some() && preview_scope != "scratch" {
                 return Err("preview --resume-state requires --scope scratch".into());
             }
-            if preview_deadline_ms.is_some()
-                && (preview_scope != "scratch"
-                    || (min_hours == 48 && preview_resume_state.is_none()))
-            {
-                return Err(
-                    "preview --deadline-ms requires Scratch with a custom age cutoff or --resume-state"
-                        .into(),
-                );
+            if preview_deadline_ms.is_some() && preview_scope != "scratch" {
+                return Err("preview --deadline-ms requires --scope scratch".into());
             }
             if !recheck_paths.is_empty() {
                 if preview_resume_state.is_none() || preview_scope != "scratch" {

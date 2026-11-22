@@ -472,7 +472,7 @@ fn rename_exclusive(parent: libc::c_int, old: &CString, new: &CString) -> io::Re
     }
 }
 
-fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
+pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
     #[cfg(target_os = "linux")]
     let lsof = "/usr/bin/lsof";
     #[cfg(target_os = "macos")]
