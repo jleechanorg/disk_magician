@@ -595,7 +595,8 @@ fn protection(
     }
     for git_dir in &obs.repos {
         let own = repo_root(git_dir) == path;
-        if !(own || full) {
+        // One protected descendant already blocks removal; no more probes.
+        if !(own || full) || (!own && below.is_some()) {
             continue;
         }
         let reason = if known.blind {
@@ -618,6 +619,12 @@ fn protection(
 }
 
 fn judge(c: &mut Ctx, path: PathBuf, obs: Observation, depth: u32) -> io::Result<()> {
+    // Only directories are units inside a descended folder; loose files and
+    // links beside active content are left.
+    if depth > 1 && !fs::symlink_metadata(&path)?.is_dir() {
+        c.kept.push((path, "kept:loose-in-active-folder".into()));
+        return Ok(());
+    }
     let stale = obs.complete && obs.newest < c.run.cutoff;
     let held = protection(c.run, &c.known, &path, &obs, &[&path], stale)?;
     if let Some((reason, true)) = &held {
@@ -707,17 +714,51 @@ pub struct Intent {
     pub row: String,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default)]
 pub struct Report {
     pub removed: Vec<(PathBuf, u64)>,
     pub would_remove: Vec<PathBuf>,
     pub deferred: Vec<(PathBuf, String)>,
-    pub kept: Vec<(PathBuf, String)>,
+    /// Kept units counted by reason; paths are not listed.
+    pub kept: BTreeMap<String, usize>,
     pub interrupted: Vec<String>,
     pub timed_out: bool,
 }
 
+/// Longest list the report prints; the rest is counted under `truncated`.
+const LIST_CAP: usize = 500;
+
 impl Report {
+    /// The printable report: full (capped) lists of what was or would be
+    /// removed or deferred, and only counts for everything kept.
+    pub fn summary(&self) -> Value {
+        let mut truncated = serde_json::Map::new();
+        let mut capped = |name: &str, list: Vec<Value>| {
+            if list.len() > LIST_CAP {
+                truncated.insert(name.into(), json!(list.len() - LIST_CAP));
+            }
+            list.into_iter().take(LIST_CAP).collect::<Vec<_>>()
+        };
+        let removed = capped(
+            "removed",
+            self.removed.iter().map(|row| json!(row)).collect(),
+        );
+        let would_remove = capped(
+            "would_remove",
+            self.would_remove.iter().map(|row| json!(row)).collect(),
+        );
+        let deferred = capped(
+            "deferred",
+            self.deferred.iter().map(|row| json!(row)).collect(),
+        );
+        let interrupted = capped(
+            "interrupted",
+            self.interrupted.iter().map(|row| json!(row)).collect(),
+        );
+        json!({"removed":removed,"would_remove":would_remove,"deferred":deferred,"interrupted":interrupted,
+            "kept":self.kept,"truncated":truncated,"timed_out":self.timed_out})
+    }
+
     pub fn complete(&self) -> bool {
         !self.timed_out
     }
@@ -969,10 +1010,12 @@ fn recover(run: &Run, plan: &Plan, report: &mut Report) -> io::Result<()> {
 /// through the revalidate, stage, check, delete transaction.
 pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     let mut report = Report {
-        kept: plan.kept.clone(),
         timed_out: plan.timed_out,
         ..Report::default()
     };
+    for (_, reason) in &plan.kept {
+        *report.kept.entry(reason.clone()).or_default() += 1;
+    }
     recover(run, plan, &mut report)?;
     if !run.clean {
         report.would_remove = plan.removals.clone();
@@ -1014,7 +1057,7 @@ pub fn run(
         "deadline"
     };
     Ok((
-        json!({"status":status,"clean":options.clean,"report":report}),
+        json!({"status":status,"clean":options.clean,"report":report.summary()}),
         report.complete(),
     ))
 }

@@ -2,7 +2,7 @@
 //! two seconds pass, and the cutoff is one second ago, so every fixture is
 //! stale by both mtime and ctime until a test touches it.
 use diskm_shadow::scratch_expired::{
-    apply, independent, lease_protects, observe, plan, sweep, Intent, Plan, Run,
+    apply, independent, lease_protects, observe, plan, sweep, Intent, Plan, Report, Run,
 };
 use diskm_shadow::scratch_lease::{BundleKind, OwnerProcessState};
 use std::fs;
@@ -195,10 +195,7 @@ fn old_parent_with_evidence_descendant_is_kept_whole() {
     let plan = planned(&fx, cutoff);
     let mut removals = plan.removals.clone();
     removals.sort();
-    assert_eq!(
-        removals,
-        vec![fx.root.join("task/notes"), fx.root.join("task/scratch")]
-    );
+    assert_eq!(removals, vec![fx.root.join("task/scratch")]);
     assert!(kept(&plan, &fx.root.join("task/evidence"))
         .unwrap()
         .starts_with("kept:protected-subtree"));
@@ -281,9 +278,9 @@ fn depth_limit_is_reported() {
     let fx = Fx::new("depth");
     fx.file("a/b/c/d/e/old");
     fx.file("a/b/c/d/sibling");
-    fx.file("a/b/c/side");
-    fx.file("a/b/side");
-    fx.file("a/side");
+    fx.file("a/b/c/side/f");
+    fx.file("a/b/side/f");
+    fx.file("a/side/f");
     let cutoff = age();
     fx.file("a/b/c/d/fresh");
     let plan = planned(&fx, cutoff);
@@ -301,6 +298,55 @@ fn depth_limit_is_reported() {
             fx.root.join("a/side"),
         ]
     );
+}
+
+#[test]
+fn loose_stale_file_beside_fresh_sibling_is_kept() {
+    let fx = Fx::new("loose-file");
+    fx.file("a/old-loose");
+    std::os::unix::fs::symlink("/nonexistent", fx.root.join("a/old-link")).unwrap();
+    let cutoff = age();
+    fx.file("a/fresh");
+    let plan = planned(&fx, cutoff);
+    assert!(plan.removals.is_empty(), "{:?}", plan.removals);
+    for name in ["a/old-loose", "a/old-link"] {
+        assert_eq!(
+            kept(&plan, &fx.root.join(name)),
+            Some("kept:loose-in-active-folder")
+        );
+    }
+}
+
+#[test]
+fn stale_child_directory_beside_fresh_file_is_removed() {
+    let fx = Fx::new("child-dir");
+    fx.file("a/old-dir/f");
+    let cutoff = age();
+    fx.file("a/fresh");
+    assert_eq!(
+        planned(&fx, cutoff).removals,
+        vec![fx.root.join("a/old-dir")]
+    );
+}
+
+#[test]
+fn report_lists_are_capped_and_kept_paths_are_counted() {
+    let mut report = Report::default();
+    for index in 0..600 {
+        report
+            .removed
+            .push((PathBuf::from(format!("/r/{index}")), 1));
+    }
+    report.kept.insert("kept:fresh".into(), 15_000);
+    report
+        .deferred
+        .push((PathBuf::from("/d"), "deferred:changed".into()));
+    let summary = report.summary();
+    assert_eq!(summary["removed"].as_array().unwrap().len(), 500);
+    assert_eq!(summary["truncated"]["removed"], 100);
+    assert_eq!(summary["kept"]["kept:fresh"], 15_000);
+    assert_eq!(summary["deferred"].as_array().unwrap().len(), 1);
+    assert!(summary["truncated"]["deferred"].is_null() || summary["truncated"]["deferred"] == 0);
 }
 
 #[test]
