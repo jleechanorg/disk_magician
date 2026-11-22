@@ -131,3 +131,18 @@ fn legacy_owner_without_a_pid_keeps_the_run() {
     fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
     assert_eq!(verdict(&f, &run), Err("kept:producer-still-live"));
 }
+
+#[test]
+fn legacy_null_owner_entry_keeps_the_run() {
+    let f = fixture("null-owner");
+    let run = legacy_run(&f, "build-null", "build", exited_pid());
+    let record_path = f.state.join("worktree_leases/build-null.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["owners"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::Value::Null);
+    fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(verdict(&f, &run), Err("kept:producer-still-live"));
+}

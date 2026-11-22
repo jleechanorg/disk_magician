@@ -681,12 +681,13 @@ pub(crate) fn legacy_lease(bundle: &Path) -> io::Result<Option<LegacyLease>> {
             return Ok(Some(LegacyLease::OtherKind));
         }
         // An owner entry without a usable PID is an unknown owner; keep the run.
+        // Only an absent top-level `owner` key is skipped; a null entry counts
+        // as an owner without a PID.
         let owners: Vec<&serde_json::Value> = record["owners"]
             .as_array()
             .into_iter()
             .flatten()
-            .chain(std::iter::once(&record["owner"]))
-            .filter(|owner| !owner.is_null())
+            .chain(record.get("owner"))
             .collect();
         let pids: Vec<u64> = owners
             .iter()
