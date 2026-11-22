@@ -9,7 +9,7 @@
              ledger to the log without unattended automated deletion.
              Execution (--clean) requires interactive operator approval via
              CLAUDE_STATE_APPROVED=1.
-             Enforces 7-day recency floor (worktree_recency.sh content age),
+             Enforces 48-hour default recency floor (worktree_recency.sh content age),
              preserves dirty/unpushed/stashed repos (flagged NEEDS-REVIEW),
              preserves active lsof file handles (fails closed on probe error),
              refuses symlinks escaping the state root, and refuses

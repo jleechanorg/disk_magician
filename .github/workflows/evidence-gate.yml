@@ -32,5 +32,4 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: >-
           printf '%s' "$PR_BODY" |
-          python3 trusted-gate/.github/scripts/validate_evidence.py
-          --expected-head "$PR_HEAD_SHA"
+          node trusted-gate/.github/scripts/validate_evidence.js

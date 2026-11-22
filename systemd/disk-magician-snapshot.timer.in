@@ -1,0 +1,10 @@
+[Unit]
+Description=Capture local disk capacity
+
+[Timer]
+OnBootSec=@SNAPSHOT_INTERVAL_SECONDS@s
+OnUnitActiveSec=@SNAPSHOT_INTERVAL_SECONDS@s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

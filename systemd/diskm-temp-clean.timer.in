@@ -1,0 +1,10 @@
+[Unit]
+Description=Cleanup of managed temp files
+
+[Timer]
+OnBootSec=@TEMP_SWEEP_INTERVAL_SECONDS@s
+OnUnitActiveSec=@TEMP_SWEEP_INTERVAL_SECONDS@s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

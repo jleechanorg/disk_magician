@@ -9,13 +9,7 @@
     <string>@BASH@</string>
     <string>@REPO_ROOT@/scripts/cleanup_colima.sh</string>
     <string>--clean</string>
-    <string>--prune-volumes</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>DOCKER_VOLUMES_APPROVED</key>
-    <string>1</string>
-  </dict>
   <!--
     StartInterval, not StartCalendarInterval: the prior Sunday-03:45
     calendar schedule never fired in 16+ days of being loaded (`launchctl

@@ -1,0 +1,8 @@
+[Unit]
+Description=Disk Magician local capacity snapshot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=DISK_MAGICIAN_TRIGGER=timer
+ExecStart="%h/.local/bin/diskm" snapshot --path / --state-dir "%h/.disk_magician_state"

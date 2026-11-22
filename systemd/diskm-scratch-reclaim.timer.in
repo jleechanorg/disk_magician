@@ -2,8 +2,8 @@
 Description=Disk Magician Scratch reclaim schedule
 
 [Timer]
-Unit=@UNIT_NAME@.service
-@CADENCE@
+OnBootSec=@SCRATCH_PRESSURE_INTERVAL_SECONDS@s
+OnUnitActiveSec=@SCRATCH_PRESSURE_INTERVAL_SECONDS@s
 
 [Install]
 WantedBy=timers.target
