@@ -34,6 +34,7 @@ mod scratch_recovery;
 pub mod scratch_sweep;
 pub mod scratch_target;
 pub mod snapshot;
+pub mod state_publish;
 pub mod status;
 mod volume_config;
 

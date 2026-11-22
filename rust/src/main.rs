@@ -1,6 +1,6 @@
 use diskm_shadow::{
     artifact_batch, artifact_discovery, history, preview, reclaim_report, scan, scratch_dir,
-    scratch_manifest, scratch_sweep, scratch_target, snapshot, status,
+    scratch_manifest, scratch_sweep, scratch_target, snapshot, state_publish, status,
 };
 use serde::Serialize;
 use std::env;
@@ -26,6 +26,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-index refresh [--root scratch|system-tmp]
   diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
   diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
+  diskm state-publish --repo DIR [--remote NAME] [--branch NAME] [--max-commits N] [--state-dir DIR]
   diskm scratch-sweep [--root scratch|system-tmp] [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
   diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp]
   diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
@@ -67,6 +68,7 @@ enum Operation {
         host_temp: bool,
     },
     ScratchSweep(scratch_sweep::Options),
+    StatePublish(state_publish::Options),
     ScratchQualify {
         cutoff: i64,
         paths: Vec<PathBuf>,
@@ -124,6 +126,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     match command {
         "-h" | "--help" | "help" => return Ok(Operation::Help),
         "snapshot" => return parse_snapshot(args),
+        "state-publish" => return parse_state_publish(args),
         "scratch-manifest" => return parse_scratch_nomination(args, false),
         "scratch-sweep" => return parse_scratch_sweep(args),
         "scratch-qualify" => return parse_scratch_nomination(args, true),
@@ -278,6 +281,52 @@ fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Opera
         }
     }
     Ok(Operation::ScratchSweep(options))
+}
+
+fn parse_state_publish(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let mut repo = None;
+    let mut remote = None;
+    let mut branch = None;
+    let mut max_commits = None;
+    let mut state_dir = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Ok(Operation::Help),
+            Some("--repo") if repo.is_none() => {
+                repo = Some(required_value(&mut args, "--repo")?.into())
+            }
+            Some("--remote") if remote.is_none() => {
+                remote = Some(utf8(required_value(&mut args, "--remote")?)?)
+            }
+            Some("--branch") if branch.is_none() => {
+                branch = Some(utf8(required_value(&mut args, "--branch")?)?)
+            }
+            Some("--max-commits") if max_commits.is_none() => {
+                max_commits = Some(positive(&mut args, "--max-commits")?)
+            }
+            Some("--state-dir") if state_dir.is_none() => {
+                state_dir = Some(required_value(&mut args, "--state-dir")?.into())
+            }
+            _ => return Err("state-publish accepts --repo DIR, --remote NAME, --branch NAME, --max-commits N and --state-dir DIR".into()),
+        }
+    }
+    Ok(Operation::StatePublish(state_publish::Options {
+        repo: repo.ok_or("state-publish requires --repo DIR")?,
+        remote: remote.unwrap_or_else(|| "origin".into()),
+        branch: branch.unwrap_or_else(|| "main".into()),
+        max_commits: max_commits.unwrap_or(20),
+        state_dir,
+    }))
+}
+
+fn utf8(value: OsString) -> Result<String, String> {
+    value
+        .into_string()
+        .ok()
+        .filter(|name| {
+            !name.starts_with('-') && !name.contains(':') && !name.chars().any(char::is_whitespace)
+        })
+        .ok_or_else(|| "Git remote and branch names must be plain UTF-8 names".to_owned())
 }
 
 fn parse_snapshot(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
@@ -520,6 +569,13 @@ fn run(operation: Operation) -> io::Result<u8> {
                 print_json(&scratch_manifest::qualify_exact(
                     &paths, cutoff, options, jobs,
                 )?)?;
+            }
+        }
+        Operation::StatePublish(options) => {
+            let (report, code) = state_publish::run(&options)?;
+            print_json(&report)?;
+            if code != 0 {
+                return Ok(code);
             }
         }
         Operation::ScratchSweep(options) => {
