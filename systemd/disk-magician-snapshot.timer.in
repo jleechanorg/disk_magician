@@ -1,0 +1,9 @@
+[Unit]
+Description=Capture local disk capacity every two hours
+
+[Timer]
+OnCalendar=*-*-* 00/2:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

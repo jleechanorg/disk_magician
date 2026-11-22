@@ -1,6 +1,6 @@
 use diskm_shadow::{
     artifact_batch, artifact_discovery, history, preview, reclaim_report, scan, scratch_dir,
-    scratch_manifest, scratch_target, status,
+    scratch_manifest, scratch_sweep, scratch_target, snapshot, state_publish, status,
 };
 use serde::Serialize;
 use std::env;
@@ -8,7 +8,9 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod scratch_index_cli;
 
 const USAGE: &str = "diskm — Disk Magician migration candidate; inventory output is JSON
 
@@ -17,13 +19,22 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm reclaim-ledger --read-existing [--state-dir DIR]
   diskm history --state-dir DIR [--days 7|30] [--json]
   diskm scratch-dir [SUBPATH]
-  diskm scratch-manifest --before-epoch SECONDS --path ABSOLUTE_PATH [--path ...] | --paths-from FILE
-  diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL]
-  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours 6|48] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
+  diskm scratch-new REPO PURPOSE [--kind build|evidence|scratch]
+  diskm scratch-temp-file REPO PURPOSE
+  diskm scratch-lease PATH
+  diskm scratch-finish PATH [completed|abandoned]
+  diskm scratch-index refresh [--root scratch|system-tmp]
+  diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
+  diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
+  diskm state-publish --repo DIR [--remote NAME] [--branch NAME] [--max-commits N] [--state-dir DIR]
+  diskm scratch-sweep [--root scratch|system-tmp] [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
+  diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp]
+  diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
+  diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
+  diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours N] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
 
-Preview --deadline-ms bounds Scratch discovery. With --resume-state, it supports
-48-hour and six-hour live inventory. Verdict
-checks run afterward, up to 12 seconds per candidate, and the default scan is unlimited.
+Preview --deadline-ms bounds Scratch discovery at any age. With --resume-state,
+preview can resume incomplete discovery. Verdict checks run after discovery.
 
 Status defaults to the current directory. Scan defaults to 30 seconds and
 100,000 visited paths. An incomplete scan emits a report and exits 75.
@@ -34,6 +45,11 @@ const USAGE_ERROR: u8 = 2;
 
 enum Operation {
     Help,
+    Snapshot {
+        root: PathBuf,
+        output: Option<PathBuf>,
+        state_dir: Option<PathBuf>,
+    },
     Status {
         root: PathBuf,
         state_dir: Option<PathBuf>,
@@ -49,6 +65,16 @@ enum Operation {
     ScratchManifest {
         cutoff: i64,
         paths: Vec<PathBuf>,
+        host_temp: bool,
+    },
+    ScratchSweep(scratch_sweep::Options),
+    StatePublish(state_publish::Options),
+    ScratchQualify {
+        cutoff: i64,
+        paths: Vec<PathBuf>,
+        options: scan::ScanOptions,
+        jobs: usize,
+        host_temp: bool,
     },
     ScratchTargetApply {
         manifest: PathBuf,
@@ -57,7 +83,7 @@ enum Operation {
         target_used_bytes: u64,
         paths: Vec<String>,
         all_entries: bool,
-        ack_restored: Option<String>,
+        recovery: Option<scratch_target::RecoveryAction>,
     },
     Preview {
         scope: &'static str,
@@ -99,7 +125,11 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         .ok_or_else(|| "invalid command".to_owned())?;
     match command {
         "-h" | "--help" | "help" => return Ok(Operation::Help),
-        "scratch-manifest" => return parse_scratch_manifest(args),
+        "snapshot" => return parse_snapshot(args),
+        "state-publish" => return parse_state_publish(args),
+        "scratch-manifest" => return parse_scratch_nomination(args, false),
+        "scratch-sweep" => return parse_scratch_sweep(args),
+        "scratch-qualify" => return parse_scratch_nomination(args, true),
         "scratch-target-apply" => return parse_scratch_target_apply(args),
         "status" | "scan" | "history" | "preview" => {}
         _ => return Err(format!("unknown command {command:?}")),
@@ -138,11 +168,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
                 };
             }
             Some("--min-hours") if command == "preview" => {
-                min_hours = match required_value(&mut args, "--min-hours")?.to_str() {
-                    Some("6") => 6,
-                    Some("48") => 48,
-                    _ => return Err("--min-hours must be 6 or 48".to_owned()),
-                };
+                min_hours = positive(&mut args, "--min-hours")?;
             }
             Some("--max-candidates") if command == "preview" => {
                 max_candidates = Some(positive(&mut args, "--max-candidates")?);
@@ -204,14 +230,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             if preview_resume_state.is_some() && preview_scope != "scratch" {
                 return Err("preview --resume-state requires --scope scratch".into());
             }
-            if preview_deadline_ms.is_some()
-                && (preview_scope != "scratch"
-                    || (min_hours != 6 && preview_resume_state.is_none()))
-            {
-                return Err(
-                    "preview --deadline-ms requires Scratch with --min-hours 6 or --resume-state"
-                        .into(),
-                );
+            if preview_deadline_ms.is_some() && preview_scope != "scratch" {
+                return Err("preview --deadline-ms requires --scope scratch".into());
             }
             if !recheck_paths.is_empty() {
                 if preview_resume_state.is_none() || preview_scope != "scratch" {
@@ -243,15 +263,151 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     }
 }
 
-fn parse_scratch_manifest(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let mut options = scratch_sweep::Options::default();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--clean") => options.clean = true,
+            Some("--root") => options.system_tmp = parse_temp_root(&mut args)?,
+            Some("--min-hours") => options.min_hours = positive(&mut args, "--min-hours")?,
+            Some("--max-candidates") => options.limit = positive(&mut args, "--max-candidates")?,
+            Some("--deadline-ms") => {
+                options.deadline = Duration::from_millis(positive(&mut args, "--deadline-ms")?)
+            }
+            Some("--path") => options
+                .paths
+                .push(required_value(&mut args, "--path")?.into()),
+            _ => return Err(format!("unexpected scratch-sweep argument {arg:?}")),
+        }
+    }
+    Ok(Operation::ScratchSweep(options))
+}
+
+fn parse_state_publish(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let mut repo = None;
+    let mut remote = None;
+    let mut branch = None;
+    let mut max_commits = None;
+    let mut state_dir = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Ok(Operation::Help),
+            Some("--repo") if repo.is_none() => {
+                repo = Some(required_value(&mut args, "--repo")?.into())
+            }
+            Some("--remote") if remote.is_none() => {
+                remote = Some(utf8(required_value(&mut args, "--remote")?)?)
+            }
+            Some("--branch") if branch.is_none() => {
+                branch = Some(utf8(required_value(&mut args, "--branch")?)?)
+            }
+            Some("--max-commits") if max_commits.is_none() => {
+                max_commits = Some(positive(&mut args, "--max-commits")?)
+            }
+            Some("--state-dir") if state_dir.is_none() => {
+                state_dir = Some(required_value(&mut args, "--state-dir")?.into())
+            }
+            _ => return Err("state-publish accepts --repo DIR, --remote NAME, --branch NAME, --max-commits N and --state-dir DIR".into()),
+        }
+    }
+    Ok(Operation::StatePublish(state_publish::Options {
+        repo: repo.ok_or("state-publish requires --repo DIR")?,
+        remote: remote.unwrap_or_else(|| "origin".into()),
+        branch: branch.unwrap_or_else(|| "main".into()),
+        max_commits: max_commits.unwrap_or(20),
+        state_dir,
+    }))
+}
+
+fn utf8(value: OsString) -> Result<String, String> {
+    value
+        .into_string()
+        .ok()
+        .filter(|name| {
+            !name.starts_with('-') && !name.contains(':') && !name.chars().any(char::is_whitespace)
+        })
+        .ok_or_else(|| "Git remote and branch names must be plain UTF-8 names".to_owned())
+}
+
+fn parse_snapshot(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let mut root = None;
+    let mut output = None;
+    let mut state_dir = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Ok(Operation::Help),
+            Some("--path") if root.is_none() => {
+                root = Some(required_value(&mut args, "--path")?.into())
+            }
+            Some("--output") if output.is_none() => {
+                output = Some(required_value(&mut args, "--output")?.into())
+            }
+            Some("--state-dir") if state_dir.is_none() => {
+                state_dir = Some(required_value(&mut args, "--state-dir")?.into())
+            }
+            _ => {
+                return Err(
+                    "snapshot accepts --path PATH, --output FILE and --state-dir DIR".into(),
+                )
+            }
+        }
+    }
+    Ok(Operation::Snapshot {
+        root: root.unwrap_or_else(|| "/".into()),
+        output,
+        state_dir,
+    })
+}
+
+fn relative_age_cutoff(value: OsString) -> Result<i64, String> {
+    let hours = value
+        .to_str()
+        .and_then(|value| value.strip_suffix("h"))
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or("--older-than expects a positive number of hours such as 6h")?;
+    let seconds = hours.checked_mul(3600).ok_or("age is out of range")?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?;
+    i64::try_from(now.as_secs())
+        .ok()
+        .and_then(|now| now.checked_sub(seconds))
+        .filter(|cutoff| *cutoff > 0)
+        .ok_or_else(|| "age cutoff must be after the Unix epoch".to_owned())
+}
+
+fn parse_temp_root(args: &mut impl Iterator<Item = OsString>) -> Result<bool, String> {
+    match required_value(args, "--root")?.to_str() {
+        Some("scratch") => Ok(false),
+        Some("system-tmp") => Ok(true),
+        _ => Err("--root must be scratch or system-tmp".into()),
+    }
+}
+
+fn parse_scratch_nomination(
+    mut args: impl Iterator<Item = OsString>,
+    qualify: bool,
+) -> Result<Operation, String> {
     let mut cutoff = None;
     let mut paths = Vec::new();
+    let mut jobs = 1;
+    let mut host_temp = false;
+    let mut deadline_ms = 30_000;
+    let mut max_entries = 100_000;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--before-epoch") if cutoff.is_none() => {
                 cutoff = Some(positive(&mut args, "--before-epoch")?);
             }
+            Some("--older-than") if cutoff.is_none() => {
+                cutoff = Some(relative_age_cutoff(required_value(&mut args, "--older-than")?)?);
+            }
             Some("--path") => paths.push(PathBuf::from(required_value(&mut args, "--path")?)),
+            Some("--jobs") if qualify => jobs = positive(&mut args, "--jobs")?,
+            Some("--root") => host_temp = parse_temp_root(&mut args)?,
+            Some("--deadline-ms") if qualify => deadline_ms = positive(&mut args, "--deadline-ms")?,
+            Some("--max-entries") if qualify => max_entries = positive(&mut args, "--max-entries")?,
             Some("--paths-from") => {
                 let list = PathBuf::from(required_value(&mut args, "--paths-from")?);
                 let bytes = std::fs::read(&list)
@@ -268,17 +424,31 @@ fn parse_scratch_manifest(mut args: impl Iterator<Item = OsString>) -> Result<Op
             Some("--help" | "-h") => return Ok(Operation::Help),
             _ => {
                 return Err(
-                    "scratch-manifest accepts --before-epoch SECONDS, --path FILE, and --paths-from FILE".into(),
+                    "scratch-manifest accepts --before-epoch or --older-than, and --path or --paths-from".into(),
                 )
             }
         }
     }
     if paths.is_empty() {
-        return Err("scratch-manifest requires --path or --paths-from".into());
+        return Err("Scratch nomination requires --path or --paths-from".into());
+    }
+    let cutoff = cutoff.ok_or("Scratch nomination requires --before-epoch or --older-than")?;
+    if qualify {
+        return Ok(Operation::ScratchQualify {
+            cutoff,
+            paths,
+            jobs,
+            host_temp,
+            options: scan::ScanOptions {
+                deadline: Duration::from_millis(deadline_ms),
+                max_entries,
+            },
+        });
     }
     Ok(Operation::ScratchManifest {
-        cutoff: cutoff.ok_or("scratch-manifest requires --before-epoch")?,
+        cutoff,
         paths,
+        host_temp,
     })
 }
 
@@ -291,7 +461,7 @@ fn parse_scratch_target_apply(
     let mut target_used_bytes = None;
     let mut paths = Vec::new();
     let mut all_entries = false;
-    let mut ack_restored = None;
+    let mut recovery = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--manifest") if manifest.is_none() => {
@@ -311,24 +481,27 @@ fn parse_scratch_target_apply(
             Some("--target-used-bytes") if target_used_bytes.is_none() => {
                 target_used_bytes = Some(positive(&mut args, "--target-used-bytes")?);
             }
-            Some("--path") if !all_entries && ack_restored.is_none() => {
+            Some("--path") if !all_entries && recovery.is_none() => {
                 paths.push(
                     required_value(&mut args, "--path")?
                         .into_string()
                         .map_err(|_| "manifest paths must be UTF-8")?,
                 );
             }
-            Some("--all") if !all_entries && paths.is_empty() && ack_restored.is_none() => {
+            Some("--all") if !all_entries && paths.is_empty() && recovery.is_none() => {
                 all_entries = true
             }
-            Some("--ack-restored")
-                if !all_entries && paths.is_empty() && ack_restored.is_none() =>
+            Some(option @ ("--ack-restored" | "--restore-staged"))
+                if !all_entries && paths.is_empty() && recovery.is_none() =>
             {
-                ack_restored = Some(
-                    required_value(&mut args, "--ack-restored")?
-                        .into_string()
-                        .map_err(|_| "restored path must be UTF-8")?,
-                );
+                let path = required_value(&mut args, option)?
+                    .into_string()
+                    .map_err(|_| "recovery path must be UTF-8")?;
+                recovery = Some(if option == "--restore-staged" {
+                    scratch_target::RecoveryAction::Restore(path)
+                } else {
+                    scratch_target::RecoveryAction::Acknowledge(path)
+                });
             }
             _ => return Err("invalid scratch-target-apply options".into()),
         }
@@ -340,7 +513,7 @@ fn parse_scratch_target_apply(
         target_used_bytes: target_used_bytes.ok_or("--target-used-bytes is required")?,
         paths,
         all_entries,
-        ack_restored,
+        recovery,
     })
 }
 
@@ -352,6 +525,22 @@ fn print_json(report: &impl Serialize) -> io::Result<()> {
 
 fn run(operation: Operation) -> io::Result<u8> {
     match operation {
+        Operation::Snapshot {
+            root,
+            output,
+            state_dir,
+        } => {
+            if let Some(state_dir) = state_dir.as_deref() {
+                print_json(&snapshot::run(&root, Some(state_dir), output.as_deref())?)?;
+            } else {
+                let value = snapshot::collect(&root)?;
+                if let Some(destination) = output {
+                    snapshot::publish(&destination, &value)?;
+                } else {
+                    print_json(&value)?;
+                }
+            }
+        }
         Operation::Help => {
             writeln!(io::stdout().lock(), "{USAGE}")?;
         }
@@ -365,8 +554,43 @@ fn run(operation: Operation) -> io::Result<u8> {
                 return Ok(TEMPORARY_FAILURE);
             }
         }
-        Operation::ScratchManifest { cutoff, paths } => {
-            print_json(&scratch_manifest::create(&paths, cutoff)?)?;
+        Operation::ScratchQualify {
+            cutoff,
+            paths,
+            options,
+            jobs,
+            host_temp,
+        } => {
+            if host_temp {
+                print_json(&scratch_manifest::qualify_host_temp(
+                    &paths, cutoff, options, jobs,
+                )?)?;
+            } else {
+                print_json(&scratch_manifest::qualify_exact(
+                    &paths, cutoff, options, jobs,
+                )?)?;
+            }
+        }
+        Operation::StatePublish(options) => {
+            let (report, code) = state_publish::run(&options)?;
+            print_json(&report)?;
+            if code != 0 {
+                return Ok(code);
+            }
+        }
+        Operation::ScratchSweep(options) => {
+            let (report, complete) = scratch_sweep::run(&options)?;
+            print_json(&report)?;
+            if !complete {
+                return Ok(TEMPORARY_FAILURE);
+            }
+        }
+        Operation::ScratchManifest {
+            cutoff,
+            paths,
+            host_temp,
+        } => {
+            print_json(&scratch_manifest::create_in(&paths, cutoff, host_temp)?)?;
         }
         Operation::ScratchTargetApply {
             manifest,
@@ -375,7 +599,7 @@ fn run(operation: Operation) -> io::Result<u8> {
             target_used_bytes,
             paths,
             all_entries,
-            ack_restored,
+            recovery,
         } => {
             let report = scratch_target::apply(
                 &manifest,
@@ -384,10 +608,12 @@ fn run(operation: Operation) -> io::Result<u8> {
                 target_used_bytes,
                 &paths,
                 all_entries,
-                ack_restored.as_deref(),
+                recovery.as_ref(),
             )?;
             let reached = report.target_reached;
-            let acknowledged = ack_restored.is_some() && report.recovery.is_none();
+            let acknowledged = recovery.is_some()
+                && report.recovery.is_none()
+                && report.native_recovery_stage.is_none();
             print_json(&report)?;
             if !reached && !acknowledged {
                 return Ok(TEMPORARY_FAILURE);
@@ -476,6 +702,12 @@ fn native_volume(args: &[OsString]) -> Option<ExitCode> {
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
+    if let Some(status) = scratch_index_cli::dispatch(&args) {
+        return status;
+    }
+    if let Some(status) = diskm_shadow::scratch_lease::dispatch(&args) {
+        return status;
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "scratch-artifact-validate")

@@ -1,43 +1,6 @@
 //! Disk Magician migration candidate.
 
-use std::env;
-use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::PathBuf;
-
-// Temporary bridge to the installed package during parity testing.
-const LEGACY_CLI: &str = "disk-magician";
-pub const LEGACY_COMPAT_CLI: &str = "DISKM_LEGACY_COMPAT_CLI";
-
-/// Resolve the same explicitly selected legacy backend for dispatcher and native subcommands.
-pub fn legacy_cli() -> io::Result<PathBuf> {
-    let Some(configured) = env::var_os(LEGACY_COMPAT_CLI) else {
-        return Ok(PathBuf::from(LEGACY_CLI));
-    };
-    let candidate = PathBuf::from(configured);
-    if !candidate.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "legacy compatibility path must be absolute",
-        ));
-    }
-    let path = std::fs::canonicalize(candidate)?;
-    let metadata = std::fs::metadata(&path)?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "legacy compatibility backend is not executable",
-        ));
-    }
-    let running = std::fs::metadata(env::current_exe()?)?;
-    if metadata.dev() == running.dev() && metadata.ino() == running.ino() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "refusing self-recursive legacy backend",
-        ));
-    }
-    Ok(path)
-}
+use std::{io, path::PathBuf};
 
 /// Verify the local Scratch registry against the mounted filesystem.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -54,56 +17,24 @@ pub fn verified_scratch_volume(
     volume_macos::verified_root(expected, for_reclaim)
 }
 
-/// Read the registered Scratch root. None means the volume authority confirmed absence.
-pub(crate) fn scratch_volume_path(override_cli: Option<PathBuf>) -> io::Result<Option<PathBuf>> {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-    use std::process::{Command, Stdio};
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if override_cli.is_none() && env::var_os(LEGACY_COMPAT_CLI).is_none() {
-        return verified_scratch_volume(None, false);
-    }
-
-    let backend = match override_cli {
-        Some(path) => path,
-        None => legacy_cli()?,
-    };
-    let output = Command::new(backend)
-        .args(["volume", "path", "scratch"])
-        .stderr(Stdio::null())
-        .output()?;
-    match output.status.code() {
-        Some(3) => Ok(None),
-        Some(0) => {
-            let mut bytes = output.stdout;
-            while bytes.last() == Some(&b'\n') {
-                bytes.pop();
-            }
-            if bytes.is_empty() {
-                return Err(io::Error::other("active Scratch volume returned no path"));
-            }
-            Ok(Some(PathBuf::from(OsString::from_vec(bytes))))
-        }
-        Some(code) => Err(io::Error::other(format!(
-            "Scratch volume lookup failed (rc={code})"
-        ))),
-        None => Err(io::Error::other("Scratch volume lookup was interrupted")),
-    }
-}
-
 pub mod artifact_batch;
 pub mod artifact_discovery;
 pub mod history;
+pub mod job_receipt;
 pub mod preview;
 pub mod preview_scopes;
-pub mod preview_worktrees;
 pub mod reclaim_report;
 pub mod scan;
 pub mod scratch_dir;
+mod scratch_file_transaction;
+pub mod scratch_index;
+pub mod scratch_lease;
 pub mod scratch_manifest;
 mod scratch_recovery;
+pub mod scratch_sweep;
 pub mod scratch_target;
+pub mod snapshot;
+pub mod state_publish;
 pub mod status;
 mod volume_config;
 

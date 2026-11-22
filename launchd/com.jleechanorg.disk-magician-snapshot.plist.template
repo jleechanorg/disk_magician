@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jleechanorg.disk-magician-snapshot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/bin/diskm</string>
+    <string>snapshot</string>
+    <string>--path</string>
+    <string>/</string>
+    <string>--state-dir</string>
+    <string>@HOME@/.disk_magician_state</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DISK_MAGICIAN_TRIGGER</key>
+    <string>timer</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-snapshot.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/disk-magician-snapshot.log</string>
+</dict>
+</plist>

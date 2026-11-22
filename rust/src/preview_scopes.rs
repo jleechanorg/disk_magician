@@ -2,16 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LEDGER_PATH: &str = "reclaim/directory-ledger.json";
 const MAX_LEDGER_BYTES: u64 = 32 * 1024 * 1024;
-const POLICY_TIMEOUT_SECONDS: u64 = 30;
-const MAX_POLICY_OUTPUT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -47,56 +45,23 @@ pub struct LedgerPathHint {
     pub canonical_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct LedgerSummary {
     pub rows: Vec<LedgerPathHint>,
-}
-
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
-pub struct TempPolicyPreview {
-    pub command: Vec<String>,
-    pub status: Option<i32>,
-    pub timed_out: bool,
-    pub truncated: bool,
-    pub output: String,
-    /// cleanup_tmp records an actuator job receipt even when run with --dry-run.
-    pub may_write_job_receipt: bool,
-    pub receipt_trigger: String,
-}
-
-#[derive(Deserialize)]
-struct Ledger {
-    rows: Vec<LedgerPathHint>,
 }
 
 /// Resolve the same host temp locations that the canonical tmp sweeper uses.
 /// All returned paths are canonical and unique. Roots sharing Scratch's device
 /// are omitted because this list is specifically for host temp observations.
 pub fn resolve_host_temp_scopes() -> io::Result<HostTempScopes> {
-    let scratch_path = Command::new(crate::legacy_cli()?)
-        .args(["volume", "path", "scratch"])
-        .output()?;
-    let (scratch_device, scratch_scope_availability) = if scratch_path.status.success() {
-        let scratch_path = String::from_utf8(scratch_path.stdout).map_err(io::Error::other)?;
-        let scratch_root = PathBuf::from(scratch_path.trim());
-        let scratch_root = fs::canonicalize(scratch_root)?;
-        let scratch_metadata = fs::metadata(&scratch_root)?;
-        if !scratch_metadata.is_dir() {
-            return Err(io::Error::other(
-                "registered Scratch volume is not a directory",
-            ));
-        }
-        (
-            Some(scratch_metadata.dev()),
-            TempScopeAvailability::RegisteredScratchExcluded,
-        )
-    } else if scratch_path.status.code() == Some(3) {
-        (None, TempScopeAvailability::ScratchNotConfigured)
-    } else {
-        return Err(io::Error::other(
-            "registered Scratch identity is unavailable",
-        ));
-    };
+    let (scratch_device, scratch_scope_availability) =
+        match crate::verified_scratch_volume(None, false)? {
+            Some(root) => (
+                Some(fs::metadata(root)?.dev()),
+                TempScopeAvailability::RegisteredScratchExcluded,
+            ),
+            None => (None, TempScopeAvailability::ScratchNotConfigured),
+        };
 
     let mut candidates = Vec::new();
     if let Some(root) = private_tmp_root() {
@@ -196,18 +161,8 @@ pub fn canonical_temp_scopes(
 
 pub fn read_ledger(state_dir: &Path) -> io::Result<LedgerSummary> {
     let path = state_dir.join(LEDGER_PATH);
-    let metadata = fs::symlink_metadata(&path)?;
-    if !metadata.file_type().is_file() {
-        return Err(io::Error::other("directory ledger is not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_LEDGER_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_LEDGER_BYTES {
-        return Err(io::Error::other("directory ledger exceeds the read limit"));
-    }
-    let ledger: Ledger = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let bytes = crate::job_receipt::read_bounded(&path, MAX_LEDGER_BYTES)?;
+    let ledger: LedgerSummary = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     Ok(LedgerSummary {
         rows: ledger
             .rows
@@ -220,76 +175,4 @@ pub fn read_ledger(state_dir: &Path) -> io::Result<LedgerSummary> {
             })
             .collect(),
     })
-}
-
-/// Ask the canonical temp cleaner for its default selection without a job receipt.
-pub fn temp_policy_preview() -> io::Result<TempPolicyPreview> {
-    temp_policy_preview_command(&crate::legacy_cli()?)
-}
-
-pub fn temp_policy_preview_command(executable: &Path) -> io::Result<TempPolicyPreview> {
-    const PYTHON: &str = r#"
-import json, os, signal, subprocess, sys
-timeout = int(sys.argv[1])
-limit = int(sys.argv[2])
-proc = subprocess.Popen(sys.argv[3:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        start_new_session=True, env={**os.environ, 'DISK_MAGICIAN_AGE_FLOOR_MINUTES': ''})
-try:
-    output, _ = proc.communicate(timeout=timeout)
-    timed_out = False
-except subprocess.TimeoutExpired:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    output, _ = proc.communicate()
-    timed_out = True
-print(json.dumps({
-    'status': proc.returncode,
-    'timed_out': timed_out,
-    'truncated': len(output) > limit,
-    'output': output[:limit].decode('utf-8', 'replace'),
-}))
-"#;
-    let executable_name = executable.as_os_str().to_string_lossy().into_owned();
-    let args = vec![
-        executable_name.clone(),
-        "cleanup-tmp".to_owned(),
-        "--dry-run".to_owned(),
-        "--no-job-receipt".to_owned(),
-    ];
-    let output = Command::new("python3")
-        .arg("-c")
-        .arg(PYTHON)
-        .arg(POLICY_TIMEOUT_SECONDS.to_string())
-        .arg(MAX_POLICY_OUTPUT_BYTES.to_string())
-        .args(&args)
-        .env_remove("DISK_MAGICIAN_AGE_FLOOR_MINUTES")
-        .env_remove("DISK_MAGICIAN_RECEIPT_TRIGGER")
-        .env_remove("DISK_MAGICIAN_C14_LEDGER")
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
-    }
-    let response: BoundedCommandOutput =
-        serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
-    Ok(TempPolicyPreview {
-        command: args,
-        status: response.status,
-        timed_out: response.timed_out,
-        truncated: response.truncated,
-        output: response.output,
-        may_write_job_receipt: false,
-        receipt_trigger: String::new(),
-    })
-}
-
-#[derive(Deserialize)]
-struct BoundedCommandOutput {
-    status: Option<i32>,
-    timed_out: bool,
-    truncated: bool,
-    output: String,
 }
