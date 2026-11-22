@@ -27,8 +27,14 @@ pub struct PullRequest {
     pub texts: Vec<String>,
 }
 
+/// Pull requests plus one record per verified search partition.
+pub struct Fetched {
+    pub requests: Vec<PullRequest>,
+    pub partitions: Vec<Value>,
+}
+
 /// Fetches every open pull request for a query; an error holds the refresh.
-pub type Fetcher = fn(&str) -> io::Result<Vec<PullRequest>>;
+pub type Fetcher = fn(&str) -> io::Result<Fetched>;
 
 /// (spelling found in text, canonical spelling the cleaner compares against)
 pub type Root = (String, String);
@@ -168,7 +174,13 @@ fn civil(days: i64) -> String {
 /// since the epoch). GitHub search returns at most 1,000 results, so a larger
 /// range is split in half until each part fits; a single day over the limit
 /// holds the refresh.
-fn fetch_range(query: &str, from: i64, to: i64, requests: &mut Vec<PullRequest>) -> io::Result<()> {
+fn fetch_range(
+    query: &str,
+    from: i64,
+    to: i64,
+    requests: &mut Vec<PullRequest>,
+    partitions: &mut Vec<Value>,
+) -> io::Result<()> {
     let scoped = format!("{query} created:{}..{}", civil(from), civil(to));
     let mut after: Option<String> = None;
     let mut fetched = 0u64;
@@ -187,8 +199,8 @@ fn fetch_range(query: &str, from: i64, to: i64, requests: &mut Vec<PullRequest>)
                 return Err(io::Error::other("one day exceeds GitHub's search limit"));
             }
             let middle = from + (to - from) / 2;
-            fetch_range(query, from, middle, requests)?;
-            return fetch_range(query, middle + 1, to, requests);
+            fetch_range(query, from, middle, requests, partitions)?;
+            return fetch_range(query, middle + 1, to, requests, partitions);
         }
         let (nodes, next) = page(search)?;
         for node in nodes.iter().filter(|node| node["url"].is_string()) {
@@ -218,7 +230,10 @@ fn fetch_range(query: &str, from: i64, to: i64, requests: &mut Vec<PullRequest>)
         match next {
             Some(cursor) => after = Some(cursor),
             // Replace automatic holds only from a verified complete result.
-            None if fetched == total => return Ok(()),
+            None if fetched == total => {
+                partitions.push(json!({"query": scoped, "reported": total, "fetched": fetched}));
+                return Ok(());
+            }
             None => {
                 return Err(io::Error::other(
                     "fetched fewer pull requests than the search reported",
@@ -229,7 +244,7 @@ fn fetch_range(query: &str, from: i64, to: i64, requests: &mut Vec<PullRequest>)
 }
 
 /// Every open pull request for `query`, paginated through `gh api graphql`.
-pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
+pub fn fetch_github(query: &str) -> io::Result<Fetched> {
     let today = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?
@@ -237,8 +252,12 @@ pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
         / 86_400;
     // GitHub launched in 2008; nothing can be older than 2008-01-01.
     let mut requests = Vec::new();
-    fetch_range(query, 13_879, today + 1, &mut requests)?;
-    Ok(requests)
+    let mut partitions = Vec::new();
+    fetch_range(query, 13_879, today + 1, &mut requests, &mut partitions)?;
+    Ok(Fetched {
+        requests,
+        partitions,
+    })
 }
 
 /// Registered Scratch and system temp roots under every spelling.
@@ -300,7 +319,11 @@ pub fn refresh(
         return hold("existing_holds_unreadable");
     };
     let existing = existing.unwrap_or_default();
-    let Ok(requests) = fetch(query) else {
+    let Ok(Fetched {
+        requests,
+        partitions,
+    }) = fetch(query)
+    else {
         return hold("fetch_failed");
     };
     let mut fresh = BTreeMap::new();
@@ -317,7 +340,7 @@ pub fn refresh(
         .values()
         .filter(|value| !value.starts_with(AUTO))
         .count();
-    let result = json!({"status": "refreshed", "pull_requests": requests.len(), "automatic": merged.len() - manual, "manual": manual, "path": path});
+    let result = json!({"status": "refreshed", "pull_requests": requests.len(), "automatic": merged.len() - manual, "manual": manual, "path": path, "partitions": partitions});
     let receipt = job_receipt::publish_terminal(
         &state,
         "evidence-holds",

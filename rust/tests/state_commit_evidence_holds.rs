@@ -1,4 +1,4 @@
-use diskm_shadow::evidence_holds::{self, Holds, PullRequest, AUTO};
+use diskm_shadow::evidence_holds::{self, Fetched, Holds, PullRequest, AUTO};
 use diskm_shadow::state_commit;
 use std::collections::BTreeMap;
 use std::fs;
@@ -168,14 +168,17 @@ fn merge_keeps_manual_holds_and_replaces_automatic_ones() {
     assert!(!merged.contains_key(Path::new("/old")));
 }
 
-fn one_request(_: &str) -> io::Result<Vec<PullRequest>> {
-    Ok(vec![PullRequest {
-        url: "https://pr/9".into(),
-        texts: vec!["evidence at /tmp/held/file.txt".into()],
-    }])
+fn one_request(_: &str) -> io::Result<Fetched> {
+    Ok(Fetched {
+        requests: vec![PullRequest {
+            url: "https://pr/9".into(),
+            texts: vec!["evidence at /tmp/held/file.txt".into()],
+        }],
+        partitions: Vec::new(),
+    })
 }
 
-fn failing(_: &str) -> io::Result<Vec<PullRequest>> {
+fn failing(_: &str) -> io::Result<Fetched> {
     Err(io::Error::other("network down"))
 }
 
@@ -196,4 +199,31 @@ fn refresh_writes_holds_and_a_failure_keeps_them() {
     let (_, code) = evidence_holds::refresh(Some(&state), "q", &roots(), one_request).unwrap();
     assert_eq!(code, 75);
     assert_eq!(fs::read_to_string(&path).unwrap(), "not json");
+}
+
+#[test]
+fn refuses_an_in_progress_operation_without_writing() {
+    let (_root, repo, state) = repo_and_state("operation");
+    let git_dir = PathBuf::from(git(&repo, &["rev-parse", "--absolute-git-dir"]).trim());
+    for marker in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+        fs::write(git_dir.join(marker), head(&repo) + "\n").unwrap();
+        assert_held_unchanged(&repo, &state, "main", "operation_in_progress");
+        fs::remove_file(git_dir.join(marker)).unwrap();
+    }
+    for marker in ["rebase-merge", "rebase-apply"] {
+        fs::create_dir(git_dir.join(marker)).unwrap();
+        assert_held_unchanged(&repo, &state, "main", "operation_in_progress");
+        fs::remove_dir(git_dir.join(marker)).unwrap();
+    }
+}
+
+#[test]
+fn refuses_an_oversized_or_non_regular_source() {
+    let (_root, repo, state) = repo_and_state("oversize");
+    let source = state.join("snapshots/disk_snapshot.json");
+    fs::write(&source, vec![b'x'; 10 * 1024 * 1024 + 1]).unwrap();
+    assert_held_unchanged(&repo, &state, "main", "source_unreadable");
+    fs::remove_file(&source).unwrap();
+    fs::create_dir(&source).unwrap();
+    assert_held_unchanged(&repo, &state, "main", "source_unreadable");
 }
