@@ -457,7 +457,7 @@ that are missing from it.
 
 **Skill (single source of truth):** `~/.claude/skills/fix-completion-deploy/SKILL.md` — durable fix promotion, origin-main verification, tracked templates, and deployed-revision proof.
 
-1. The 30-min snapshot launchd job (`com.jleechanorg.disk-magician`) runs the
+1. The retired Python snapshot launchd job (`com.jleechanorg.disk-magician`) ran the
    **uv-tool-packaged copy** at
    `~/.local/share/uv/tools/disk-magician/.../disk_magician/`, built from
    `src/disk_magician/` — NOT the repo root files.
@@ -642,7 +642,7 @@ contradicted it. Check them in this order before proposing a reclaim change:
 - Colima's sparse disk only shrinks via in-VM `fstrim`; when the HOST disk
   hits ~100% the guest wedges with I/O errors and can't trim — recover with
   `colima stop && colima start` then `colima ssh -- sudo fstrim -av`.
-  Prevention: the 2h pressure-sweep job (free < 40G gate).
+  Prevention: the retired Python pressure-sweep job (free < 40G gate).
 - Snapshot JSON is schema_version 2: coverage_pct is dedup-corrected
   (raw value preserved at `snapshot_metadata.coverage_pct_raw_v1`);
   `residual_gb`/`residual_delta_gb` track unmeasured space;

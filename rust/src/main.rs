@@ -627,7 +627,14 @@ fn run(operation: Operation) -> io::Result<u8> {
         Operation::TimeWindows => {
             let windows: serde_json::Map<String, serde_json::Value> = time_windows::listing()
                 .into_iter()
-                .map(|(name, seconds)| (format!("{name}_SECONDS"), seconds.into()))
+                .map(|(name, window)| {
+                    let seconds = if window.subsec_nanos() == 0 {
+                        window.as_secs().into()
+                    } else {
+                        window.as_secs_f64().into()
+                    };
+                    (format!("{name}_SECONDS"), seconds)
+                })
                 .collect();
             print_json(&windows)?;
         }

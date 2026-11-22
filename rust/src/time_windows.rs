@@ -47,26 +47,33 @@ pub const STATE_COMMIT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 pub const EVIDENCE_HOLDS_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub const SCRATCH_RECLAIM_TIMEOUT: Duration = Duration::from_secs(950);
 
-/// Every window above, by placeholder name, in seconds.
-pub fn listing() -> Vec<(&'static str, u64)> {
+/// Every window above, by placeholder name.
+pub fn listing() -> Vec<(&'static str, Duration)> {
     vec![
-        ("CONTENT_FLOOR", u64::from(CONTENT_FLOOR_HOURS) * 3600),
-        ("SCAN_DEADLINE", SCAN_DEADLINE.as_secs()),
-        ("INDEX_REFRESH_DEADLINE", INDEX_REFRESH_DEADLINE.as_secs()),
-        ("PREVIEW_CHECK_WINDOW", PREVIEW_CHECK_WINDOW.as_secs()),
-        ("OPEN_FILE_PROBE_TIMEOUT", OPEN_FILE_PROBE_TIMEOUT.as_secs()),
-        ("VOLUME_PROBE_TIMEOUT", VOLUME_PROBE_TIMEOUT.as_secs()),
-        ("HISTORY", u64::from(HISTORY_DAYS) * 86_400),
-        ("LEDGER_STALE", (LEDGER_STALE_HOURS * 3600.0) as u64),
-        ("SNAPSHOT_STALE_AFTER", SNAPSHOT_STALE_AFTER.as_secs()),
-        ("SNAPSHOT_INTERVAL", SNAPSHOT_INTERVAL.as_secs()),
         (
-            "SCRATCH_PRESSURE_INTERVAL",
-            SCRATCH_PRESSURE_INTERVAL.as_secs(),
+            "CONTENT_FLOOR",
+            Duration::from_secs(u64::from(CONTENT_FLOOR_HOURS) * 3600),
         ),
-        ("TEMP_SWEEP_INTERVAL", TEMP_SWEEP_INTERVAL.as_secs()),
-        ("STATE_COMMIT_INTERVAL", STATE_COMMIT_INTERVAL.as_secs()),
-        ("EVIDENCE_HOLDS_INTERVAL", EVIDENCE_HOLDS_INTERVAL.as_secs()),
-        ("SCRATCH_RECLAIM_TIMEOUT", SCRATCH_RECLAIM_TIMEOUT.as_secs()),
+        ("SCAN_DEADLINE", SCAN_DEADLINE),
+        ("INDEX_REFRESH_DEADLINE", INDEX_REFRESH_DEADLINE),
+        ("PREVIEW_CHECK_WINDOW", PREVIEW_CHECK_WINDOW),
+        ("OPEN_FILE_PROBE_TIMEOUT", OPEN_FILE_PROBE_TIMEOUT),
+        ("VOLUME_PROBE_TIMEOUT", VOLUME_PROBE_TIMEOUT),
+        ("PROBE_POLL", PROBE_POLL),
+        (
+            "HISTORY",
+            Duration::from_secs(u64::from(HISTORY_DAYS) * 86_400),
+        ),
+        (
+            "LEDGER_STALE",
+            Duration::from_secs_f64(LEDGER_STALE_HOURS * 3600.0),
+        ),
+        ("SNAPSHOT_STALE_AFTER", SNAPSHOT_STALE_AFTER),
+        ("SNAPSHOT_INTERVAL", SNAPSHOT_INTERVAL),
+        ("SCRATCH_PRESSURE_INTERVAL", SCRATCH_PRESSURE_INTERVAL),
+        ("TEMP_SWEEP_INTERVAL", TEMP_SWEEP_INTERVAL),
+        ("STATE_COMMIT_INTERVAL", STATE_COMMIT_INTERVAL),
+        ("EVIDENCE_HOLDS_INTERVAL", EVIDENCE_HOLDS_INTERVAL),
+        ("SCRATCH_RECLAIM_TIMEOUT", SCRATCH_RECLAIM_TIMEOUT),
     ]
 }
