@@ -1,12 +1,15 @@
 //! Hourly removal of Scratch folders whose newest content is past the floor.
 
+pub use crate::scratch_file_transaction::open_paths;
 use crate::scratch_lease::{self, BundleKind, LegacyLease, OwnerProcessState};
 use crate::time_windows::{GIT_REMOTE_PROBE_TIMEOUT, PROBE_POLL};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -416,10 +419,17 @@ fn run_lease(root: &Path, run: &Path) -> Option<&'static str> {
 
 /// Injection points: the remote classifier, the remote tip probe and the lease
 /// verdict, so tests need no network and no registered Scratch volume.
+#[allow(clippy::type_complexity)]
 pub struct Hooks {
     pub independent: Box<dyn Fn(&Path, &str) -> bool>,
     pub tips: Box<dyn Fn(&Path, &str) -> io::Result<Vec<String>>>,
     pub lease: Box<dyn Fn(&Path, &Path) -> Option<&'static str>>,
+    /// Whether any process has a file or working directory under the path.
+    pub open: Box<dyn Fn(&Path) -> io::Result<bool>>,
+    /// Called with the original and staged path right after the rename.
+    pub after_stage: Box<dyn Fn(&Path, &Path)>,
+    /// Returning true at a named point simulates a crash there.
+    pub crash: Box<dyn Fn(&str) -> bool>,
 }
 
 impl Default for Hooks {
@@ -428,6 +438,9 @@ impl Default for Hooks {
             independent: Box::new(independent_remote),
             tips: Box::new(remote_tips),
             lease: Box::new(run_lease),
+            open: Box::new(open_paths),
+            after_stage: Box::new(|_, _| {}),
+            crash: Box::new(|_| false),
         }
     }
 }
@@ -464,6 +477,7 @@ pub struct Plan {
     pub removals: Vec<PathBuf>,
     pub kept: Vec<(PathBuf, String)>,
     pub alts: Vec<(PathBuf, PathBuf)>,
+    pub blind: bool,
     pub timed_out: bool,
 }
 
@@ -520,11 +534,17 @@ fn runs(dir: &Path, level: u32, found: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-struct Ctx<'a> {
-    run: &'a Run,
+/// What the whole run knows: evidence holds, the alternates scan, and whether
+/// any unit was only partly observed (which blinds that scan).
+struct Known {
     holds: Vec<PathBuf>,
     alts: Vec<(PathBuf, PathBuf)>,
     blind: bool,
+}
+
+struct Ctx<'a> {
+    run: &'a Run,
+    known: Known,
     removals: Vec<PathBuf>,
     kept: Vec<(PathBuf, String)>,
 }
@@ -541,9 +561,7 @@ fn repo_root(git_dir: &Path) -> &Path {
 /// `full` adds the checks that matter only when removal is on the table.
 fn protection(
     run: &Run,
-    holds: &[PathBuf],
-    alts: &[(PathBuf, PathBuf)],
-    blind: bool,
+    known: &Known,
     path: &Path,
     obs: &Observation,
     within: &[&Path],
@@ -553,7 +571,7 @@ fn protection(
     if path.file_name().is_some_and(|name| name == "evidence") {
         return Ok(Some(("evidence".into(), true)));
     }
-    for held in holds {
+    for held in &known.holds {
         if path.starts_with(held) {
             return Ok(Some(("pr-evidence".into(), true)));
         }
@@ -580,10 +598,10 @@ fn protection(
         if !(own || full) {
             continue;
         }
-        let reason = if blind {
+        let reason = if known.blind {
             Some("deferred:incomplete-alternates-scan")
         } else {
-            git_protected(git_dir, within, alts, &run.hooks)
+            git_protected(git_dir, within, &known.alts, &run.hooks)
         };
         if let Some(reason) = reason {
             let reason = reason
@@ -601,16 +619,7 @@ fn protection(
 
 fn judge(c: &mut Ctx, path: PathBuf, obs: Observation, depth: u32) -> io::Result<()> {
     let stale = obs.complete && obs.newest < c.run.cutoff;
-    let held = protection(
-        c.run,
-        &c.holds,
-        &c.alts,
-        c.blind,
-        &path,
-        &obs,
-        &[&path],
-        stale,
-    )?;
+    let held = protection(c.run, &c.known, &path, &obs, &[&path], stale)?;
     if let Some((reason, true)) = &held {
         c.kept
             .push((path, format!("kept:protected-subtree:{reason}")));
@@ -634,7 +643,11 @@ fn judge(c: &mut Ctx, path: PathBuf, obs: Observation, depth: u32) -> io::Result
     };
     c.kept.push((path.clone(), reason));
     if descend {
-        for child in sorted_children(&path)? {
+        let Ok(children) = sorted_children(&path) else {
+            c.kept.push((path, "deferred:incomplete".into()));
+            return Ok(());
+        };
+        for child in children {
             let seen = observe(&child, c.run.device, c.run.deadline);
             judge(c, child, seen, depth + 1)?;
         }
@@ -652,11 +665,14 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
         units.push((path, seen));
     }
     let blind = units.iter().any(|(_, seen)| !seen.complete);
-    let mut ctx = Ctx {
-        run,
+    let known = Known {
         holds: read_holds(&run.holds)?,
         alts,
         blind,
+    };
+    let mut ctx = Ctx {
+        run,
+        known,
         removals: Vec::new(),
         kept: Vec::new(),
     };
@@ -666,7 +682,339 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
     Ok(Plan {
         removals: ctx.removals,
         kept: ctx.kept,
-        alts: ctx.alts,
+        alts: ctx.known.alts,
+        blind: ctx.known.blind,
         timed_out: Instant::now() >= run.deadline,
     })
+}
+
+// ---- Removal transaction, recovery and report ----
+
+const STAGES: &str = ".diskm-expired";
+
+/// What a stage records so an interrupted run can be finished or undone.
+#[derive(Serialize, Deserialize)]
+pub struct Intent {
+    /// `staged` (renamed, not yet verified) or `deleting`.
+    pub state: String,
+    /// Original path relative to the Scratch root.
+    pub original: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+    pub newest: i64,
+    pub bytes: u64,
+    /// The exact deletion-log row, so replay appends it at most once.
+    pub row: String,
+}
+
+#[derive(Default, Serialize)]
+pub struct Report {
+    pub removed: Vec<(PathBuf, u64)>,
+    pub would_remove: Vec<PathBuf>,
+    pub deferred: Vec<(PathBuf, String)>,
+    pub kept: Vec<(PathBuf, String)>,
+    pub interrupted: Vec<String>,
+    pub timed_out: bool,
+}
+
+impl Report {
+    pub fn complete(&self) -> bool {
+        !self.timed_out
+    }
+}
+
+fn write_intent(path: &Path, intent: &Intent) -> io::Result<()> {
+    let temporary = path.with_extension("tmp");
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(&serde_json::to_vec(intent).map_err(io::Error::other)?)?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    fs::File::open(path.parent().unwrap_or(path))?.sync_all()
+}
+
+fn alive(pid: i32) -> bool {
+    (unsafe { libc::kill(pid, 0) } == 0)
+        || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn allocated(path: &Path) -> u64 {
+    let Ok(info) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    let children = if info.is_dir() {
+        sorted_children(path).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    info.blocks() * 512 + children.iter().map(|child| allocated(child)).sum::<u64>()
+}
+
+fn make_writable(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        for child in sorted_children(path)? {
+            make_writable(&child)?;
+        }
+    }
+    Ok(())
+}
+
+/// The staged-tree check: identity, completeness, no newer content, no hold,
+/// no new evidence directory, the Git proof again, and no open file or
+/// working directory. `newest` is skipped while finishing a half-removed tree,
+/// whose directory times our own removals changed.
+fn staged_ok(
+    run: &Run,
+    item: &Path,
+    intent: &Intent,
+    alts: &[(PathBuf, PathBuf)],
+) -> io::Result<bool> {
+    let original = run.root.join(&intent.original);
+    let info = fs::symlink_metadata(item)?;
+    let seen = observe(item, run.device, run.deadline);
+    let newer = intent.state == "staged" && seen.newest > intent.newest;
+    if (info.dev(), info.ino()) != (intent.device, intent.inode)
+        || !seen.complete
+        || newer
+        || !seen.evidence.is_empty()
+    {
+        return Ok(false);
+    }
+    if read_holds(&run.holds)?
+        .iter()
+        .any(|held| original.starts_with(held) || held.starts_with(&original))
+    {
+        return Ok(false);
+    }
+    if seen
+        .repos
+        .iter()
+        .any(|git_dir| git_protected(git_dir, &[item, &original], alts, &run.hooks).is_some())
+    {
+        return Ok(false);
+    }
+    Ok(matches!((run.hooks.open)(item), Ok(false)))
+}
+
+fn crashed(run: &Run, point: &str) -> io::Result<()> {
+    if (run.hooks.crash)(point) {
+        return Err(io::Error::other(format!("simulated crash at {point}")));
+    }
+    Ok(())
+}
+
+/// Delete the staged item, then make the receipt durable, then drop the
+/// intent. Replaying skips a row already in the log.
+fn finish(
+    run: &Run,
+    stage: &Path,
+    intent_path: &Path,
+    intent: &mut Intent,
+    report: &mut Report,
+) -> io::Result<()> {
+    let item = stage.join("item");
+    if let Ok(info) = fs::symlink_metadata(&item) {
+        if intent.state != "deleting" {
+            intent.bytes = allocated(&item);
+            let timestamp = crate::job_receipt::timestamp(std::time::SystemTime::now())?;
+            let path = run
+                .root
+                .join(&intent.original)
+                .to_string_lossy()
+                .replace('\t', "\\t")
+                .replace('\r', "\\r")
+                .replace('\n', "\\n");
+            let nonce = stage.file_name().unwrap_or_default().to_string_lossy();
+            intent.row = format!(
+                "{timestamp}\tdiskm-expired\tremove\t{}\t{path}\t{nonce}\n",
+                intent.bytes.div_ceil(1024)
+            );
+            intent.state = "deleting".into();
+            write_intent(intent_path, intent)?;
+        }
+        if info.is_dir() {
+            make_writable(&item)?;
+            fs::remove_dir_all(&item)?;
+        } else {
+            fs::remove_file(&item)?;
+        }
+    }
+    crashed(run, "removed")?;
+    crate::scratch_target::flush_audit(&mut Some((run.log.clone(), intent.row.clone())), true)?;
+    fs::remove_file(intent_path)?;
+    let _ = fs::remove_dir(stage);
+    report
+        .removed
+        .push((run.root.join(&intent.original), intent.bytes));
+    Ok(())
+}
+
+/// Put the staged item back; if its name is taken keep stage and intent.
+fn restore(
+    run: &Run,
+    stage: &Path,
+    intent_path: &Path,
+    intent: &Intent,
+    report: &mut Report,
+) -> io::Result<()> {
+    let original = run.root.join(&intent.original);
+    let free =
+        fs::symlink_metadata(&original).is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+    let verdict = if free {
+        fs::rename(stage.join("item"), &original)?;
+        fs::remove_file(intent_path)?;
+        let _ = fs::remove_dir(stage);
+        "deferred:restored"
+    } else {
+        "deferred:restore-blocked"
+    };
+    report.deferred.push((original, verdict.into()));
+    Ok(())
+}
+
+fn remove_unit(run: &Run, plan: &Plan, path: &Path, report: &mut Report) -> io::Result<()> {
+    let seen = observe(path, run.device, run.deadline);
+    let known = Known {
+        holds: read_holds(&run.holds)?,
+        alts: plan.alts.clone(),
+        blind: plan.blind,
+    };
+    let stale = seen.complete && seen.newest < run.cutoff;
+    if !stale || protection(run, &known, path, &seen, &[path], true)?.is_some() {
+        report
+            .deferred
+            .push((path.to_path_buf(), "deferred:changed".into()));
+        return Ok(());
+    }
+    let info = fs::symlink_metadata(path)?;
+    let name = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos())
+    );
+    let dir = run.root.join(STAGES);
+    let (stage, intent_path) = (dir.join(&name), dir.join(format!("{name}.intent")));
+    fs::create_dir_all(&stage)?;
+    let mut intent = Intent {
+        state: "staged".into(),
+        original: path
+            .strip_prefix(&run.root)
+            .map_err(io::Error::other)?
+            .to_path_buf(),
+        device: info.dev(),
+        inode: info.ino(),
+        newest: seen.newest,
+        bytes: 0,
+        row: String::new(),
+    };
+    write_intent(&intent_path, &intent)?;
+    let item = stage.join("item");
+    fs::rename(path, &item)?;
+    (run.hooks.after_stage)(path, &item);
+    crashed(run, "staged")?;
+    if staged_ok(run, &item, &intent, &plan.alts).unwrap_or(false) {
+        finish(run, &stage, &intent_path, &mut intent, report)
+    } else {
+        restore(run, &stage, &intent_path, &intent, report)
+    }
+}
+
+/// Finish or undo the stages of dead processes; a live process's stage is
+/// never touched, and a dry run only lists them.
+fn recover(run: &Run, plan: &Plan, report: &mut Report) -> io::Result<()> {
+    let dir = run.root.join(STAGES);
+    let Ok(_) = fs::symlink_metadata(&dir) else {
+        return Ok(());
+    };
+    for intent_path in sorted_children(&dir)? {
+        let Some(name) = intent_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".intent"))
+        else {
+            continue;
+        };
+        if name
+            .split('-')
+            .next()
+            .and_then(|pid| pid.parse::<i32>().ok())
+            .is_none_or(alive)
+        {
+            continue;
+        }
+        if !run.clean {
+            report.interrupted.push(name.to_owned());
+            continue;
+        }
+        let stage = dir.join(name);
+        let item = stage.join("item");
+        let mut intent: Intent =
+            serde_json::from_slice(&fs::read(&intent_path)?).map_err(io::Error::other)?;
+        let present = fs::symlink_metadata(&item).is_ok();
+        if intent.state == "deleting" && (!present || staged_ok(run, &item, &intent, &plan.alts)?) {
+            finish(run, &stage, &intent_path, &mut intent, report)?;
+        } else if present {
+            restore(run, &stage, &intent_path, &intent, report)?;
+        } else {
+            fs::remove_file(&intent_path)?;
+            let _ = fs::remove_dir(&stage);
+        }
+    }
+    Ok(())
+}
+
+/// Apply a plan: recover interrupted stages, then remove each planned unit
+/// through the revalidate, stage, check, delete transaction.
+pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
+    let mut report = Report {
+        kept: plan.kept.clone(),
+        timed_out: plan.timed_out,
+        ..Report::default()
+    };
+    recover(run, plan, &mut report)?;
+    if !run.clean {
+        report.would_remove = plan.removals.clone();
+        return Ok(report);
+    }
+    for path in &plan.removals {
+        if Instant::now() >= run.deadline {
+            report.timed_out = true;
+            break;
+        }
+        remove_unit(run, plan, path, &mut report)?;
+    }
+    Ok(report)
+}
+
+pub fn sweep(run: &Run) -> io::Result<Report> {
+    apply(run, &plan(run)?)
+}
+
+/// `diskm scratch-sweep --expired`: sweep the registered Scratch root.
+pub fn run(
+    state: &Path,
+    options: &crate::scratch_sweep::Options,
+    precondition: &mut Value,
+) -> io::Result<(Value, bool)> {
+    let (root, device) = crate::preview::registered_scratch()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    *precondition = json!({"root":root,"min_hours":options.min_hours,"expired":true});
+    let cutoff = crate::preview::current_cutoff(options.min_hours)? * 1_000_000_000;
+    let mut run = Run::new(&root, device, cutoff);
+    run.clean = options.clean;
+    run.deadline = Instant::now() + options.deadline;
+    run.log = crate::scratch_target::deletion_log_path()?;
+    run.holds = state.join("evidence-holds.json");
+    let report = sweep(&run)?;
+    let status = if report.complete() {
+        "expired_sweep"
+    } else {
+        "deadline"
+    };
+    Ok((
+        json!({"status":status,"clean":options.clean,"report":report}),
+        report.complete(),
+    ))
 }

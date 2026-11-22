@@ -553,7 +553,7 @@ pub fn apply(
     Ok(report(state))
 }
 
-fn deletion_log_path() -> io::Result<PathBuf> {
+pub(crate) fn deletion_log_path() -> io::Result<PathBuf> {
     if let Some(path) =
         std::env::var_os("DISK_MAGICIAN_DELETION_LOG").filter(|path| !path.is_empty())
     {
@@ -563,7 +563,7 @@ fn deletion_log_path() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join("Library/Logs/disk-magician-deletions.log"))
 }
 
-fn flush_audit(pending: &mut Option<(PathBuf, String)>, replay: bool) -> io::Result<()> {
+pub(crate) fn flush_audit(pending: &mut Option<(PathBuf, String)>, replay: bool) -> io::Result<()> {
     let Some((path, row)) = pending.as_ref() else {
         return Ok(());
     };

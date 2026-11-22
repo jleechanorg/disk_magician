@@ -465,13 +465,46 @@ fn rename_exclusive(
 }
 
 pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
+    let Some(stdout) = run_lsof(&["-nP", "-t", "--"], Some(path))? else {
+        return Ok(Vec::new());
+    };
+    let pids: Vec<u32> = stdout
+        .lines()
+        .map(|line| line.parse::<u32>().map_err(io::Error::other))
+        .collect::<io::Result<_>>()?;
+    if pids.is_empty() {
+        return Err(io::Error::other(
+            "lsof exited successfully without a process list",
+        ));
+    }
+    Ok(pids)
+}
+
+/// Whether any process has a file or working directory at or under `path`,
+/// from one listing of every open file. A failed or timed-out probe is an error.
+pub fn open_paths(path: &Path) -> io::Result<bool> {
+    let prefix = path.as_os_str().as_encoded_bytes();
+    Ok(run_lsof(&["-nP", "-F", "n"], None)?.is_some_and(|listing| {
+        listing
+            .lines()
+            .filter_map(|line| line.strip_prefix('n'))
+            .any(|name| {
+                let name = name.as_bytes();
+                name.starts_with(prefix)
+                    && matches!(name.get(prefix.len()), None | Some(b'/' | b' '))
+            })
+    }))
+}
+
+/// Standard output of a successful `lsof`, or `None` when it found nothing.
+fn run_lsof(args: &[&str], path: Option<&Path>) -> io::Result<Option<String>> {
     #[cfg(target_os = "linux")]
     let lsof = "/usr/bin/lsof";
     #[cfg(target_os = "macos")]
     let lsof = "/usr/sbin/lsof";
     let mut child = Command::new(lsof)
-        .args(["-nP", "-t", "--"])
-        .arg(path)
+        .args(args)
+        .args(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -483,19 +516,10 @@ pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
             let stdout = std::str::from_utf8(&output.stdout).map_err(io::Error::other)?;
             let stderr = std::str::from_utf8(&output.stderr).map_err(io::Error::other)?;
             if status.success() && stderr.is_empty() {
-                let pids: Vec<u32> = stdout
-                    .lines()
-                    .map(|line| line.parse::<u32>().map_err(io::Error::other))
-                    .collect::<io::Result<_>>()?;
-                if pids.is_empty() {
-                    return Err(io::Error::other(
-                        "lsof exited successfully without a process list",
-                    ));
-                }
-                return Ok(pids);
+                return Ok(Some(stdout.to_owned()));
             }
             if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {
-                return Ok(Vec::new());
+                return Ok(None);
             }
             return Err(io::Error::other(format!("lsof failed: {}", stderr.trim())));
         }

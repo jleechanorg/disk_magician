@@ -27,6 +27,9 @@ pub struct Options {
     pub limit: usize,
     pub deadline: Duration,
     pub paths: Vec<PathBuf>,
+    /// Hourly mode: remove every expired folder of the registered Scratch
+    /// root, whatever the capacity.
+    pub expired: bool,
 }
 
 impl Default for Options {
@@ -38,6 +41,7 @@ impl Default for Options {
             limit: 20,
             deadline: crate::time_windows::SCAN_DEADLINE,
             paths: Vec::new(),
+            expired: false,
         }
     }
 }
@@ -81,6 +85,9 @@ fn sweep(
     started: SystemTime,
     precondition: &mut Value,
 ) -> io::Result<(Value, bool)> {
+    if options.expired {
+        return crate::scratch_expired::run(state, options, precondition);
+    }
     let (root, device) = if options.system_tmp {
         let root = scratch_lease::temp_path()?;
         let device = fs::symlink_metadata(&root)?.dev();

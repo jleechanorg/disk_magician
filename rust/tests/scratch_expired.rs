@@ -1,7 +1,9 @@
 //! Hourly expired Scratch sweep. Fixtures use the real clock: files are made,
 //! two seconds pass, and the cutoff is one second ago, so every fixture is
 //! stale by both mtime and ctime until a test touches it.
-use diskm_shadow::scratch_expired::{independent, lease_protects, observe, plan, Plan, Run};
+use diskm_shadow::scratch_expired::{
+    apply, independent, lease_protects, observe, plan, sweep, Intent, Plan, Run,
+};
 use diskm_shadow::scratch_lease::{BundleKind, OwnerProcessState};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -365,6 +367,7 @@ fn hosted(fx: &Fx, repo: &Path) -> PathBuf {
     bare
 }
 
+#[allow(clippy::type_complexity)]
 fn probe(bare: PathBuf) -> Box<dyn Fn(&Path, &str) -> std::io::Result<Vec<String>>> {
     Box::new(move |_, _| {
         let listing = git(
@@ -858,4 +861,514 @@ fn descent_never_enters_a_protected_repo() {
         .kept
         .iter()
         .all(|(path, _)| !path.starts_with(fx.root.join("task/repo/src"))));
+}
+
+// ---- transaction, recovery and command line ----
+
+fn log_of(fx: &Fx) -> PathBuf {
+    fx.root.parent().unwrap().join(format!(
+        "{}-deletions.log",
+        fx.root.file_name().unwrap().to_str().unwrap()
+    ))
+}
+
+fn clean_run(fx: &Fx, cutoff: i64) -> Run {
+    let mut run = run_for(fx, cutoff);
+    run.clean = true;
+    run.log = log_of(fx);
+    run.hooks.open = Box::new(|_| Ok(false));
+    run
+}
+
+fn rows(fx: &Fx) -> Vec<String> {
+    fs::read_to_string(log_of(fx))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn dead_pid() -> u32 {
+    let mut child = Command::new("true").spawn().unwrap();
+    child.wait().unwrap();
+    child.id()
+}
+
+/// A stage left by process `pid`, holding `original` in `state`.
+fn stage(fx: &Fx, pid: u32, state: &str, original: &str, with_item: bool) -> (PathBuf, String) {
+    let nonce = format!("{pid}-{}", now_ns());
+    let dir = fx.root.join(".diskm-expired");
+    let item = dir.join(&nonce).join("item");
+    let original_path = fx.root.join(original);
+    if with_item {
+        fs::create_dir_all(&item).unwrap();
+        fs::write(item.join("f"), b"x").unwrap();
+    } else {
+        fs::create_dir_all(dir.join(&nonce)).unwrap();
+    }
+    let info = fs::symlink_metadata(if with_item { &item } else { &fx.root }).unwrap();
+    let intent = Intent {
+        state: state.into(),
+        original: original.into(),
+        device: info.dev(),
+        inode: info.ino(),
+        newest: i64::MAX,
+        bytes: 1024,
+        row: format!(
+            "2026-11-22T00:00:00Z\tdiskm-expired\tremove\t1\t{}\t{nonce}\n",
+            original_path.display()
+        ),
+    };
+    fs::write(
+        dir.join(format!("{nonce}.intent")),
+        serde_json::to_vec(&intent).unwrap(),
+    )
+    .unwrap();
+    (item, nonce)
+}
+
+#[test]
+fn dry_run_removes_nothing_and_lists_interrupted_stages() {
+    let fx = Fx::new("dry-run");
+    fx.file("a/f");
+    let (item, nonce) = stage(&fx, dead_pid(), "staged", "gone", true);
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.clean = false;
+    let report = sweep(&run).unwrap();
+    assert!(fx.root.join("a/f").exists() && item.exists());
+    assert_eq!(report.would_remove, vec![fx.root.join("a")]);
+    assert_eq!(report.interrupted, vec![nonce]);
+    assert!(rows(&fx).is_empty());
+}
+
+#[test]
+fn clean_removes_a_stale_folder_and_logs_one_row() {
+    let fx = Fx::new("clean");
+    fx.file("a/deep/f");
+    fx.file("fresh-later/f");
+    let cutoff = age();
+    let report = sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(!fx.root.join("a").exists());
+    assert_eq!(report.removed.len(), 2);
+    let rows = rows(&fx);
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].contains("\tdiskm-expired\tremove\t"));
+    assert!(rows
+        .iter()
+        .any(|row| row.contains(fx.root.join("a").to_str().unwrap())));
+    // The stage and intent are gone once the receipt is durable.
+    assert_eq!(
+        fs::read_dir(fx.root.join(".diskm-expired"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn read_only_tree_is_removed() {
+    let fx = Fx::new("read-only");
+    let file = fx.file("a/ro/f");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
+    fs::set_permissions(file.parent().unwrap(), fs::Permissions::from_mode(0o500)).unwrap();
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(!fx.root.join("a").exists());
+}
+
+#[test]
+fn symlink_is_unlinked_and_its_target_preserved() {
+    let fx = Fx::new("symlink-clean");
+    let outside = Fx::new("symlink-target");
+    let target = outside.file("keep/f");
+    std::os::unix::fs::symlink(target.parent().unwrap(), fx.root.join("link")).unwrap();
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(fs::symlink_metadata(fx.root.join("link")).is_err());
+    assert!(target.exists());
+}
+
+#[test]
+fn emptied_descended_parent_stays_and_protected_sibling_is_untouched() {
+    let fx = Fx::new("parent-stays");
+    fx.file("task/evidence/e");
+    fx.file("task/scratch/f");
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(fx.root.join("task/evidence/e").exists());
+    assert!(!fx.root.join("task/scratch").exists());
+    assert!(fx.root.join("task").is_dir());
+}
+
+#[test]
+fn incomplete_unit_and_ancestors_are_never_removed() {
+    let fx = Fx::new("incomplete");
+    fx.file("u/locked/f");
+    fx.file("u/ok/f");
+    let locked = fx.root.join("u/locked");
+    let cutoff = age();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let report = sweep(&clean_run(&fx, cutoff));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    report.unwrap();
+    assert!(fx.root.join("u").is_dir() && locked.is_dir());
+    assert!(!fx.root.join("u/ok").exists());
+}
+
+#[test]
+fn deadline_stops_without_unverified_removal() {
+    let fx = Fx::new("deadline-clean");
+    fx.file("a/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.deadline = Instant::now();
+    let report = sweep(&run).unwrap();
+    assert!(report.timed_out && !report.complete());
+    assert!(fx.root.join("a/f").exists());
+}
+
+#[test]
+fn probe_failure_restores() {
+    let fx = Fx::new("probe-fail");
+    fx.file("a/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.open = Box::new(|_| Err(std::io::Error::other("lsof failed")));
+    let report = sweep(&run).unwrap();
+    assert!(fx.root.join("a/f").exists() && report.removed.is_empty());
+    assert!(rows(&fx).is_empty());
+}
+
+#[test]
+fn staged_tree_with_fresh_content_restores() {
+    let fx = Fx::new("fresh-staged");
+    fx.file("a/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.after_stage = Box::new(|_, item| fs::write(item.join("late"), b"new").unwrap());
+    sweep(&run).unwrap();
+    assert!(fx.root.join("a/f").exists() && fx.root.join("a/late").exists());
+}
+
+#[test]
+fn hold_added_after_stage_restores() {
+    let fx = Fx::new("hold-after-stage");
+    fx.file("a/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    let (holds, original) = (run.holds.clone(), fx.root.join("a"));
+    run.hooks.after_stage = Box::new(move |_, _| {
+        fs::write(
+            &holds,
+            serde_json::json!({original.to_str().unwrap(): "pr"}).to_string(),
+        )
+        .unwrap();
+    });
+    sweep(&run).unwrap();
+    let _ = fs::remove_file(&run.holds);
+    assert!(fx.root.join("a/f").exists());
+}
+
+#[test]
+fn hold_added_between_plan_and_stage_keeps_the_candidate() {
+    let fx = Fx::new("hold-before-stage");
+    fx.file("a/f");
+    let cutoff = age();
+    let run = clean_run(&fx, cutoff);
+    let planned = plan(&run).unwrap();
+    fs::write(
+        &run.holds,
+        serde_json::json!({fx.root.join("a").to_str().unwrap(): "pr"}).to_string(),
+    )
+    .unwrap();
+    let report = apply(&run, &planned).unwrap();
+    let _ = fs::remove_file(&run.holds);
+    assert!(fx.root.join("a/f").exists());
+    assert_eq!(report.deferred[0].1, "deferred:changed");
+}
+
+#[test]
+fn content_changed_between_plan_and_stage_defers() {
+    let fx = Fx::new("changed");
+    fx.file("a/f");
+    let cutoff = age();
+    let run = clean_run(&fx, cutoff);
+    let planned = plan(&run).unwrap();
+    fs::write(fx.root.join("a/f"), b"new").unwrap();
+    let report = apply(&run, &planned).unwrap();
+    assert!(fx.root.join("a/f").exists());
+    assert_eq!(report.deferred[0].1, "deferred:changed");
+}
+
+fn pushed_repo(fx: &Fx) -> (PathBuf, PathBuf) {
+    let repo = fx.root.join("u/repo");
+    init(&repo);
+    (repo.clone(), hosted(fx, &repo))
+}
+
+#[test]
+fn git_state_changed_between_plan_and_stage_defers() {
+    let fx = Fx::new("git-changed");
+    let (repo, bare) = pushed_repo(&fx);
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.independent = Box::new(|_, _| true);
+    run.hooks.tips = probe(bare);
+    let planned = plan(&run).unwrap();
+    assert!(planned.removals.contains(&fx.root.join("u")));
+    git(&repo, &["checkout", "-qb", "late"]);
+    fs::write(repo.join("g"), b"2").unwrap();
+    git(&repo, &["add", "g"]);
+    git(&repo, &["commit", "-qm", "late"]);
+    let report = apply(&run, &planned).unwrap();
+    assert!(repo.join("g").exists());
+    assert_eq!(report.deferred[0].1, "deferred:changed");
+}
+
+#[test]
+fn commit_created_after_revalidation_before_staged_check_restores() {
+    let fx = Fx::new("git-staged");
+    let (_, bare) = pushed_repo(&fx);
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.independent = Box::new(|_, _| true);
+    run.hooks.tips = probe(bare);
+    run.hooks.after_stage = Box::new(|_, item| {
+        let repo = item.join("repo");
+        git(&repo, &["checkout", "-qb", "late"]);
+        fs::write(repo.join("g"), b"2").unwrap();
+        git(&repo, &["add", "g"]);
+        git(&repo, &["commit", "-qm", "late"]);
+    });
+    sweep(&run).unwrap();
+    assert!(fx.root.join("u/repo/g").exists());
+    assert!(rows(&fx).is_empty());
+}
+
+#[test]
+fn remote_branch_disappearing_between_probes_restores() {
+    let fx = Fx::new("tips-vanish");
+    let (_, bare) = pushed_repo(&fx);
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = calls.clone();
+    let live = probe(bare);
+    run.hooks.independent = Box::new(|_, _| true);
+    // Planning and revalidation see the branch; the staged check does not.
+    run.hooks.tips = Box::new(move |repo, name| {
+        seen.set(seen.get() + 1);
+        if seen.get() >= 3 {
+            Ok(Vec::new())
+        } else {
+            live(repo, name)
+        }
+    });
+    sweep(&run).unwrap();
+    assert!(fx.root.join("u/repo/f").exists());
+}
+
+#[test]
+fn crash_after_removal_replays_the_receipt_once() {
+    let fx = Fx::new("crash-replay");
+    fx.file("a/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.crash = Box::new(|point| point == "removed");
+    assert!(sweep(&run).is_err());
+    assert!(!fx.root.join("a").exists() && rows(&fx).is_empty());
+    let intents = || {
+        fs::read_dir(fx.root.join(".diskm-expired"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".intent"))
+            .count()
+    };
+    assert_eq!(intents(), 1);
+    // The crashed process is gone; recovery in a later run reconciles it.
+    let mut again = clean_run(&fx, cutoff);
+    again.hooks.crash = Box::new(|_| false);
+    let nonce_pid = std::process::id();
+    let dir = fx.root.join(".diskm-expired");
+    for entry in fs::read_dir(&dir).unwrap().filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let renamed = name.replacen(&format!("{nonce_pid}-"), &format!("{}-", dead_pid()), 1);
+        fs::rename(dir.join(&name), dir.join(renamed)).unwrap();
+    }
+    sweep(&again).unwrap();
+    sweep(&again).unwrap();
+    assert_eq!(rows(&fx).len(), 1);
+    assert_eq!(intents(), 0);
+}
+
+#[test]
+fn interrupted_staged_dead_pid_is_restored_not_deleted() {
+    let fx = Fx::new("recover-staged");
+    let (item, _) = stage(&fx, dead_pid(), "staged", "back", true);
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.open = Box::new(|_| Ok(false));
+    sweep(&run).unwrap();
+    assert!(fx.root.join("back/f").exists() && !item.exists());
+    assert!(rows(&fx).is_empty());
+}
+
+#[test]
+fn interrupted_deleting_dead_pid_is_finished_when_checks_pass() {
+    let fx = Fx::new("recover-deleting");
+    let (item, _) = stage(&fx, dead_pid(), "deleting", "gone", true);
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(!item.exists() && !fx.root.join("gone").exists());
+    assert_eq!(rows(&fx).len(), 1);
+}
+
+#[test]
+fn deleting_stage_with_item_absent_reconciles_the_receipt_once() {
+    let fx = Fx::new("recover-absent");
+    let (_, nonce) = stage(&fx, dead_pid(), "deleting", "gone", false);
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert_eq!(
+        rows(&fx).iter().filter(|row| row.contains(&nonce)).count(),
+        1
+    );
+}
+
+#[test]
+fn deleting_stage_with_a_new_hold_is_restored_then_kept() {
+    let fx = Fx::new("recover-hold");
+    let (item, _) = stage(&fx, dead_pid(), "deleting", "held", true);
+    let cutoff = age();
+    let run = clean_run(&fx, cutoff);
+    fs::write(
+        &run.holds,
+        serde_json::json!({fx.root.join("held").to_str().unwrap(): "pr"}).to_string(),
+    )
+    .unwrap();
+    sweep(&run).unwrap();
+    let restored = fx.root.join("held/f").exists();
+    sweep(&run).unwrap();
+    let _ = fs::remove_file(&run.holds);
+    assert!(restored && fx.root.join("held/f").exists() && !item.exists());
+}
+
+#[test]
+fn deleting_stage_with_an_unpushed_commit_is_restored() {
+    let fx = Fx::new("recover-git");
+    let (item, _) = stage(&fx, dead_pid(), "deleting", "repo-back", true);
+    fs::remove_dir_all(&item).unwrap();
+    init(&item);
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(fx.root.join("repo-back/f").exists());
+    assert!(rows(&fx).is_empty());
+}
+
+#[test]
+fn restore_blocked_keeps_the_stage_and_intent() {
+    let fx = Fx::new("restore-blocked");
+    let (item, nonce) = stage(&fx, dead_pid(), "staged", "taken", true);
+    let cutoff = age();
+    fx.file("taken");
+    let run = clean_run(&fx, cutoff);
+    for _ in 0..2 {
+        sweep(&run).unwrap();
+        assert!(item.exists());
+        assert!(fx
+            .root
+            .join(format!(".diskm-expired/{nonce}.intent"))
+            .exists());
+        assert!(fx.root.join("taken").exists());
+    }
+}
+
+#[test]
+fn live_pid_stage_is_untouched() {
+    let fx = Fx::new("live-stage");
+    let (item, _) = stage(&fx, std::process::id(), "deleting", "gone", true);
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(item.exists());
+}
+
+#[test]
+fn pressure_sweep_staging_is_never_read_or_removed() {
+    let fx = Fx::new("coexist");
+    let live = fx.file(&format!(".diskm-remove-{}-root-1/item", std::process::id()));
+    let dead = fx.file(&format!(".diskm-remove-{}-root-2/item", dead_pid()));
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(live.exists() && dead.exists());
+}
+
+fn keep_alive(args: &str) -> std::process::Child {
+    let child = Command::new("sh").args(["-c", args]).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    child
+}
+
+#[test]
+fn open_file_in_the_candidate_restores() {
+    let fx = Fx::new("open-file");
+    let file = fx.file("a/f");
+    let mut child = keep_alive(&format!("exec 3< '{}'; sleep 30", file.display()));
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.open = Box::new(diskm_shadow::scratch_expired::open_paths);
+    let report = sweep(&run).unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(file.exists() && report.removed.is_empty());
+}
+
+#[test]
+fn process_working_directory_in_the_candidate_restores() {
+    let fx = Fx::new("cwd");
+    fx.file("a/f");
+    let mut child = keep_alive(&format!("cd '{}' && sleep 30", fx.root.join("a").display()));
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.open = Box::new(diskm_shadow::scratch_expired::open_paths);
+    let report = sweep(&run).unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(fx.root.join("a/f").exists() && report.removed.is_empty());
+}
+
+#[test]
+fn expired_with_a_conflicting_option_is_a_usage_error() {
+    for args in [["--root", "system-tmp"], ["--path", "/tmp/x"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
+            .args(["scratch-sweep", "--expired"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(message.contains("--expired works only"), "{message}");
+    }
+}
+
+#[test]
+fn expired_without_a_registered_scratch_volume_is_a_usage_error() {
+    let home = Fx::new("no-registry");
+    let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
+        .args([
+            "scratch-sweep",
+            "--expired",
+            "--min-hours",
+            "1",
+            "--deadline-ms",
+            "5",
+        ])
+        .env("HOME", &home.root)
+        .env("DISK_MAGICIAN_STATE_DIR", &home.root)
+        .output()
+        .unwrap();
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{message}");
+    assert!(message.contains("Scratch"), "{message}");
 }
