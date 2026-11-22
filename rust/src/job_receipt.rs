@@ -7,7 +7,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+pub fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -26,7 +26,7 @@ pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(crate) fn read_json_if_exists<T: serde::de::DeserializeOwned>(
+pub fn read_json_if_exists<T: serde::de::DeserializeOwned>(
     path: &Path,
     limit: u64,
 ) -> io::Result<Option<T>> {
@@ -61,7 +61,7 @@ pub fn state_dir(override_path: Option<&Path>) -> io::Result<PathBuf> {
     Ok(root)
 }
 
-pub(crate) fn timestamp(value: SystemTime) -> io::Result<String> {
+pub fn timestamp(value: SystemTime) -> io::Result<String> {
     let seconds = value
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?

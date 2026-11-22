@@ -1,0 +1,9 @@
+[Unit]
+Description=Commit and publish backup state every two hours
+
+[Timer]
+OnCalendar=*-*-* 00/2:25:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

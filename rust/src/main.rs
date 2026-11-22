@@ -1,6 +1,7 @@
 use diskm_shadow::{
-    artifact_batch, artifact_discovery, history, preview, reclaim_report, scan, scratch_dir,
-    scratch_manifest, scratch_sweep, scratch_target, snapshot, state_publish, status,
+    artifact_batch, artifact_discovery, evidence_holds, history, preview, reclaim_report, scan,
+    scratch_dir, scratch_manifest, scratch_sweep, scratch_target, snapshot, state_commit,
+    state_publish, status,
 };
 use serde::Serialize;
 use std::env;
@@ -27,6 +28,8 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
   diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
   diskm state-publish --repo DIR [--remote NAME] [--branch NAME] [--max-commits N] [--state-dir DIR]
+  diskm state-commit --repo DIR [--state-dir DIR] [--publish] [--max-commits N]
+  diskm evidence-holds refresh [--state-dir DIR] [--query Q]
   diskm scratch-sweep [--root scratch|system-tmp] [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
   diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp]
   diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
@@ -69,6 +72,11 @@ enum Operation {
     },
     ScratchSweep(scratch_sweep::Options),
     StatePublish(state_publish::Options),
+    StateCommit(state_commit::Options),
+    EvidenceHoldsRefresh {
+        state_dir: Option<PathBuf>,
+        query: String,
+    },
     ScratchQualify {
         cutoff: i64,
         paths: Vec<PathBuf>,
@@ -127,6 +135,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         "-h" | "--help" | "help" => return Ok(Operation::Help),
         "snapshot" => return parse_snapshot(args),
         "state-publish" => return parse_state_publish(args),
+        "state-commit" => return parse_state_commit(args),
+        "evidence-holds" => return parse_evidence_holds(args),
         "scratch-manifest" => return parse_scratch_nomination(args, false),
         "scratch-sweep" => return parse_scratch_sweep(args),
         "scratch-qualify" => return parse_scratch_nomination(args, true),
@@ -317,6 +327,76 @@ fn parse_state_publish(mut args: impl Iterator<Item = OsString>) -> Result<Opera
         max_commits: max_commits.unwrap_or(20),
         state_dir,
     }))
+}
+
+fn parse_state_commit(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let mut repo: Option<PathBuf> = None;
+    let mut state_dir: Option<PathBuf> = None;
+    let mut publish = false;
+    let mut max_commits = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Ok(Operation::Help),
+            Some("--repo") if repo.is_none() => {
+                repo = Some(required_value(&mut args, "--repo")?.into())
+            }
+            Some("--state-dir") if state_dir.is_none() => {
+                state_dir = Some(required_value(&mut args, "--state-dir")?.into())
+            }
+            Some("--publish") if !publish => publish = true,
+            Some("--max-commits") if max_commits.is_none() => {
+                max_commits = Some(positive(&mut args, "--max-commits")?)
+            }
+            _ => return Err(
+                "state-commit accepts --repo DIR, --state-dir DIR, --publish and --max-commits N"
+                    .into(),
+            ),
+        }
+    }
+    if max_commits.is_some() && !publish {
+        return Err("--max-commits requires --publish".into());
+    }
+    let repo = repo.ok_or("state-commit requires --repo DIR")?;
+    let publish = publish.then(|| state_publish::Options {
+        repo: repo.clone(),
+        remote: "origin".into(),
+        branch: "main".into(),
+        max_commits: max_commits.unwrap_or(20),
+        state_dir: state_dir.clone(),
+    });
+    Ok(Operation::StateCommit(state_commit::Options {
+        repo,
+        state_dir,
+        publish,
+    }))
+}
+
+fn parse_evidence_holds(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    if args.next().as_deref().and_then(|value| value.to_str()) != Some("refresh") {
+        return Err("evidence-holds supports only: refresh".into());
+    }
+    let mut state_dir: Option<PathBuf> = None;
+    let mut query = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Ok(Operation::Help),
+            Some("--state-dir") if state_dir.is_none() => {
+                state_dir = Some(required_value(&mut args, "--state-dir")?.into())
+            }
+            Some("--query") if query.is_none() => {
+                query = Some(
+                    required_value(&mut args, "--query")?
+                        .into_string()
+                        .map_err(|_| "--query must be UTF-8".to_owned())?,
+                )
+            }
+            _ => return Err("evidence-holds refresh accepts --state-dir DIR and --query Q".into()),
+        }
+    }
+    Ok(Operation::EvidenceHoldsRefresh {
+        state_dir,
+        query: query.unwrap_or_else(|| evidence_holds::DEFAULT_QUERY.into()),
+    })
 }
 
 fn utf8(value: OsString) -> Result<String, String> {
@@ -569,6 +649,26 @@ fn run(operation: Operation) -> io::Result<u8> {
                 print_json(&scratch_manifest::qualify_exact(
                     &paths, cutoff, options, jobs,
                 )?)?;
+            }
+        }
+        Operation::StateCommit(options) => {
+            let (report, code) = state_commit::run(&options)?;
+            print_json(&report)?;
+            if code != 0 {
+                return Ok(code);
+            }
+        }
+        Operation::EvidenceHoldsRefresh { state_dir, query } => {
+            let roots = evidence_holds::default_roots();
+            let (report, code) = evidence_holds::refresh(
+                state_dir.as_deref(),
+                &query,
+                &roots,
+                evidence_holds::fetch_github,
+            )?;
+            print_json(&report)?;
+            if code != 0 {
+                return Ok(code);
             }
         }
         Operation::StatePublish(options) => {
