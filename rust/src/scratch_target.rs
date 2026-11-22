@@ -1,9 +1,12 @@
 //! Bounded apply orchestration for one digest-bound Scratch manifest.
 
+use crate::scratch_file_transaction::{self, FileIdentity, Outcome};
+use crate::scratch_lease::{self, BundleKind, FinishOutcome, OwnerProcessState};
 use crate::scratch_recovery::{self, RecoveryHint};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -16,6 +19,7 @@ const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
 struct Manifest {
     version: u8,
     root: Root,
+    before_epoch_seconds: i64,
     entries: Vec<Entry>,
 }
 
@@ -34,6 +38,30 @@ struct Entry {
     ino: Option<u64>,
     size: Option<u64>,
     mtime_ns: Option<i64>,
+    ctime_ns: Option<i64>,
+}
+
+impl Entry {
+    fn file_identity(&self) -> io::Result<FileIdentity> {
+        let unavailable = || io::Error::other("manifest lacks exact file identity");
+        let modified = self.mtime_ns.ok_or_else(unavailable)?;
+        let changed = self.ctime_ns.ok_or_else(unavailable)?;
+        Ok(FileIdentity {
+            device: self.dev.ok_or_else(unavailable)?,
+            inode: self.ino.ok_or_else(unavailable)?,
+            size: self.size.ok_or_else(unavailable)?,
+            modified_seconds: modified.div_euclid(1_000_000_000),
+            modified_nanoseconds: modified.rem_euclid(1_000_000_000),
+            changed_seconds: changed.div_euclid(1_000_000_000),
+            changed_nanoseconds: changed.rem_euclid(1_000_000_000),
+            link_count: 1,
+        })
+    }
+}
+
+pub enum RecoveryAction {
+    Acknowledge(String),
+    Restore(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -56,6 +84,8 @@ struct ResumeState {
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     in_flight_quarantine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_stage: Option<String>,
     used_before_bytes: Option<u64>,
     used_after_bytes: Option<u64>,
 }
@@ -72,6 +102,8 @@ pub struct Report {
     pub receipts: Vec<Receipt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RecoveryHint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_recovery_stage: Option<String>,
 }
 
 fn read_manifest(path: &Path, digest: &str) -> io::Result<Manifest> {
@@ -113,7 +145,33 @@ fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String
     }
 }
 
-fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
+fn read_state(path: &Path) -> io::Result<Option<ResumeState>> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
+        return Err(io::Error::other(
+            "resume state is not a bounded regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(io::Error::other("resume state exceeds the size limit"));
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(io::Error::other)
+}
+
+fn write_state(path: &Path, state: &ResumeState, create: bool) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     if fs::canonicalize(parent)? != parent {
         return Err(io::Error::other("resume-state parent must be canonical"));
@@ -135,11 +193,22 @@ fn write_state(path: &Path, state: &ResumeState) -> io::Result<()> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&temp)?;
-    serde_json::to_writer(&mut file, state).map_err(io::Error::other)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    fs::rename(&temp, path)?;
-    File::open(parent)?.sync_all()
+    let result = (|| {
+        serde_json::to_writer(&mut file, state).map_err(io::Error::other)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        if create {
+            fs::hard_link(&temp, path)?;
+            fs::remove_file(&temp)?;
+        } else {
+            fs::rename(&temp, path)?;
+        }
+        File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 pub fn apply(
@@ -149,7 +218,7 @@ pub fn apply(
     target_used_bytes: u64,
     selected_paths: &[String],
     all_entries: bool,
-    ack_restored: Option<&str>,
+    recovery: Option<&RecoveryAction>,
 ) -> io::Result<Report> {
     if target_used_bytes == 0 {
         return Err(io::Error::other("target used bytes must be positive"));
@@ -170,13 +239,8 @@ pub fn apply(
     if fs::canonicalize(manifest_path)?.as_path() == resume_path {
         return Err(io::Error::other("resume state cannot replace the manifest"));
     }
-    let existing_state = if resume_path.exists() {
-        let meta = fs::symlink_metadata(resume_path)?;
-        if !meta.is_file() {
-            return Err(io::Error::other("resume state must be a regular file"));
-        }
-        let state: ResumeState =
-            serde_json::from_slice(&fs::read(resume_path)?).map_err(io::Error::other)?;
+    let existing_state = read_state(resume_path)?;
+    if let Some(state) = &existing_state {
         if state.version != 1
             || state.manifest_sha256 != digest
             || state.target_used_bytes != target_used_bytes
@@ -184,16 +248,17 @@ pub fn apply(
         {
             return Err(io::Error::other("resume state identity mismatch"));
         }
-        Some(state)
-    } else {
-        None
-    };
+    }
+    let new_checkpoint = existing_state.is_none();
     if existing_state.is_some() && (all_entries || !selected_paths.is_empty()) {
         return Err(io::Error::other(
             "resume uses the persisted exact selection",
         ));
     }
-    if let Some(path) = ack_restored {
+    if let Some(action) = recovery {
+        let path = match action {
+            RecoveryAction::Acknowledge(path) | RecoveryAction::Restore(path) => path.as_str(),
+        };
         if all_entries || !selected_paths.is_empty() {
             return Err(io::Error::other(
                 "restored acknowledgment cannot select candidates",
@@ -207,6 +272,26 @@ pub fn apply(
             return Err(io::Error::other(
                 "restored path must match the in-flight entry",
             ));
+        }
+        if matches!(action, RecoveryAction::Restore(_)) {
+            let stage = state
+                .native_stage
+                .as_deref()
+                .ok_or_else(|| io::Error::other("checkpoint has no native recovery stage"))?;
+            let entry = manifest
+                .entries
+                .iter()
+                .find(|entry| entry.path == path && entry.kind == "regular_file")
+                .ok_or_else(|| io::Error::other("native recovery requires an exact file entry"))?;
+            mounted_usage(&state.root, Some(&state.filesystem_id))?;
+            scratch_file_transaction::restore_exact(
+                &state.root.path,
+                state.root.dev,
+                state.root.ino,
+                Path::new(path),
+                entry.file_identity()?,
+                OsStr::new(stage),
+            )?;
         }
         return acknowledge_restored(state, &manifest.entries, path, resume_path);
     }
@@ -237,7 +322,7 @@ pub fn apply(
             if let Some(mut state) = existing_state {
                 state.status = format!("deferred:{}", error);
                 state.used_after_bytes = None;
-                write_state(resume_path, &state)?;
+                write_state(resume_path, &state, false)?;
                 return Ok(report(state));
             }
             let state = ResumeState {
@@ -250,10 +335,11 @@ pub fn apply(
                 receipts: Vec::new(),
                 status: format!("deferred:{}", error),
                 in_flight_quarantine_id: None,
+                native_stage: None,
                 used_before_bytes: None,
                 used_after_bytes: None,
             };
-            write_state(resume_path, &state)?;
+            write_state(resume_path, &state, true)?;
             return Ok(report(state));
         }
     };
@@ -279,6 +365,7 @@ pub fn apply(
             receipts: Vec::new(),
             status: "in_progress".into(),
             in_flight_quarantine_id: None,
+            native_stage: None,
             used_before_bytes: Some(start_used),
             used_after_bytes: Some(start_used),
         }
@@ -300,18 +387,107 @@ pub fn apply(
         } else {
             "in_progress".into()
         };
-        write_state(resume_path, &state)?;
+        write_state(resume_path, &state, false)?;
     }
-    if !state.pending_paths.is_empty() {
-        state.status = if start_used <= target_used_bytes {
-            "target_reached"
-        } else {
-            "deferred:native-actuator-unavailable"
+    let mut create = new_checkpoint;
+    let mut used = start_used;
+    let entries: std::collections::HashMap<_, _> = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect();
+    for _ in 0..state.pending_paths.len() {
+        if used <= state.target_used_bytes {
+            break;
         }
-        .into();
-        state.used_after_bytes = Some(start_used);
-        write_state(resume_path, &state)?;
+        let Some(path) = state.pending_paths.front().cloned() else {
+            break;
+        };
+        let entry = entries
+            .get(path.as_str())
+            .ok_or_else(|| io::Error::other("checkpoint path is missing from the manifest"))?;
+        let used_before = used;
+        let result = match cleanup_policy(&state.root, entry, manifest.before_epoch_seconds) {
+            Err(reason) => reason,
+            Ok(expected) => {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(io::Error::other)?
+                    .as_nanos();
+                let stage = format!(".diskm-remove-{}-{nonce}", std::process::id());
+                state.status = format!("applying:{path}");
+                state.native_stage = Some(stage.clone());
+                state.used_after_bytes = Some(used);
+                write_state(resume_path, &state, create)?;
+                create = false;
+                let result = scratch_file_transaction::remove_exact(
+                    &state.root.path,
+                    state.root.dev,
+                    state.root.ino,
+                    Path::new(&path),
+                    expected,
+                    OsStr::new(&stage),
+                );
+                match result {
+                    Ok(Outcome::Removed {
+                        parent_synced: true,
+                        ..
+                    }) => "removed",
+                    Ok(Outcome::AlreadyAbsent) => "already-absent",
+                    Ok(Outcome::Changed | Outcome::RestoredMismatch) => {
+                        "kept:file-identity-changed"
+                    }
+                    Ok(Outcome::DeferredOpen { .. }) => "deferred:open-file",
+                    Ok(Outcome::DeferredCheck { .. }) => "deferred:open-file-check-unavailable",
+                    Ok(Outcome::Unsupported { .. }) => "kept:native-file-unsupported",
+                    Ok(Outcome::Removed {
+                        parent_synced: false,
+                        ..
+                    })
+                    | Ok(Outcome::RecoveryRequired { .. })
+                    | Err(_) => return Ok(report_recovery_required(&state, &manifest.entries)),
+                }
+            }
+        };
+        state.native_stage = None;
+        state.pending_paths.pop_front();
+        if result.starts_with("deferred:") {
+            state.pending_paths.push_back(path.clone());
+        }
+        state.receipts.push(Receipt {
+            path,
+            result: result.into(),
+            used_before_bytes: used_before,
+            used_after_bytes: None,
+        });
+        state.status = "receipt_pending_usage".into();
+        write_state(resume_path, &state, create)?;
+        create = false;
+        if result == "removed" {
+            match mounted_usage(&state.root, Some(&state.filesystem_id)) {
+                Ok((_, measured)) => used = measured,
+                Err(error) => {
+                    state.status = format!("deferred:{error}");
+                    state.used_after_bytes = None;
+                    write_state(resume_path, &state, false)?;
+                    return Ok(report(state));
+                }
+            }
+        }
+        if let Some(receipt) = state.receipts.last_mut() {
+            receipt.used_after_bytes = Some(used);
+        }
     }
+    state.used_after_bytes = Some(used);
+    state.status = if used <= state.target_used_bytes {
+        "target_reached"
+    } else if state.pending_paths.is_empty() {
+        "queue_exhausted"
+    } else {
+        "deferred:pending-paths"
+    }
+    .into();
+    write_state(resume_path, &state, create)?;
     Ok(report(state))
 }
 
@@ -346,7 +522,7 @@ fn selected_manifest_paths(
         || paths.iter().any(|path| {
             !matches!(
                 manifest_paths.get(path.as_str()).copied(),
-                Some("regular_file" | "managed_run")
+                Some("regular_file" | "managed_run" | "directory")
             )
         })
     {
@@ -391,6 +567,64 @@ fn restored_entry_metadata(root: &Root, relative: &str) -> io::Result<fs::Metada
     result.ok_or_else(|| io::Error::other("restored path is empty"))
 }
 
+fn cleanup_policy(root: &Root, entry: &Entry, cutoff: i64) -> Result<FileIdentity, &'static str> {
+    if entry.kind != "regular_file" {
+        return Err("kept:native-file-only");
+    }
+    let relative = Path::new(&entry.path);
+    let parts: Vec<_> = relative.components().collect();
+    if parts.len() < 5
+        || parts[0].as_os_str() != "runs"
+        || parts.iter().any(|part| {
+            !matches!(part, std::path::Component::Normal(_))
+                || part.as_os_str().as_encoded_bytes().starts_with(b".")
+                || part.as_os_str() == "evidence"
+        })
+    {
+        return Err("kept:unmanaged-or-protected");
+    }
+    let bundle = root.path.join(parts[..4].iter().collect::<PathBuf>());
+    let verified =
+        scratch_lease::lookup_bundle(&bundle).map_err(|_| "deferred:lease-unavailable")?;
+    if !matches!(verified.lease.kind, BundleKind::Build) {
+        return Err("kept:protected-bundle-kind");
+    }
+    if !verified
+        .finish
+        .is_some_and(|finish| finish.outcome == FinishOutcome::Completed)
+    {
+        return Err("kept:build-not-completed");
+    }
+    match verified.owner_process_state {
+        OwnerProcessState::Live => return Err("kept:producer-still-live"),
+        OwnerProcessState::Unavailable => return Err("deferred:producer-identity-unavailable"),
+        OwnerProcessState::Exited | OwnerProcessState::IdentityChanged => {}
+    }
+    let metadata = match restored_entry_metadata(root, &entry.path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err("already-absent"),
+        Err(_) => return Err("deferred:identity-unavailable"),
+    };
+    let modified = i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec());
+    let changed = i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec());
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || entry.dev != Some(metadata.dev())
+        || entry.ino != Some(metadata.ino())
+        || entry.size != Some(metadata.size())
+        || entry.mtime_ns.map(i128::from) != Some(modified)
+        || entry.ctime_ns.map(i128::from) != Some(changed)
+    {
+        return Err("kept:file-identity-changed");
+    }
+    if modified >= i128::from(cutoff) * 1_000_000_000 {
+        return Err("kept:recent-activity");
+    }
+    entry
+        .file_identity()
+        .map_err(|_| "deferred:identity-unavailable")
+}
+
 fn acknowledge_restored(
     mut state: ResumeState,
     entries: &[Entry],
@@ -416,7 +650,17 @@ fn acknowledge_restored(
         .ok_or_else(|| io::Error::other("restored entry identity unavailable"))?;
     let (filesystem_id, used) = mounted_usage(&state.root, Some(state.filesystem_id.as_str()))?;
     let path = state.root.path.join(relative_path);
-    if !scratch_recovery::restore_is_settled(&path, identity)? {
+    if let Some(stage) = state.native_stage.as_ref() {
+        if !stage.starts_with(".diskm-remove-") || Path::new(stage).components().count() != 1 {
+            return Err(io::Error::other("invalid native recovery stage name"));
+        }
+        let stage_path = path.with_file_name(stage);
+        match fs::symlink_metadata(stage_path) {
+            Ok(_) => return Err(io::Error::other("native recovery stage is still present")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    } else if !scratch_recovery::restore_is_settled(&path, identity)? {
         return Err(io::Error::other("quarantine recovery is still unresolved"));
     }
     let metadata = restored_entry_metadata(&state.root, relative)?;
@@ -443,6 +687,7 @@ fn acknowledge_restored(
     state.used_after_bytes = Some(used);
     state.pending_paths.pop_front();
     state.in_flight_quarantine_id = None;
+    state.native_stage = None;
     state.receipts.push(Receipt {
         path: relative.to_owned(),
         result: "kept:restored".into(),
@@ -457,7 +702,7 @@ fn acknowledge_restored(
         "in_progress"
     }
     .into();
-    write_state(resume_path, &state)?;
+    write_state(resume_path, &state, false)?;
     Ok(report(state))
 }
 
@@ -474,24 +719,34 @@ fn report(state: ResumeState) -> Report {
         pending_paths: state.pending_paths.into_iter().collect(),
         receipts: state.receipts,
         recovery: None,
+        native_recovery_stage: state.native_stage,
     }
 }
 
 fn report_recovery_required(state: &ResumeState, entries: &[Entry]) -> Report {
-    let recovery = state.pending_paths.front().map(|path| {
-        let identity = entries
-            .iter()
-            .find(|entry| &entry.path == path)
-            .and_then(|entry| entry.dev.zip(entry.ino));
-        scratch_recovery::hint(
-            &state.root.path,
-            path,
-            identity,
-            state.in_flight_quarantine_id.as_deref(),
-        )
-    });
+    let recovery = state
+        .pending_paths
+        .front()
+        .filter(|_| state.native_stage.is_none())
+        .map(|path| {
+            let identity = entries
+                .iter()
+                .find(|entry| &entry.path == path)
+                .and_then(|entry| entry.dev.zip(entry.ino));
+            scratch_recovery::hint(
+                &state.root.path,
+                path,
+                identity,
+                state.in_flight_quarantine_id.as_deref(),
+            )
+        });
     Report {
-        status: "recovery_required:check exact in-flight quarantine before resume".into(),
+        status: if state.native_stage.is_some() {
+            "recovery_required:check the recorded native stage before resume"
+        } else {
+            "recovery_required:check exact in-flight quarantine before resume"
+        }
+        .into(),
         complete: false,
         target_reached: false,
         target_used_bytes: state.target_used_bytes,
@@ -500,5 +755,6 @@ fn report_recovery_required(state: &ResumeState, entries: &[Entry]) -> Report {
         pending_paths: state.pending_paths.iter().cloned().collect(),
         receipts: state.receipts.clone(),
         recovery,
+        native_recovery_stage: state.native_stage.clone(),
     }
 }

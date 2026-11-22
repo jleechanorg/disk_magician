@@ -24,10 +24,10 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-finish PATH [completed|abandoned]
   diskm scratch-index refresh [--root scratch|system-tmp]
   diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
-  diskm snapshot [--path PATH] [--output FILE]
+  diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
   diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) --path ABSOLUTE_PATH [--path ...] | --paths-from FILE
-  diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--jobs N] [--deadline-ms N] [--max-entries N]
-  diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL]
+  diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
+  diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
   diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours N] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
 
 Preview --deadline-ms bounds Scratch discovery. With --resume-state, it supports
@@ -46,6 +46,7 @@ enum Operation {
     Snapshot {
         root: PathBuf,
         output: Option<PathBuf>,
+        state_dir: Option<PathBuf>,
     },
     Status {
         root: PathBuf,
@@ -68,6 +69,7 @@ enum Operation {
         paths: Vec<PathBuf>,
         options: scan::ScanOptions,
         jobs: usize,
+        host_temp: bool,
     },
     ScratchTargetApply {
         manifest: PathBuf,
@@ -76,7 +78,7 @@ enum Operation {
         target_used_bytes: u64,
         paths: Vec<String>,
         all_entries: bool,
-        ack_restored: Option<String>,
+        recovery: Option<scratch_target::RecoveryAction>,
     },
     Preview {
         scope: &'static str,
@@ -263,6 +265,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
 fn parse_snapshot(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
     let mut root = None;
     let mut output = None;
+    let mut state_dir = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => return Ok(Operation::Help),
@@ -272,12 +275,20 @@ fn parse_snapshot(mut args: impl Iterator<Item = OsString>) -> Result<Operation,
             Some("--output") if output.is_none() => {
                 output = Some(required_value(&mut args, "--output")?.into())
             }
-            _ => return Err("snapshot accepts --path PATH and --output FILE".into()),
+            Some("--state-dir") if state_dir.is_none() => {
+                state_dir = Some(required_value(&mut args, "--state-dir")?.into())
+            }
+            _ => {
+                return Err(
+                    "snapshot accepts --path PATH, --output FILE and --state-dir DIR".into(),
+                )
+            }
         }
     }
     Ok(Operation::Snapshot {
         root: root.unwrap_or_else(|| "/".into()),
         output,
+        state_dir,
     })
 }
 
@@ -306,6 +317,7 @@ fn parse_scratch_nomination(
     let mut cutoff = None;
     let mut paths = Vec::new();
     let mut jobs = 1;
+    let mut host_temp = false;
     let mut deadline_ms = 30_000;
     let mut max_entries = 100_000;
     while let Some(arg) = args.next() {
@@ -318,6 +330,13 @@ fn parse_scratch_nomination(
             }
             Some("--path") => paths.push(PathBuf::from(required_value(&mut args, "--path")?)),
             Some("--jobs") if qualify => jobs = positive(&mut args, "--jobs")?,
+            Some("--root") if qualify => {
+                host_temp = match required_value(&mut args, "--root")?.to_str() {
+                    Some("scratch") => false,
+                    Some("system-tmp") => true,
+                    _ => return Err("--root must be scratch or system-tmp".into()),
+                };
+            }
             Some("--deadline-ms") if qualify => deadline_ms = positive(&mut args, "--deadline-ms")?,
             Some("--max-entries") if qualify => max_entries = positive(&mut args, "--max-entries")?,
             Some("--paths-from") => {
@@ -350,6 +369,7 @@ fn parse_scratch_nomination(
             cutoff,
             paths,
             jobs,
+            host_temp,
             options: scan::ScanOptions {
                 deadline: Duration::from_millis(deadline_ms),
                 max_entries,
@@ -368,7 +388,7 @@ fn parse_scratch_target_apply(
     let mut target_used_bytes = None;
     let mut paths = Vec::new();
     let mut all_entries = false;
-    let mut ack_restored = None;
+    let mut recovery = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--manifest") if manifest.is_none() => {
@@ -388,24 +408,27 @@ fn parse_scratch_target_apply(
             Some("--target-used-bytes") if target_used_bytes.is_none() => {
                 target_used_bytes = Some(positive(&mut args, "--target-used-bytes")?);
             }
-            Some("--path") if !all_entries && ack_restored.is_none() => {
+            Some("--path") if !all_entries && recovery.is_none() => {
                 paths.push(
                     required_value(&mut args, "--path")?
                         .into_string()
                         .map_err(|_| "manifest paths must be UTF-8")?,
                 );
             }
-            Some("--all") if !all_entries && paths.is_empty() && ack_restored.is_none() => {
+            Some("--all") if !all_entries && paths.is_empty() && recovery.is_none() => {
                 all_entries = true
             }
-            Some("--ack-restored")
-                if !all_entries && paths.is_empty() && ack_restored.is_none() =>
+            Some(option @ ("--ack-restored" | "--restore-staged"))
+                if !all_entries && paths.is_empty() && recovery.is_none() =>
             {
-                ack_restored = Some(
-                    required_value(&mut args, "--ack-restored")?
-                        .into_string()
-                        .map_err(|_| "restored path must be UTF-8")?,
-                );
+                let path = required_value(&mut args, option)?
+                    .into_string()
+                    .map_err(|_| "recovery path must be UTF-8")?;
+                recovery = Some(if option == "--restore-staged" {
+                    scratch_target::RecoveryAction::Restore(path)
+                } else {
+                    scratch_target::RecoveryAction::Acknowledge(path)
+                });
             }
             _ => return Err("invalid scratch-target-apply options".into()),
         }
@@ -417,7 +440,7 @@ fn parse_scratch_target_apply(
         target_used_bytes: target_used_bytes.ok_or("--target-used-bytes is required")?,
         paths,
         all_entries,
-        ack_restored,
+        recovery,
     })
 }
 
@@ -429,12 +452,20 @@ fn print_json(report: &impl Serialize) -> io::Result<()> {
 
 fn run(operation: Operation) -> io::Result<u8> {
     match operation {
-        Operation::Snapshot { root, output } => {
-            let value = snapshot::collect(&root)?;
-            if let Some(destination) = output {
-                snapshot::publish(&destination, &value)?;
+        Operation::Snapshot {
+            root,
+            output,
+            state_dir,
+        } => {
+            if let Some(state_dir) = state_dir.as_deref() {
+                print_json(&snapshot::run(&root, Some(state_dir), output.as_deref())?)?;
             } else {
-                print_json(&value)?;
+                let value = snapshot::collect(&root)?;
+                if let Some(destination) = output {
+                    snapshot::publish(&destination, &value)?;
+                } else {
+                    print_json(&value)?;
+                }
             }
         }
         Operation::Help => {
@@ -455,10 +486,17 @@ fn run(operation: Operation) -> io::Result<u8> {
             paths,
             options,
             jobs,
+            host_temp,
         } => {
-            print_json(&scratch_manifest::qualify_exact(
-                &paths, cutoff, options, jobs,
-            )?)?;
+            if host_temp {
+                print_json(&scratch_manifest::qualify_host_temp(
+                    &paths, cutoff, options, jobs,
+                )?)?;
+            } else {
+                print_json(&scratch_manifest::qualify_exact(
+                    &paths, cutoff, options, jobs,
+                )?)?;
+            }
         }
         Operation::ScratchManifest { cutoff, paths } => {
             print_json(&scratch_manifest::create(&paths, cutoff)?)?;
@@ -470,7 +508,7 @@ fn run(operation: Operation) -> io::Result<u8> {
             target_used_bytes,
             paths,
             all_entries,
-            ack_restored,
+            recovery,
         } => {
             let report = scratch_target::apply(
                 &manifest,
@@ -479,10 +517,12 @@ fn run(operation: Operation) -> io::Result<u8> {
                 target_used_bytes,
                 &paths,
                 all_entries,
-                ack_restored.as_deref(),
+                recovery.as_ref(),
             )?;
             let reached = report.target_reached;
-            let acknowledged = ack_restored.is_some() && report.recovery.is_none();
+            let acknowledged = recovery.is_some()
+                && report.recovery.is_none()
+                && report.native_recovery_stage.is_none();
             print_json(&report)?;
             if !reached && !acknowledged {
                 return Ok(TEMPORARY_FAILURE);

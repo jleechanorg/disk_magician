@@ -23,6 +23,35 @@ batch with native lease, identity, evidence, and active-use checks. Persist the
 verified result separately from age observations. Deferred entries and coverage
 gaps remain visible.
 
+## Native exact-file milestone
+
+`scratch-qualify --root scratch|system-tmp --older-than 6h` reports age and
+coverage for an exact list. A qualification report conveys no deletion
+authority. `scratch-target-apply` accepts a hash-pinned Scratch manifest and
+rechecks the exact file, cutoff, mount, producer lease and open-file status.
+The first actuator handles single-link files in completed native build bundles
+whose producer has exited. Evidence, unmanaged Scratch, whole-directory removal
+and host-temp mutation still need native policy and verification.
+
+Each apply invocation uses its own resume file outside Scratch. Resume one
+checkpoint with one invocation at a time. The actuator briefly renames a
+selected file within its parent while checking the captured identity. A crash
+can leave the transaction name recorded in the checkpoint. `--restore-staged`
+restores the exact artifact if its original name is free. If a crash leaves
+neither name, the checkpoint reports an unresolved operation. A closed lease
+and an open-file observation depend on producer cooperation after the check.
+
+`snapshot --state-dir DIR` writes a partial capacity snapshot and a terminal
+receipt locally. Git state publication and replacement scheduled workers remain
+open. The known inventory deferrals still apply to existing unmanaged data.
+
+Linux executable fixtures verified a selected old file was removed, changed
+and open files were preserved, and recovery refused to overwrite an existing
+replacement. macOS verified lease closure, Scratch and temp age qualification,
+and snapshot receipt publication. Its exact apply deferred at the APFS
+provisioned-capacity check. Keep the container's physical free-space floor and
+mount validation when separating reclaim preflight from quota provisioning.
+
 ## Task 1 — Retire generic forwarding
 
 Modify `rust/src/main.rs`, `rust/tests/cli_contract.rs`, and `rust/README.md`. Add `native_cli_rejects_unported_commands_without_launching_the_backend`. Run `cargo test --locked --manifest-path rust/Cargo.toml --test cli_contract` with the existing Scratch fixture environment. RED shows a missing Rust command starts the backend. Remove generic forwarding. GREEN shows native help and exit 2 for unsupported verbs with no backend calls. Existing named adapters remain testable. Commit the deletion.

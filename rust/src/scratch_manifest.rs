@@ -42,7 +42,8 @@ struct Entry {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct QualificationReport {
-    pub root: PathBuf,
+    pub root: Option<PathBuf>,
+    pub roots: Vec<PathBuf>,
     pub cutoff_epoch_seconds: i64,
     pub cutoff_source: &'static str,
     pub complete: bool,
@@ -303,14 +304,52 @@ pub fn qualify_exact(
     scan_options: ScanOptions,
     jobs: usize,
 ) -> io::Result<QualificationReport> {
+    let (root, _) = registered_scratch()?;
+    qualify_under_roots(paths, cutoff_epoch_seconds, scan_options, jobs, vec![root])
+}
+
+pub fn qualify_host_temp(
+    paths: &[PathBuf],
+    cutoff_epoch_seconds: i64,
+    scan_options: ScanOptions,
+    jobs: usize,
+) -> io::Result<QualificationReport> {
+    let scopes = crate::preview_scopes::resolve_host_temp_scopes()?;
+    let roots = scopes.roots.into_iter().map(|scope| scope.path).collect();
+    qualify_under_roots(paths, cutoff_epoch_seconds, scan_options, jobs, roots)
+}
+
+fn qualify_under_roots(
+    paths: &[PathBuf],
+    cutoff_epoch_seconds: i64,
+    scan_options: ScanOptions,
+    jobs: usize,
+    roots: Vec<PathBuf>,
+) -> io::Result<QualificationReport> {
     if paths.is_empty() || jobs == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "qualification needs paths and a positive worker count",
         ));
     }
-    let (root, device) = registered_scratch()?;
-    let root_before = fs::symlink_metadata(&root)?;
+    if roots.is_empty() {
+        return Err(io::Error::other("no verified qualification roots"));
+    }
+    let identities = roots
+        .iter()
+        .map(|root| {
+            let metadata = fs::symlink_metadata(root)?;
+            if !metadata.is_dir() {
+                return Err(io::Error::other("qualification root changed"));
+            }
+            Ok((root, metadata.dev(), metadata.ino()))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    #[cfg(target_os = "macos")]
+    let path_alias = identities
+        .iter()
+        .any(|(path, _, _)| path.as_path() == Path::new("/private/tmp"))
+        && fs::canonicalize("/tmp").is_ok_and(|path| path == Path::new("/private/tmp"));
     let next = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel();
     let worker_count = jobs.min(paths.len());
@@ -318,14 +357,26 @@ pub fn qualify_exact(
         for _ in 0..worker_count {
             let next = &next;
             let sender = sender.clone();
-            let root = &root;
+            let identities = &identities;
             scope.spawn(move || loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
                 let Some(path) = paths.get(index) else {
                     break;
                 };
+                #[cfg(target_os = "macos")]
+                let aliased = path_alias
+                    .then(|| path.strip_prefix("/tmp").ok())
+                    .flatten()
+                    .map(|relative| Path::new("/private/tmp").join(relative));
+                #[cfg(target_os = "macos")]
+                let path = aliased.as_ref().unwrap_or(path);
+                let (root, device, _) = identities
+                    .iter()
+                    .filter(|(root, _, _)| path.starts_with(root))
+                    .max_by_key(|(root, _, _)| root.components().count())
+                    .unwrap_or(&identities[0]);
                 let qualification =
-                    age_measurement(root, path, device, cutoff_epoch_seconds, scan_options);
+                    age_measurement(root, path, *device, cutoff_epoch_seconds, scan_options);
                 if sender.send((index, qualification)).is_err() {
                     break;
                 }
@@ -333,9 +384,11 @@ pub fn qualify_exact(
         }
     });
     drop(sender);
-    let root_after = fs::symlink_metadata(&root)?;
-    if (root_before.dev(), root_before.ino()) != (root_after.dev(), root_after.ino()) {
-        return Err(io::Error::other("registered Scratch identity changed"));
+    for (root, device, inode) in identities {
+        let after = fs::symlink_metadata(root)?;
+        if !after.is_dir() || (device, inode) != (after.dev(), after.ino()) {
+            return Err(io::Error::other("qualification root identity changed"));
+        }
     }
     let mut slots: Vec<Option<Qualification>> = (0..paths.len()).map(|_| None).collect();
     for (index, entry) in receiver {
@@ -347,7 +400,8 @@ pub fn qualify_exact(
         .ok_or_else(|| io::Error::other("qualification result missing"))?;
     let complete = entries.iter().all(|entry| entry.coverage_complete);
     Ok(QualificationReport {
-        root,
+        root: (roots.len() == 1).then(|| roots[0].clone()),
+        roots,
         cutoff_epoch_seconds,
         cutoff_source: "explicit",
         complete,

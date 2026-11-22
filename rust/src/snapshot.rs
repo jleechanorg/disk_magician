@@ -1,25 +1,16 @@
 //! Native capacity snapshot using the existing history fields.
 
-use crate::status;
+use crate::{job_receipt, status};
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn collect(root: &Path) -> io::Result<Value> {
     let capacity = status::status(root, None)?.capacity;
-    let date = Command::new("date")
-        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()?;
-    if !date.status.success() {
-        return Err(io::Error::other("cannot obtain snapshot timestamp"));
-    }
-    let timestamp = std::str::from_utf8(&date.stdout)
-        .map_err(io::Error::other)?
-        .trim();
+    let timestamp = job_receipt::timestamp(SystemTime::now())?;
     // A capacity sample does not claim coverage of the file inventory.
     let gib = |bytes| bytes as f64 / 1_073_741_824.0;
     Ok(json!({
@@ -76,4 +67,83 @@ pub fn publish(path: &Path, snapshot: &Value) -> io::Result<()> {
         let _ = fs::remove_file(&staging);
     }
     result
+}
+
+/// Collect capacity, publish the snapshot locally, and record a native terminal
+/// receipt. The report remains partial because this command does not scan files.
+pub fn run(
+    root: &Path,
+    state_dir_override: Option<&Path>,
+    output_override: Option<&Path>,
+) -> io::Result<Value> {
+    let started = SystemTime::now();
+    let state_dir = job_receipt::state_dir(state_dir_override)?;
+    let output = if let Some(output) = output_override {
+        output.to_path_buf()
+    } else {
+        let snapshots = state_dir.join("snapshots");
+        fs::create_dir_all(&snapshots)?;
+        snapshots.join("disk_snapshot.json")
+    };
+    let before = status::status(root, None)?.capacity;
+    let collected = collect(root);
+    match collected {
+        Ok(snapshot) => {
+            if let Err(error) = publish(&output, &snapshot) {
+                let post = json!({"snapshot_path":output,"published":false,"free_bytes":null,"freed_bytes":null});
+                let _ = job_receipt::publish_terminal(
+                    &state_dir,
+                    "snapshot_commit",
+                    started,
+                    Err(&error.to_string()),
+                    json!({"available_bytes":before.available_bytes}),
+                    post,
+                    json!({"committed":false,"pushed":false,"status":"local_write_failed"}),
+                );
+                return Err(error);
+            }
+            let available_after = status::status(root, None)
+                .ok()
+                .map(|report| report.capacity.available_bytes);
+            let result = json!({
+                "snapshot":snapshot,
+                "snapshot_path":output,
+                "postcondition":{
+                    "available_bytes":available_after,
+                    "allocated_bytes":null,
+                    "freed_bytes":null
+                }
+            });
+            let delta =
+                available_after.map(|after| i128::from(after) - i128::from(before.available_bytes));
+            job_receipt::publish_terminal(
+                &state_dir,
+                "snapshot_commit",
+                started,
+                Ok(()),
+                json!({"available_bytes":before.available_bytes}),
+                json!({
+                    "available_bytes":available_after,
+                    "df_delta_bytes":delta,
+                    "freed_bytes":null,
+                    "measurement_status":"partial",
+                    "coverage_pct":null
+                }),
+                json!({"committed":false,"pushed":false,"status":"local_only"}),
+            )?;
+            Ok(result)
+        }
+        Err(error) => {
+            let _ = job_receipt::publish_terminal(
+                &state_dir,
+                "snapshot_commit",
+                started,
+                Err(&error.to_string()),
+                json!({"available_bytes":before.available_bytes}),
+                json!({"available_bytes":null,"freed_bytes":null}),
+                json!({"committed":false,"pushed":false,"status":"snapshot_failed"}),
+            );
+            Err(error)
+        }
+    }
 }

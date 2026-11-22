@@ -31,6 +31,7 @@ pub enum BundleKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProcessOwner {
     pub pid: u32,
+    pub uid: u32,
     /// Linux boot ID, which prevents a PID/start-tick pair surviving reboot.
     /// macOS uses the absolute process start string as its available identity.
     pub host_boot_id: Option<String>,
@@ -55,18 +56,36 @@ pub struct BundleLease {
     pub filesystem_times_observed_epoch_nanos: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishOutcome {
     Completed,
     Abandoned,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FinishEvent {
+    pub bundle_id: String,
+    pub filepath: PathBuf,
     pub owner: ProcessOwner,
     pub outcome: FinishOutcome,
     pub finished_epoch_nanos: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerProcessState {
+    Live,
+    Exited,
+    IdentityChanged,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiedBundle {
+    pub lease: BundleLease,
+    pub finish: Option<FinishEvent>,
+    pub owner_process_state: OwnerProcessState,
 }
 
 pub fn dispatch(args: &[OsString]) -> Option<ExitCode> {
@@ -188,7 +207,7 @@ fn state_records() -> io::Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn owner_details(pid: u32) -> io::Result<(Option<String>, String, String)> {
+fn owner_details(pid: u32) -> io::Result<(u32, Option<String>, String, String)> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
         .trim()
         .to_owned();
@@ -203,7 +222,9 @@ fn owner_details(pid: u32) -> io::Result<(Option<String>, String, String)> {
     let command = fs::read_to_string(format!("/proc/{pid}/comm"))?
         .trim()
         .to_owned();
+    let uid = fs::metadata(format!("/proc/{pid}"))?.uid();
     Ok((
+        uid,
         Some(format!("linux:{boot_id}")),
         format!("linux:{start}"),
         command,
@@ -211,17 +232,38 @@ fn owner_details(pid: u32) -> io::Result<(Option<String>, String, String)> {
 }
 
 #[cfg(target_os = "macos")]
-fn owner_details(pid: u32) -> io::Result<(Option<String>, String, String)> {
+fn owner_details(pid: u32) -> io::Result<(u32, Option<String>, String, String)> {
     let output = Command::new("/bin/ps")
-        .args(["-p", &pid.to_string(), "-o", "lstart=,comm="])
+        .args(["-p", &pid.to_string(), "-o", "uid=,lstart=,comm="])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
         .output()?;
     if !output.status.success() {
+        // ps exit 1 alone cannot distinguish an absent PID from a probe failure.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "producer has exited",
+            ));
+        }
         return Err(io::Error::other("producer process identity is unavailable"));
     }
     let value = String::from_utf8(output.stdout).map_err(io::Error::other)?;
-    let value = value.trim();
-    let (start, command) = value.split_at(value.len().min(24));
+    let mut fields = value.split_whitespace();
+    let uid = fields
+        .next()
+        .ok_or_else(|| io::Error::other("producer user identity is unavailable"))?
+        .parse::<u32>()
+        .map_err(io::Error::other)?;
+    let start = fields.by_ref().take(5).collect::<Vec<_>>().join(" ");
+    let command = fields.collect::<Vec<_>>().join(" ");
+    if start.is_empty() || command.is_empty() {
+        return Err(io::Error::other("producer process identity is unavailable"));
+    }
     Ok((
+        uid,
         None,
         format!("macos:{}", start.trim()),
         command.trim().to_owned(),
@@ -229,7 +271,7 @@ fn owner_details(pid: u32) -> io::Result<(Option<String>, String, String)> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn owner_details(_: u32) -> io::Result<(Option<String>, String, String)> {
+fn owner_details(_: u32) -> io::Result<(u32, Option<String>, String, String)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "native owner identity is unsupported",
@@ -241,9 +283,10 @@ fn caller_owner() -> io::Result<ProcessOwner> {
     if pid <= 1 {
         return Err(io::Error::other("producer process is unavailable"));
     }
-    let (host_boot_id, started, command) = owner_details(pid)?;
+    let (uid, host_boot_id, started, command) = owner_details(pid)?;
     Ok(ProcessOwner {
         pid,
+        uid,
         host_boot_id,
         started,
         command,
@@ -287,6 +330,52 @@ fn record_path(bundle: &Path) -> io::Result<(PathBuf, BundleLease)> {
         ));
     }
     Ok((record, lease))
+}
+
+/// Read and validate a lease against the current Scratch root, bundle path and
+/// filesystem identity. A finish event is accepted only for this lease's exact
+/// identity and original producer incarnation.
+pub fn lookup_bundle(bundle: &Path) -> io::Result<VerifiedBundle> {
+    let (record_path, lease) = record_path(bundle)?;
+    let finish_path = record_path.with_extension("finished.json");
+    let finish = match fs::read(finish_path) {
+        Ok(bytes) => {
+            let event: FinishEvent = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            if event.bundle_id != lease.bundle_id
+                || event.filepath != lease.filepath
+                || event.owner != lease.owner
+                || event.finished_epoch_nanos < lease.created_epoch_nanos
+            {
+                return Err(io::Error::other(
+                    "finish event does not match the verified bundle lease",
+                ));
+            }
+            Some(event)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let owner_process_state = owner_process_state(&lease.owner);
+    Ok(VerifiedBundle {
+        lease,
+        finish,
+        owner_process_state,
+    })
+}
+
+fn owner_process_state(expected: &ProcessOwner) -> OwnerProcessState {
+    match owner_details(expected.pid) {
+        Ok((uid, boot_id, started, _))
+            if uid == expected.uid
+                && boot_id == expected.host_boot_id
+                && started == expected.started =>
+        {
+            OwnerProcessState::Live
+        }
+        Ok(_) => OwnerProcessState::IdentityChanged,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => OwnerProcessState::Exited,
+        Err(_) => OwnerProcessState::Unavailable,
+    }
 }
 
 fn create_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -434,7 +523,8 @@ fn finish_bundle(args: &[OsString]) -> io::Result<String> {
             ))
         }
     };
-    let (_, lease) = record_path(Path::new(&args[0]))?;
+    let verified = lookup_bundle(Path::new(&args[0]))?;
+    let lease = verified.lease;
     let owner = caller_owner()?;
     if (
         owner.pid,
@@ -451,6 +541,8 @@ fn finish_bundle(args: &[OsString]) -> io::Result<String> {
         ));
     }
     let event = FinishEvent {
+        bundle_id: lease.bundle_id.clone(),
+        filepath: lease.filepath.clone(),
         owner,
         outcome,
         finished_epoch_nanos: now_ns()?,
@@ -483,7 +575,8 @@ fn inspect_bundle(args: &[OsString]) -> io::Result<String> {
             "usage: diskm scratch-lease <bundle-path>",
         ));
     }
-    let (record, mut lease) = record_path(Path::new(&args[0]))?;
+    let verified = lookup_bundle(Path::new(&args[0]))?;
+    let mut lease = verified.lease;
     // This is a live observation of the directory's own mtime. Recursive content
     // freshness comes from the age scanner and has its own scan timestamp.
     let observed = fs::symlink_metadata(&lease.filepath)?;
@@ -496,12 +589,10 @@ fn inspect_bundle(args: &[OsString]) -> io::Result<String> {
     lease.filesystem_modified_epoch_nanos = observed.modified().ok().and_then(to_ns);
     lease.filesystem_created_epoch_nanos = observed.created().ok().and_then(to_ns);
     lease.filesystem_times_observed_epoch_nanos = now_ns()?;
-    let finish_path = record.with_extension("finished.json");
-    let finish = match fs::read(finish_path) {
-        Ok(bytes) => Some(serde_json::from_slice::<FinishEvent>(&bytes).map_err(io::Error::other)?),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    serde_json::to_string(&serde_json::json!({ "lease": lease, "finish": finish }))
-        .map_err(io::Error::other)
+    serde_json::to_string(&serde_json::json!({
+        "lease": lease,
+        "finish": verified.finish,
+        "owner_process_state": verified.owner_process_state,
+    }))
+    .map_err(io::Error::other)
 }

@@ -20,11 +20,13 @@ pub fn verified_scratch_volume(
 pub mod artifact_batch;
 pub mod artifact_discovery;
 pub mod history;
+pub mod job_receipt;
 pub mod preview;
 pub mod preview_scopes;
 pub mod reclaim_report;
 pub mod scan;
 pub mod scratch_dir;
+mod scratch_file_transaction;
 pub mod scratch_index;
 pub mod scratch_lease;
 pub mod scratch_manifest;
