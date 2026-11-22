@@ -9,7 +9,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn collect(root: &Path) -> io::Result<Value> {
-    let capacity = status::status(root, None)?.capacity;
+    format_sample(&status::status(root, None)?.capacity)
+}
+
+fn format_sample(capacity: &status::CapacityReport) -> io::Result<Value> {
     let timestamp = job_receipt::timestamp(SystemTime::now())?;
     // A capacity sample does not claim coverage of the file inventory.
     let gib = |bytes| bytes as f64 / 1_073_741_824.0;
@@ -78,72 +81,64 @@ pub fn run(
 ) -> io::Result<Value> {
     let started = SystemTime::now();
     let state_dir = job_receipt::state_dir(state_dir_override)?;
-    let output = if let Some(output) = output_override {
-        output.to_path_buf()
-    } else {
-        let snapshots = state_dir.join("snapshots");
-        fs::create_dir_all(&snapshots)?;
-        snapshots.join("disk_snapshot.json")
-    };
-    let before = status::status(root, None)?.capacity;
-    let collected = collect(root);
-    match collected {
-        Ok(snapshot) => {
-            if let Err(error) = publish(&output, &snapshot) {
-                let post = json!({"snapshot_path":output,"published":false,"free_bytes":null,"freed_bytes":null});
-                let _ = job_receipt::publish_terminal(
-                    &state_dir,
-                    "snapshot_commit",
-                    started,
-                    job_receipt::Completion::Error(&error.to_string()),
-                    json!({"available_bytes":before.available_bytes}),
-                    post,
-                    json!({"committed":false,"pushed":false,"status":"local_write_failed"}),
-                );
-                return Err(error);
-            }
-            let available_after = status::status(root, None)
-                .ok()
-                .map(|report| report.capacity.available_bytes);
-            let result = json!({
-                "snapshot":snapshot,
-                "snapshot_path":output,
-                "postcondition":{
-                    "available_bytes":available_after,
-                    "allocated_bytes":null,
-                    "freed_bytes":null
-                }
-            });
-            let delta =
-                available_after.map(|after| i128::from(after) - i128::from(before.available_bytes));
-            job_receipt::publish_terminal(
-                &state_dir,
-                "snapshot_commit",
-                started,
+    let output = output_override.map_or_else(
+        || state_dir.join("snapshots/disk_snapshot.json"),
+        Path::to_path_buf,
+    );
+    let mut before = None;
+    let mut phase = "snapshot_failed";
+    let result = (|| -> io::Result<Value> {
+        let capacity = status::status(root, None)?.capacity;
+        before = Some(capacity.available_bytes);
+        let snapshot = format_sample(&capacity)?;
+        phase = "local_write_failed";
+        if output_override.is_none() {
+            fs::create_dir_all(state_dir.join("snapshots"))?;
+        }
+        publish(&output, &snapshot)?;
+        phase = "local_only";
+        let available_after = status::status(root, None)
+            .ok()
+            .map(|report| report.capacity.available_bytes);
+        Ok(
+            json!({"snapshot":snapshot,"snapshot_path":output,"postcondition":{
+                "available_bytes":available_after,"allocated_bytes":null,"freed_bytes":null
+            }}),
+        )
+    })();
+    let reason;
+    let (completion, postcondition) = match &result {
+        Ok(value) => {
+            let available = value["postcondition"]["available_bytes"].as_u64();
+            let delta = available
+                .zip(before)
+                .map(|(after, before)| i128::from(after) - i128::from(before));
+            (
                 job_receipt::Completion::Success,
-                json!({"available_bytes":before.available_bytes}),
                 json!({
-                    "available_bytes":available_after,
-                    "df_delta_bytes":delta,
-                    "freed_bytes":null,
-                    "measurement_status":"partial",
-                    "coverage_pct":null
+                    "available_bytes":available,"df_delta_bytes":delta,"freed_bytes":null,
+                    "measurement_status":"partial","coverage_pct":null
                 }),
-                json!({"committed":false,"pushed":false,"status":"local_only"}),
-            )?;
-            Ok(result)
+            )
         }
         Err(error) => {
-            let _ = job_receipt::publish_terminal(
-                &state_dir,
-                "snapshot_commit",
-                started,
-                job_receipt::Completion::Error(&error.to_string()),
-                json!({"available_bytes":before.available_bytes}),
-                json!({"available_bytes":null,"freed_bytes":null}),
-                json!({"committed":false,"pushed":false,"status":"snapshot_failed"}),
-            );
-            Err(error)
+            reason = error.to_string();
+            (
+                job_receipt::Completion::Error(&reason),
+                json!({
+                    "snapshot_path":output,"published":false,"available_bytes":null,"freed_bytes":null
+                }),
+            )
         }
-    }
+    };
+    let receipt = job_receipt::publish_terminal(
+        &state_dir,
+        "snapshot_commit",
+        started,
+        completion,
+        json!({"available_bytes":before}),
+        postcondition,
+        json!({"committed":false,"pushed":false,"status":phase}),
+    );
+    result.and_then(|value| receipt.map(|_| value))
 }

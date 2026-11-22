@@ -53,7 +53,12 @@ neither name, the checkpoint reports an unresolved operation. A closed lease
 and an open-file observation depend on producer cooperation after the check.
 
 `snapshot --state-dir DIR` writes a partial capacity snapshot and a terminal
-receipt locally. `scratch-sweep` uses the registered volume's configured trigger
+receipt locally, including when the initial capacity probe fails. A failed run
+preserves the last published sample. The native templates retain the Mac
+30-minute cadence and Linux two-hour cadence. The Mac snapshot template uses a
+separate label, leaving the retired job disabled. Git publication remains open.
+
+`scratch-sweep` uses the registered volume's configured trigger
 and target, a default 48-hour cutoff, and oldest-first managed-file selection.
 It previews by default. `--clean` writes an exact manifest, recovery request,
 checkpoint, and native receipt in the local state directory. Before checking
