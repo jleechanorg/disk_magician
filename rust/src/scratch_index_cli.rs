@@ -202,17 +202,7 @@ impl Options {
 }
 
 fn display_path(bytes: &[u8]) -> (String, Option<String>) {
-    match std::str::from_utf8(bytes) {
-        Ok(value) => (value.to_owned(), None),
-        Err(_) => {
-            use std::fmt::Write as _;
-            let mut hex = String::with_capacity(bytes.len() * 2);
-            for byte in bytes {
-                write!(hex, "{byte:02x}").expect("formatting to String cannot fail");
-            }
-            (String::from_utf8_lossy(bytes).into_owned(), Some(hex))
-        }
-    }
+    scan::path_parts_for_report(OsStr::from_bytes(bytes).as_ref())
 }
 
 fn run(options: Options, refresh: bool) -> Result<(), Box<dyn Error>> {

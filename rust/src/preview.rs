@@ -1219,7 +1219,9 @@ fn report_from_checkpoint(path: &Path, mut saved: ResumeCheckpoint) -> Report {
     }
 }
 
-fn load_checkpoint(path: &Path) -> io::Result<Option<ResumeCheckpoint>> {
+pub(crate) fn load_checkpoint<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> io::Result<Option<T>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1243,7 +1245,7 @@ fn load_checkpoint(path: &Path) -> io::Result<Option<ResumeCheckpoint>> {
         .map_err(io::Error::other)
 }
 
-fn write_checkpoint(path: &Path, checkpoint: &ResumeCheckpoint) -> io::Result<()> {
+pub(crate) fn write_checkpoint(path: &Path, checkpoint: &impl Serialize) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(io::Error::other("resume checkpoint path must be absolute"));
     }
@@ -1288,7 +1290,7 @@ fn write_checkpoint(path: &Path, checkpoint: &ResumeCheckpoint) -> io::Result<()
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&temp, &target)?;
-        Ok(())
+        File::open(&parent)?.sync_all()
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);

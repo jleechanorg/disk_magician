@@ -105,7 +105,7 @@ fn sweep(
         max_entries: usize::MAX,
     };
     let mut holds = BTreeMap::new();
-    let (paths, scan_complete, gaps) = if !options.paths.is_empty() {
+    let (mut paths, scan_complete, gaps) = if !options.paths.is_empty() {
         (options.paths.clone(), true, Vec::new())
     } else if options.system_tmp {
         (
@@ -116,6 +116,24 @@ fn sweep(
     } else {
         discover(&root, device, cutoff, scan_options, &mut holds)?
     };
+    let cursor = (options.clean && options.paths.is_empty()).then(|| {
+        state.join(if options.system_tmp {
+            "tmp-cursor.json"
+        } else {
+            "scratch-cursor.json"
+        })
+    });
+    if let Some(path) = &cursor {
+        if let Some(Some((hours, next))) = preview::load_checkpoint::<Option<(u32, PathBuf)>>(path)?
+        {
+            if let Some(index) = paths
+                .iter()
+                .position(|path| *path == next && hours == options.min_hours)
+            {
+                paths.rotate_left(index);
+            }
+        }
+    }
     let start_checks = Instant::now();
     let mut qualification: Option<scratch_manifest::QualificationReport> = None;
     for batch in paths.chunks(options.limit) {
@@ -138,10 +156,16 @@ fn sweep(
             break;
         }
     }
-    let unchecked = paths.len()
-        - qualification
-            .as_ref()
-            .map_or(0, |report| report.entries.len());
+    let checked = qualification
+        .as_ref()
+        .map_or(0, |report| report.entries.len());
+    let unchecked = paths.len() - checked;
+    if let Some(path) = cursor.filter(|_| checked > 0) {
+        preview::write_checkpoint(
+            &path,
+            &paths.get(checked).map(|next| (options.min_hours, next)),
+        )?;
+    }
     let mut eligible: Vec<_> = qualification
         .iter()
         .flat_map(|report| &report.entries)

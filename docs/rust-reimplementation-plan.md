@@ -67,9 +67,11 @@ The hourly macOS and Linux temp jobs use
 `scratch-sweep --root system-tmp --clean --min-hours 72`. They scan direct
 leased temp files and apply the age cutoff independently of Scratch quota.
 The sweeps advance through held-only batches within the verification deadline.
-An unfinished discovery or verification budget still needs a durable continuation
-across invocations. Git state publication and qualification of existing unmanaged
-data remain open.
+An unattended clean sweep records the next unchecked path and resumes from it
+at the same age cutoff setting. Reaching the end of the batch sequence resets
+the cursor. Dry runs and explicit path nominations leave that cursor untouched.
+Durable continuation of unfinished filesystem discovery, Git state publication,
+and qualification of existing unmanaged data remain open.
 
 Mac and Linux executable fixtures verified that exact apply removed the selected
 old file and preserved changed and open files. Recovery refused to overwrite

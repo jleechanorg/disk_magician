@@ -394,60 +394,37 @@ pub fn apply(
             .map(|state| state.filesystem_id.as_str())
             .filter(|id| !id.is_empty()),
     );
+    let mut state = existing_state.unwrap_or_else(|| ResumeState {
+        version: 1,
+        manifest_sha256: digest.to_owned(),
+        target_used_bytes,
+        root: manifest.root,
+        filesystem_id: String::new(),
+        pending_paths: initial_paths.unwrap_or_default().into(),
+        receipts: Vec::new(),
+        status: "in_progress".into(),
+        in_flight_quarantine_id: None,
+        native_stage: None,
+        used_before_bytes: None,
+        used_after_bytes: None,
+    });
     let (filesystem_id, start_used) = match measured {
         Ok(usage) => usage,
         Err(error) => {
-            if let Some(mut state) = existing_state {
-                state.status = format!("deferred:{}", error);
-                state.used_after_bytes = None;
-                write_state(resume_path, &state, false)?;
-                return Ok(report(state));
-            }
-            let state = ResumeState {
-                version: 1,
-                manifest_sha256: digest.to_owned(),
-                target_used_bytes,
-                root: manifest.root,
-                filesystem_id: String::new(),
-                pending_paths: initial_paths.unwrap_or_default().into(),
-                receipts: Vec::new(),
-                status: format!("deferred:{}", error),
-                in_flight_quarantine_id: None,
-                native_stage: None,
-                used_before_bytes: None,
-                used_after_bytes: None,
-            };
-            write_state(resume_path, &state, true)?;
+            state.status = format!("deferred:{error}");
+            state.used_after_bytes = None;
+            write_state(resume_path, &state, new_checkpoint)?;
             return Ok(report(state));
         }
     };
-    let mut state = if let Some(state) = existing_state {
-        if !state.filesystem_id.is_empty() && state.filesystem_id != filesystem_id {
-            return Err(io::Error::other("resume Scratch identity changed"));
-        }
-        let mut state = state;
-        state.filesystem_id = filesystem_id;
-        if state.used_before_bytes.is_none() {
-            state.used_before_bytes = Some(start_used);
-        }
-        state
-    } else {
-        let paths = initial_paths.unwrap_or_default();
-        ResumeState {
-            version: 1,
-            manifest_sha256: digest.to_owned(),
-            target_used_bytes,
-            root: manifest.root,
-            filesystem_id,
-            pending_paths: paths.into(),
-            receipts: Vec::new(),
-            status: "in_progress".into(),
-            in_flight_quarantine_id: None,
-            native_stage: None,
-            used_before_bytes: Some(start_used),
-            used_after_bytes: Some(start_used),
-        }
-    };
+    if !state.filesystem_id.is_empty() && state.filesystem_id != filesystem_id {
+        return Err(io::Error::other("resume Scratch identity changed"));
+    }
+    state.filesystem_id = filesystem_id;
+    state.used_before_bytes.get_or_insert(start_used);
+    if new_checkpoint {
+        state.used_after_bytes = Some(start_used);
+    }
 
     if let Some(receipt) = state
         .receipts

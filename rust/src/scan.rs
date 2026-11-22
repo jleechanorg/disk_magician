@@ -215,7 +215,7 @@ fn path_parts(path: &Path) -> (String, Option<String>) {
     (path.to_string_lossy().into_owned(), None)
 }
 
-pub(crate) fn path_parts_for_report(path: &Path) -> (String, Option<String>) {
+pub fn path_parts_for_report(path: &Path) -> (String, Option<String>) {
     path_parts(path)
 }
 
