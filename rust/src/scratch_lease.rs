@@ -680,13 +680,21 @@ pub(crate) fn legacy_lease(bundle: &Path) -> io::Result<Option<LegacyLease>> {
         if record["kind"] != "build" {
             return Ok(Some(LegacyLease::OtherKind));
         }
-        let pids: Vec<u64> = record["owners"]
+        // An owner entry without a usable PID is an unknown owner; keep the run.
+        let owners: Vec<&serde_json::Value> = record["owners"]
             .as_array()
             .into_iter()
             .flatten()
             .chain(std::iter::once(&record["owner"]))
+            .filter(|owner| !owner.is_null())
+            .collect();
+        let pids: Vec<u64> = owners
+            .iter()
             .filter_map(|owner| owner["pid"].as_u64())
             .collect();
+        if pids.len() != owners.len() {
+            return Ok(Some(LegacyLease::Build { owner_live: true }));
+        }
         let alive = |pid: u64| {
             let Ok(pid) = libc::pid_t::try_from(pid) else {
                 return true;

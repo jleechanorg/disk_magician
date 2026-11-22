@@ -105,8 +105,29 @@ fn run_without_any_lease_stays_lease_missing() {
 fn legacy_record_for_a_replaced_directory_is_ignored() {
     let f = fixture("replaced");
     let run = legacy_run(&f, "build-replaced", "build", exited_pid());
-    // Same path, new directory: the recorded inode no longer matches.
-    fs::remove_dir_all(&run).unwrap();
-    fs::create_dir_all(&run).unwrap();
+    // Simulate a different directory at the same path: the recorded inode no
+    // longer matches. Deterministic, unlike deleting and recreating it, which
+    // can reuse the inode on Linux.
+    let record_path = f.state.join("worktree_leases/build-replaced.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    let inode = record["checkout_ino"].as_u64().unwrap();
+    record["checkout_ino"] = json!(inode + 1);
+    fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
     assert_eq!(verdict(&f, &run), Err("kept:lease-missing"));
+}
+
+#[test]
+fn legacy_owner_without_a_pid_keeps_the_run() {
+    let f = fixture("unknown-owner");
+    let run = legacy_run(&f, "build-unknown", "build", exited_pid());
+    let record_path = f.state.join("worktree_leases/build-unknown.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    record["owners"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"comm": "codex"}));
+    fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(verdict(&f, &run), Err("kept:producer-still-live"));
 }
