@@ -37,6 +37,10 @@ fn fixture(name: &str) -> Fixture {
         fs::create_dir_all(state.join("volumes")).unwrap();
         fs::copy(&registry, state.join("volumes/registry.json")).unwrap();
     }
+    if cfg!(target_os = "linux") {
+        fs::create_dir_all(state.join("repo/config")).unwrap();
+        fs::write(state.join("repo/config/config.json"), "{}").unwrap();
+    }
     Fixture {
         state,
         runs: Vec::new(),
@@ -47,12 +51,32 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Environment every diskm call in a fixture uses.
+fn env(f: &Fixture) -> Vec<(&'static str, PathBuf)> {
+    let mut vars = vec![("DISK_MAGICIAN_STATE_DIR", f.state.clone())];
+    if cfg!(target_os = "linux") {
+        vars.push(("DISK_MAGICIAN_STATE_REPO", f.state.join("repo")));
+    }
+    vars
+}
+
 fn diskm(f: &Fixture, args: &[&str]) -> Output {
     Command::new(DISKM)
         .args(args)
-        .env("DISK_MAGICIAN_STATE_DIR", &f.state)
+        .envs(env(f))
         .output()
         .unwrap()
+}
+
+/// Runs `check_completed_build` with this fixture's process-wide environment.
+fn in_fixture_env<T>(f: &Fixture, action: impl FnOnce() -> T) -> T {
+    let _guard = STATE_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (name, value) in env(f) {
+        std::env::set_var(name, value);
+    }
+    action()
 }
 
 /// Allocates through a short-lived `sh`, as `$(diskm scratch-new ...)` does,
@@ -67,7 +91,7 @@ fn allocate(f: &mut Fixture, kind: &str, extra: &[&str]) -> PathBuf {
         .arg("--kind")
         .arg(kind)
         .args(extra)
-        .env("DISK_MAGICIAN_STATE_DIR", &f.state)
+        .envs(env(&*f))
         .output()
         .unwrap();
     assert!(
@@ -92,11 +116,7 @@ fn lease(f: &Fixture, run: &Path) -> serde_json::Value {
 
 fn verdict(f: &Fixture, run: &Path) -> Result<(), &'static str> {
     let root = PathBuf::from(lease(f, run)["lease"]["root"].as_str().unwrap());
-    let _guard = STATE_ENV
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    std::env::set_var("DISK_MAGICIAN_STATE_DIR", &f.state);
-    check_completed_build(&root, run)
+    in_fixture_env(f, || check_completed_build(&root, run))
 }
 
 fn finish(f: &Fixture, run: &Path, outcome: &str) -> Output {
@@ -208,7 +228,7 @@ fn unfinished_temp_file_is_kept() {
         .arg(DISKM)
         .arg(repo())
         .arg("lease-lifecycle")
-        .env("DISK_MAGICIAN_STATE_DIR", &f.state)
+        .envs(env(&f))
         .output()
         .unwrap();
     assert!(
@@ -218,13 +238,7 @@ fn unfinished_temp_file_is_kept() {
     );
     let file = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
     let root = PathBuf::from(lease(&f, &file)["lease"]["root"].as_str().unwrap());
-    let verdict = {
-        let _guard = STATE_ENV
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::env::set_var("DISK_MAGICIAN_STATE_DIR", &f.state);
-        check_completed_build(&root, &file)
-    };
+    let verdict = in_fixture_env(&f, || check_completed_build(&root, &file));
     let _ = fs::remove_file(&file);
     assert_eq!(verdict, Err("kept:build-not-completed"));
 }
