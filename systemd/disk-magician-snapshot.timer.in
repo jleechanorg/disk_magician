@@ -2,7 +2,8 @@
 Description=Capture local disk capacity every two hours
 
 [Timer]
-OnCalendar=*-*-* 00/2:15:00
+OnBootSec=@SNAPSHOT_INTERVAL_SECONDS@s
+OnUnitActiveSec=@SNAPSHOT_INTERVAL_SECONDS@s
 Persistent=true
 
 [Install]

@@ -2,7 +2,8 @@
 Description=Refresh pull request evidence holds hourly
 
 [Timer]
-OnCalendar=hourly
+OnBootSec=@EVIDENCE_HOLDS_INTERVAL_SECONDS@s
+OnUnitActiveSec=@EVIDENCE_HOLDS_INTERVAL_SECONDS@s
 Persistent=true
 
 [Install]

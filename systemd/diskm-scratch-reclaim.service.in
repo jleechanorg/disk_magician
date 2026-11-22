@@ -9,5 +9,5 @@ Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
 Environment=DISK_MAGICIAN_TRIGGER=timer
 Environment=DISK_MAGICIAN_DELETION_LOG=@DELETION_LOG@
 ExecStart="%h/.local/bin/diskm" scratch-sweep --clean
-TimeoutStartSec=950
+TimeoutStartSec=@SCRATCH_RECLAIM_TIMEOUT_SECONDS@
 Restart=no

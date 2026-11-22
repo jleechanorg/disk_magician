@@ -26,6 +26,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-finish PATH [completed|abandoned]
   diskm scratch-index refresh [--root scratch|system-tmp]
   diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
+  diskm time-windows
   diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
   diskm state-publish --repo DIR [--remote NAME] [--branch NAME] [--max-commits N] [--state-dir DIR]
   diskm state-commit --repo DIR [--state-dir DIR] [--publish] [--max-commits N]
@@ -39,8 +40,8 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
 Preview --deadline-ms bounds Scratch discovery at any age. With --resume-state,
 preview can resume incomplete discovery. Verdict checks run after discovery.
 
-Status defaults to the current directory. Scan defaults to 30 seconds and
-100,000 visited paths. An incomplete scan emits a report and exits 75.
+Status defaults to the current directory. Scan defaults to 100,000 visited
+paths; `diskm time-windows` prints every default time window. An incomplete scan emits a report and exits 75.
 Preview defaults to the Scratch scope. Use --scope all for all supported locations.";
 
 const TEMPORARY_FAILURE: u8 = 75;
@@ -48,6 +49,7 @@ const USAGE_ERROR: u8 = 2;
 
 enum Operation {
     Help,
+    TimeWindows,
     Snapshot {
         root: PathBuf,
         output: Option<PathBuf>,
@@ -134,6 +136,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     match command {
         "-h" | "--help" | "help" => return Ok(Operation::Help),
         "snapshot" => return parse_snapshot(args),
+        "time-windows" => return Ok(Operation::TimeWindows),
         "state-publish" => return parse_state_publish(args),
         "state-commit" => return parse_state_commit(args),
         "evidence-holds" => return parse_evidence_holds(args),
@@ -620,6 +623,13 @@ fn run(operation: Operation) -> io::Result<u8> {
                     print_json(&value)?;
                 }
             }
+        }
+        Operation::TimeWindows => {
+            let windows: serde_json::Map<String, serde_json::Value> = time_windows::listing()
+                .into_iter()
+                .map(|(name, seconds)| (format!("{name}_SECONDS"), seconds.into()))
+                .collect();
+            print_json(&windows)?;
         }
         Operation::Help => {
             writeln!(io::stdout().lock(), "{USAGE}")?;

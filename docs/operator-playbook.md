@@ -170,7 +170,7 @@ underestimated cumulative-reservoir growth):
    `disk_used_gb` as a floor when `snapshot_coverage_pct` (or
    `snapshot_metadata.coverage_pct`) is **< 70%** — low-coverage mins
    are bogus (e.g. 714 GiB at 5.5% coverage). Prefer the ledger floor when
-   `ledger/topdown-5g.json` has a commit within **48h**; if the ledger is
+   `ledger/topdown-5g.json` has a commit within `LEDGER_STALE_HOURS` (`rust/src/time_windows.rs`); if the ledger is
    older, say so and do not invent bucket deltas from stale ledger HEAD.
    Live snapshot path:
    `<state-repo>/snapshots/disk_snapshot.json` (legacy
@@ -231,6 +231,8 @@ free-space alert, an investigation), do this **without being asked**, then act:
    producer first (ask before pausing CI runners) rather than loop.
 
 ## 6-tier routine cleanup stack — unified safe maintenance
+
+> The jobs in this section belong to the retired Python runtime and are not installed. Their windows are historical; current defaults come only from `rust/src/time_windows.rs`, and the active native templates are rendered with `scripts/render_template.py`.
 
 **Emergency reclaim order:** Use the repo’s [diskm skill](../.agents/skills/diskm/SKILL.md) and the user-scope `disk-reclaim-playbook` skill. The first steps find the producer, apply per-worktree sparse exclusion where appropriate, and reclaim then trim Linux Scratch. Those steps accounted for ~108 of ~250 GiB recovered on 2026-11-13. The six tiers below cover routine maintenance.
 
@@ -566,7 +568,7 @@ live or unknown lease owner, AO ownership, live cwd, open file, volume identity,
 secret-like or ignored user data, an unverified/dependent remote, unreachable Git
 objects, content written within the last hour (`kept:recent-activity`), or
 unmeasurable mtime. Otherwise one
-proof suffices: age (class floor, worktrees 48 h, `DISK_MAGICIAN_AGE_FLOOR_MINUTES` >= 120),
+proof suffices: age (class floor, worktrees at the default content floor, `DISK_MAGICIAN_AGE_FLOOR_MINUTES` >= 120),
 on-origin, rescued (`scripts/lib/rescue_ref.sh` pushes `refs/diskm-rescue/...` first),
 rebuildable, producer-released, operator-named (`DISK_MAGICIAN_OPERATOR_TARGETS`).
 Dirty or unpushed repositories require a successful complete rescue to an
@@ -645,7 +647,7 @@ contradicted it. Check them in this order before proposing a reclaim change:
   (raw value preserved at `snapshot_metadata.coverage_pct_raw_v1`);
   `residual_gb`/`residual_delta_gb` track unmeasured space;
   `topdown_coverage` embeds the nightly frontier scan when
-  `~/.disk_magician_state/frontier_last.json` is <36h old.
+  `~/.disk_magician_state/frontier_last.json` is younger than `SNAPSHOT_STALE_AFTER` (`rust/src/time_windows.rs`).
 - Backup/history repo: `~/.disk_magician_backup` (host profile
   `backup/jeffreys-macbook-pro/`); full history is anchored by branch
   `archive/pre-reset-20260711` — do not `git gc --prune` there casually.

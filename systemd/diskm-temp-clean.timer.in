@@ -2,7 +2,8 @@
 Description=Hourly cleanup of managed temp files
 
 [Timer]
-OnCalendar=hourly
+OnBootSec=@TEMP_SWEEP_INTERVAL_SECONDS@s
+OnUnitActiveSec=@TEMP_SWEEP_INTERVAL_SECONDS@s
 Persistent=true
 
 [Install]

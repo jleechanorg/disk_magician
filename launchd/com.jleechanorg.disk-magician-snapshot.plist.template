@@ -19,7 +19,7 @@
     <string>timer</string>
   </dict>
   <key>StartInterval</key>
-  <integer>1800</integer>
+  <integer>@SNAPSHOT_INTERVAL_SECONDS@</integer>
   <key>StandardOutPath</key>
   <string>@HOME@/Library/Logs/disk-magician-snapshot.log</string>
   <key>StandardErrorPath</key>

@@ -33,3 +33,40 @@ pub const HISTORY_DAYS: u32 = 7;
 /// Age after which the reclaim report is flagged stale, in hours.
 /// `DISK_MAGICIAN_LEDGER_STALE_HOURS` overrides it.
 pub const LEDGER_STALE_HOURS: f64 = 48.0;
+
+/// A snapshot older than this is reported stale by `status`.
+pub const SNAPSHOT_STALE_AFTER: Duration = Duration::from_secs(36 * 60 * 60);
+
+/// Scheduler cadences and run budgets. Templates in `launchd/` and `systemd/`
+/// carry `@<NAME>_SECONDS@` placeholders that `scripts/render_template.sh`
+/// fills from `diskm time-windows`.
+pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30 * 60);
+pub const SCRATCH_PRESSURE_INTERVAL: Duration = Duration::from_secs(20 * 60);
+pub const TEMP_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub const STATE_COMMIT_INTERVAL: Duration = Duration::from_secs(30 * 60);
+pub const EVIDENCE_HOLDS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub const SCRATCH_RECLAIM_TIMEOUT: Duration = Duration::from_secs(950);
+
+/// Every window above, by placeholder name, in seconds.
+pub fn listing() -> Vec<(&'static str, u64)> {
+    vec![
+        ("CONTENT_FLOOR", u64::from(CONTENT_FLOOR_HOURS) * 3600),
+        ("SCAN_DEADLINE", SCAN_DEADLINE.as_secs()),
+        ("INDEX_REFRESH_DEADLINE", INDEX_REFRESH_DEADLINE.as_secs()),
+        ("PREVIEW_CHECK_WINDOW", PREVIEW_CHECK_WINDOW.as_secs()),
+        ("OPEN_FILE_PROBE_TIMEOUT", OPEN_FILE_PROBE_TIMEOUT.as_secs()),
+        ("VOLUME_PROBE_TIMEOUT", VOLUME_PROBE_TIMEOUT.as_secs()),
+        ("HISTORY", u64::from(HISTORY_DAYS) * 86_400),
+        ("LEDGER_STALE", (LEDGER_STALE_HOURS * 3600.0) as u64),
+        ("SNAPSHOT_STALE_AFTER", SNAPSHOT_STALE_AFTER.as_secs()),
+        ("SNAPSHOT_INTERVAL", SNAPSHOT_INTERVAL.as_secs()),
+        (
+            "SCRATCH_PRESSURE_INTERVAL",
+            SCRATCH_PRESSURE_INTERVAL.as_secs(),
+        ),
+        ("TEMP_SWEEP_INTERVAL", TEMP_SWEEP_INTERVAL.as_secs()),
+        ("STATE_COMMIT_INTERVAL", STATE_COMMIT_INTERVAL.as_secs()),
+        ("EVIDENCE_HOLDS_INTERVAL", EVIDENCE_HOLDS_INTERVAL.as_secs()),
+        ("SCRATCH_RECLAIM_TIMEOUT", SCRATCH_RECLAIM_TIMEOUT.as_secs()),
+    ]
+}

@@ -19,7 +19,7 @@
     <string>@HOME@</string>
   </dict>
   <key>StartInterval</key>
-  <integer>3600</integer>
+  <integer>@TEMP_SWEEP_INTERVAL_SECONDS@</integer>
   <key>StandardOutPath</key>
   <string>@HOME@/Library/Logs/disk-magician-tmp-scratch.log</string>
   <key>StandardErrorPath</key>

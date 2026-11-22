@@ -20,7 +20,7 @@
     <string>@HOME@</string>
   </dict>
   <key>StartInterval</key>
-  <integer>1200</integer>
+  <integer>@SCRATCH_PRESSURE_INTERVAL_SECONDS@</integer>
   <key>StandardOutPath</key>
   <string>@HOME@/Library/Logs/disk-magician-scratch-pressure.log</string>
   <key>StandardErrorPath</key>

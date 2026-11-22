@@ -23,7 +23,7 @@
     <string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StartInterval</key>
-  <integer>1800</integer>
+  <integer>@STATE_COMMIT_INTERVAL_SECONDS@</integer>
   <key>StandardOutPath</key>
   <string>@HOME@/Library/Logs/disk-magician-state-commit.log</string>
   <key>StandardErrorPath</key>

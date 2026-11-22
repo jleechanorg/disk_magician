@@ -11,7 +11,6 @@ use std::{
 
 const LEDGER_FILE: &str = "ledger/topdown-5g.status.json";
 const SNAPSHOT_FILE: &str = "snapshots/disk_snapshot.json";
-const STALE_AFTER: u64 = 36 * 60 * 60;
 const MIN_COVERAGE: f64 = 70.0;
 
 #[derive(Debug, Serialize)]
@@ -169,7 +168,7 @@ fn read_snapshot(dir: &Path, now: u64) -> SnapshotReport {
         Ok(value) => (value, None),
         Err(reason) => (None, Some(reason)),
     };
-    let state = if age_seconds > STALE_AFTER {
+    let state = if age_seconds > crate::time_windows::SNAPSHOT_STALE_AFTER.as_secs() {
         ObservationState::Stale
     } else if measurement_error.is_some() || coverage_error.is_some() || coverage_pct.is_none() {
         ObservationState::Unknown
@@ -190,7 +189,10 @@ fn read_snapshot(dir: &Path, now: u64) -> SnapshotReport {
         ObservationState::Partial => measurement_status
             .as_deref()
             .map(|measurement| format!("measurement_status_{measurement}")),
-        ObservationState::Stale => Some("snapshot_older_than_36_hours".into()),
+        ObservationState::Stale => Some(format!(
+            "snapshot_older_than_{}_hours",
+            crate::time_windows::SNAPSHOT_STALE_AFTER.as_secs() / 3600
+        )),
         ObservationState::Unknown => measurement_error
             .map(str::to_owned)
             .or_else(|| coverage_error.map(str::to_owned))
@@ -348,7 +350,7 @@ fn read_ledger(dir: &Path, now: u64) -> LedgerReport {
         );
     };
     let state = match publication.as_deref() {
-        _ if age > STALE_AFTER => ObservationState::Stale,
+        _ if age > crate::time_windows::SNAPSHOT_STALE_AFTER.as_secs() => ObservationState::Stale,
         Some("partial") => ObservationState::Partial,
         Some("published") if mode.as_deref() == Some("partial") => ObservationState::Partial,
         Some("published") if mode.as_deref() == Some("complete") => ObservationState::Fresh,
