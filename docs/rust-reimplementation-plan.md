@@ -36,8 +36,14 @@ A preview grants no deletion authority. `scratch-target-apply` accepts a hash-pi
 rechecks the exact file, cutoff, mount, producer lease and open-file status.
 The first actuator handles single-link files in completed native build bundles
 whose producer has exited. An observable process working directory inside a
-completed build bundle also holds its files. Evidence, unmanaged Scratch and whole-directory
-removal still need native policy and verification.
+completed build bundle also holds its files. The operator or evidence publisher
+can record an exact canonical file or directory and its PR reference in
+`evidence-holds.json` under the Disk Magician state directory. Use a JSON
+object that maps absolute paths to PR links. Publish holds before the producing
+lease finishes and keep them until the evidence is released. Preview and apply
+hold every matching path and defer when the hold file is unreadable. Automatic
+discovery of external PR references, unmanaged Scratch and whole-directory
+removal remain open.
 
 `scratch-temp-file REPO PURPOSE` allocates one leased file in `/tmp` with mode
 0600. Use `scratch-finish` after use and `scratch-manifest --root system-tmp` to

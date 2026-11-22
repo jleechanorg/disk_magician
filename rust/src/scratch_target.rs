@@ -662,6 +662,19 @@ fn restored_entry_metadata(root: &Root, relative: &str) -> io::Result<fs::Metada
 
 pub(crate) fn check_build_lease(root: &Path, relative: &Path) -> Result<(), &'static str> {
     let bundle = build_bundle(root, relative)?;
+    let state = crate::job_receipt::state_dir(None).map_err(|_| "deferred:evidence-holds")?;
+    let holds = read_json_if_exists::<std::collections::HashMap<PathBuf, String>>(
+        &state.join("evidence-holds.json"),
+        MAX_MANIFEST_BYTES,
+    )
+    .map_err(|_| "deferred:evidence-holds")?;
+    if holds.is_some_and(|holds| {
+        holds
+            .keys()
+            .any(|held| root.join(relative).starts_with(held))
+    }) {
+        return Err("kept:pr-evidence");
+    }
     check_completed_build(root, &bundle)
 }
 

@@ -45,14 +45,9 @@ pub struct LedgerPathHint {
     pub canonical_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct LedgerSummary {
     pub rows: Vec<LedgerPathHint>,
-}
-
-#[derive(Deserialize)]
-struct Ledger {
-    rows: Vec<LedgerPathHint>,
 }
 
 /// Resolve the same host temp locations that the canonical tmp sweeper uses.
@@ -167,7 +162,7 @@ pub fn canonical_temp_scopes(
 pub fn read_ledger(state_dir: &Path) -> io::Result<LedgerSummary> {
     let path = state_dir.join(LEDGER_PATH);
     let bytes = crate::job_receipt::read_bounded(&path, MAX_LEDGER_BYTES)?;
-    let ledger: Ledger = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let ledger: LedgerSummary = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     Ok(LedgerSummary {
         rows: ledger
             .rows

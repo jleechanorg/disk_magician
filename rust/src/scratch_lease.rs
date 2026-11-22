@@ -1,11 +1,12 @@
 //! Lock-free metadata for managed Scratch bundles.
 //! Immutable bundle and finish records let producers operate independently.
 
+use crate::job_receipt::create_once;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -389,27 +390,6 @@ fn owner_process_state(expected: &ProcessOwner) -> OwnerProcessState {
         Err(error) if error.kind() == io::ErrorKind::NotFound => OwnerProcessState::Exited,
         Err(_) => OwnerProcessState::Unavailable,
     }
-}
-
-fn create_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temp = path.with_extension(format!("tmp-{}-{}", std::process::id(), now_ns()?));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    if let Err(error) = fs::hard_link(&temp, path) {
-        let _ = fs::remove_file(&temp);
-        return Err(error);
-    }
-    fs::remove_file(temp)?;
-    File::open(
-        path.parent()
-            .ok_or_else(|| io::Error::other("lease record has no parent"))?,
-    )?
-    .sync_all()
 }
 
 fn create_bundle(args: &[OsString], system_tmp: bool) -> io::Result<String> {

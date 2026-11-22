@@ -166,23 +166,35 @@ pub fn publish_terminal(
         ));
     }
     let path = directory.join(format!("{run_id}.json"));
-    let temp = directory.join(format!(".{run_id}.tmp"));
+    let mut bytes = serde_json::to_vec(&document).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    create_once(&path, &bytes)?;
+    Ok(document)
+}
+
+pub(crate) fn create_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let temp = path.with_extension(format!("tmp-{}-{}", std::process::id(), nonce));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&temp)?;
-    let result = (|| {
-        serde_json::to_writer(&mut file, &document).map_err(io::Error::other)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        fs::hard_link(&temp, &path)?;
-        fs::remove_file(&temp)?;
-        File::open(&directory)?.sync_all()
-    })();
-    if result.is_err() {
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::hard_link(&temp, path));
+    if let Err(error) = result {
         let _ = fs::remove_file(&temp);
+        return Err(error);
     }
-    result?;
-    Ok(document)
+    fs::remove_file(temp)?;
+    File::open(
+        path.parent()
+            .ok_or_else(|| io::Error::other("record has no parent"))?,
+    )?
+    .sync_all()
 }
