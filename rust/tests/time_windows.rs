@@ -38,6 +38,9 @@ const ACTIVE_TEMPLATES: &[&str] = &[
     "systemd/diskm-temp-clean.timer.in",
     "systemd/diskm-scratch-reclaim.timer.in",
     "systemd/diskm-scratch-reclaim.service.in",
+    "launchd/com.jleechanorg.disk-magician-scratch-expired.plist.template",
+    "systemd/diskm-scratch-expired.service.in",
+    "systemd/diskm-scratch-expired.timer.in",
 ];
 
 #[test]
@@ -73,4 +76,35 @@ fn expired_sweep_windows_are_listed() {
     assert_eq!(secs("EXPIRED_SWEEP_INTERVAL"), 3600);
     assert_eq!(secs("EXPIRED_SWEEP_DEADLINE"), 600);
     assert_eq!(secs("GIT_REMOTE_PROBE_TIMEOUT"), 20);
+}
+
+#[test]
+fn expired_templates_run_the_expired_sweep() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let read = |name: &str| std::fs::read_to_string(root.join(name)).unwrap();
+    for template in [
+        "launchd/com.jleechanorg.disk-magician-scratch-expired.plist.template",
+        "systemd/diskm-scratch-expired.service.in",
+    ] {
+        let text = read(template);
+        assert!(
+            text.contains("scratch-sweep")
+                && text.contains("--expired")
+                && text.contains("--clean"),
+            "{template} must run scratch-sweep --expired --clean"
+        );
+    }
+    let timer = read("systemd/diskm-scratch-expired.timer.in");
+    for key in ["OnBootSec=", "OnUnitActiveSec="] {
+        assert!(
+            timer
+                .lines()
+                .any(|l| l.starts_with(key) && l.contains("@EXPIRED_SWEEP_INTERVAL_SECONDS@")),
+            "timer {key} must use the interval placeholder"
+        );
+    }
+    assert!(
+        !timer.contains("scratch-sweep"),
+        "a timer carries no command"
+    );
 }
