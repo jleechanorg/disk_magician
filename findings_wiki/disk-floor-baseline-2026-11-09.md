@@ -144,7 +144,7 @@ field. A partial-freshness result does not make incomplete observations eligible
 1. Follow the repository's fleet check and existing reclaim-ledger sequence before a live disk
    investigation. Compute the requested 7-day and 30-day minima from eligible captures; report each
    capture window, coverage, typical daily minimum, and current-minus-floor for the same filesystem.
-2. If the complete ledger is older than 48 hours, state the gap. If no eligible ledger exists,
+2. If the complete ledger is older than `LEDGER_STALE_HOURS` (`rust/src/time_windows.rs`), state the gap. If no eligible ledger exists,
    fall back to daily minima of `host_disk.used_kb` in
    `~/.disk_magician_state/disk_observer.jsonl{,.1,.2}`. State the earliest available date and the
    median daily minimum alongside the minimum; report missing observations explicitly. Use committed
