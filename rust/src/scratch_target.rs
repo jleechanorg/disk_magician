@@ -145,6 +145,15 @@ fn mounted_usage(root: &Root, filesystem_id: Option<&str>) -> io::Result<(String
     }
 }
 
+pub(crate) fn measure_usage(path: &Path, device: u64) -> io::Result<u64> {
+    let root = Root {
+        path: path.to_path_buf(),
+        dev: device,
+        ino: fs::symlink_metadata(path)?.ino(),
+    };
+    mounted_usage(&root, None).map(|(_, used)| used)
+}
+
 fn read_state(path: &Path) -> io::Result<Option<ResumeState>> {
     let file = match OpenOptions::new()
         .read(true)
@@ -568,6 +577,11 @@ fn restored_entry_metadata(root: &Root, relative: &str) -> io::Result<fs::Metada
 }
 
 pub(crate) fn check_build_lease(root: &Path, relative: &Path) -> Result<(), &'static str> {
+    let bundle = build_bundle(root, relative)?;
+    check_completed_build(root, &bundle)
+}
+
+pub(crate) fn build_bundle(root: &Path, relative: &Path) -> Result<PathBuf, &'static str> {
     let parts: Vec<_> = relative.components().collect();
     if parts.len() < 5
         || parts[0].as_os_str() != "runs"
@@ -579,8 +593,11 @@ pub(crate) fn check_build_lease(root: &Path, relative: &Path) -> Result<(), &'st
     {
         return Err("kept:unmanaged-or-protected");
     }
-    let bundle = root.join(parts[..4].iter().collect::<PathBuf>());
-    let verified = scratch_lease::lookup_bundle_under_root(&bundle, root)
+    Ok(root.join(parts[..4].iter().collect::<PathBuf>()))
+}
+
+pub(crate) fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static str> {
+    let verified = scratch_lease::lookup_bundle_under_root(bundle, root)
         .map_err(|_| "deferred:lease-unavailable")?;
     if !matches!(verified.lease.kind, BundleKind::Build) {
         return Err("kept:protected-bundle-kind");

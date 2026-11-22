@@ -46,8 +46,17 @@ neither name, the checkpoint reports an unresolved operation. A closed lease
 and an open-file observation depend on producer cooperation after the check.
 
 `snapshot --state-dir DIR` writes a partial capacity snapshot and a terminal
-receipt locally. Git state publication and replacement scheduled workers remain
-open. The known inventory deferrals still apply to existing unmanaged data.
+receipt locally. `scratch-sweep` uses the registered volume's configured trigger
+and target, a default 48-hour cutoff, and oldest-first managed-file selection.
+It previews by default. `--clean` writes an exact manifest, recovery request,
+checkpoint, and native receipt in the local state directory. An interrupted
+attempt can be recovered with its saved manifest and `scratch-target-apply`
+recovery options. The launchd and systemd Scratch templates call this binary
+directly.
+
+Before enabling the timers, add recovery of old attempts and forward progress
+past persistent holds or discovery deadlines. Host-temp mutation and scheduling,
+Git state publication, and qualification of existing unmanaged data remain open.
 
 Mac and Linux executable fixtures verified that exact apply removed the selected
 old file and preserved changed and open files. Recovery refused to overwrite

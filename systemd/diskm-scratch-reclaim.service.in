@@ -7,10 +7,6 @@ Type=oneshot
 Environment=DISK_MAGICIAN_CONFIG=@CONFIG_PATH@
 Environment=DISK_MAGICIAN_STATE_DIR=@STATE_PATH@
 Environment=DISK_MAGICIAN_TRIGGER=timer
-Environment=DISK_MAGICIAN_DELETION_LOG=@DELETION_LOG@
-# The LRU target is operator-approved. Scheduled cleanup keeps at least 48 hours.
-Environment=DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT=@SCRATCH_LRU_BUDGET_PCT@
-Environment=DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS=@SCRATCH_BUDGET_FLOOR_HOURS@
-ExecStart=/usr/bin/bash @ORCHESTRATOR@ tmp-scratch-sweep --scratch-only --clean
+ExecStart="%h/.local/bin/diskm" scratch-sweep --clean --min-hours @SCRATCH_BUDGET_FLOOR_HOURS@
 TimeoutStartSec=950
 Restart=no

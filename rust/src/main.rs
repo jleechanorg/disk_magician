@@ -1,6 +1,6 @@
 use diskm_shadow::{
     artifact_batch, artifact_discovery, history, preview, reclaim_report, scan, scratch_dir,
-    scratch_manifest, scratch_target, snapshot, status,
+    scratch_manifest, scratch_sweep, scratch_target, snapshot, status,
 };
 use serde::Serialize;
 use std::env;
@@ -25,6 +25,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-index refresh [--root scratch|system-tmp]
   diskm scratch-search --older-than Nh [--root scratch|system-tmp] [--limit N|--all]
   diskm snapshot [--path PATH] [--output FILE] [--state-dir DIR]
+  diskm scratch-sweep [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
   diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) --path ABSOLUTE_PATH [--path ...] | --paths-from FILE
   diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
@@ -63,6 +64,7 @@ enum Operation {
         cutoff: i64,
         paths: Vec<PathBuf>,
     },
+    ScratchSweep(scratch_sweep::Options),
     ScratchQualify {
         cutoff: i64,
         paths: Vec<PathBuf>,
@@ -121,6 +123,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         "-h" | "--help" | "help" => return Ok(Operation::Help),
         "snapshot" => return parse_snapshot(args),
         "scratch-manifest" => return parse_scratch_nomination(args, false),
+        "scratch-sweep" => return parse_scratch_sweep(args),
         "scratch-qualify" => return parse_scratch_nomination(args, true),
         "scratch-target-apply" => return parse_scratch_target_apply(args),
         "status" | "scan" | "history" | "preview" => {}
@@ -253,6 +256,25 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         }
         _ => unreachable!("command already validated"),
     }
+}
+
+fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let mut options = scratch_sweep::Options::default();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--clean") => options.clean = true,
+            Some("--min-hours") => options.min_hours = positive(&mut args, "--min-hours")?,
+            Some("--max-candidates") => options.limit = positive(&mut args, "--max-candidates")?,
+            Some("--deadline-ms") => {
+                options.deadline = Duration::from_millis(positive(&mut args, "--deadline-ms")?)
+            }
+            Some("--path") => options
+                .paths
+                .push(required_value(&mut args, "--path")?.into()),
+            _ => return Err(format!("unexpected scratch-sweep argument {arg:?}")),
+        }
+    }
+    Ok(Operation::ScratchSweep(options))
 }
 
 fn parse_snapshot(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
@@ -489,6 +511,13 @@ fn run(operation: Operation) -> io::Result<u8> {
                 print_json(&scratch_manifest::qualify_exact(
                     &paths, cutoff, options, jobs,
                 )?)?;
+            }
+        }
+        Operation::ScratchSweep(options) => {
+            let (report, complete) = scratch_sweep::run(&options)?;
+            print_json(&report)?;
+            if !complete {
+                return Ok(TEMPORARY_FAILURE);
             }
         }
         Operation::ScratchManifest { cutoff, paths } => {

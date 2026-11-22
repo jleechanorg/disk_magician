@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Every 20 minutes, run safe top-level Scratch pruning and the existing
-     quota reclaim. Each step requires the verified Scratch mount and the
-     available-space floor; the ordinary /tmp sweep keeps its hourly cadence. -->
+<!-- Every 20 minutes, check the registered Scratch quota and reclaim
+     qualified files in completed native build runs. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -10,26 +9,17 @@
   <key>ProgramArguments</key>
   <array>
     <string>@HOME@/.local/bin/diskm</string>
-    <string>tmp-scratch-sweep</string>
-    <string>--scratch-only</string>
+    <string>scratch-sweep</string>
     <string>--clean</string>
+    <string>--min-hours</string>
+    <string>@SCRATCH_BUDGET_FLOOR_HOURS@</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>DISK_MAGICIAN_TRIGGER</key>
     <string>scratch-pressure-timer</string>
-    <!-- Scheduled Scratch keeps at least 48 hours of content inactivity. -->
-    <key>DISK_MAGICIAN_SCRATCH_BUDGET_FLOOR_HOURS</key>
-    <string>@SCRATCH_BUDGET_FLOOR_HOURS@</string>
     <key>HOME</key>
     <string>@HOME@</string>
-    <!-- Authority: operator decision 2026-11-18 ("yes permanently hands off"), CLAUDE.md:237-265 -->
-    <key>DISK_MAGICIAN_SCRATCH_LRU_BUDGET_PCT</key>
-    <string>50</string>
-    <key>DISK_MAGICIAN_SCRATCH_DETAIL</key>
-    <string>off</string>
-    <key>DISK_MAGICIAN_SCRATCH_MIN_KB</key>
-    <string>262144</string>
   </dict>
   <key>StartInterval</key>
   <integer>1200</integer>

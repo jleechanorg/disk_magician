@@ -368,7 +368,7 @@ fn live_preview(
     )
 }
 
-fn current_cutoff(min_hours: u32) -> io::Result<i64> {
+pub(crate) fn current_cutoff(min_hours: u32) -> io::Result<i64> {
     let now = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

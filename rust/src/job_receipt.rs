@@ -50,6 +50,12 @@ pub(crate) fn timestamp(value: SystemTime) -> io::Result<String> {
     ))
 }
 
+pub enum Completion<'a> {
+    Success,
+    Partial(&'a str),
+    Error(&'a str),
+}
+
 /// Publish a terminal receipt through create-once publication and directory
 /// fsync. Concurrent runs never rewrite one another's records or take an
 /// application lock. Unknown byte counts stay JSON null.
@@ -57,7 +63,7 @@ pub fn publish_terminal(
     state: &Path,
     job: &str,
     started: SystemTime,
-    completion: Result<(), &str>,
+    completion: Completion<'_>,
     precondition: Value,
     postcondition: Value,
     publication: Value,
@@ -71,12 +77,11 @@ pub fn publish_terminal(
             "invalid job name",
         ));
     }
-    let outcome = if completion.is_ok() {
-        "success"
-    } else {
-        "error"
+    let (outcome, reason) = match completion {
+        Completion::Success => ("success", None),
+        Completion::Partial(reason) => ("partial", Some(reason)),
+        Completion::Error(reason) => ("error", Some(reason)),
     };
-    let reason = completion.err();
     let ended = SystemTime::now();
     let run_id = format!(
         "{:x}-{}-{:x}",
@@ -97,7 +102,7 @@ pub fn publish_terminal(
         "id": run_id,
         "run_id": run_id,
         "job": job,
-        "trigger": "native",
+        "trigger": std::env::var("DISK_MAGICIAN_TRIGGER").unwrap_or_else(|_| "native".into()),
         "identity": {
             "kind": "native_rust",
             "source_sha": std::env::var("DISKM_SOURCE_SHA").ok(),

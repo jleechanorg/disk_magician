@@ -31,6 +31,7 @@ pub mod scratch_index;
 pub mod scratch_lease;
 pub mod scratch_manifest;
 mod scratch_recovery;
+pub mod scratch_sweep;
 pub mod scratch_target;
 pub mod snapshot;
 pub mod status;
