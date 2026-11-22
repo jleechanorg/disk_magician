@@ -1,3 +1,15 @@
+---
+title: "2026-10-26 all-time low: FileProvider duplicates, temporary files, and worktree slimming"
+hostname: jeffreys-macbook-pro
+date: 2026-10-26
+status: active
+paths:
+  - /System/Volumes/Data
+  - /Users/jleechan/Library/CloudStorage/Dropbox/conversation-backups
+  - /Users/jleechan/Library/Application Support/FileProvider
+  - /Users/jleechan/projects_other/worktree_disk_trim
+---
+
 # 2026-10-26: All-Time Low `636 GiB Used / 224 GiB Avail (74%)` — Dropbox FileProvider Duplicate Prune, Sub-24h `/private/tmp` C14 Fixes, 29-Repo Worktree Slimming, Open-FD Log Truncation & `/learn` Wiki Push Invariant
 
 - **Date**: 2026-10-26
