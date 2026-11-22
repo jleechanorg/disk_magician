@@ -12,6 +12,8 @@
 
 Pin the active Rust baseline and reconcile overlapping cleanup changes before altering the same call paths. Use disposable registered Scratch fixtures for mutation tests. Live removal remains an explicit exact scope. Drain old scheduled writers before any installed writer switch and preserve existing recovery data.
 
+Before expanding a cleaner rewrite, run the read-only rollout preflight on each target host: dry-run the normal installed entry point against the registered root, confirm its holds include no `kept:unsafe-staging-root` or `deferred:staging-root`, read back the installed revision and scheduler state, and check the Evidence Gate schema for the intended claim. A host prerequisite that fails here is the next work item, ahead of further implementation.
+
 ## Current cleanup baseline
 
 The operator’s November 22 six-hour inventory recorded 98,872 Scratch candidates
