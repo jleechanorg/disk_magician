@@ -59,6 +59,10 @@ same `scratch-finish` command after use. For an exact host-temp manifest, select
 manifest SHA-256 and a resume file outside the cleanup scope. Keep the resume
 file with the manifest for interrupted-stage recovery.
 
+## Leased runs
+
+`diskm scratch-new <repo> <purpose> --kind build|evidence [--owner-pid PID]` allocates a leased run under `runs/`. Any process of the same user can later run `diskm scratch-finish "$OUT_DIR" completed` (or `abandoned`), so `OUT_DIR="$(diskm scratch-new ...)"` works even though that subshell exits at once. The cleaner removes files in a build run that is completed, abandoned, or never finished, once the recorded owner has exited. Each file still has to pass the 48-hour content floor and the open-file, live-directory, repository and PR-evidence checks. `--owner-pid` binds the run to a long-lived producer, and the run is kept while that process lives. Evidence runs and ad-hoc `scratch-dir` paths are never removed this way.
+
 ## Scheduled runs and installation
 
 Install the built `diskm` as a single executable. The `disk-magician` alias

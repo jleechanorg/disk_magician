@@ -700,7 +700,7 @@ pub(crate) fn build_bundle(root: &Path, relative: &Path) -> Result<PathBuf, &'st
     Ok(root.join(parts[..4].iter().collect::<PathBuf>()))
 }
 
-pub(crate) fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static str> {
+pub fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static str> {
     let verified = scratch_lease::lookup_bundle_under_root(bundle, root).map_err(|error| {
         match error.kind() {
             io::ErrorKind::NotFound => "kept:lease-missing",
@@ -713,10 +713,20 @@ pub(crate) fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'
     ) {
         return Err("kept:protected-bundle-kind");
     }
-    if !verified
-        .finish
-        .is_some_and(|finish| finish.outcome == FinishOutcome::Completed)
-    {
+    // A build run is disposable by its own declaration: completed, explicitly
+    // abandoned, or never finished by an owner that has since exited (checked
+    // below) all qualify. A temp file still needs an explicit completion.
+    let finished = match (&verified.lease.kind, &verified.finish) {
+        (BundleKind::Build, None) => true,
+        (BundleKind::Build, Some(finish)) => matches!(
+            finish.outcome,
+            FinishOutcome::Completed | FinishOutcome::Abandoned
+        ),
+        (_, finish) => finish
+            .as_ref()
+            .is_some_and(|finish| finish.outcome == FinishOutcome::Completed),
+    };
+    if !finished {
         return Err("kept:build-not-completed");
     }
     match verified.owner_process_state {
