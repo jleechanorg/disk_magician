@@ -150,12 +150,30 @@ fn bodies(nodes: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// Every open pull request for `query`, paginated through `gh api graphql`.
-pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
-    let mut requests = Vec::new();
+/// Civil date for days since the Unix epoch (Howard Hinnant's algorithm).
+fn civil(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Every open pull request whose creation date falls in `from..=to` (days
+/// since the epoch). GitHub search returns at most 1,000 results, so a larger
+/// range is split in half until each part fits; a single day over the limit
+/// holds the refresh.
+fn fetch_range(query: &str, from: i64, to: i64, requests: &mut Vec<PullRequest>) -> io::Result<()> {
+    let scoped = format!("{query} created:{}..{}", civil(from), civil(to));
     let mut after: Option<String> = None;
+    let mut fetched = 0u64;
     loop {
-        let mut variables = vec![("q", query)];
+        let mut variables = vec![("q", scoped.as_str())];
         if let Some(cursor) = after.as_deref() {
             variables.push(("after", cursor));
         }
@@ -165,7 +183,12 @@ pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
             .as_u64()
             .ok_or_else(|| io::Error::other("missing issueCount"))?;
         if total > SEARCH_LIMIT {
-            return Err(io::Error::other("search exceeds GitHub's result limit"));
+            if from >= to {
+                return Err(io::Error::other("one day exceeds GitHub's search limit"));
+            }
+            let middle = from + (to - from) / 2;
+            fetch_range(query, from, middle, requests)?;
+            return fetch_range(query, middle + 1, to, requests);
         }
         let (nodes, next) = page(search)?;
         for node in nodes.iter().filter(|node| node["url"].is_string()) {
@@ -190,11 +213,12 @@ pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
                 url: node["url"].as_str().unwrap_or_default().to_owned(),
                 texts,
             });
+            fetched += 1;
         }
         match next {
             Some(cursor) => after = Some(cursor),
             // Replace automatic holds only from a verified complete result.
-            None if total == requests.len() as u64 => return Ok(requests),
+            None if fetched == total => return Ok(()),
             None => {
                 return Err(io::Error::other(
                     "fetched fewer pull requests than the search reported",
@@ -202,6 +226,19 @@ pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
             }
         }
     }
+}
+
+/// Every open pull request for `query`, paginated through `gh api graphql`.
+pub fn fetch_github(query: &str) -> io::Result<Vec<PullRequest>> {
+    let today = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_secs() as i64
+        / 86_400;
+    // GitHub launched in 2008; nothing can be older than 2008-01-01.
+    let mut requests = Vec::new();
+    fetch_range(query, 13_879, today + 1, &mut requests)?;
+    Ok(requests)
 }
 
 /// Registered Scratch and system temp roots under every spelling.
