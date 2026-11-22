@@ -1,5 +1,14 @@
 # Disk Magician 🪄
 
+The native framework lives in [rust/](rust/README.md). Build it with
+`cargo build --locked --manifest-path rust/Cargo.toml`.
+
+The [reimplementation design](docs/rust-reimplementation-design.md) and
+[implementation plan](docs/rust-reimplementation-plan.md) track the legacy
+commands and jobs that still need Rust replacements. The sections below
+describe the previous release and its operating procedures.
+
+
 `disk_magician` is a generalized, zero-dependency utility to analyze local disk usage, validate snapshots, identify bloat (orphaned worktrees, caches, stale temp files), and run automated backup/history tracking using a serverless Git repository.
 
 Designed to work across macOS and Linux, it can be exposed as a skill/plugin for various agent environments (Claude, Codex, Hermes, Openclaw).
