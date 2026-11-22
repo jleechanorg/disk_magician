@@ -145,6 +145,9 @@ fn largest_blob(repo: &Path, commit: &str) -> io::Result<Option<(u64, String)>> 
 
 /// Exit 0 is clean, 1 is a finding; anything else (including a missing
 /// binary) means the scan is unavailable and publication holds.
+/// Scans a commit range; `Err(reason)` holds publication.
+pub type Scanner = fn(&Path, &str) -> io::Result<Result<(), &'static str>>;
+
 fn secret_scan(repo: &Path, range: &str) -> io::Result<Result<(), &'static str>> {
     let status = Command::new("gitleaks")
         .args([
@@ -175,6 +178,7 @@ pub fn observe(
     branch: &str,
     max_commits: usize,
     max_blob: u64,
+    scan: Scanner,
 ) -> io::Result<Plan> {
     let tracking = format!("refs/remotes/{remote}/{branch}");
     git(
@@ -228,7 +232,7 @@ pub fn observe(
         return Ok(hold("oversize_first_pending", stop));
     }
     let candidate = pending[accepted - 1].clone();
-    if let Err(reason) = secret_scan(repo, &format!("{upstream}..{candidate}"))? {
+    if let Err(reason) = scan(repo, &format!("{upstream}..{candidate}"))? {
         return Ok(hold(reason, json!({"candidate": candidate})));
     }
     Ok(Plan::Publish {
@@ -277,7 +281,7 @@ pub fn run(options: &Options) -> io::Result<(Value, u8)> {
     let started = SystemTime::now();
     let state = job_receipt::state_dir(options.state_dir.as_deref())?;
     let precondition = json!({"repo": options.repo, "remote": options.remote, "branch": options.branch, "max_commits": options.max_commits});
-    let outcome = observe(&options.repo, &options.remote, &options.branch, options.max_commits, MAX_BLOB_BYTES)
+    let outcome = observe(&options.repo, &options.remote, &options.branch, options.max_commits, MAX_BLOB_BYTES, secret_scan)
         .and_then(|plan| match plan {
             Plan::UpToDate { upstream } => Ok((json!({"status": "up_to_date", "upstream": upstream, "published": 0}), 0)),
             Plan::Hold { upstream, reason, detail } => Ok((json!({"status": "held", "reason": reason, "upstream": upstream, "detail": detail, "published": 0}), 75)),

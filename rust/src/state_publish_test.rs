@@ -1,6 +1,11 @@
 use super::*;
 use std::fs;
 
+/// Stands in for gitleaks where a test covers size, prefix or lease logic.
+fn clean(_: &Path, _: &str) -> io::Result<Result<(), &'static str>> {
+    Ok(Ok(()))
+}
+
 struct Fixture {
     root: PathBuf,
     work: PathBuf,
@@ -94,7 +99,7 @@ fn publishes_only_the_bounded_prefix() {
         count,
         remaining,
         ..
-    } = observe(&f.work, "origin", "main", 20, 1024).unwrap()
+    } = observe(&f.work, "origin", "main", 20, 1024, clean).unwrap()
     else {
         panic!("expected publish")
     };
@@ -115,7 +120,7 @@ fn stops_before_an_oversized_blob() {
         count,
         stop,
         ..
-    } = observe(&f.work, "origin", "main", 20, 1024).unwrap()
+    } = observe(&f.work, "origin", "main", 20, 1024, clean).unwrap()
     else {
         panic!("expected publish")
     };
@@ -129,7 +134,7 @@ fn holds_when_the_first_pending_commit_is_oversized() {
     let f = fixture("oversize-first");
     let before = remote_tip(&f.work);
     add(&f.work, "big.bin", &[7u8; 2048]);
-    let plan = observe(&f.work, "origin", "main", 20, 1024).unwrap();
+    let plan = observe(&f.work, "origin", "main", 20, 1024, clean).unwrap();
     assert!(
         matches!(&plan, Plan::Hold { reason, .. } if reason == "oversize_first_pending"),
         "{plan:?}"
@@ -148,7 +153,7 @@ fn holds_on_a_secret_scan_finding() {
         "config.env",
         format!("GITHUB_TOKEN={token}\n").as_bytes(),
     );
-    let plan = observe(&f.work, "origin", "main", 20, 1024).unwrap();
+    let plan = observe(&f.work, "origin", "main", 20, 1024, secret_scan).unwrap();
     // Without gitleaks the scan fails closed instead of reporting the finding.
     let scanner = Command::new("gitleaks")
         .arg("version")
@@ -174,7 +179,7 @@ fn refuses_when_the_remote_moved_after_observation() {
         upstream,
         candidate,
         ..
-    } = observe(&f.work, "origin", "main", 20, 1024).unwrap()
+    } = observe(&f.work, "origin", "main", 20, 1024, clean).unwrap()
     else {
         panic!("expected publish")
     };
@@ -199,7 +204,7 @@ fn reports_up_to_date_without_pushing() {
     let f = fixture("current");
     let before = remote_tip(&f.work);
     assert!(matches!(
-        observe(&f.work, "origin", "main", 20, 1024).unwrap(),
+        observe(&f.work, "origin", "main", 20, 1024, clean).unwrap(),
         Plan::UpToDate { .. }
     ));
     assert_eq!(remote_tip(&f.work), before);
