@@ -101,12 +101,17 @@ underestimated cumulative-reservoir growth):
 -1. **Verify the scheduled jobs are alive BEFORE trusting any floor/history
     number.** A floor computed from a dead collector is not a floor; report an
     unhealthy fleet as the primary finding. Installed is not running.
-    - macOS: the five `launchd/com.jleechanorg.disk-magician-*.plist.template`
-      jobs must each show a `run interval` in
+    - The native jobs are snapshot, scratch-pressure (Linux: scratch-reclaim),
+      tmp-scratch (Linux: temp-clean), state-commit and evidence-holds. Other
+      templates in `launchd/` belong to retired jobs and call commands native
+      `diskm` does not have; do not install them.
+    - macOS: each `launchd/com.jleechanorg.disk-magician-<job>.plist.template`
+      job must show a `run interval` in
       `launchctl print gui/$(id -u)/com.jleechanorg.disk-magician-<job>`.
-    - Linux: `systemctl --user list-timers` must list the five timers rendered
-      from `systemd/*.timer.in`, and `diskm volume path scratch` must succeed
+    - Linux: `systemctl --user list-timers` must list the timers rendered from
+      `systemd/*.timer.in`, and `diskm volume path scratch` must succeed
       (`diskm-scratch.service` mounts the Scratch image via its fstab entry).
+      State-commit is installed only where the host has its own backup remote.
     - Install or repair: render each template with
       `python3 scripts/render_template.py <template> <destination>` (it fills
       windows from `diskm time-windows`; pass other placeholders with `--set`),
