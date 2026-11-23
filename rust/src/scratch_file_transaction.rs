@@ -466,7 +466,7 @@ fn rename_exclusive(
 }
 
 pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
-    let Some(stdout) = run_lsof(&["-nP", "-t", "--"], Some(path))? else {
+    let Some(stdout) = run_lsof(default_lsof(), &["-nP", "-w", "-t", "--"], Some(path))? else {
         return Ok(Vec::new());
     };
     let pids: Vec<u32> = stdout
@@ -484,17 +484,37 @@ pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
 /// Whether any process has a file or working directory at or under `path`,
 /// from one listing of every open file. A failed or timed-out probe is an error.
 pub fn open_paths(path: &Path) -> io::Result<bool> {
+    open_paths_with(path, default_lsof())
+}
+
+fn default_lsof() -> &'static Path {
+    Path::new(if cfg!(target_os = "linux") {
+        "/usr/bin/lsof"
+    } else {
+        "/usr/sbin/lsof"
+    })
+}
+
+/// As `open_paths`, with the `lsof` executable named. The listing must parse:
+/// every line is a `p` (process) or `n` (name) field.
+pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
     let prefix = path.as_os_str().as_encoded_bytes();
-    Ok(run_lsof(&["-nP", "-F", "n"], None)?.is_some_and(|listing| {
-        listing
-            .lines()
-            .filter_map(|line| line.strip_prefix('n'))
-            .any(|name| {
-                let name = name.as_bytes();
-                name.starts_with(prefix)
-                    && matches!(name.get(prefix.len()), None | Some(b'/' | b' '))
-            })
-    }))
+    let Some(listing) = run_lsof(lsof, &["-nP", "-w", "-F", "n"], None)? else {
+        return Ok(false);
+    };
+    let mut found = false;
+    for line in listing.lines() {
+        match line.as_bytes().first() {
+            Some(b'p') => {}
+            Some(b'n') => {
+                let name = &line.as_bytes()[1..];
+                found |= name.starts_with(prefix)
+                    && matches!(name.get(prefix.len()), None | Some(b'/' | b' '));
+            }
+            _ => return Err(io::Error::other("unparsable lsof listing")),
+        }
+    }
+    Ok(found)
 }
 
 /// Run a command to completion within `limit`, draining stdout and stderr
@@ -561,26 +581,26 @@ pub fn run_capture(
     Ok((status, out.unwrap_or_default(), err.unwrap_or_default()))
 }
 
-/// Standard output of a successful `lsof`, or `None` when it found nothing.
-fn run_lsof(args: &[&str], path: Option<&Path>) -> io::Result<Option<String>> {
-    #[cfg(target_os = "linux")]
-    let lsof = "/usr/bin/lsof";
-    #[cfg(target_os = "macos")]
-    let lsof = "/usr/sbin/lsof";
+/// Standard output of `lsof`, or `None` when it found nothing. Exit status 1
+/// with a listing means some entries could not be read, which `lsof` reports
+/// beside a usable listing; any other failure is an error.
+fn run_lsof(lsof: &Path, args: &[&str], path: Option<&Path>) -> io::Result<Option<String>> {
     let (status, stdout, stderr) = run_capture(
         Command::new(lsof).args(args).args(path),
         None,
         crate::time_windows::OPEN_FILE_PROBE_TIMEOUT,
     )?;
-    let stdout = std::str::from_utf8(&stdout).map_err(io::Error::other)?;
-    let stderr = std::str::from_utf8(&stderr).map_err(io::Error::other)?;
-    if status.success() && stderr.is_empty() {
-        return Ok(Some(stdout.to_owned()));
+    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+    if !stdout.is_empty() && matches!(status.code(), Some(0 | 1)) {
+        return Ok(Some(stdout));
     }
-    if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {
+    if status.code() == Some(1) && stderr.is_empty() {
         return Ok(None);
     }
-    Err(io::Error::other(format!("lsof failed: {}", stderr.trim())))
+    Err(io::Error::other(format!(
+        "lsof failed: {}",
+        String::from_utf8_lossy(&stderr).trim()
+    )))
 }
 
 /// Rename without replacing anything at `to`; fails if `to` exists.

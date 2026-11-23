@@ -2,7 +2,7 @@
 //! two seconds pass, and the cutoff is one second ago, so every fixture is
 //! stale by both mtime and ctime until a test touches it.
 use diskm_shadow::scratch_expired::{
-    apply, independent, lease_protects, observe, plan, run_capture, sweep, Intent, Plan, Report,
+    apply, independent, lease_protects, observe, open_paths_with, plan, run_capture, sweep, Intent, Plan, Report,
     Run,
 };
 use diskm_shadow::scratch_lease::{BundleKind, OwnerProcessState};
@@ -1896,4 +1896,47 @@ fn run_capture_does_not_wait_for_a_descendant_holding_the_pipe() {
     let error = run_capture(&mut command, None, Duration::from_millis(500)).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+// ---- the open-file probe against a fake lsof ----
+
+fn fake_lsof(fx: &Fx, script: &str) -> PathBuf {
+    let path = fx.root.join("fake-lsof");
+    fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn lsof_warnings_with_a_usable_listing_do_not_fail_the_probe() {
+    let fx = Fx::new("fake-lsof-warn");
+    // Linux lsof warns about unreadable mounts and exits 1 or 0 beside a listing.
+    for status in [0, 1] {
+        let lsof = fake_lsof(
+            &fx,
+            &format!(
+                "echo 'lsof: WARNING: cannot stat() fuse file system' >&2\nprintf 'p1\\nn/elsewhere/x\\np2\\nn/held/dir/file\\n'\nexit {status}"
+            ),
+        );
+        assert!(open_paths_with(Path::new("/held/dir"), &lsof).unwrap());
+        assert!(!open_paths_with(Path::new("/held/other"), &lsof).unwrap());
+        // A sibling that merely shares a name prefix is not inside the path.
+        assert!(!open_paths_with(Path::new("/held/di"), &lsof).unwrap());
+    }
+}
+
+#[test]
+fn an_unparsable_or_failed_lsof_fails_closed() {
+    let fx = Fx::new("fake-lsof-bad");
+    for script in [
+        "echo 'garbage output'",
+        "printf 'p1\\nn/x\\nrubbish\\n'",
+        "echo 'lsof: error' >&2\nexit 2",
+        "echo 'lsof: error' >&2\nexit 1",
+        "exit 0",
+    ] {
+        let lsof = fake_lsof(&fx, script);
+        assert!(open_paths_with(Path::new("/held"), &lsof).is_err(), "{script}");
+    }
+    assert!(open_paths_with(Path::new("/held"), Path::new("/nonexistent/lsof")).is_err());
 }
