@@ -729,7 +729,7 @@ fn common_repo_with_external_worktree_holds() {
 }
 
 #[test]
-fn common_repo_with_internal_worktree_does_not_hold_by_itself() {
+fn internal_linked_worktree_holds() {
     let fx = Fx::new("common-internal");
     let unit = fx.root.join("u");
     init(&unit.join("repo"));
@@ -746,7 +746,9 @@ fn common_repo_with_internal_worktree_does_not_hold_by_itself() {
     );
     let cutoff = age();
     let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
-    assert!(plan.removals.contains(&unit));
+    // A linked worktree is held without exception, even beside its repository.
+    assert!(!plan.removals.contains(&unit));
+    assert!(why(&plan, "git-linked-worktree"), "{:?}", plan.kept);
 }
 
 #[test]
@@ -1373,6 +1375,10 @@ fn expired_with_a_conflicting_option_is_a_usage_error() {
 #[test]
 fn expired_without_a_registered_scratch_volume_is_a_usage_error() {
     let home = Fx::new("no-registry");
+    if cfg!(target_os = "linux") {
+        fs::create_dir_all(home.root.join("repo/config")).unwrap();
+        fs::write(home.root.join("repo/config/config.json"), "{}").unwrap();
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
         .args([
             "scratch-sweep",
@@ -1384,6 +1390,7 @@ fn expired_without_a_registered_scratch_volume_is_a_usage_error() {
         ])
         .env("HOME", &home.root)
         .env("DISK_MAGICIAN_STATE_DIR", &home.root)
+        .env("DISK_MAGICIAN_STATE_REPO", home.root.join("repo"))
         .output()
         .unwrap();
     let message = String::from_utf8_lossy(&output.stderr);
@@ -1430,7 +1437,7 @@ fn corrupt_gitfile_holds() {
     fs::create_dir_all(unit.join("repo")).unwrap();
     for text in ["garbage", "gitdir:", ""] {
         fs::write(unit.join("repo/.git"), text).unwrap();
-        assert!(why(&planned_after_age(&fx), "git-probe-failed"), "{text:?}");
+        assert!(planned_after_age(&fx).removals.is_empty(), "{text:?}");
     }
 }
 
@@ -1724,4 +1731,154 @@ fn hidden_entries_under_runs_are_not_candidates() {
         planned(&fx, cutoff).removals,
         vec![fx.root.join("runs/2026-11-22/repo/done")]
     );
+}
+
+// ---- round three: submodule stores, fresh scans, linked worktrees, deadline ----
+
+fn lender_with_bare(fx: &Fx) -> (PathBuf, PathBuf) {
+    let lender = fx.root.join("lender/repo");
+    init(&lender);
+    let bare = hosted(fx, &lender);
+    (lender, bare)
+}
+
+fn borrow_from(borrower_git_store: &Path, lender: &Path) {
+    let info = borrower_git_store.join("objects/info");
+    fs::create_dir_all(&info).unwrap();
+    fs::write(
+        info.join("alternates"),
+        format!("{}\n", lender.join(".git/objects").display()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn submodule_borrower_elsewhere_holds_the_lender() {
+    let fx = Fx::new("submodule-borrower");
+    let (lender, bare) = lender_with_bare(&fx);
+    let source = fx.root.parent().unwrap().join(format!(
+        "diskm-expired-submodule-borrower-{}-src",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    init(&source);
+    let superproject = fx.root.join("other/super");
+    init(&superproject);
+    git(
+        &superproject,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            source.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    borrow_from(&superproject.join(".git/modules/sub"), &lender);
+    let cutoff = age();
+    let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
+    let _ = fs::remove_dir_all(&source);
+    assert!(
+        !plan.removals.contains(&fx.root.join("lender")),
+        "{:?}",
+        plan.kept
+    );
+    assert!(why(&plan, "git-alternates-dependent"), "{:?}", plan.kept);
+}
+
+fn lender_run(fx: &Fx, cutoff: i64, bare: PathBuf) -> Run {
+    let mut run = git_run(fx, cutoff, Some(bare));
+    run.clean = true;
+    run.log = log_of(fx);
+    run.hooks.open = Box::new(|_| Ok(false));
+    run
+}
+
+#[test]
+fn a_new_borrower_repository_created_after_planning_restores_the_lender() {
+    let fx = Fx::new("new-borrower");
+    let (lender, bare) = lender_with_bare(&fx);
+    let cutoff = age();
+    let run = lender_run(&fx, cutoff, bare);
+    let planned = plan(&run).unwrap();
+    assert!(planned.removals.contains(&fx.root.join("lender")));
+    git(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            "--shared",
+            lender.to_str().unwrap(),
+            fx.root.join("brand-new/repo").to_str().unwrap(),
+        ],
+    );
+    let report = apply(&run, &planned).unwrap();
+    assert!(lender.join("f").exists(), "{:?}", report.deferred);
+    assert!(report
+        .removed
+        .iter()
+        .all(|(path, _)| path != &fx.root.join("lender")));
+}
+
+#[test]
+fn alternates_added_after_staging_restore_the_lender() {
+    let fx = Fx::new("alternates-after-stage");
+    let (lender, bare) = lender_with_bare(&fx);
+    let borrower = fx.root.join("borrower/repo");
+    init(&borrower);
+    let cutoff = age();
+    let mut run = lender_run(&fx, cutoff, bare);
+    let target = borrower.clone();
+    let original = lender.clone();
+    run.hooks.after_stage = Box::new(move |path, _| {
+        if path.ends_with("lender") {
+            borrow_from(&target.join(".git"), &original);
+        }
+    });
+    sweep(&run).unwrap();
+    assert!(lender.join("f").exists());
+    assert!(rows(&fx).iter().all(|row| !row.contains("lender")));
+}
+
+fn recovery_stage_with_repo(fx: &Fx) -> (PathBuf, PathBuf) {
+    let (item, _) = stage(fx, dead_pid(), "deleting", "lender-back", true);
+    // Keep the item directory itself: the intent records its identity.
+    init(&item.join("repo"));
+    let bare = hosted(fx, &item.join("repo"));
+    (item, bare)
+}
+
+#[test]
+fn deleting_stage_recovery_is_finished_without_a_borrower() {
+    let fx = Fx::new("recover-no-borrower");
+    let (item, bare) = recovery_stage_with_repo(&fx);
+    let cutoff = age();
+    let report = sweep(&lender_run(&fx, cutoff, bare)).unwrap();
+    assert!(!item.exists(), "{:?}", report.deferred);
+    assert!(!fx.root.join("lender-back").exists());
+}
+
+#[test]
+fn deleting_stage_recovery_rescans_borrowers() {
+    let fx = Fx::new("recover-borrower");
+    let (item, bare) = recovery_stage_with_repo(&fx);
+    let borrower = fx.root.join("borrower/repo");
+    init(&borrower);
+    // The borrower points at the stage's original location.
+    borrow_from(&borrower.join(".git"), &fx.root.join("lender-back/repo"));
+    let cutoff = age();
+    sweep(&lender_run(&fx, cutoff, bare)).unwrap();
+    assert!(fx.root.join("lender-back/repo/f").exists() && !item.exists());
+}
+
+#[test]
+fn run_capture_does_not_wait_for_a_descendant_holding_the_pipe() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "sleep 30 & exit 0"]);
+    let started = Instant::now();
+    let error = run_capture(&mut command, None, Duration::from_millis(500)).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(10));
 }

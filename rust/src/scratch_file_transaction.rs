@@ -8,6 +8,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -498,6 +499,9 @@ pub fn open_paths(path: &Path) -> io::Result<bool> {
 
 /// Run a command to completion within `limit`, draining stdout and stderr
 /// concurrently so a large listing cannot fill a pipe and stall the child.
+/// The whole collection is bounded by `limit`: a descendant that keeps a pipe
+/// open after the command exits is killed with its process group, never waited
+/// on.
 pub fn run_capture(
     command: &mut Command,
     input: Option<String>,
@@ -510,37 +514,51 @@ pub fn run_capture(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .process_group(0);
     let mut child = command.spawn()?;
     if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
         std::thread::spawn(move || stdin.write_all(text.as_bytes()));
     }
-    fn drain(stream: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let drain = |stream: Option<Box<dyn Read + Send>>, is_stdout: bool| {
+        let sender = sender.clone();
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             if let Some(mut stream) = stream {
                 let _ = stream.read_to_end(&mut bytes);
             }
-            bytes
-        })
-    }
-    let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
+            let _ = sender.send((is_stdout, bytes));
+        });
+    };
+    drain(child.stdout.take().map(|s| Box::new(s) as _), true);
+    drain(child.stderr.take().map(|s| Box::new(s) as _), false);
+    drop(sender);
+    let group = child.id() as libc::pid_t;
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if started.elapsed() > limit {
-            child.kill()?;
+            unsafe { libc::killpg(group, libc::SIGKILL) };
             child.wait()?;
             return Err(io::Error::new(io::ErrorKind::TimedOut, "probe timeout"));
         }
         std::thread::sleep(crate::time_windows::PROBE_POLL);
     };
-    let joined = |handle: std::thread::JoinHandle<Vec<u8>>| {
-        handle.join().map_err(|_| io::Error::other("reader"))
-    };
-    Ok((status, joined(out)?, joined(err)?))
+    let (mut out, mut err) = (None, None);
+    while out.is_none() || err.is_none() {
+        match receiver.recv_timeout(limit.saturating_sub(started.elapsed())) {
+            Ok((true, bytes)) => out = Some(bytes),
+            Ok((false, bytes)) => err = Some(bytes),
+            Err(_) => {
+                unsafe { libc::killpg(group, libc::SIGKILL) };
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "probe timeout"));
+            }
+        }
+    }
+    Ok((status, out.unwrap_or_default(), err.unwrap_or_default()))
 }
 
 /// Standard output of a successful `lsof`, or `None` when it found nothing.

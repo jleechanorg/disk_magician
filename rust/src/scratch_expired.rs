@@ -32,6 +32,8 @@ pub struct Observation {
     pub evidence: Vec<PathBuf>,
     /// `(alternates file, borrowed object directory)` pairs.
     pub alternates: Vec<(PathBuf, PathBuf)>,
+    /// Object stores seen: git directories, submodule modules, bare repos.
+    pub stores: Vec<PathBuf>,
 }
 
 fn nanos(seconds: i64, fraction: i64) -> i64 {
@@ -61,15 +63,63 @@ fn read_alternates(git_dir: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
         .collect())
 }
 
-fn alternates_of(git_dir: &Path, found: &mut Observation) {
-    if !git_dir.is_dir() {
-        return;
+/// Every object store behind a `.git` entry or bare repository: the git
+/// directory, submodule module directories, and for a gitfile its target. A
+/// linked worktree's store is its common repository's, found on its own.
+fn git_stores(entry: &Path) -> io::Result<Vec<PathBuf>> {
+    fn modules(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+        let children = match sorted_children(dir) {
+            Ok(children) => children,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for child in children.into_iter().filter(|child| child.is_dir()) {
+            if child.join("HEAD").is_file() {
+                out.push(child.clone());
+                modules(&child.join("modules"), out)?;
+            } else {
+                modules(&child, out)?;
+            }
+        }
+        Ok(())
     }
-    match read_alternates(git_dir) {
-        Ok(pairs) => found.alternates.extend(pairs),
+    let mut stores = Vec::new();
+    let home = if entry.is_file() {
+        match gitfile_target(entry) {
+            Some(target) if target.join("commondir").exists() => return Ok(stores),
+            Some(target) => target,
+            None => return Err(io::Error::other("unparsable gitfile")),
+        }
+    } else {
+        entry.to_path_buf()
+    };
+    modules(&home.join("modules"), &mut stores)?;
+    stores.push(home);
+    Ok(stores)
+}
+
+fn gitfile_target(file: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(file).ok()?;
+    let relative = text.trim().strip_prefix("gitdir:")?.trim().to_owned();
+    Some(lexical(&file.parent()?.join(relative)))
+}
+
+fn collect_stores(entry: &Path, found: &mut Observation) {
+    match git_stores(entry) {
+        Ok(stores) => {
+            for store in stores {
+                match read_alternates(&store) {
+                    Ok(pairs) => found.alternates.extend(pairs),
+                    Err(error) => found
+                        .gaps
+                        .push(format!("{}: alternates: {error}", store.display())),
+                }
+                found.stores.push(store);
+            }
+        }
         Err(error) => found
             .gaps
-            .push(format!("{}: alternates: {error}", git_dir.display())),
+            .push(format!("{}: git entry: {error}", entry.display())),
     }
 }
 
@@ -135,7 +185,7 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
         match name {
             ".git" => {
                 found.repos.push(path.clone());
-                alternates_of(&path, found);
+                collect_stores(&path, found);
                 continue;
             }
             "HEAD" if info.is_file() => bare[0] = true,
@@ -155,7 +205,7 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
     }
     if bare == [true; 3] {
         found.repos.push(dir.to_path_buf());
-        alternates_of(dir, found);
+        collect_stores(dir, found);
     }
 }
 
@@ -310,27 +360,23 @@ fn git_protected(
     let failed = Some("deferred:git-probe-failed");
     if git_dir.is_file() {
         // A gitfile: unparsable or unreadable fails closed; a target outside
-        // the candidate is someone else's repository; an internal target is
-        // judged as the repository it belongs to (superproject modules, the
-        // common directory of a linked worktree).
-        let Some(target) = fs::read_to_string(git_dir).ok().and_then(|text| {
-            let relative = text.trim().strip_prefix("gitdir:")?.trim().to_owned();
-            Some(lexical(&git_dir.parent()?.join(relative)))
-        }) else {
+        // the candidate is someone else's repository.
+        let Some(target) = gitfile_target(git_dir) else {
             return failed;
         };
         if !inside(&target) {
             return Some("kept:git-linked-worktree");
         }
-        let home = match fs::read_to_string(target.join("commondir")) {
-            Ok(text) => lexical(&target.join(text.trim())),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => target,
-            Err(_) => return failed,
-        };
-        return if home.is_dir() {
-            git_protected(&home, within, alts, hooks, true)
-        } else {
-            failed
+        // A linked worktree (its gitdir has a `commondir`) is held without
+        // exception: its owner cannot be established from Scratch. Anything
+        // else inside the candidate is a submodule or separate git directory,
+        // judged as the repository it is.
+        return match fs::symlink_metadata(target.join("commondir")) {
+            Ok(_) => Some("kept:git-linked-worktree"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && target.is_dir() => {
+                git_protected(&target, within, alts, hooks, true)
+            }
+            Err(_) => failed,
         };
     }
     // Alternates name the original location; map each prefix onto this repo.
@@ -516,9 +562,8 @@ pub struct Plan {
     pub removals: Vec<PathBuf>,
     pub kept: Vec<(PathBuf, String)>,
     pub alts: Vec<(PathBuf, PathBuf)>,
-    /// Every Git directory seen under the root, to re-read alternates at
-    /// removal time.
-    pub repos: Vec<PathBuf>,
+    /// Every object store seen under the root, to re-read alternates cheaply.
+    pub stores: Vec<PathBuf>,
     pub blind: bool,
     pub timed_out: bool,
 }
@@ -653,7 +698,7 @@ fn protection(
     for git_dir in &obs.repos {
         let own = repo_root(git_dir) == path;
         // One protected descendant already blocks removal; no more probes.
-        if !(own || full) || (!own && below.is_some()) {
+        if !own && (!full || below.is_some()) {
             continue;
         }
         let reason = if known.blind {
@@ -697,7 +742,7 @@ fn judge(c: &mut Ctx, path: PathBuf, obs: Observation) -> io::Result<()> {
 
 /// Judge every candidate under the Scratch root. Nothing is changed.
 pub fn plan(run: &Run) -> io::Result<Plan> {
-    let (mut units, mut alts, mut repos, mut blind) = (Vec::new(), Vec::new(), Vec::new(), false);
+    let (mut units, mut alts, mut stores, mut blind) = (Vec::new(), Vec::new(), Vec::new(), false);
     let (found, hidden) = candidates(&run.root)?;
     for (path, judged) in found
         .into_iter()
@@ -706,7 +751,7 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
     {
         let seen = observe(&path, run.device, run.deadline);
         alts.extend(seen.alternates.iter().cloned());
-        repos.extend(seen.repos.iter().filter(|dir| dir.is_dir()).cloned());
+        stores.extend(seen.stores.iter().filter(|dir| dir.is_dir()).cloned());
         blind |= !seen.complete;
         if judged {
             units.push((path, seen));
@@ -730,7 +775,7 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
         removals: ctx.removals,
         kept: ctx.kept,
         alts: ctx.known.alts,
-        repos,
+        stores,
         blind: ctx.known.blind,
         timed_out: Instant::now() >= run.deadline,
     })
@@ -846,12 +891,7 @@ fn make_writable(path: &Path) -> io::Result<()> {
 /// working directory. While finishing a half-removed tree only surviving
 /// files and links count toward freshness, because our own removals changed
 /// directory times.
-fn staged_ok(
-    run: &Run,
-    item: &Path,
-    intent: &Intent,
-    alts: &[(PathBuf, PathBuf)],
-) -> io::Result<bool> {
+fn staged_ok(run: &Run, item: &Path, intent: &Intent, known: &Known) -> io::Result<bool> {
     let original = run.root.join(&intent.original);
     let info = fs::symlink_metadata(item)?;
     let seen = observe(item, run.device, run.deadline);
@@ -874,9 +914,12 @@ fn staged_ok(
     {
         return Ok(false);
     }
-    if seen.repos.iter().any(|git_dir| {
-        git_protected(git_dir, &[item, &original], alts, &run.hooks, false).is_some()
-    }) {
+    // The borrower scan was incomplete: no repository can be proven unborrowed.
+    if (known.blind && !seen.repos.is_empty())
+        || seen.repos.iter().any(|git_dir| {
+            git_protected(git_dir, &[item, &original], &known.alts, &run.hooks, false).is_some()
+        })
+    {
         return Ok(false);
     }
     Ok(matches!((run.hooks.open)(item), Ok(false)))
@@ -956,11 +999,85 @@ fn restore(
     Ok(())
 }
 
-fn remove_unit(run: &Run, plan: &Plan, path: &Path, report: &mut Report) -> io::Result<()> {
+/// One pass over the whole root, reading directory entries only, for every
+/// object store; a directory it cannot read marks the scan incomplete.
+fn scan_stores(dir: &Path, deadline: Instant, out: &mut Vec<PathBuf>, complete: &mut bool) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        *complete = false;
+        return;
+    };
+    let (mut bare, mut subdirs) = ([false; 3], Vec::new());
+    for entry in entries {
+        let Ok((entry, kind)) = entry.and_then(|entry| entry.file_type().map(|kind| (entry, kind)))
+        else {
+            *complete = false;
+            continue;
+        };
+        match entry.file_name().to_str() {
+            Some(".git") => match git_stores(&entry.path()) {
+                Ok(stores) => out.extend(stores),
+                Err(_) => *complete = false,
+            },
+            Some("HEAD") if kind.is_file() => bare[0] = true,
+            Some("objects") if kind.is_dir() => bare[1] = true,
+            Some("refs") if kind.is_dir() => bare[2] = true,
+            _ => {}
+        }
+        if kind.is_dir() && entry.file_name() != ".git" {
+            subdirs.push(entry.path());
+        }
+    }
+    if bare == [true; 3] {
+        match git_stores(dir) {
+            Ok(stores) => out.extend(stores),
+            Err(_) => *complete = false,
+        }
+        return;
+    }
+    for sub in subdirs {
+        if Instant::now() >= deadline {
+            *complete = false;
+            return;
+        }
+        scan_stores(&sub, deadline, out, complete);
+    }
+}
+
+/// Holds and borrower dependencies as they are now, found by a fresh pass.
+fn fresh_known(run: &Run) -> io::Result<Known> {
+    let (mut stores, mut complete) = (Vec::new(), true);
+    scan_stores(&run.root, run.deadline, &mut stores, &mut complete);
+    let mut alts = Vec::new();
+    for store in &stores {
+        match read_alternates(store) {
+            Ok(pairs) => alts.extend(pairs),
+            Err(_) => complete = false,
+        }
+    }
+    Ok(Known {
+        holds: read_holds(&run.holds)?,
+        alts,
+        blind: !complete,
+    })
+}
+
+/// A unit renamed into its stage, awaiting the staged-tree check.
+struct Staged {
+    stage: PathBuf,
+    intent_path: PathBuf,
+    intent: Intent,
+}
+
+fn stage_unit(
+    run: &Run,
+    plan: &Plan,
+    path: &Path,
+    report: &mut Report,
+) -> io::Result<Option<Staged>> {
     let seen = observe(path, run.device, run.deadline);
     // Borrowers can appear after planning: re-read every known alternates file.
     let alts = plan
-        .repos
+        .stores
         .iter()
         .filter(|dir| dir.is_dir())
         .map(|dir| read_alternates(dir))
@@ -975,7 +1092,7 @@ fn remove_unit(run: &Run, plan: &Plan, path: &Path, report: &mut Report) -> io::
         report
             .deferred
             .push((path.to_path_buf(), "deferred:changed".into()));
-        return Ok(());
+        return Ok(None);
     }
     let info = fs::symlink_metadata(path)?;
     let name = format!(
@@ -988,7 +1105,7 @@ fn remove_unit(run: &Run, plan: &Plan, path: &Path, report: &mut Report) -> io::
     let dir = run.root.join(STAGES);
     let (stage, intent_path) = (dir.join(&name), dir.join(format!("{name}.intent")));
     fs::create_dir_all(&stage)?;
-    let mut intent = Intent {
+    let intent = Intent {
         state: "staged".into(),
         original: path
             .strip_prefix(&run.root)
@@ -1005,16 +1122,16 @@ fn remove_unit(run: &Run, plan: &Plan, path: &Path, report: &mut Report) -> io::
     fs::rename(path, &item)?;
     (run.hooks.after_stage)(path, &item);
     crashed(run, "staged")?;
-    if staged_ok(run, &item, &intent, &known.alts).unwrap_or(false) {
-        finish(run, &stage, &intent_path, &mut intent, report)
-    } else {
-        restore(run, &stage, &intent_path, &intent, report)
-    }
+    Ok(Some(Staged {
+        stage,
+        intent_path,
+        intent,
+    }))
 }
 
 /// Finish or undo the stages of dead processes; a live process's stage is
 /// never touched, and a dry run only lists them.
-fn recover(run: &Run, plan: &Plan, report: &mut Report) -> io::Result<()> {
+fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
     let dir = run.root.join(STAGES);
     let Ok(_) = fs::symlink_metadata(&dir) else {
         return Ok(());
@@ -1044,7 +1161,9 @@ fn recover(run: &Run, plan: &Plan, report: &mut Report) -> io::Result<()> {
         let mut intent: Intent =
             serde_json::from_slice(&fs::read(&intent_path)?).map_err(io::Error::other)?;
         let present = fs::symlink_metadata(&item).is_ok();
-        if intent.state == "deleting" && (!present || staged_ok(run, &item, &intent, &plan.alts)?) {
+        if intent.state == "deleting"
+            && (!present || staged_ok(run, &item, &intent, &fresh_known(run)?)?)
+        {
             finish(run, &stage, &intent_path, &mut intent, report)?;
         } else if present {
             restore(run, &stage, &intent_path, &intent, report)?;
@@ -1066,17 +1185,45 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     for (_, reason) in &plan.kept {
         *report.kept.entry(reason.clone()).or_default() += 1;
     }
-    recover(run, plan, &mut report)?;
+    recover(run, &mut report)?;
     if !run.clean {
         report.would_remove = plan.removals.clone();
         return Ok(report);
     }
+    let mut staged = Vec::new();
     for path in &plan.removals {
         if Instant::now() >= run.deadline {
             report.timed_out = true;
             break;
         }
-        remove_unit(run, plan, path, &mut report)?;
+        staged.extend(stage_unit(run, plan, path, &mut report)?);
+    }
+    if staged.is_empty() {
+        return Ok(report);
+    }
+    // Everything is staged before the one fresh borrower scan, so a borrower
+    // that appeared since planning, and one made while staging, is seen
+    // against each item's final location.
+    let known = fresh_known(run)?;
+    for mut unit in staged {
+        let item = unit.stage.join("item");
+        if staged_ok(run, &item, &unit.intent, &known).unwrap_or(false) {
+            finish(
+                run,
+                &unit.stage,
+                &unit.intent_path,
+                &mut unit.intent,
+                &mut report,
+            )?;
+        } else {
+            restore(
+                run,
+                &unit.stage,
+                &unit.intent_path,
+                &unit.intent,
+                &mut report,
+            )?;
+        }
     }
     Ok(report)
 }
