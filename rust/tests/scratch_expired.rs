@@ -1648,7 +1648,7 @@ fn borrower_created_after_planning_defers_the_lender() {
 #[test]
 fn restore_never_overwrites_a_destination_created_during_the_restore() {
     let fx = Fx::new("restore-race");
-    fx.file("a/f");
+    fx.file("a");
     let cutoff = age();
     let mut run = clean_run(&fx, cutoff);
     run.hooks.open = Box::new(|_| Err(std::io::Error::other("probe failed")));
