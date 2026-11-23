@@ -441,6 +441,9 @@ fn git_protected(
     let Ok(git_entry) = fs::symlink_metadata(git_dir) else {
         return failed;
     };
+    if git_entry.is_symlink() {
+        return failed;
+    }
     if git_entry.is_file() {
         // A gitfile: unparsable or unreadable fails closed; a target outside
         // the candidate is someone else's repository.
