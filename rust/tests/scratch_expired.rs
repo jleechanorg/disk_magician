@@ -2393,7 +2393,7 @@ fn core_worktree_through_an_internal_symlink_to_outside_holds() {
         std::process::id()
     ));
     fs::create_dir_all(&outside).unwrap();
-    std::os::unix::fs::symlink(&outside, unit.join("tree")).unwrap();
+    std::os::unix::fs::symlink(&outside, unit.join("repo/tree")).unwrap();
     git(&unit.join("repo"), &["config", "core.worktree", "../tree"]);
     let cutoff = age();
     let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
