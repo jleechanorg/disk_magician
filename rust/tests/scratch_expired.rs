@@ -1661,7 +1661,13 @@ fn restore_never_overwrites_a_destination_created_during_the_restore() {
     fx.file("a");
     let cutoff = age();
     let mut run = clean_run(&fx, cutoff);
-    run.hooks.open = Box::new(|_| Err(std::io::Error::other("probe failed")));
+    run.hooks.open = Box::new(|p| {
+        if p.to_string_lossy().contains(".diskm-expired") {
+            Err(std::io::Error::other("probe failed"))
+        } else {
+            Ok(false)
+        }
+    });
     let target = fx.root.join("a");
     run.hooks.crash = Box::new(move |point| {
         if point == "restore" {
@@ -2479,13 +2485,19 @@ fn restore_cause(setup: impl FnOnce(&mut Run)) -> String {
 #[test]
 fn a_restored_tree_reports_its_cause() {
     assert_eq!(
-        restore_cause(|run| run.hooks.open = Box::new(|_| Ok(true))),
+        restore_cause(
+            |run| run.hooks.open = Box::new(|p| Ok(p.to_string_lossy().contains(".diskm-expired")))
+        ),
         "deferred:restored:open-file"
     );
     assert_eq!(
-        restore_cause(
-            |run| run.hooks.open = Box::new(|_| Err(std::io::Error::other("lsof timeout")))
-        ),
+        restore_cause(|run| run.hooks.open = Box::new(|p| {
+            if p.to_string_lossy().contains(".diskm-expired") {
+                Err(std::io::Error::other("lsof timeout"))
+            } else {
+                Ok(false)
+            }
+        })),
         "deferred:restored:probe-error:lsof timeout"
     );
     assert_eq!(
