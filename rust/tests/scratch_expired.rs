@@ -2527,7 +2527,7 @@ fn each_tree_is_checked_right_after_it_is_staged_and_repo_less_trees_skip_the_sc
     fs::set_permissions(fx.root.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(
         *events.borrow(),
-        ["stage:a", "open", "open", "stage:b", "open", "open"]
+        ["open", "stage:a", "open", "open", "open", "stage:b", "open", "open"]
     );
     assert_eq!(report.removed.len(), 2, "{:?}", report.deferred);
 }
@@ -2988,4 +2988,20 @@ fn incomplete_observation_marks_report_incomplete() {
         1,
     );
     assert!(!r.complete());
+}
+
+#[test]
+fn pre_stage_open_check_skips_staging() {
+    let fx = Fx::new("pre-stage-open");
+    fx.file("live/f");
+    let mut run = clean_run(&fx, age());
+    let staged = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = staged.clone();
+    run.hooks.open = Box::new(|_| Ok(true));
+    run.hooks.after_stage = Box::new(move |_, _| {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let report = sweep(&run).unwrap();
+    assert!(!staged.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(fx.root.join("live/f").exists() && report.removed.is_empty());
 }

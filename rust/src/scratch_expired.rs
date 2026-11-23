@@ -683,20 +683,21 @@ pub struct Plan {
 }
 
 fn read_holds(path: &Path) -> io::Result<Vec<PathBuf>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice::<BTreeMap<PathBuf, String>>(&bytes)
-            .map_err(io::Error::other)?
-            .into_keys()
-            .collect()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error),
-    }
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    Ok(serde_json::from_slice::<BTreeMap<PathBuf, String>>(&bytes)
+        .map_err(io::Error::other)?
+        .into_keys()
+        .collect())
 }
 
 fn sorted_children(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut children = fs::read_dir(dir)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<io::Result<Vec<_>>>()?;
+    let mut children: Vec<_> = fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<io::Result<_>>()?;
     children.sort();
     Ok(children)
 }
@@ -710,8 +711,7 @@ fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
         let name = path.file_name().unwrap_or_default();
         if name == STAGES {
             continue;
-        }
-        if name.as_encoded_bytes().starts_with(b".") {
+        } else if name.as_encoded_bytes().starts_with(b".") {
             hidden.push(path);
         } else if name == "runs" && fs::symlink_metadata(&path)?.is_dir() {
             runs(&path, 0, &mut found, &mut hidden)?;
@@ -998,8 +998,8 @@ fn write_intent(path: &Path, intent: &Intent) -> io::Result<()> {
 }
 
 fn alive(pid: i32) -> bool {
-    (unsafe { libc::kill(pid, 0) } == 0)
-        || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    let e = || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    (unsafe { libc::kill(pid, 0) } == 0) || e()
 }
 
 fn allocated(path: &Path) -> u64 {
@@ -1113,10 +1113,9 @@ fn existing(path: &Path) -> io::Result<Option<fs::Metadata>> {
 }
 
 fn crashed(run: &Run, point: &str) -> io::Result<()> {
-    if (run.hooks.crash)(point) {
-        return Err(io::Error::other(format!("simulated crash at {point}")));
-    }
-    Ok(())
+    (!(run.hooks.crash)(point))
+        .then_some(())
+        .ok_or_else(|| io::Error::other(format!("simulated crash at {point}")))
 }
 
 /// Delete the staged item, then make the receipt durable, then drop the
@@ -1268,10 +1267,15 @@ fn stage_unit(
         blind: plan.blind || alts.is_err(),
     };
     let stale = seen.complete && seen.newest < run.cutoff;
-    if !stale || protection(run, &known, path, &seen, &[path], true)?.is_some() {
-        report
-            .deferred
-            .push((path.to_path_buf(), "deferred:changed".into()));
+    let open = (run.hooks.open)(path);
+    let held = !stale || protection(run, &known, path, &seen, &[path], true)?.is_some();
+    if held || !matches!(open, Ok(false)) {
+        let why = match open {
+            Ok(true) if !held => "deferred:open-file".into(),
+            Err(e) if !held => format!("deferred:probe-error:{e}"),
+            _ => "deferred:changed".into(),
+        };
+        report.deferred.push((path.to_path_buf(), why));
         return Ok(None);
     }
     let info = fs::symlink_metadata(path)?;
@@ -1447,9 +1451,6 @@ pub fn run(
         (false, true) => "deadline",
         (false, false) => "partial",
     };
-    let summary = report.summary();
-    Ok((
-        json!({"status":status,"clean":options.clean,"report":summary}),
-        ok,
-    ))
+    let body = json!({"status":status,"clean":options.clean,"report":report.summary()});
+    Ok((body, ok))
 }
