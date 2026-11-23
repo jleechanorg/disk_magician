@@ -495,6 +495,32 @@ fn default_lsof() -> &'static Path {
     })
 }
 
+fn unescape_lsof(s: &[u8]) -> Vec<u8> {
+    let (mut out, mut i) = (Vec::with_capacity(s.len()), 0);
+    while i < s.len() {
+        let b = if s[i] == b'\\' && i + 1 < s.len() {
+            i += 2;
+            match s[i - 1] {
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'x' if i + 2 <= s.len() => {
+                    let hex = std::str::from_utf8(&s[i..i + 2]).unwrap_or("");
+                    u8::from_str_radix(hex, 16)
+                        .inspect(|_| i += 2)
+                        .unwrap_or(b'x')
+                }
+                c => c,
+            }
+        } else {
+            i += 1;
+            s[i - 1]
+        };
+        out.push(b);
+    }
+    out
+}
+
 /// As `open_paths`, with the `lsof` executable named. The listing must parse:
 /// every line starts with an ASCII field letter (`p` process, `n` name, and on
 /// macOS also `f`, `t`, ...), at least one process line exists, and only name
@@ -513,6 +539,8 @@ pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
             return Err(io::Error::other("unparsable lsof listing"));
         }
         processes |= *field == b'p';
+        let dec = (*field == b'n' && name.contains(&b'\\')).then(|| unescape_lsof(name));
+        let name = dec.as_deref().unwrap_or(name);
         found |= *field == b'n'
             && name.starts_with(prefix)
             && matches!(name.get(prefix.len()), None | Some(b'/' | b' '));

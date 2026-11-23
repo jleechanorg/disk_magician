@@ -2950,3 +2950,28 @@ fn a_dot_git_symlink_is_not_proof() {
         planned.kept
     );
 }
+
+#[test]
+fn open_paths_with_decodes_escaped_lsof_names() {
+    let fx = Fx::new("lsof-escape");
+    let script = fx.root.join("fake-lsof");
+    let target = fx.root.join("dir\nwith\tnewline");
+    let escaped = format!(
+        "p123\nn{}/sock\n",
+        fx.root.join("dir\\nwith\\tnewline").display()
+    );
+    fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{escaped}'\n")).unwrap();
+    chmod(&script, 0o700);
+    assert!(open_paths_with(&target, &script).unwrap());
+}
+
+#[test]
+fn incomplete_observation_marks_report_incomplete() {
+    let fx = Fx::new("report-incomplete");
+    fx.file("locked/f");
+    let cutoff = age();
+    chmod(&fx.root.join("locked"), 0o000);
+    let report = sweep(&clean_run(&fx, cutoff)).unwrap();
+    chmod(&fx.root.join("locked"), 0o700);
+    assert!(!report.timed_out && !report.complete());
+}

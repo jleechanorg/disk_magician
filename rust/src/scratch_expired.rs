@@ -956,26 +956,23 @@ impl Report {
             "removed",
             self.removed
                 .iter()
-                .map(|(path, bytes)| json!([text(path), bytes]))
+                .map(|(p, b)| json!([text(p), b]))
                 .collect(),
         );
         let would_remove = capped(
             "would_remove",
-            self.would_remove
-                .iter()
-                .map(|path| json!(text(path)))
-                .collect(),
+            self.would_remove.iter().map(|p| json!(text(p))).collect(),
         );
         let deferred = capped(
             "deferred",
             self.deferred
                 .iter()
-                .map(|(path, why)| json!([text(path), why]))
+                .map(|(p, w)| json!([text(p), w]))
                 .collect(),
         );
         let interrupted = capped(
             "interrupted",
-            self.interrupted.iter().map(|row| json!(row)).collect(),
+            self.interrupted.iter().map(|r| json!(r)).collect(),
         );
         json!({"removed":removed,"would_remove":would_remove,"deferred":deferred,"interrupted":interrupted,
             "kept":self.kept,"truncated":truncated,"timed_out":self.timed_out})
@@ -983,6 +980,11 @@ impl Report {
 
     pub fn complete(&self) -> bool {
         !self.timed_out
+            && self.kept.get("deferred:incomplete").copied().unwrap_or(0) == 0
+            && !self
+                .deferred
+                .iter()
+                .any(|(_, r)| r.starts_with("incomplete"))
     }
 }
 
@@ -1043,12 +1045,7 @@ fn staged_ok(
     known: Option<&Known>,
 ) -> io::Result<Verdict> {
     use Verdict::Fail;
-    let short = |reason: &str| {
-        reason
-            .split_once(':')
-            .map_or(reason, |(_, rest)| rest)
-            .to_owned()
-    };
+    let short = |r: &str| r.split_once(':').map_or(r, |(_, s)| s).to_owned();
     let original = run.root.join(&intent.original);
     let info = fs::symlink_metadata(item)?;
     let seen = observe(item, run.device, run.deadline);
@@ -1136,18 +1133,15 @@ fn finish(
         if intent.state != "deleting" {
             intent.bytes = allocated(&item);
             let timestamp = crate::job_receipt::timestamp(std::time::SystemTime::now())?;
-            let path = run
-                .root
-                .join(&intent.original)
+            let p = run.root.join(&intent.original);
+            let path = p
                 .to_string_lossy()
                 .replace('\t', "\\t")
                 .replace('\r', "\\r")
                 .replace('\n', "\\n");
             let nonce = stage.file_name().unwrap_or_default().to_string_lossy();
-            intent.row = format!(
-                "{timestamp}\tdiskm-expired\tremove\t{}\t{path}\t{nonce}\n",
-                intent.bytes.div_ceil(1024)
-            );
+            let kb = intent.bytes.div_ceil(1024);
+            intent.row = format!("{timestamp}\tdiskm-expired\tremove\t{kb}\t{path}\t{nonce}\n");
             intent.state = "deleting".into();
             write_intent(intent_path, intent)?;
         }
@@ -1267,11 +1261,7 @@ fn stage_unit(
 ) -> io::Result<Option<Staged>> {
     let seen = observe(path, run.device, run.deadline);
     // Borrowers can appear after planning: re-read every known alternates file.
-    let alts = plan
-        .stores
-        .iter()
-        .map(|dir| read_alternates(dir))
-        .collect::<io::Result<Vec<_>>>();
+    let alts: io::Result<Vec<_>> = plan.stores.iter().map(|d| read_alternates(d)).collect();
     let known = Known {
         holds: read_holds(&run.holds)?,
         alts: alts.iter().flatten().flatten().cloned().collect(),
@@ -1285,22 +1275,20 @@ fn stage_unit(
         return Ok(None);
     }
     let info = fs::symlink_metadata(path)?;
-    let name = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos())
-    );
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |e| e.as_nanos());
+    let name = format!("{}-{ns}", std::process::id());
     let dir = run.root.join(STAGES);
     let (stage, intent_path) = (dir.join(&name), dir.join(format!("{name}.intent")));
     fs::create_dir_all(&stage)?;
+    let original = path
+        .strip_prefix(&run.root)
+        .map_err(io::Error::other)?
+        .to_path_buf();
     let intent = Intent {
         state: "staged".into(),
-        original: path
-            .strip_prefix(&run.root)
-            .map_err(io::Error::other)?
-            .to_path_buf(),
+        original,
         device: info.dev(),
         inode: info.ino(),
         newest: seen.newest,
@@ -1327,19 +1315,12 @@ fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
         return Ok(());
     }
     for intent_path in sorted_children(&dir)? {
-        let Some(name) = intent_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".intent"))
-        else {
+        let f = intent_path.file_name().and_then(|n| n.to_str());
+        let Some(name) = f.and_then(|n| n.strip_suffix(".intent")) else {
             continue;
         };
-        if name
-            .split('-')
-            .next()
-            .and_then(|pid| pid.parse::<i32>().ok())
-            .is_none_or(alive)
-        {
+        let pid = name.split('-').next().and_then(|p| p.parse::<i32>().ok());
+        if pid.is_none_or(alive) {
             continue;
         }
         if !run.clean {
@@ -1367,8 +1348,14 @@ fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
         if intent.state == "deleting" && (!present || cause.is_none()) {
             finish(run, &stage, &intent_path, &mut intent, report)?;
         } else if present {
-            let cause = cause.unwrap_or_default();
-            restore(run, &stage, &intent_path, &intent, &cause, report)?;
+            restore(
+                run,
+                &stage,
+                &intent_path,
+                &intent,
+                &cause.unwrap_or_default(),
+                report,
+            )?;
         } else {
             fs::remove_file(&intent_path)?;
             let _ = fs::remove_dir(&stage);
@@ -1382,7 +1369,7 @@ fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
 pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     let mut report = Report {
         timed_out: plan.timed_out,
-        ..Report::default()
+        ..Default::default()
     };
     for (_, reason) in &plan.kept {
         *report.kept.entry(reason.clone()).or_default() += 1;
@@ -1402,24 +1389,12 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
             continue;
         };
         let item = unit.stage.join("item");
+        let (s, p) = (&unit.stage, &unit.intent_path);
         match staged_ok(run, &item, &unit.intent, None)
             .unwrap_or_else(|error| Verdict::Fail(format!("check-error:{error}")))
         {
-            Verdict::Pass => finish(
-                run,
-                &unit.stage,
-                &unit.intent_path,
-                &mut unit.intent,
-                &mut report,
-            )?,
-            Verdict::Fail(cause) => restore(
-                run,
-                &unit.stage,
-                &unit.intent_path,
-                &unit.intent,
-                &cause,
-                &mut report,
-            )?,
+            Verdict::Pass => finish(run, s, p, &mut unit.intent, &mut report)?,
+            Verdict::Fail(cause) => restore(run, s, p, &unit.intent, &cause, &mut report)?,
             Verdict::NeedsScan => pending.push(unit),
         }
     }
@@ -1466,13 +1441,15 @@ pub fn run(
     run.log = crate::scratch_target::deletion_log_path()?;
     run.holds = state.join("evidence-holds.json");
     let report = sweep(&run)?;
-    let status = if report.complete() {
-        "expired_sweep"
-    } else {
-        "deadline"
+    let ok = report.complete();
+    let status = match (ok, report.timed_out) {
+        (true, _) => "expired_sweep",
+        (false, true) => "deadline",
+        (false, false) => "partial",
     };
+    let summary = report.summary();
     Ok((
-        json!({"status":status,"clean":options.clean,"report":report.summary()}),
-        report.complete(),
+        json!({"status":status,"clean":options.clean,"report":summary}),
+        ok,
     ))
 }
