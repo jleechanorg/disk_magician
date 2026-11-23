@@ -552,10 +552,11 @@ pub fn run_capture(
         let sender = sender.clone();
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            if let Some(mut stream) = stream {
-                let _ = stream.read_to_end(&mut bytes);
-            }
-            let _ = sender.send((is_stdout, bytes));
+            let read = match stream {
+                Some(mut stream) => stream.read_to_end(&mut bytes).map(|_| bytes),
+                None => Ok(bytes),
+            };
+            let _ = sender.send((is_stdout, read));
         });
     };
     drain(child.stdout.take().map(|s| Box::new(s) as _), true);
@@ -577,8 +578,8 @@ pub fn run_capture(
     let (mut out, mut err) = (None, None);
     while out.is_none() || err.is_none() {
         match receiver.recv_timeout(limit.saturating_sub(started.elapsed())) {
-            Ok((true, bytes)) => out = Some(bytes),
-            Ok((false, bytes)) => err = Some(bytes),
+            Ok((true, bytes)) => out = Some(bytes?),
+            Ok((false, bytes)) => err = Some(bytes?),
             Err(_) => {
                 unsafe { libc::killpg(group, libc::SIGKILL) };
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "probe timeout"));
