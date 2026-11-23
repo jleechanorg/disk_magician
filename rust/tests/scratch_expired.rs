@@ -2,8 +2,8 @@
 //! two seconds pass, and the cutoff is one second ago, so every fixture is
 //! stale by both mtime and ctime until a test touches it.
 use diskm_shadow::scratch_expired::{
-    apply, independent, lease_protects, observe, open_paths_with, plan, run_capture, sweep, Intent, Plan, Report,
-    Run,
+    apply, independent, lease_protects, observe, open_paths_with, plan, run_capture, sweep, Intent,
+    Plan, Report, Run,
 };
 use diskm_shadow::scratch_lease::{BundleKind, OwnerProcessState};
 use std::fs;
@@ -1936,7 +1936,10 @@ fn an_unparsable_or_failed_lsof_fails_closed() {
         "exit 0",
     ] {
         let lsof = fake_lsof(&fx, script);
-        assert!(open_paths_with(Path::new("/held"), &lsof).is_err(), "{script}");
+        assert!(
+            open_paths_with(Path::new("/held"), &lsof).is_err(),
+            "{script}"
+        );
     }
     assert!(open_paths_with(Path::new("/held"), Path::new("/nonexistent/lsof")).is_err());
 }
