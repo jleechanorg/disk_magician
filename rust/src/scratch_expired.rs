@@ -396,24 +396,20 @@ fn lexical(path: &Path) -> PathBuf {
     out
 }
 
-/// The precondition for any Git recovery proof: the whole gitdir is listable
-/// and every file Git may read is openable, because Git silently skips what it
-/// cannot read and then reports a clean count. Only regular files are opened
-/// (a socket or FIFO must not block or fail it). Object contents are not read:
-/// `objects/` and each of its subdirectories only need to be listable.
-fn readable(dir: &Path, top: bool) -> io::Result<()> {
+/// Precondition for Git recovery proof: gitdir is listable, symlink-free, and
+/// regular files are openable (`objects/` fanout dirs only checked listable).
+fn readable(dir: &Path, depth: u8) -> io::Result<()> {
     for child in sorted_children(dir)? {
         let info = fs::symlink_metadata(&child)?;
-        if info.is_file() {
-            fs::File::open(&child)?;
-        } else if info.is_dir() && top && child.file_name() == Some("objects".as_ref()) {
-            for sub in sorted_children(&child)? {
-                if fs::symlink_metadata(&sub)?.is_dir() {
-                    fs::read_dir(&sub)?;
-                }
-            }
+        let name = child.file_name().and_then(|n| n.to_str());
+        if info.is_symlink() {
+            return Err(io::Error::other("symlink"));
+        } else if info.is_dir() && depth == 1 && !matches!(name, Some("info" | "pack")) {
+            fs::read_dir(&child)?;
         } else if info.is_dir() {
-            readable(&child, false)?;
+            readable(&child, u8::from(depth != 0 || name != Some("objects")) + 1)?;
+        } else if info.is_file() {
+            fs::File::open(&child)?;
         }
     }
     Ok(())
@@ -487,10 +483,8 @@ fn git_protected(
     {
         return Some("kept:git-alternates-dependent");
     }
-    match readable(git_dir, true) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return failed,
+    if readable(git_dir, 0).is_err() {
+        return failed;
     }
     let Ok(config) = git(git_dir, &["config", "--local", "--list"], None) else {
         return failed;
@@ -818,6 +812,9 @@ fn protection(
         if !own && (!full || below.is_some()) {
             continue;
         }
+        if Instant::now() >= run.deadline {
+            return Ok(Some(("incomplete".into(), own)));
+        }
         let reason = if known.blind {
             Some("deferred:incomplete-alternates-scan")
         } else {
@@ -886,7 +883,11 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
         kept: Vec::new(),
     };
     for (path, seen) in units {
-        judge(&mut ctx, path, seen)?;
+        if Instant::now() >= run.deadline {
+            ctx.kept.push((path, "deferred:incomplete".into()));
+        } else {
+            judge(&mut ctx, path, seen)?;
+        }
     }
     Ok(Plan {
         removals: ctx.removals,
@@ -1052,10 +1053,8 @@ fn staged_ok(
         return Ok(Fail("identity".into()));
     }
     if !seen.complete {
-        return Ok(Fail(format!(
-            "incomplete:{}",
-            seen.gaps.first().map_or("", String::as_str)
-        )));
+        let gap = seen.gaps.first().map_or("", String::as_str);
+        return Ok(Fail(format!("incomplete:{gap}")));
     }
     if !seen.evidence.is_empty() {
         return Ok(Fail("evidence".into()));
@@ -1072,10 +1071,12 @@ fn staged_ok(
     if let Some(reason) = lease_of(run, &original, item) {
         return Ok(Fail(format!("lease-{}", short(reason))));
     }
-    match (run.hooks.open)(item) {
-        Ok(false) => {}
-        Ok(true) => return Ok(Fail("open-file".into())),
-        Err(error) => return Ok(Fail(format!("probe-error:{error}"))),
+    for target in [item, &original] {
+        match (run.hooks.open)(target) {
+            Ok(false) => {}
+            Ok(true) => return Ok(Fail("open-file".into())),
+            Err(error) => return Ok(Fail(format!("probe-error:{error}"))),
+        }
     }
     if seen.repos.is_empty() {
         return Ok(Verdict::Pass);

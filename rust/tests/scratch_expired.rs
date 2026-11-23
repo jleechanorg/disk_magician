@@ -2705,3 +2705,74 @@ fn an_unreadable_part_of_the_gitdir_in_recovery_restores() {
         );
     }
 }
+
+#[test]
+fn symlink_or_unreadable_pack_file_in_gitdir_holds_repo() {
+    for kind in ["symlink", "pack-file", "info-file"] {
+        let fx = Fx::new("gitdir-extra");
+        let repo = fx.root.join("u/repo");
+        unpushed_repo(&repo, "packed-refs");
+        let target = match kind {
+            "symlink" => {
+                let link = repo.join(".git/logs/HEAD");
+                fs::create_dir_all(link.parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(fx.root.join("missing"), &link).unwrap();
+                link
+            }
+            "pack-file" => {
+                let p = repo.join(".git/objects/pack/test.idx");
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(&p, b"idx").unwrap();
+                chmod(&p, 0o000);
+                p
+            }
+            _ => {
+                let p = repo.join(".git/objects/info/packs");
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+                fs::write(&p, b"P\n").unwrap();
+                chmod(&p, 0o000);
+                p
+            }
+        };
+        let planned = plan(&local_only_run(&fx, age()));
+        if kind != "symlink" {
+            chmod(&target, 0o700);
+        }
+        let planned = planned.unwrap();
+        assert!(
+            !planned.removals.contains(&fx.root.join("u")),
+            "{kind}: {:?}",
+            planned.kept
+        );
+    }
+}
+
+#[test]
+fn open_file_check_also_checks_original_path_when_staged() {
+    let fx = Fx::new("open-original");
+    let target = fx.root.join("sockdir");
+    fx.file("sockdir/sock");
+    let mut run = clean_run(&fx, age());
+    let orig = target.clone();
+    run.hooks.open = Box::new(move |path| Ok(path == orig));
+    let report = sweep(&run).unwrap();
+    assert!(target.exists() && report.removed.is_empty());
+}
+
+#[test]
+fn plan_stops_git_qualification_when_deadline_expires() {
+    let fx = Fx::new("plan-deadline");
+    let repo = fx.root.join("u/repo");
+    unpushed_repo(&repo, "refs");
+    let mut run = local_only_run(&fx, age());
+    let probed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = probed.clone();
+    run.hooks.independent = Box::new(move |_, _| {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        false
+    });
+    run.deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let planned = plan(&run).unwrap();
+    assert!(planned.timed_out && !probed.load(std::sync::atomic::Ordering::SeqCst));
+}
