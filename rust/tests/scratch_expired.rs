@@ -3219,3 +3219,74 @@ fn bare_repo_with_symlinked_git_dirs_is_protected() {
     assert!(!planned.removals.contains(&repo), "{:?}", planned.kept);
     let _ = fs::remove_dir_all(&ext);
 }
+
+#[test]
+fn grafted_unpublished_commit_holds() {
+    let fx = Fx::new("git-graft");
+    let repo = fx.root.join("u/repo");
+    init(&repo);
+    let bare = hosted(&fx, &repo);
+    let a = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    git(&repo, &["checkout", "--orphan", "o"]);
+    fs::write(repo.join("o.txt"), b"x").unwrap();
+    git(&repo, &["add", "o.txt"]);
+    git(&repo, &["commit", "-qm", "orphan"]);
+    let b = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    git(&repo, &["checkout", "-q", "main"]);
+    fs::write(
+        repo.join(".git/info/grafts"),
+        format!("{} {}\n", a.trim(), b.trim()),
+    )
+    .unwrap();
+    let mut run = clean_run(&fx, age());
+    run.hooks.independent = Box::new(|_, _| true);
+    run.hooks.tips = probe(bare);
+    let planned = plan(&run).unwrap();
+    assert!(
+        !planned.removals.contains(&fx.root.join("u")),
+        "{:?}",
+        planned.kept
+    );
+}
+
+#[test]
+fn recovery_restores_when_new_dir_added_during_deleting() {
+    let fx = Fx::new("recover-new-dir");
+    fx.file("folder/old");
+    let cutoff = age();
+    let stages = fx.root.join(".diskm-expired");
+    fs::create_dir_all(stages.join("999999-1/item")).unwrap();
+    fs::rename(fx.root.join("folder"), stages.join("999999-1/item")).unwrap();
+    let info = fs::symlink_metadata(stages.join("999999-1/item")).unwrap();
+    fs::write(
+        stages.join("999999-1.intent"),
+        serde_json::json!({
+            "state": "deleting", "original": "folder", "device": info.dev(),
+            "inode": info.ino(), "newest": cutoff - 1_000_000_000, "bytes": 0, "row": ""
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::create_dir_all(stages.join("999999-1/item/new-directory")).unwrap();
+    let report = sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(
+        fx.root.join("folder/new-directory").exists(),
+        "{:?}",
+        report.deferred
+    );
+    assert!(report.removed.is_empty());
+}

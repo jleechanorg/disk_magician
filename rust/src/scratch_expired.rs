@@ -16,9 +16,7 @@ use std::{collections::BTreeMap, fs, process::Command};
 /// What one complete walk of a unit saw.
 #[derive(Default)]
 pub struct Observation {
-    /// Newest mtime or ctime (ns) under unit plus root mtime, excluding `.git`.
     pub newest: i64,
-    /// Same over files/links only (directory times change during staged deletion).
     pub newest_file: i64,
     pub complete: bool,
     pub gaps: Vec<String>,
@@ -253,6 +251,11 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
         let changed = mtime(&info).max(nanos(info.ctime(), info.ctime_nsec()));
         found.newest = found.newest.max(changed);
         if info.is_dir() {
+            let b = info
+                .created()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+            found.newest_file = found.newest_file.max(b.map_or(0, |d| d.as_nanos() as i64));
             walk(&path, device, deadline, found);
         } else {
             found.newest_file = found.newest_file.max(changed);
@@ -264,16 +267,12 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
     }
 }
 
-// ---- Git protection: a repository holds unless recovery is proven ----
-
 fn bounded(command: &mut Command, input: Option<String>, limit: Duration) -> io::Result<String> {
     let (status, stdout, stderr) =
         run_capture(command.env("GIT_TERMINAL_PROMPT", "0"), input, limit)?;
     if !status.success() {
         return Err(io::Error::other(format!("exited with {status}")));
     }
-    // A command that succeeds yet complains proved nothing: it may have
-    // skipped what it could not read.
     if !stderr.is_empty() {
         let first = String::from_utf8_lossy(&stderr);
         let first = first.lines().next().unwrap_or_default();
@@ -282,22 +281,18 @@ fn bounded(command: &mut Command, input: Option<String>, limit: Duration) -> io:
     String::from_utf8(stdout).map_err(io::Error::other)
 }
 
-fn git(
-    git_dir: &Path,
-    args: &[&str],
-    input: Option<String>,
-    deadline: Instant,
-) -> io::Result<String> {
-    let rem = deadline.saturating_duration_since(Instant::now());
+fn git(d: &Path, args: &[&str], inp: Option<String>, dl: Instant) -> io::Result<String> {
+    let rem = dl.saturating_duration_since(Instant::now());
     if rem.is_zero() {
         return Err(io::Error::new(io::ErrorKind::TimedOut, "deadline"));
     }
     let mut cmd = Command::new("git");
-    cmd.arg("--git-dir")
-        .arg(git_dir)
+    cmd.arg("--no-replace-objects")
+        .arg("--git-dir")
+        .arg(d)
         .args(args)
-        .current_dir(repo_root(git_dir));
-    bounded(&mut cmd, input, GIT_REMOTE_PROBE_TIMEOUT.min(rem))
+        .current_dir(repo_root(d));
+    bounded(&mut cmd, inp, GIT_REMOTE_PROBE_TIMEOUT.min(rem))
 }
 
 /// Whether a remote URL names a hosted network destination that cannot be
@@ -576,6 +571,9 @@ fn git_protected(
         .filter(|l| !l.ends_with("missing"))
         .filter_map(|l| l.split(' ').next())
         .collect();
+    if !matches!(existing(&git_dir.join("info/grafts")), Ok(None)) {
+        return Some("kept:git-unrecovered-commits");
+    }
     let mut args = vec!["rev-list", "--all", "--reflog", "--count"];
     if !live.is_empty() {
         args.push("--not");
