@@ -1985,3 +1985,271 @@ fn a_listing_without_a_process_line_or_with_stray_lines_fails_closed() {
         assert!(open_paths_with(Path::new("/x"), &lsof).is_err(), "{script}");
     }
 }
+
+// ---- round four: relative alternates, module repositories, errors, names ----
+
+/// `alternates` text pointing at the lender by a path relative to the
+/// borrower's `objects` directory.
+fn borrow_relative(borrower_store: &Path, lender_store_objects: &Path) {
+    let base = borrower_store.join("objects");
+    let up = base
+        .strip_prefix(lender_store_objects.ancestors().nth(4).unwrap())
+        .unwrap();
+    let ups = "../".repeat(up.components().count());
+    let tail = lender_store_objects
+        .strip_prefix(lender_store_objects.ancestors().nth(4).unwrap())
+        .unwrap();
+    fs::create_dir_all(base.join("info")).unwrap();
+    fs::write(
+        base.join("info/alternates"),
+        format!("{ups}{}\n", tail.display()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn relative_alternates_protect_the_lender_at_planning() {
+    let fx = Fx::new("relative-plan");
+    let (lender, bare) = lender_with_bare(&fx);
+    let borrower = fx.root.join("borrower/repo");
+    init(&borrower);
+    borrow_relative(&borrower.join(".git"), &lender.join(".git/objects"));
+    let cutoff = age();
+    let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
+    assert!(
+        !plan.removals.contains(&fx.root.join("lender")),
+        "{:?}",
+        plan.kept
+    );
+    assert!(why(&plan, "git-alternates-dependent"), "{:?}", plan.kept);
+}
+
+#[test]
+fn relative_alternates_protect_the_lender_after_staging() {
+    let fx = Fx::new("relative-stage");
+    let (lender, bare) = lender_with_bare(&fx);
+    let borrower = fx.root.join("borrower/repo");
+    init(&borrower);
+    let cutoff = age();
+    let mut run = lender_run(&fx, cutoff, bare);
+    let (target, objects) = (borrower.clone(), lender.join(".git/objects"));
+    run.hooks.after_stage = Box::new(move |path, _| {
+        if path.ends_with("lender") {
+            borrow_relative(&target.join(".git"), &objects);
+        }
+    });
+    sweep(&run).unwrap();
+    assert!(lender.join("f").exists());
+    assert!(rows(&fx).iter().all(|row| !row.contains("lender")));
+}
+
+#[test]
+fn relative_alternates_protect_the_lender_in_recovery() {
+    let fx = Fx::new("relative-recover");
+    let (item, bare) = recovery_stage_with_repo(&fx);
+    let borrower = fx.root.join("borrower/repo");
+    init(&borrower);
+    borrow_relative(
+        &borrower.join(".git"),
+        &fx.root.join("lender-back/repo/.git/objects"),
+    );
+    let cutoff = age();
+    sweep(&lender_run(&fx, cutoff, bare)).unwrap();
+    assert!(fx.root.join("lender-back/repo/f").exists() && !item.exists());
+}
+
+fn deinitialized_submodule(fx: &Fx) -> (PathBuf, PathBuf, PathBuf) {
+    let source = fx.root.parent().unwrap().join(format!(
+        "diskm-expired-deinit-{}-src",
+        fx.root.file_name().unwrap().to_str().unwrap()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    init(&source);
+    let superproject = fx.root.join("u/super");
+    init(&superproject);
+    git(
+        &superproject,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            source.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(&superproject, &["commit", "-qm", "add sub"]);
+    let bare = hosted(fx, &superproject);
+    git(
+        &superproject.join("sub"),
+        &["commit", "--allow-empty", "-qm", "unpublished"],
+    );
+    git(&superproject, &["submodule", "deinit", "-q", "-f", "sub"]);
+    (source, superproject, bare)
+}
+
+fn module_blind_tips(bare: PathBuf) -> Box<dyn Fn(&Path, &str) -> std::io::Result<Vec<String>>> {
+    let super_tips = probe(bare);
+    Box::new(move |dir, name| {
+        if dir.to_string_lossy().contains("/modules/") {
+            Ok(Vec::new())
+        } else {
+            super_tips(dir, name)
+        }
+    })
+}
+
+#[test]
+fn deinitialized_submodule_with_unpublished_commits_holds() {
+    let fx = Fx::new("deinit");
+    let (source, superproject, bare) = deinitialized_submodule(&fx);
+    assert!(
+        !superproject.join("sub/.git").exists(),
+        "deinit left a gitfile"
+    );
+    let cutoff = age();
+    let mut run = git_run(&fx, cutoff, Some(bare.clone()));
+    run.hooks.tips = module_blind_tips(bare);
+    let plan = plan(&run).unwrap();
+    let _ = fs::remove_dir_all(&source);
+    assert!(
+        !plan.removals.contains(&fx.root.join("u")),
+        "{:?}",
+        plan.kept
+    );
+    assert!(why(&plan, "git-unrecovered-commits"), "{:?}", plan.kept);
+}
+
+#[test]
+fn module_commit_created_after_staging_restores() {
+    let fx = Fx::new("deinit-staged");
+    let (source, superproject, bare) = deinitialized_submodule(&fx);
+    // The module is fully published at planning time; only .git/modules changes.
+    let module = superproject.join(".git/modules/sub");
+    git(
+        &module,
+        &["push", "-q", "origin", "HEAD:refs/heads/published"],
+    );
+    let cutoff = age();
+    let mut run = lender_run(&fx, cutoff, bare.clone());
+    let module_remote = fx.root.parent().unwrap().join(format!(
+        "{}-remote.git",
+        fx.root.file_name().unwrap().to_str().unwrap()
+    ));
+    let _ = module_remote;
+    run.hooks.tips = Box::new(move |dir, name| {
+        let listing = git(
+            if dir.to_string_lossy().contains("/modules/") {
+                dir
+            } else {
+                &bare
+            },
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                "refs/heads",
+                "refs/tags",
+            ],
+        );
+        let _ = name;
+        Ok(listing.lines().map(str::to_owned).collect())
+    });
+    run.hooks.after_stage = Box::new(|_, item| {
+        let module = item.join("u/super/.git/modules/sub");
+        let module = if module.exists() {
+            module
+        } else {
+            item.join("super/.git/modules/sub")
+        };
+        git(&module, &["commit-tree", "-m", "late", "HEAD^{tree}"]);
+        git(
+            &module,
+            &[
+                "update-ref",
+                "refs/heads/late",
+                &git(
+                    &module,
+                    &["commit-tree", "-m", "late", "-p", "HEAD", "HEAD^{tree}"],
+                )
+                .trim()
+                .to_owned(),
+            ],
+        );
+    });
+    sweep(&run).unwrap();
+    let _ = fs::remove_dir_all(&source);
+    assert!(superproject.join("f").exists());
+}
+
+#[test]
+fn unreadable_worktrees_directory_holds() {
+    let fx = Fx::new("worktrees-unreadable");
+    let unit = fx.root.join("u");
+    init(&unit.join("repo"));
+    let bare = hosted(&fx, &unit.join("repo"));
+    let outside = fx.root.parent().unwrap().join(format!(
+        "diskm-expired-worktrees-unreadable-{}-wt",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&outside);
+    git(
+        &unit.join("repo"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            outside.to_str().unwrap(),
+        ],
+    );
+    let worktrees = unit.join("repo/.git/worktrees");
+    let cutoff = age();
+    fs::set_permissions(&worktrees, fs::Permissions::from_mode(0o000)).unwrap();
+    let plan = plan(&git_run(&fx, cutoff, Some(bare)));
+    fs::set_permissions(&worktrees, fs::Permissions::from_mode(0o700)).unwrap();
+    let _ = fs::remove_dir_all(&outside);
+    let plan = plan.unwrap();
+    assert!(!plan.removals.contains(&unit), "{:?}", plan.kept);
+}
+
+#[test]
+fn report_with_non_utf8_paths_does_not_panic() {
+    use std::os::unix::ffi::OsStrExt;
+    let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/r/bad\xff"));
+    let mut report = Report::default();
+    report.removed.push((odd.clone(), 1));
+    report.would_remove.push(odd.clone());
+    report.deferred.push((odd, "deferred:incomplete".into()));
+    let summary = report.summary();
+    assert!(summary["removed"][0][0]
+        .as_str()
+        .unwrap()
+        .starts_with("/r/bad"));
+}
+
+#[test]
+fn a_non_utf8_run_name_is_deferred_not_removed() {
+    use std::os::unix::ffi::OsStrExt;
+    let fx = Fx::new("non-utf8-run");
+    let dir = fx.root.join("runs/2026-11-22/repo");
+    fs::create_dir_all(&dir).unwrap();
+    let odd = dir.join(std::ffi::OsStr::from_bytes(b"run\xff"));
+    if fs::create_dir(&odd).is_err() {
+        return; // the filesystem refuses non-UTF-8 names (APFS)
+    }
+    fs::write(odd.join("f"), b"x").unwrap();
+    let cutoff = age();
+    let report = sweep(&clean_run(&fx, cutoff)).unwrap();
+    report.summary();
+    assert!(odd.join("f").exists());
+    assert!(
+        report
+            .kept
+            .keys()
+            .any(|reason| reason == "deferred:incomplete"),
+        "{:?}",
+        report.kept
+    );
+}
