@@ -2592,3 +2592,87 @@ fn a_matching_legacy_record_with_mistyped_fields_keeps_the_run() {
         );
     }
 }
+
+// ---- round eight: diagnostics and unreadable reflogs are not proof ----
+
+/// A commit that now exists only in the reflog: made, then reset away.
+fn reflog_only_commit(repo: &Path) {
+    fs::write(repo.join("g"), b"2").unwrap();
+    git(repo, &["add", "g"]);
+    git(repo, &["commit", "-qm", "reflog only"]);
+    git(repo, &["reset", "-q", "--hard", "HEAD~1"]);
+}
+
+fn lock(path: &Path) -> impl FnOnce() + '_ {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+    move || fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap()
+}
+
+#[test]
+fn unreadable_reflog_is_not_proof_at_planning() {
+    for target in [".git/logs", ".git/logs/HEAD"] {
+        let fx = Fx::new("logs-plan");
+        let unit = fx.root.join("u");
+        let repo = unit.join("repo");
+        init(&repo);
+        let bare = hosted(&fx, &repo);
+        reflog_only_commit(&repo);
+        let cutoff = age();
+        let unlock = lock(&repo.join(target));
+        let planned = plan(&git_run(&fx, cutoff, Some(bare)));
+        unlock();
+        let planned = planned.unwrap();
+        assert!(
+            !planned.removals.contains(&unit),
+            "{target}: {:?}",
+            planned.kept
+        );
+    }
+}
+
+#[test]
+fn unreadable_reflog_after_staging_restores() {
+    let fx = Fx::new("logs-stage");
+    let unit = fx.root.join("u");
+    let repo = unit.join("repo");
+    init(&repo);
+    let bare = hosted(&fx, &repo);
+    reflog_only_commit(&repo);
+    let cutoff = age();
+    let mut run = lender_run(&fx, cutoff, bare);
+    run.hooks.after_stage = Box::new(|_, item| {
+        fs::set_permissions(
+            item.join("repo/.git/logs"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+    });
+    let report = sweep(&run).unwrap();
+    let _ = fs::set_permissions(repo.join(".git/logs"), fs::Permissions::from_mode(0o700));
+    assert!(repo.join("f").exists(), "{:?}", report.deferred);
+    assert!(report.removed.is_empty());
+}
+
+#[test]
+fn unreadable_reflog_in_recovery_restores() {
+    let fx = Fx::new("logs-recover");
+    let (item, bare) = recovery_stage_with_repo(&fx);
+    reflog_only_commit(&item.join("repo"));
+    let cutoff = age();
+    let logs = item.join("repo/.git/logs");
+    let unlock = lock(&logs);
+    let swept = sweep(&lender_run(&fx, cutoff, bare));
+    let _ = fs::set_permissions(
+        fx.root.join("lender-back/repo/.git/logs"),
+        fs::Permissions::from_mode(0o700),
+    );
+    unlock_if_present(&logs, unlock);
+    swept.unwrap();
+    assert!(fx.root.join("lender-back/repo/f").exists() && !item.exists());
+}
+
+fn unlock_if_present(path: &Path, unlock: impl FnOnce()) {
+    if path.exists() {
+        unlock();
+    }
+}
