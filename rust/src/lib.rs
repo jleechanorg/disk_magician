@@ -41,6 +41,7 @@ pub mod state_publish;
 pub mod status;
 pub mod time_windows;
 mod volume_config;
+pub mod worktree_hygiene;
 
 #[cfg(target_os = "linux")]
 pub mod volume_linux;

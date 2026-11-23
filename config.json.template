@@ -1,6 +1,9 @@
 {
   "library_frontier_enabled": true,
-  "worktree_sparse_excludes": {"roadmap": ["dashboards/prw/telemetry"]},
+  "worktree_sparse_excludes": {
+    "roadmap": ["dashboards/prw/telemetry", "product/strategy/private-benchmark-runs"],
+    "user_scope": ["backup"]
+  },
   "monitored_dirs": [
     {
       "key": "claude_root",

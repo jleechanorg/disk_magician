@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Disk Magician worktree hygiene periodically
+
+[Timer]
+OnBootSec=@WORKTREE_HYGIENE_INTERVAL_SECONDS@s
+OnUnitActiveSec=@WORKTREE_HYGIENE_INTERVAL_SECONDS@s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
