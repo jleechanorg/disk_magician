@@ -481,8 +481,6 @@ pub struct Plan {
     pub timed_out: bool,
 }
 
-const DESCENT_DEPTH: u32 = 4;
-
 fn read_holds(path: &Path) -> io::Result<Vec<PathBuf>> {
     match fs::read(path) {
         Ok(bytes) => Ok(serde_json::from_slice::<BTreeMap<PathBuf, String>>(&bytes)
@@ -618,47 +616,23 @@ fn protection(
     Ok(below)
 }
 
-fn judge(c: &mut Ctx, path: PathBuf, obs: Observation, depth: u32) -> io::Result<()> {
-    // Only directories are units inside a descended folder; loose files and
-    // links beside active content are left.
-    if depth > 1 && !fs::symlink_metadata(&path)?.is_dir() {
-        c.kept.push((path, "kept:loose-in-active-folder".into()));
-        return Ok(());
-    }
+/// Judge one candidate whole: removed when stale, complete and free of
+/// protected content; otherwise kept whole. Active workspaces are never
+/// descended into.
+fn judge(c: &mut Ctx, path: PathBuf, obs: Observation) -> io::Result<()> {
     let stale = obs.complete && obs.newest < c.run.cutoff;
     let held = protection(c.run, &c.known, &path, &obs, &[&path], stale)?;
-    if let Some((reason, true)) = &held {
-        c.kept
-            .push((path, format!("kept:protected-subtree:{reason}")));
-        return Ok(());
-    }
-    if stale && held.is_none() {
-        c.removals.push(path);
-        return Ok(());
-    }
-    let reason = match &held {
-        Some((reason, _)) => format!("kept:protected-descendant:{reason}"),
+    let reason = match held {
+        Some((reason, true)) => format!("kept:protected-subtree:{reason}"),
+        Some((reason, false)) => format!("kept:protected-descendant:{reason}"),
         None if !obs.complete => "deferred:incomplete".into(),
-        None => "kept:fresh".into(),
-    };
-    let is_dir = fs::symlink_metadata(&path)?.is_dir();
-    let descend = is_dir && depth < DESCENT_DEPTH;
-    let reason = if is_dir && !descend {
-        "kept:depth-limit".into()
-    } else {
-        reason
-    };
-    c.kept.push((path.clone(), reason));
-    if descend {
-        let Ok(children) = sorted_children(&path) else {
-            c.kept.push((path, "deferred:incomplete".into()));
+        None if !stale => "kept:fresh".into(),
+        None => {
+            c.removals.push(path);
             return Ok(());
-        };
-        for child in children {
-            let seen = observe(&child, c.run.device, c.run.deadline);
-            judge(c, child, seen, depth + 1)?;
         }
-    }
+    };
+    c.kept.push((path, reason));
     Ok(())
 }
 
@@ -684,7 +658,7 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
         kept: Vec::new(),
     };
     for (path, seen) in units {
-        judge(&mut ctx, path, seen, 1)?;
+        judge(&mut ctx, path, seen)?;
     }
     Ok(Plan {
         removals: ctx.removals,

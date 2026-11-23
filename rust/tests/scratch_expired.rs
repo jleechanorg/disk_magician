@@ -186,22 +186,21 @@ fn fresh_file_does_not_shelter_stale_sibling_folder() {
 }
 
 #[test]
-fn old_parent_with_evidence_descendant_is_kept_whole() {
+fn protected_descendant_keeps_whole_candidate_and_no_child_is_removed() {
     let fx = Fx::new("evidence-descendant");
     fx.file("task/evidence/e");
     fx.file("task/scratch/f");
     fx.file("task/notes");
     let cutoff = age();
     let plan = planned(&fx, cutoff);
-    let mut removals = plan.removals.clone();
-    removals.sort();
-    assert_eq!(removals, vec![fx.root.join("task/scratch")]);
-    assert!(kept(&plan, &fx.root.join("task/evidence"))
-        .unwrap()
-        .starts_with("kept:protected-subtree"));
+    assert!(plan.removals.is_empty(), "{:?}", plan.removals);
     assert!(kept(&plan, &fx.root.join("task"))
         .unwrap()
-        .starts_with("kept:protected-descendant"));
+        .starts_with("kept:protected-descendant:evidence"));
+    assert!(plan
+        .kept
+        .iter()
+        .all(|(path, _)| path.parent() == Some(&fx.root)));
 }
 
 #[test]
@@ -218,13 +217,13 @@ fn evidence_holds_inside_and_containing_block_ancestors() {
     });
     fs::write(&run.holds, holds.to_string()).unwrap();
     let plan = plan(&run).unwrap();
-    assert_eq!(plan.removals, vec![fx.root.join("h1/other")]);
+    assert!(plan.removals.is_empty(), "{:?}", plan.removals);
     assert!(kept(&plan, &fx.root.join("h2"))
         .unwrap()
         .starts_with("kept:protected-subtree"));
-    assert!(kept(&plan, &fx.root.join("h1/inner"))
+    assert!(kept(&plan, &fx.root.join("h1"))
         .unwrap()
-        .starts_with("kept:protected-subtree"));
+        .starts_with("kept:protected-descendant"));
     fs::remove_file(&run.holds).unwrap();
 }
 
@@ -274,59 +273,26 @@ fn lease_protection_by_kind_and_owner_state() {
 }
 
 #[test]
-fn depth_limit_is_reported() {
-    let fx = Fx::new("depth");
-    fx.file("a/b/c/d/e/old");
-    fx.file("a/b/c/d/sibling");
-    fx.file("a/b/c/side/f");
-    fx.file("a/b/side/f");
-    fx.file("a/side/f");
-    let cutoff = age();
-    fx.file("a/b/c/d/fresh");
-    let plan = planned(&fx, cutoff);
-    assert_eq!(
-        kept(&plan, &fx.root.join("a/b/c/d")),
-        Some("kept:depth-limit")
-    );
-    let mut removals = plan.removals.clone();
-    removals.sort();
-    assert_eq!(
-        removals,
-        vec![
-            fx.root.join("a/b/c/side"),
-            fx.root.join("a/b/side"),
-            fx.root.join("a/side"),
-        ]
-    );
-}
-
-#[test]
-fn loose_stale_file_beside_fresh_sibling_is_kept() {
-    let fx = Fx::new("loose-file");
-    fx.file("a/old-loose");
-    std::os::unix::fs::symlink("/nonexistent", fx.root.join("a/old-link")).unwrap();
-    let cutoff = age();
-    fx.file("a/fresh");
-    let plan = planned(&fx, cutoff);
-    assert!(plan.removals.is_empty(), "{:?}", plan.removals);
-    for name in ["a/old-loose", "a/old-link"] {
-        assert_eq!(
-            kept(&plan, &fx.root.join(name)),
-            Some("kept:loose-in-active-folder")
-        );
-    }
-}
-
-#[test]
-fn stale_child_directory_beside_fresh_file_is_removed() {
+fn stale_child_dir_beside_fresh_file_is_kept_with_its_parent() {
     let fx = Fx::new("child-dir");
     fx.file("a/old-dir/f");
     let cutoff = age();
     fx.file("a/fresh");
-    assert_eq!(
-        planned(&fx, cutoff).removals,
-        vec![fx.root.join("a/old-dir")]
-    );
+    let plan = planned(&fx, cutoff);
+    assert!(plan.removals.is_empty(), "{:?}", plan.removals);
+    assert_eq!(kept(&plan, &fx.root.join("a")), Some("kept:fresh"));
+    assert!(kept(&plan, &fx.root.join("a/old-dir")).is_none());
+}
+
+#[test]
+fn fresh_candidate_kept_whole() {
+    let fx = Fx::new("fresh-whole");
+    fx.file("a/f");
+    let cutoff = age();
+    fx.file("b/f");
+    let plan = planned(&fx, cutoff);
+    assert_eq!(plan.removals, vec![fx.root.join("a")]);
+    assert_eq!(kept(&plan, &fx.root.join("b")), Some("kept:fresh"));
 }
 
 #[test]
@@ -451,7 +417,7 @@ fn held(fx: &Fx, setup: impl FnOnce(&Path, &Fx) -> Option<PathBuf>) -> Option<St
     }
     plan.kept
         .iter()
-        .find(|(path, _)| path.starts_with(&unit) && path.ends_with("repo"))
+        .find(|(path, _)| *path == unit)
         .map(|(_, reason)| reason.clone())
 }
 
@@ -462,7 +428,7 @@ fn why(plan: &Plan, reason: &str) -> bool {
 fn assert_unrecovered(reason: Option<String>) {
     assert_eq!(
         reason.as_deref(),
-        Some("kept:protected-subtree:git-unrecovered-commits")
+        Some("kept:protected-descendant:git-unrecovered-commits")
     );
 }
 
@@ -878,9 +844,7 @@ fn nested_repo_at_depth_holds() {
     init(&fx.root.join("u/a/b/c/repo"));
     fx.file("u/other/f");
     let cutoff = age();
-    let plan = planned(&fx, cutoff);
-    assert!(!plan.removals.contains(&fx.root.join("u")));
-    assert!(plan.removals.contains(&fx.root.join("u/other")));
+    assert!(planned(&fx, cutoff).removals.is_empty());
 }
 
 #[test]
@@ -892,21 +856,17 @@ fn corrupt_git_dir_holds() {
 }
 
 #[test]
-fn descent_never_enters_a_protected_repo() {
+fn protected_repo_keeps_its_whole_candidate() {
     let fx = Fx::new("opaque");
     init(&fx.root.join("task/repo"));
     fx.file("task/repo/src/old");
     fx.file("task/scratch/f");
     let cutoff = age();
     let plan = planned(&fx, cutoff);
-    assert_eq!(plan.removals, vec![fx.root.join("task/scratch")]);
-    assert!(kept(&plan, &fx.root.join("task/repo"))
+    assert!(plan.removals.is_empty());
+    assert!(kept(&plan, &fx.root.join("task"))
         .unwrap()
-        .starts_with("kept:protected-subtree"));
-    assert!(plan
-        .kept
-        .iter()
-        .all(|(path, _)| !path.starts_with(fx.root.join("task/repo/src"))));
+        .starts_with("kept:protected-descendant"));
 }
 
 // ---- transaction, recovery and command line ----
@@ -1036,15 +996,14 @@ fn symlink_is_unlinked_and_its_target_preserved() {
 }
 
 #[test]
-fn emptied_descended_parent_stays_and_protected_sibling_is_untouched() {
+fn candidate_with_a_protected_descendant_is_untouched_by_clean() {
     let fx = Fx::new("parent-stays");
     fx.file("task/evidence/e");
     fx.file("task/scratch/f");
     let cutoff = age();
     sweep(&clean_run(&fx, cutoff)).unwrap();
     assert!(fx.root.join("task/evidence/e").exists());
-    assert!(!fx.root.join("task/scratch").exists());
-    assert!(fx.root.join("task").is_dir());
+    assert!(fx.root.join("task/scratch/f").exists());
 }
 
 #[test]
@@ -1059,7 +1018,7 @@ fn incomplete_unit_and_ancestors_are_never_removed() {
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
     report.unwrap();
     assert!(fx.root.join("u").is_dir() && locked.is_dir());
-    assert!(!fx.root.join("u/ok").exists());
+    assert!(fx.root.join("u/ok").exists());
 }
 
 #[test]
