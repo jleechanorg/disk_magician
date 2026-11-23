@@ -16,21 +16,15 @@ use std::{collections::BTreeMap, fs, process::Command};
 /// What one complete walk of a unit saw.
 #[derive(Default)]
 pub struct Observation {
-    /// Newest mtime or ctime in nanoseconds, over everything strictly under
-    /// the unit plus the unit root's own mtime, excluding `.git` entries.
+    /// Newest mtime or ctime (ns) under unit plus root mtime, excluding `.git`.
     pub newest: i64,
-    /// The same, over files and links only: removing entries from a staged
-    /// tree changes directory times but never a surviving file's.
+    /// Same over files/links only (directory times change during staged deletion).
     pub newest_file: i64,
     pub complete: bool,
     pub gaps: Vec<String>,
-    /// Git directories (`.git` directories or files, bare repositories).
     pub repos: Vec<PathBuf>,
-    /// Directories named `evidence`.
     pub evidence: Vec<PathBuf>,
-    /// `(alternates file, borrowed object directory)` pairs.
     pub alternates: Vec<(PathBuf, PathBuf)>,
-    /// Object stores seen: git directories, submodule modules, bare repos.
     pub stores: Vec<PathBuf>,
 }
 
@@ -62,17 +56,50 @@ fn resolve(path: &Path) -> Option<PathBuf> {
 
 /// Objects borrowed through `objects/info/alternates`; a file that exists but
 /// cannot be read is an error, never "no alternates".
+fn unquote_alt(line: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let b = line.strip_prefix('"')?.strip_suffix('"')?.as_bytes();
+    let (mut out, mut i) = (Vec::with_capacity(b.len()), 0);
+    while i < b.len() {
+        if b[i] != b'\\' {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let e = *b.get(i + 1)?;
+        i += 2;
+        if let Some(p) = b"abtnvfr".iter().position(|&x| x == e) {
+            out.push(p as u8 + 7);
+        } else if e == b'\\' || e == b'"' {
+            out.push(e);
+        } else if (b'0'..=b'3').contains(&e)
+            && b.get(i..i + 2)
+                .is_some_and(|s| s.iter().all(|c| (b'0'..=b'7').contains(c)))
+        {
+            out.push(u8::from_str_radix(std::str::from_utf8(&b[i - 1..i + 2]).ok()?, 8).ok()?);
+            i += 2;
+        } else {
+            return None;
+        }
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+}
+
 fn read_alternates(git_dir: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
     let file = git_dir.join("objects/info/alternates");
-    let text = match fs::read_to_string(&file) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-    text.lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            resolve(&git_dir.join("objects").join(line))
+    if existing(&file)?.is_none() {
+        return Ok(Vec::new());
+    }
+    fs::read_to_string(&file)?
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let p = if l.starts_with('"') {
+                unquote_alt(l)
+            } else {
+                Some(PathBuf::from(l))
+            };
+            p.and_then(|p| resolve(&git_dir.join("objects").join(p)))
                 .map(|target| (file.clone(), target))
                 .ok_or_else(|| io::Error::other("unresolvable alternates path"))
         })
@@ -226,11 +253,10 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
         }
         let changed = mtime(&info).max(nanos(info.ctime(), info.ctime_nsec()));
         found.newest = found.newest.max(changed);
-        if !info.is_dir() {
-            found.newest_file = found.newest_file.max(changed);
-        }
         if info.is_dir() {
             walk(&path, device, deadline, found);
+        } else {
+            found.newest_file = found.newest_file.max(changed);
         }
     }
     if bare == [true; 3] {
@@ -364,10 +390,9 @@ fn independent_remote(git_dir: &Path, name: &str) -> bool {
 
 fn remote_tips(git_dir: &Path, name: &str) -> io::Result<Vec<String>> {
     let dl = Instant::now() + GIT_REMOTE_PROBE_TIMEOUT;
-    let listing = git(git_dir, &["ls-remote", "--heads", "--tags", name], None, dl)?;
-    Ok(listing
-        .lines()
-        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+    let l = git(git_dir, &["ls-remote", "--heads", "--tags", name], None, dl)?;
+    Ok(l.lines()
+        .filter_map(|s| s.split_whitespace().next().map(str::to_owned))
         .collect())
 }
 
@@ -412,15 +437,14 @@ fn git_protected(
     within: &[&Path],
     alts: &[(PathBuf, PathBuf)],
     hooks: &Hooks,
-    tree_inside: bool,
+    ti: bool,
     deadline: Instant,
 ) -> Option<&'static str> {
-    // A repository kept under some `.git/modules` has its tree beside it.
-    let tree_inside = tree_inside
+    let tree_inside = ti
         || git_dir
             .ancestors()
             .skip(1)
-            .any(|up| up.file_name() == Some(".git".as_ref()));
+            .any(|u| u.file_name() == Some(".git".as_ref()));
     // Containment is physical: a symlink inside the candidate that leads
     // outside it does not count as inside.
     let physical: Vec<PathBuf> = within.iter().filter_map(|p| resolve(p)).collect();
@@ -457,10 +481,10 @@ fn git_protected(
     let Some(relative) = within.iter().find_map(|p| git_dir.strip_prefix(p).ok()) else {
         return failed;
     };
-    let lent = |target: &Path| {
+    let lent = |t: &Path| {
         within
             .iter()
-            .any(|prefix| target.starts_with(prefix.join(relative).join("objects")))
+            .any(|p| t.starts_with(p.join(relative).join("objects")))
     };
     if alts
         .iter()
@@ -542,14 +566,12 @@ fn git_protected(
             Err(_) => return failed,
         }
     }
-    let known = if tips.is_empty() {
-        String::new()
-    } else {
-        let input = Some(tips.join("\n") + "\n");
-        let Ok(text) = git(git_dir, &["cat-file", "--batch-check"], input, deadline) else {
-            return failed;
-        };
-        text
+    let inp = (!tips.is_empty()).then(|| tips.join("\n") + "\n");
+    let res = inp.map_or(Ok(String::new()), |s| {
+        git(git_dir, &["cat-file", "--batch-check"], Some(s), deadline)
+    });
+    let Ok(known) = res else {
+        return failed;
     };
     let live: Vec<&str> = known
         .lines()
@@ -598,19 +620,14 @@ fn run_lease(root: &Path, run: &Path, actual: &Path) -> Option<&'static str> {
     }
 }
 
-/// Injection points: the remote classifier, the remote tip probe and the lease
-/// verdict, so tests need no network and no registered Scratch volume.
+/// Injection points for tests (remote classifier, tip probe, lease, open, hooks).
 #[allow(clippy::type_complexity)]
 pub struct Hooks {
     pub independent: Box<dyn Fn(&Path, &str) -> bool>,
     pub tips: Box<dyn Fn(&Path, &str) -> io::Result<Vec<String>>>,
-    /// `(root, recorded path, current path)`.
     pub lease: Box<dyn Fn(&Path, &Path, &Path) -> Option<&'static str>>,
-    /// Whether any process has a file or working directory under the path.
     pub open: Box<dyn Fn(&Path) -> io::Result<bool>>,
-    /// Called with the original and staged path right after the rename.
     pub after_stage: Box<dyn Fn(&Path, &Path)>,
-    /// Returning true at a named point simulates a crash there.
     pub crash: Box<dyn Fn(&str) -> bool>,
 }
 
@@ -666,11 +683,10 @@ pub struct Plan {
 }
 
 fn read_holds(path: &Path) -> io::Result<Vec<PathBuf>> {
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
+    if existing(path)?.is_none() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(path)?;
     let m: BTreeMap<PathBuf, String> = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     Ok(m.into_keys().collect())
 }
@@ -706,10 +722,10 @@ fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
 /// `runs/<date>/<repo>/<run>`: each run is a candidate; the levels above stay.
 fn runs(dir: &Path, lvl: u32, out: &mut Vec<PathBuf>, hid: &mut Vec<PathBuf>) -> io::Result<()> {
     for path in sorted_children(dir)? {
-        if path
+        let dot = path
             .file_name()
-            .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."))
-        {
+            .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."));
+        if dot {
             hid.push(path);
         } else if lvl < 2 && fs::symlink_metadata(&path)?.is_dir() {
             runs(&path, lvl + 1, out, hid)?;
@@ -749,11 +765,12 @@ fn lease_of(run: &Run, original: &Path, actual: &Path) -> Option<&'static str> {
     if relative.components().count() != 4 || !relative.starts_with("runs") {
         return None;
     }
-    fs::symlink_metadata(actual).map_or(Some("deferred:lease-unavailable"), |info| {
-        info.is_dir()
-            .then(|| (run.hooks.lease)(&run.root, original, actual))
-            .flatten()
-    })
+    let Ok(info) = fs::symlink_metadata(actual) else {
+        return Some("deferred:lease-unavailable");
+    };
+    info.is_dir()
+        .then(|| (run.hooks.lease)(&run.root, original, actual))
+        .flatten()
 }
 
 /// Why `path` cannot be removed whole: `(reason, own)` where `own` means the
@@ -915,31 +932,24 @@ impl Report {
     /// removed or deferred, and only counts for everything kept.
     pub fn summary(&self) -> Value {
         let mut truncated = serde_json::Map::new();
-        let mut capped = |name: &str, list: Vec<Value>| {
-            if list.len() > LIST_CAP {
-                truncated.insert(name.into(), json!(list.len() - LIST_CAP));
+        let mut cap = |n: &str, v: Vec<Value>| {
+            if v.len() > LIST_CAP {
+                truncated.insert(n.into(), json!(v.len() - LIST_CAP));
             }
-            list.into_iter().take(LIST_CAP).collect::<Vec<_>>()
+            v.into_iter().take(LIST_CAP).collect::<Vec<_>>()
         };
-        let text = |path: &Path| path.to_string_lossy().into_owned();
-        let rem: Vec<_> = self
-            .removed
-            .iter()
-            .map(|(p, b)| json!([text(p), b]))
-            .collect();
-        let removed = capped("removed", rem);
-        let wr: Vec<_> = self.would_remove.iter().map(|p| json!(text(p))).collect();
-        let would_remove = capped("would_remove", wr);
+        let t = |p: &Path| p.to_string_lossy().into_owned();
+        let rem: Vec<_> = self.removed.iter().map(|(p, b)| json!([t(p), b])).collect();
+        let wr: Vec<_> = self.would_remove.iter().map(|p| json!(t(p))).collect();
         let def: Vec<_> = self
             .deferred
             .iter()
-            .map(|(p, w)| json!([text(p), w]))
+            .map(|(p, w)| json!([t(p), w]))
             .collect();
-        let deferred = capped("deferred", def);
         let int: Vec<_> = self.interrupted.iter().map(|r| json!(r)).collect();
-        let interrupted = capped("interrupted", int);
-        json!({"removed":removed,"would_remove":would_remove,"deferred":deferred,"interrupted":interrupted,
-            "kept":self.kept,"truncated":truncated,"timed_out":self.timed_out})
+        json!({"removed": cap("removed", rem), "would_remove": cap("would_remove", wr),
+            "deferred": cap("deferred", def), "interrupted": cap("interrupted", int),
+            "kept": self.kept, "truncated": truncated, "timed_out": self.timed_out})
     }
 
     pub fn complete(&self) -> bool {
@@ -951,7 +961,7 @@ impl Report {
 
 fn incomplete_reason(r: &str) -> bool {
     let a = ["incomplete", "probe-error:", "check-error:"];
-    let b = ["git-probe-failed", "lease-unavailable"];
+    let b = ["git-probe-failed", "lease-unavailable", "restore-blocked"];
     a.iter().chain(&b).any(|s| r.contains(s))
 }
 
@@ -991,14 +1001,7 @@ fn make_writable(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// The staged-tree check: identity, completeness, no newer content, no hold,
-/// no new evidence directory, the Git proof again, and no open file or
-/// working directory. While finishing a half-removed tree only surviving
-/// files and links count toward freshness, because our own removals changed
-/// directory times.
-/// The staged-tree verdict. Repositories need the borrower scan, which is one
-/// pass over the whole root, so a tree that has any answers `NeedsScan` until
-/// the caller supplies it; trees without repositories never need it.
+/// The staged-tree verdict. Repositories need the borrower scan (`NeedsScan`).
 enum Verdict {
     Pass,
     NeedsScan,
@@ -1021,18 +1024,17 @@ fn staged_ok(
     } else {
         seen.newest_file
     };
-    if (info.dev(), info.ino()) != (intent.device, intent.inode) {
-        return Ok(Fail("identity".into()));
-    }
-    if !seen.complete {
-        let gap = seen.gaps.first().map_or("", String::as_str);
-        return Ok(Fail(format!("incomplete:{gap}")));
-    }
-    if !seen.evidence.is_empty() {
-        return Ok(Fail("evidence".into()));
-    }
-    if newest > intent.newest {
-        return Ok(Fail("fresh-content".into()));
+    if let Some(reason) = match () {
+        _ if (info.dev(), info.ino()) != (intent.device, intent.inode) => Some("identity".into()),
+        _ if !seen.complete => Some(format!(
+            "incomplete:{}",
+            seen.gaps.first().map_or("", String::as_str)
+        )),
+        _ if !seen.evidence.is_empty() => Some("evidence".into()),
+        _ if newest > intent.newest => Some("fresh-content".into()),
+        _ => None,
+    } {
+        return Ok(Fail(reason));
     }
     let holds = read_holds(&run.holds)?;
     if holds
@@ -1323,18 +1325,18 @@ fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
             return Err(io::Error::other("unsafe original path"));
         }
         let present = existing(&item)?.is_some();
-        let verdict = if present && intent.state == "deleting" {
-            match staged_ok(run, &item, &intent, None)? {
+        let cause = if present && intent.state == "deleting" {
+            let v = match staged_ok(run, &item, &intent, None)? {
                 Verdict::NeedsScan => staged_ok(run, &item, &intent, Some(&fresh_known(run)?))?,
                 other => other,
+            };
+            match v {
+                Verdict::Pass => None,
+                Verdict::Fail(c) => Some(c),
+                Verdict::NeedsScan => Some("scan-unavailable".into()),
             }
         } else {
-            Verdict::Fail("interrupted-stage".into())
-        };
-        let cause = match verdict {
-            Verdict::Pass => None,
-            Verdict::Fail(cause) => Some(cause),
-            Verdict::NeedsScan => Some("scan-unavailable".into()),
+            Some("interrupted-stage".into())
         };
         if intent.state == "deleting" && (!present || cause.is_none()) {
             finish(run, &stage, &intent_path, &mut intent, report)?;

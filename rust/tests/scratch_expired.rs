@@ -3150,3 +3150,29 @@ fn revalidation_lease_unavailable_marks_report_incomplete() {
     let report = apply(&run, &planned).unwrap();
     assert!(!report.complete() && report.removed.is_empty());
 }
+
+#[test]
+fn quoted_alternates_path_still_protects_lender() {
+    let fx = Fx::new("quoted-alts");
+    let lender = fx.root.join("lender");
+    init(&lender);
+    let borrower = fx.root.join("evidence/b");
+    fs::create_dir_all(&borrower).unwrap();
+    git(&borrower, &["init", "-q"]);
+    let raw = format!("{}\n", lender.join(".git/objects").display());
+    let quoted = format!(
+        "\"{}\"\n",
+        raw.trim().replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    fs::write(borrower.join(".git/objects/info/alternates"), quoted).unwrap();
+    let planned = plan(&clean_run(&fx, age())).unwrap();
+    assert!(!planned.removals.contains(&lender), "{:?}", planned.kept);
+}
+
+#[test]
+fn restore_blocked_marks_report_incomplete() {
+    let mut r = diskm_shadow::scratch_expired::Report::default();
+    r.deferred
+        .push(("x".into(), "deferred:restore-blocked".into()));
+    assert!(!r.complete());
+}
