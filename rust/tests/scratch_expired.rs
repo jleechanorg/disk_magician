@@ -2596,34 +2596,41 @@ fn a_matching_legacy_record_with_mistyped_fields_keeps_the_run() {
 // ---- round eight: diagnostics and unreadable reflogs are not proof ----
 
 /// A commit that now exists only in the reflog: made, then reset away.
-fn reflog_only_commit(repo: &Path) {
-    fs::write(repo.join("g"), b"2").unwrap();
-    git(repo, &["add", "g"]);
-    git(repo, &["commit", "-qm", "reflog only"]);
-    git(repo, &["reset", "-q", "--hard", "HEAD~1"]);
+
+const UNREADABLE: [&str; 6] = [
+    ".git/refs/heads",
+    ".git/refs",
+    ".git/packed-refs",
+    ".git/objects/pack",
+    ".git/logs",
+    ".git/logs/HEAD",
+];
+
+fn chmod(path: &Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-fn lock(path: PathBuf) -> impl FnOnce() {
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-    move || fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap()
+/// A pushed repository with packed refs, so every target in `UNREADABLE` exists.
+fn packed_repo(fx: &Fx, repo: &Path) -> PathBuf {
+    init(repo);
+    let bare = hosted(fx, repo);
+    git(repo, &["pack-refs", "--all"]);
+    bare
 }
 
 #[test]
-fn unreadable_reflog_is_not_proof_at_planning() {
-    for target in [".git/logs", ".git/logs/HEAD"] {
-        let fx = Fx::new("logs-plan");
-        let unit = fx.root.join("u");
-        let repo = unit.join("repo");
-        init(&repo);
-        let bare = hosted(&fx, &repo);
-        reflog_only_commit(&repo);
+fn an_unreadable_part_of_the_gitdir_is_not_proof_at_planning() {
+    for target in UNREADABLE {
+        let fx = Fx::new("gitdir-plan");
+        let repo = fx.root.join("u/repo");
+        let bare = packed_repo(&fx, &repo);
         let cutoff = age();
-        let unlock = lock(repo.join(target));
+        chmod(&repo.join(target), 0o000);
         let planned = plan(&git_run(&fx, cutoff, Some(bare)));
-        unlock();
+        chmod(&repo.join(target), 0o700);
         let planned = planned.unwrap();
         assert!(
-            !planned.removals.contains(&unit),
+            !planned.removals.contains(&fx.root.join("u")),
             "{target}: {:?}",
             planned.kept
         );
@@ -2631,43 +2638,39 @@ fn unreadable_reflog_is_not_proof_at_planning() {
 }
 
 #[test]
-fn unreadable_reflog_after_staging_restores() {
-    let fx = Fx::new("logs-stage");
-    let unit = fx.root.join("u");
-    let repo = unit.join("repo");
-    init(&repo);
-    let bare = hosted(&fx, &repo);
-    let cutoff = age();
-    let mut run = lender_run(&fx, cutoff, bare);
-    run.hooks.after_stage = Box::new(|_, item| {
-        fs::set_permissions(
-            item.join("repo/.git/logs"),
-            fs::Permissions::from_mode(0o000),
-        )
-        .unwrap();
-    });
-    let report = sweep(&run).unwrap();
-    let _ = fs::set_permissions(repo.join(".git/logs"), fs::Permissions::from_mode(0o700));
-    assert!(repo.join("f").exists(), "{:?}", report.deferred);
-    assert!(report.removed.is_empty());
+fn an_unreadable_part_of_the_gitdir_after_staging_restores() {
+    for target in UNREADABLE {
+        let fx = Fx::new("gitdir-stage");
+        let repo = fx.root.join("u/repo");
+        let bare = packed_repo(&fx, &repo);
+        let cutoff = age();
+        let mut run = lender_run(&fx, cutoff, bare);
+        run.hooks.after_stage =
+            Box::new(move |_, item| chmod(&item.join("repo").join(target), 0o000));
+        let report = sweep(&run).unwrap();
+        chmod(&repo.join(target), 0o700);
+        assert!(
+            repo.join("f").exists() && report.removed.is_empty(),
+            "{target}: {:?}",
+            report.deferred
+        );
+    }
 }
 
 #[test]
-fn unreadable_reflog_in_recovery_restores() {
-    let fx = Fx::new("logs-recover");
-    let (item, bare) = recovery_stage_with_repo(&fx);
-    reflog_only_commit(&item.join("repo"));
-    let cutoff = age();
-    fs::set_permissions(
-        item.join("repo/.git/logs"),
-        fs::Permissions::from_mode(0o000),
-    )
-    .unwrap();
-    let swept = sweep(&lender_run(&fx, cutoff, bare));
-    let _ = fs::set_permissions(
-        fx.root.join("lender-back/repo/.git/logs"),
-        fs::Permissions::from_mode(0o700),
-    );
-    swept.unwrap();
-    assert!(fx.root.join("lender-back/repo/f").exists() && !item.exists());
+fn an_unreadable_part_of_the_gitdir_in_recovery_restores() {
+    for target in UNREADABLE {
+        let fx = Fx::new("gitdir-recover");
+        let (item, _) = stage(&fx, dead_pid(), "deleting", "lender-back", true);
+        let bare = packed_repo(&fx, &item.join("repo"));
+        let cutoff = age();
+        chmod(&item.join("repo").join(target), 0o000);
+        let swept = sweep(&lender_run(&fx, cutoff, bare));
+        chmod(&fx.root.join("lender-back/repo").join(target), 0o700);
+        swept.unwrap();
+        assert!(
+            fx.root.join("lender-back/repo/f").exists() && !item.exists(),
+            "{target}"
+        );
+    }
 }
