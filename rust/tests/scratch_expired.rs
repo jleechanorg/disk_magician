@@ -1938,7 +1938,7 @@ fn an_unparsable_or_failed_lsof_fails_closed() {
     let fx = Fx::new("fake-lsof-bad");
     for script in [
         "echo 'garbage output'",
-        "printf 'p1\\nn/x\\nrubbish\\n'",
+        "printf 'p1\\nn/x\\n42rubbish\\n'",
         "echo 'lsof: error' >&2\nexit 2",
         "echo 'lsof: error' >&2\nexit 1",
         "exit 0",
