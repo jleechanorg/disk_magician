@@ -981,7 +981,22 @@ fn make_writable(path: &Path) -> io::Result<()> {
 /// working directory. While finishing a half-removed tree only surviving
 /// files and links count toward freshness, because our own removals changed
 /// directory times.
-fn staged_ok(run: &Run, item: &Path, intent: &Intent, known: &Known) -> io::Result<Option<String>> {
+/// The staged-tree verdict. Repositories need the borrower scan, which is one
+/// pass over the whole root, so a tree that has any answers `NeedsScan` until
+/// the caller supplies it; trees without repositories never need it.
+enum Verdict {
+    Pass,
+    NeedsScan,
+    Fail(String),
+}
+
+fn staged_ok(
+    run: &Run,
+    item: &Path,
+    intent: &Intent,
+    known: Option<&Known>,
+) -> io::Result<Verdict> {
+    use Verdict::Fail;
     let short = |reason: &str| {
         reason
             .split_once(':')
@@ -997,45 +1012,52 @@ fn staged_ok(run: &Run, item: &Path, intent: &Intent, known: &Known) -> io::Resu
         seen.newest_file
     };
     if (info.dev(), info.ino()) != (intent.device, intent.inode) {
-        return Ok(Some("identity".into()));
+        return Ok(Fail("identity".into()));
     }
     if !seen.complete {
-        return Ok(Some(format!(
+        return Ok(Fail(format!(
             "incomplete:{}",
             seen.gaps.first().map_or("", String::as_str)
         )));
     }
     if !seen.evidence.is_empty() {
-        return Ok(Some("evidence".into()));
+        return Ok(Fail("evidence".into()));
     }
     if newest > intent.newest {
-        return Ok(Some("fresh-content".into()));
+        return Ok(Fail("fresh-content".into()));
     }
     if read_holds(&run.holds)?
         .iter()
         .any(|held| original.starts_with(held) || held.starts_with(&original))
     {
-        return Ok(Some("hold".into()));
+        return Ok(Fail("hold".into()));
     }
     if let Some(reason) = lease_of(run, &original, item) {
-        return Ok(Some(format!("lease-{}", short(reason))));
+        return Ok(Fail(format!("lease-{}", short(reason))));
     }
+    match (run.hooks.open)(item) {
+        Ok(false) => {}
+        Ok(true) => return Ok(Fail("open-file".into())),
+        Err(error) => return Ok(Fail(format!("probe-error:{error}"))),
+    }
+    if seen.repos.is_empty() {
+        return Ok(Verdict::Pass);
+    }
+    let Some(known) = known else {
+        return Ok(Verdict::NeedsScan);
+    };
     // The borrower scan was incomplete: no repository can be proven unborrowed.
-    if known.blind && !seen.repos.is_empty() {
-        return Ok(Some("alternates-scan-incomplete".into()));
+    if known.blind {
+        return Ok(Fail("alternates-scan-incomplete".into()));
     }
     for git_dir in &seen.repos {
         if let Some(reason) =
             git_protected(git_dir, &[item, &original], &known.alts, &run.hooks, false)
         {
-            return Ok(Some(short(reason)));
+            return Ok(Fail(short(reason)));
         }
     }
-    Ok(match (run.hooks.open)(item) {
-        Ok(false) => None,
-        Ok(true) => Some("open-file".into()),
-        Err(error) => Some(format!("probe-error:{error}")),
-    })
+    Ok(Verdict::Pass)
 }
 
 /// Metadata of `path`, or `None` only when it is truly absent.
@@ -1283,10 +1305,18 @@ fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
         let mut intent: Intent =
             serde_json::from_slice(&fs::read(&intent_path)?).map_err(io::Error::other)?;
         let present = existing(&item)?.is_some();
-        let cause = if present && intent.state == "deleting" {
-            staged_ok(run, &item, &intent, &fresh_known(run)?)?
+        let verdict = if present && intent.state == "deleting" {
+            match staged_ok(run, &item, &intent, None)? {
+                Verdict::NeedsScan => staged_ok(run, &item, &intent, Some(&fresh_known(run)?))?,
+                other => other,
+            }
         } else {
-            Some("interrupted-stage".into())
+            Verdict::Fail("interrupted-stage".into())
+        };
+        let cause = match verdict {
+            Verdict::Pass => None,
+            Verdict::Fail(cause) => Some(cause),
+            Verdict::NeedsScan => Some("scan-unavailable".into()),
         };
         if intent.state == "deleting" && (!present || cause.is_none()) {
             finish(run, &stage, &intent_path, &mut intent, report)?;
@@ -1316,39 +1346,70 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
         report.would_remove = plan.removals.clone();
         return Ok(report);
     }
-    let mut staged = Vec::new();
+    let mut pending = Vec::new();
     for path in &plan.removals {
         if Instant::now() >= run.deadline {
             report.timed_out = true;
             break;
         }
-        staged.extend(stage_unit(run, plan, path, &mut report)?);
-    }
-    if staged.is_empty() {
-        return Ok(report);
-    }
-    // Everything is staged before the one fresh borrower scan, so a borrower
-    // that appeared since planning, and one made while staging, is seen
-    // against each item's final location.
-    let known = fresh_known(run)?;
-    for mut unit in staged {
+        let Some(mut unit) = stage_unit(run, plan, path, &mut report)? else {
+            continue;
+        };
         let item = unit.stage.join("item");
-        let cause = staged_ok(run, &item, &unit.intent, &known)
-            .unwrap_or_else(|error| Some(format!("check-error:{error}")));
-        match cause {
-            None => finish(
+        match staged_ok(run, &item, &unit.intent, None)
+            .unwrap_or_else(|error| Verdict::Fail(format!("check-error:{error}")))
+        {
+            Verdict::Pass => finish(
                 run,
                 &unit.stage,
                 &unit.intent_path,
                 &mut unit.intent,
                 &mut report,
             )?,
-            Some(cause) => restore(
+            Verdict::Fail(cause) => restore(
                 run,
                 &unit.stage,
                 &unit.intent_path,
                 &unit.intent,
                 &cause,
+                &mut report,
+            )?,
+            Verdict::NeedsScan => pending.push(unit),
+        }
+    }
+    if pending.is_empty() {
+        return Ok(report);
+    }
+    // Trees holding repositories: every one is staged before the single fresh
+    // borrower scan, so a borrower that appeared since planning, or while
+    // staging, is seen against each item's final location.
+    let known = fresh_known(run)?;
+    for mut unit in pending {
+        let item = unit.stage.join("item");
+        match staged_ok(run, &item, &unit.intent, Some(&known))
+            .unwrap_or_else(|error| Verdict::Fail(format!("check-error:{error}")))
+        {
+            Verdict::Pass => finish(
+                run,
+                &unit.stage,
+                &unit.intent_path,
+                &mut unit.intent,
+                &mut report,
+            )?,
+            Verdict::Fail(cause) => restore(
+                run,
+                &unit.stage,
+                &unit.intent_path,
+                &unit.intent,
+                &cause,
+                &mut report,
+            )?,
+            Verdict::NeedsScan => restore(
+                run,
+                &unit.stage,
+                &unit.intent_path,
+                &unit.intent,
+                "scan-unavailable",
                 &mut report,
             )?,
         }
