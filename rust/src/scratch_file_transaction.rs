@@ -4,13 +4,13 @@
 use serde::Serialize;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct FileIdentity {
@@ -496,38 +496,80 @@ pub fn open_paths(path: &Path) -> io::Result<bool> {
     }))
 }
 
+/// Run a command to completion within `limit`, draining stdout and stderr
+/// concurrently so a large listing cannot fill a pipe and stall the child.
+pub fn run_capture(
+    command: &mut Command,
+    input: Option<String>,
+    limit: Duration,
+) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+    }
+    fn drain(stream: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut stream) = stream {
+                let _ = stream.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    }
+    let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill()?;
+            child.wait()?;
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "probe timeout"));
+        }
+        std::thread::sleep(crate::time_windows::PROBE_POLL);
+    };
+    let joined = |handle: std::thread::JoinHandle<Vec<u8>>| {
+        handle.join().map_err(|_| io::Error::other("reader"))
+    };
+    Ok((status, joined(out)?, joined(err)?))
+}
+
 /// Standard output of a successful `lsof`, or `None` when it found nothing.
 fn run_lsof(args: &[&str], path: Option<&Path>) -> io::Result<Option<String>> {
     #[cfg(target_os = "linux")]
     let lsof = "/usr/bin/lsof";
     #[cfg(target_os = "macos")]
     let lsof = "/usr/sbin/lsof";
-    let mut child = Command::new(lsof)
-        .args(args)
-        .args(path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
-            let status = output.status;
-            let stdout = std::str::from_utf8(&output.stdout).map_err(io::Error::other)?;
-            let stderr = std::str::from_utf8(&output.stderr).map_err(io::Error::other)?;
-            if status.success() && stderr.is_empty() {
-                return Ok(Some(stdout.to_owned()));
-            }
-            if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {
-                return Ok(None);
-            }
-            return Err(io::Error::other(format!("lsof failed: {}", stderr.trim())));
-        }
-        if started.elapsed() > crate::time_windows::OPEN_FILE_PROBE_TIMEOUT {
-            child.kill()?;
-            child.wait()?;
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "lsof timeout"));
-        }
-        std::thread::sleep(crate::time_windows::PROBE_POLL);
+    let (status, stdout, stderr) = run_capture(
+        Command::new(lsof).args(args).args(path),
+        None,
+        crate::time_windows::OPEN_FILE_PROBE_TIMEOUT,
+    )?;
+    let stdout = std::str::from_utf8(&stdout).map_err(io::Error::other)?;
+    let stderr = std::str::from_utf8(&stderr).map_err(io::Error::other)?;
+    if status.success() && stderr.is_empty() {
+        return Ok(Some(stdout.to_owned()));
     }
+    if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {
+        return Ok(None);
+    }
+    Err(io::Error::other(format!("lsof failed: {}", stderr.trim())))
+}
+
+/// Rename without replacing anything at `to`; fails if `to` exists.
+pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let (old, new) = (
+        CString::new(from.as_os_str().as_bytes()).map_err(io::Error::other)?,
+        CString::new(to.as_os_str().as_bytes()).map_err(io::Error::other)?,
+    );
+    rename_exclusive(libc::AT_FDCWD, &old, libc::AT_FDCWD, &new)
 }

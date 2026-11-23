@@ -1,17 +1,18 @@
 //! Hourly removal of Scratch folders whose newest content is past the floor.
 
-pub use crate::scratch_file_transaction::open_paths;
+use crate::scratch_file_transaction::rename_noreplace;
+pub use crate::scratch_file_transaction::{open_paths, run_capture};
 use crate::scratch_lease::{self, BundleKind, LegacyLease, OwnerProcessState};
-use crate::time_windows::{GIT_REMOTE_PROBE_TIMEOUT, PROBE_POLL};
+use crate::time_windows::GIT_REMOTE_PROBE_TIMEOUT;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::IpAddr;
+use std::io::{self, Write};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// What one complete walk of a unit saw.
@@ -20,6 +21,9 @@ pub struct Observation {
     /// Newest mtime or ctime in nanoseconds, over everything strictly under
     /// the unit plus the unit root's own mtime, excluding `.git` entries.
     pub newest: i64,
+    /// The same, over files and links only: removing entries from a staged
+    /// tree changes directory times but never a surviving file's.
+    pub newest_file: i64,
     pub complete: bool,
     pub gaps: Vec<String>,
     /// Git directories (`.git` directories or files, bare repositories).
@@ -38,15 +42,34 @@ fn mtime(info: &fs::Metadata) -> i64 {
     nanos(info.mtime(), info.mtime_nsec())
 }
 
-fn alternates_of(git_dir: &Path, found: &mut Observation) {
+/// Objects borrowed through `objects/info/alternates`; a file that exists but
+/// cannot be read is an error, never "no alternates".
+fn read_alternates(git_dir: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
     let file = git_dir.join("objects/info/alternates");
-    if let Ok(text) = fs::read_to_string(&file) {
-        for line in text.lines().filter(|line| !line.is_empty()) {
+    let text = match fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
             let target = git_dir.join("objects").join(line);
-            found
-                .alternates
-                .push((file.clone(), fs::canonicalize(&target).unwrap_or(target)));
-        }
+            (file.clone(), fs::canonicalize(&target).unwrap_or(target))
+        })
+        .collect())
+}
+
+fn alternates_of(git_dir: &Path, found: &mut Observation) {
+    if !git_dir.is_dir() {
+        return;
+    }
+    match read_alternates(git_dir) {
+        Ok(pairs) => found.alternates.extend(pairs),
+        Err(error) => found
+            .gaps
+            .push(format!("{}: alternates: {error}", git_dir.display())),
     }
 }
 
@@ -61,6 +84,8 @@ pub fn observe(unit: &Path, device: u64, deadline: Instant) -> Observation {
             found.newest = mtime(&info);
             if info.is_dir() {
                 walk(unit, device, deadline, &mut found);
+            } else {
+                found.newest_file = found.newest.max(nanos(info.ctime(), info.ctime_nsec()));
             }
         }
         Err(error) => found.gaps.push(format!("{}: {error}", unit.display())),
@@ -119,10 +144,11 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
             "evidence" if info.is_dir() => found.evidence.push(path.clone()),
             _ => {}
         }
-        found.newest = found
-            .newest
-            .max(mtime(&info))
-            .max(nanos(info.ctime(), info.ctime_nsec()));
+        let changed = mtime(&info).max(nanos(info.ctime(), info.ctime_nsec()));
+        found.newest = found.newest.max(changed);
+        if !info.is_dir() {
+            found.newest_file = found.newest_file.max(changed);
+        }
         if info.is_dir() {
             walk(&path, device, deadline, found);
         }
@@ -136,44 +162,11 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
 // ---- Git protection: a repository holds unless recovery is proven ----
 
 fn bounded(command: &mut Command, input: Option<String>, limit: Duration) -> io::Result<String> {
-    command
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .env("GIT_TERMINAL_PROMPT", "0");
-    let mut child = command.spawn()?;
-    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
-        std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+    let (status, stdout, _) = run_capture(command.env("GIT_TERMINAL_PROMPT", "0"), input, limit)?;
+    if !status.success() {
+        return Err(io::Error::other(format!("exited with {status}")));
     }
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("no stdout"))?;
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        stdout.read_to_string(&mut text).map(|_| text)
-    });
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            let text = reader.join().map_err(|_| io::Error::other("reader"))??;
-            return if status.success() {
-                Ok(text)
-            } else {
-                Err(io::Error::other(format!("exited with {status}")))
-            };
-        }
-        if started.elapsed() > limit {
-            child.kill()?;
-            child.wait()?;
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "probe timeout"));
-        }
-        std::thread::sleep(PROBE_POLL);
-    }
+    String::from_utf8(stdout).map_err(io::Error::other)
 }
 
 fn git(git_dir: &Path, args: &[&str], input: Option<String>) -> io::Result<String> {
@@ -183,8 +176,14 @@ fn git(git_dir: &Path, args: &[&str], input: Option<String>) -> io::Result<Strin
 }
 
 /// Whether a remote URL names a hosted network destination that cannot be
-/// this machine. `resolve(user, port, host)` is the `ssh -G` hostname.
-pub fn independent(url: &str, resolve: &dyn Fn(&str, &str, &str) -> Option<String>) -> bool {
+/// this machine. `resolve(user, port, host)` is the `ssh -G` hostname and
+/// `dns(host)` the addresses a name resolves to; a name that cannot be
+/// resolved, or resolves to any non-public address, is not independent.
+pub fn independent(
+    url: &str,
+    resolve: &dyn Fn(&str, &str, &str) -> Option<String>,
+    dns: &dyn Fn(&str) -> Option<Vec<IpAddr>>,
+) -> bool {
     let scp;
     let (scheme, rest) = match url.split_once("://") {
         Some(parts) => parts,
@@ -217,7 +216,16 @@ pub fn independent(url: &str, resolve: &dyn Fn(&str, &str, &str) -> Option<Strin
     };
     let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
     match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => {
+        Ok(ip) => public(ip),
+        Err(_) => {
+            dns(&host).is_some_and(|found| !found.is_empty() && found.into_iter().all(public))
+        }
+    }
+}
+
+fn public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
             let [a, b, ..] = ip.octets();
             !(ip.is_loopback()
                 || ip.is_private()
@@ -226,7 +234,7 @@ pub fn independent(url: &str, resolve: &dyn Fn(&str, &str, &str) -> Option<Strin
                 || ip.is_broadcast()
                 || (a == 100 && (64..128).contains(&b)))
         }
-        Ok(IpAddr::V6(ip)) => {
+        IpAddr::V6(ip) => {
             let first = ip.segments()[0];
             !(ip.is_loopback()
                 || ip.is_unspecified()
@@ -234,20 +242,17 @@ pub fn independent(url: &str, resolve: &dyn Fn(&str, &str, &str) -> Option<Strin
                 || first & 0xffc0 == 0xfe80
                 || ip.to_ipv4_mapped().is_some())
         }
-        Err(_) => {
-            host.contains('.')
-                && ![
-                    "localhost",
-                    ".local",
-                    ".lan",
-                    ".internal",
-                    ".home.arpa",
-                    ".localdomain",
-                ]
-                .iter()
-                .any(|local| host.ends_with(local))
-        }
     }
+}
+
+fn resolve_dns(host: &str) -> Option<Vec<IpAddr>> {
+    Some(
+        (host, 0)
+            .to_socket_addrs()
+            .ok()?
+            .map(|addr| addr.ip())
+            .collect(),
+    )
 }
 
 fn ssh_hostname(user: &str, port: &str, host: &str) -> Option<String> {
@@ -266,7 +271,7 @@ fn ssh_hostname(user: &str, port: &str, host: &str) -> Option<String> {
 
 fn independent_remote(git_dir: &Path, name: &str) -> bool {
     git(git_dir, &["ls-remote", "--get-url", name], None)
-        .is_ok_and(|url| independent(url.trim(), &ssh_hostname))
+        .is_ok_and(|url| independent(url.trim(), &ssh_hostname, &resolve_dns))
 }
 
 fn remote_tips(git_dir: &Path, name: &str) -> io::Result<Vec<String>> {
@@ -299,23 +304,47 @@ fn git_protected(
     within: &[&Path],
     alts: &[(PathBuf, PathBuf)],
     hooks: &Hooks,
+    tree_inside: bool,
 ) -> Option<&'static str> {
     let inside = |path: &Path| within.iter().any(|prefix| path.starts_with(prefix));
     let failed = Some("deferred:git-probe-failed");
     if git_dir.is_file() {
-        let text = fs::read_to_string(git_dir).ok()?;
-        let target = text.trim().strip_prefix("gitdir:")?.trim();
-        let target = lexical(&git_dir.parent()?.join(target));
-        return if inside(&target) {
-            None
+        // A gitfile: unparsable or unreadable fails closed; a target outside
+        // the candidate is someone else's repository; an internal target is
+        // judged as the repository it belongs to (superproject modules, the
+        // common directory of a linked worktree).
+        let Some(target) = fs::read_to_string(git_dir).ok().and_then(|text| {
+            let relative = text.trim().strip_prefix("gitdir:")?.trim().to_owned();
+            Some(lexical(&git_dir.parent()?.join(relative)))
+        }) else {
+            return failed;
+        };
+        if !inside(&target) {
+            return Some("kept:git-linked-worktree");
+        }
+        let home = match fs::read_to_string(target.join("commondir")) {
+            Ok(text) => lexical(&target.join(text.trim())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => target,
+            Err(_) => return failed,
+        };
+        return if home.is_dir() {
+            git_protected(&home, within, alts, hooks, true)
         } else {
-            Some("kept:git-linked-worktree")
+            failed
         };
     }
-    let objects = git_dir.join("objects");
+    // Alternates name the original location; map each prefix onto this repo.
+    let relative = within
+        .iter()
+        .find_map(|prefix| git_dir.strip_prefix(prefix).ok());
+    let lent = |target: &Path| {
+        within.iter().any(|prefix| {
+            relative.is_some_and(|rel| target.starts_with(prefix.join(rel).join("objects")))
+        })
+    };
     if alts
         .iter()
-        .any(|(file, target)| target.starts_with(&objects) && !inside(file))
+        .any(|(file, target)| lent(target) && !inside(file))
     {
         return Some("kept:git-alternates-dependent");
     }
@@ -327,8 +356,10 @@ fn git_protected(
         let (key, value) = line.split_once('=').unwrap_or((line, ""));
         // A non-bare git directory not named `.git` belongs to a working
         // tree elsewhere (`--separate-git-dir`), which deleting would orphan.
-        let detached =
-            key == "core.bare" && value == "false" && git_dir.file_name() != Some(".git".as_ref());
+        let detached = !tree_inside
+            && key == "core.bare"
+            && value == "false"
+            && git_dir.file_name() != Some(".git".as_ref());
         if detached || (key == "core.worktree" && !inside(&lexical(&git_dir.join(value)))) {
             return Some("kept:git-external-worktree");
         }
@@ -349,6 +380,11 @@ fn git_protected(
                 return Some("kept:git-external-worktree");
             }
         }
+    }
+    match git(git_dir, &["for-each-ref", "refs/stash"], None) {
+        Ok(text) if text.trim().is_empty() => {}
+        Ok(_) => return Some("kept:git-stash"),
+        Err(_) => return failed,
     }
     let mut tips = Vec::new();
     for name in remotes
@@ -403,11 +439,13 @@ pub fn lease_protects(kind: &BundleKind, owner: &OwnerProcessState) -> Option<&'
     }
 }
 
-fn run_lease(root: &Path, run: &Path) -> Option<&'static str> {
-    match scratch_lease::lookup_bundle_under_root(run, root) {
+/// The lease verdict for the run recorded at `run` whose directory is now at
+/// `actual` (the same path unless it is staged).
+fn run_lease(root: &Path, run: &Path, actual: &Path) -> Option<&'static str> {
+    match scratch_lease::lookup_bundle_at(run, root, (run != actual).then_some(actual)) {
         Ok(found) => lease_protects(&found.lease.kind, &found.owner_process_state),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match scratch_lease::legacy_lease(run) {
+            match scratch_lease::legacy_lease(run, (run != actual).then_some(actual)) {
                 Ok(None | Some(LegacyLease::Build { owner_live: false })) => None,
                 Ok(Some(_)) => Some("kept:live-or-unknown-owner"),
                 Err(_) => Some("deferred:lease-unavailable"),
@@ -423,7 +461,8 @@ fn run_lease(root: &Path, run: &Path) -> Option<&'static str> {
 pub struct Hooks {
     pub independent: Box<dyn Fn(&Path, &str) -> bool>,
     pub tips: Box<dyn Fn(&Path, &str) -> io::Result<Vec<String>>>,
-    pub lease: Box<dyn Fn(&Path, &Path) -> Option<&'static str>>,
+    /// `(root, recorded path, current path)`.
+    pub lease: Box<dyn Fn(&Path, &Path, &Path) -> Option<&'static str>>,
     /// Whether any process has a file or working directory under the path.
     pub open: Box<dyn Fn(&Path) -> io::Result<bool>>,
     /// Called with the original and staged path right after the rename.
@@ -477,6 +516,9 @@ pub struct Plan {
     pub removals: Vec<PathBuf>,
     pub kept: Vec<(PathBuf, String)>,
     pub alts: Vec<(PathBuf, PathBuf)>,
+    /// Every Git directory seen under the root, to re-read alternates at
+    /// removal time.
+    pub repos: Vec<PathBuf>,
     pub blind: bool,
     pub timed_out: bool,
 }
@@ -500,31 +542,42 @@ fn sorted_children(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(children)
 }
 
-fn candidates(root: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut found = Vec::new();
+/// `(candidates, scan-only)`: hidden entries are never candidates but are
+/// still scanned for repositories that may borrow objects. Stages of this job
+/// are neither.
+fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let (mut found, mut hidden) = (Vec::new(), Vec::new());
     for path in sorted_children(root)? {
-        let hidden = path
-            .file_name()
-            .is_none_or(|name| name.as_encoded_bytes().starts_with(b"."));
-        if hidden || path.file_name().is_none_or(|name| name.to_str().is_none()) {
+        let name = path.file_name().unwrap_or_default();
+        if name == STAGES {
             continue;
         }
-        if path.file_name().is_some_and(|name| name == "runs")
-            && fs::symlink_metadata(&path)?.is_dir()
-        {
-            runs(&path, 0, &mut found)?;
-        } else {
+        if name.as_encoded_bytes().starts_with(b".") {
+            hidden.push(path);
+        } else if name == "runs" && fs::symlink_metadata(&path)?.is_dir() {
+            runs(&path, 0, &mut found, &mut hidden)?;
+        } else if name.to_str().is_some() {
             found.push(path);
         }
     }
-    Ok(found)
+    Ok((found, hidden))
 }
 
 /// `runs/<date>/<repo>/<run>`: each run is a candidate; the levels above stay.
-fn runs(dir: &Path, level: u32, found: &mut Vec<PathBuf>) -> io::Result<()> {
+fn runs(
+    dir: &Path,
+    level: u32,
+    found: &mut Vec<PathBuf>,
+    hidden: &mut Vec<PathBuf>,
+) -> io::Result<()> {
     for path in sorted_children(dir)? {
-        if level < 2 && fs::symlink_metadata(&path)?.is_dir() {
-            runs(&path, level + 1, found)?;
+        if path
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
+        {
+            hidden.push(path);
+        } else if level < 2 && fs::symlink_metadata(&path)?.is_dir() {
+            runs(&path, level + 1, found, hidden)?;
         } else {
             found.push(path);
         }
@@ -554,6 +607,20 @@ fn repo_root(git_dir: &Path) -> &Path {
     }
 }
 
+/// The lease verdict for a run directory (`runs/<date>/<repo>/<run>`) recorded
+/// at `original` and currently at `actual`; other paths have no lease.
+fn lease_of(run: &Run, original: &Path, actual: &Path) -> Option<&'static str> {
+    let relative = original.strip_prefix(&run.root).ok()?;
+    let is_run = relative.components().count() == 4
+        && relative.starts_with("runs")
+        && fs::symlink_metadata(actual).is_ok_and(|info| info.is_dir());
+    if is_run {
+        (run.hooks.lease)(&run.root, original, actual)
+    } else {
+        None
+    }
+}
+
 /// Why `path` cannot be removed whole: `(reason, own)` where `own` means the
 /// path itself is an indivisible protected subtree, not just a descendant.
 /// `full` adds the checks that matter only when removal is on the table.
@@ -580,16 +647,8 @@ fn protection(
     if full && !obs.evidence.is_empty() {
         below = Some(("evidence".to_owned(), false));
     }
-    if let Ok(relative) = path.strip_prefix(&run.root) {
-        let parts: Vec<_> = relative.components().collect();
-        if parts.len() == 4
-            && parts[0].as_os_str() == "runs"
-            && fs::symlink_metadata(path)?.is_dir()
-        {
-            if let Some(reason) = (run.hooks.lease)(&run.root, path) {
-                return Ok(Some((reason.into(), true)));
-            }
-        }
+    if let Some(reason) = lease_of(run, path, path) {
+        return Ok(Some((reason.into(), true)));
     }
     for git_dir in &obs.repos {
         let own = repo_root(git_dir) == path;
@@ -600,7 +659,7 @@ fn protection(
         let reason = if known.blind {
             Some("deferred:incomplete-alternates-scan")
         } else {
-            git_protected(git_dir, within, &known.alts, &run.hooks)
+            git_protected(git_dir, within, &known.alts, &run.hooks, false)
         };
         if let Some(reason) = reason {
             let reason = reason
@@ -638,14 +697,21 @@ fn judge(c: &mut Ctx, path: PathBuf, obs: Observation) -> io::Result<()> {
 
 /// Judge every candidate under the Scratch root. Nothing is changed.
 pub fn plan(run: &Run) -> io::Result<Plan> {
-    let mut units = Vec::new();
-    let mut alts = Vec::new();
-    for path in candidates(&run.root)? {
+    let (mut units, mut alts, mut repos, mut blind) = (Vec::new(), Vec::new(), Vec::new(), false);
+    let (found, hidden) = candidates(&run.root)?;
+    for (path, judged) in found
+        .into_iter()
+        .map(|path| (path, true))
+        .chain(hidden.into_iter().map(|path| (path, false)))
+    {
         let seen = observe(&path, run.device, run.deadline);
         alts.extend(seen.alternates.iter().cloned());
-        units.push((path, seen));
+        repos.extend(seen.repos.iter().filter(|dir| dir.is_dir()).cloned());
+        blind |= !seen.complete;
+        if judged {
+            units.push((path, seen));
+        }
     }
-    let blind = units.iter().any(|(_, seen)| !seen.complete);
     let known = Known {
         holds: read_holds(&run.holds)?,
         alts,
@@ -664,6 +730,7 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
         removals: ctx.removals,
         kept: ctx.kept,
         alts: ctx.known.alts,
+        repos,
         blind: ctx.known.blind,
         timed_out: Instant::now() >= run.deadline,
     })
@@ -776,8 +843,9 @@ fn make_writable(path: &Path) -> io::Result<()> {
 
 /// The staged-tree check: identity, completeness, no newer content, no hold,
 /// no new evidence directory, the Git proof again, and no open file or
-/// working directory. `newest` is skipped while finishing a half-removed tree,
-/// whose directory times our own removals changed.
+/// working directory. While finishing a half-removed tree only surviving
+/// files and links count toward freshness, because our own removals changed
+/// directory times.
 fn staged_ok(
     run: &Run,
     item: &Path,
@@ -787,7 +855,11 @@ fn staged_ok(
     let original = run.root.join(&intent.original);
     let info = fs::symlink_metadata(item)?;
     let seen = observe(item, run.device, run.deadline);
-    let newer = intent.state == "staged" && seen.newest > intent.newest;
+    let newer = if intent.state == "staged" {
+        seen.newest
+    } else {
+        seen.newest_file
+    } > intent.newest;
     if (info.dev(), info.ino()) != (intent.device, intent.inode)
         || !seen.complete
         || newer
@@ -798,14 +870,13 @@ fn staged_ok(
     if read_holds(&run.holds)?
         .iter()
         .any(|held| original.starts_with(held) || held.starts_with(&original))
+        || lease_of(run, &original, item).is_some()
     {
         return Ok(false);
     }
-    if seen
-        .repos
-        .iter()
-        .any(|git_dir| git_protected(git_dir, &[item, &original], alts, &run.hooks).is_some())
-    {
+    if seen.repos.iter().any(|git_dir| {
+        git_protected(git_dir, &[item, &original], alts, &run.hooks, false).is_some()
+    }) {
         return Ok(false);
     }
     Ok(matches!((run.hooks.open)(item), Ok(false)))
@@ -873,10 +944,8 @@ fn restore(
     report: &mut Report,
 ) -> io::Result<()> {
     let original = run.root.join(&intent.original);
-    let free =
-        fs::symlink_metadata(&original).is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
-    let verdict = if free {
-        fs::rename(stage.join("item"), &original)?;
+    crashed(run, "restore")?;
+    let verdict = if rename_noreplace(&stage.join("item"), &original).is_ok() {
         fs::remove_file(intent_path)?;
         let _ = fs::remove_dir(stage);
         "deferred:restored"
@@ -889,10 +958,17 @@ fn restore(
 
 fn remove_unit(run: &Run, plan: &Plan, path: &Path, report: &mut Report) -> io::Result<()> {
     let seen = observe(path, run.device, run.deadline);
+    // Borrowers can appear after planning: re-read every known alternates file.
+    let alts = plan
+        .repos
+        .iter()
+        .filter(|dir| dir.is_dir())
+        .map(|dir| read_alternates(dir))
+        .collect::<io::Result<Vec<_>>>();
     let known = Known {
         holds: read_holds(&run.holds)?,
-        alts: plan.alts.clone(),
-        blind: plan.blind,
+        alts: alts.iter().flatten().flatten().cloned().collect(),
+        blind: plan.blind || alts.is_err(),
     };
     let stale = seen.complete && seen.newest < run.cutoff;
     if !stale || protection(run, &known, path, &seen, &[path], true)?.is_some() {
@@ -929,7 +1005,7 @@ fn remove_unit(run: &Run, plan: &Plan, path: &Path, report: &mut Report) -> io::
     fs::rename(path, &item)?;
     (run.hooks.after_stage)(path, &item);
     crashed(run, "staged")?;
-    if staged_ok(run, &item, &intent, &plan.alts).unwrap_or(false) {
+    if staged_ok(run, &item, &intent, &known.alts).unwrap_or(false) {
         finish(run, &stage, &intent_path, &mut intent, report)
     } else {
         restore(run, &stage, &intent_path, &intent, report)

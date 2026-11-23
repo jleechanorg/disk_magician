@@ -2,10 +2,12 @@
 //! two seconds pass, and the cutoff is one second ago, so every fixture is
 //! stale by both mtime and ctime until a test touches it.
 use diskm_shadow::scratch_expired::{
-    apply, independent, lease_protects, observe, plan, sweep, Intent, Plan, Report, Run,
+    apply, independent, lease_protects, observe, plan, run_capture, sweep, Intent, Plan, Report,
+    Run,
 };
 use diskm_shadow::scratch_lease::{BundleKind, OwnerProcessState};
 use std::fs;
+use std::net::IpAddr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -151,7 +153,7 @@ fn run_for(fx: &Fx, cutoff: i64) -> Run {
         "{}-holds.json",
         fx.root.file_name().unwrap().to_str().unwrap()
     ));
-    run.hooks.lease = Box::new(|_, _| None);
+    run.hooks.lease = Box::new(|_, _, _| None);
     run
 }
 
@@ -243,7 +245,7 @@ fn runs_descend_to_run_level_and_leases_protect() {
     fx.file("runs/2026-11-22/repo/live/f");
     let cutoff = age();
     let mut run = run_for(&fx, cutoff);
-    run.hooks.lease = Box::new(|_, path| {
+    run.hooks.lease = Box::new(|_, path, _| {
         path.ends_with("live")
             .then_some("kept:live-or-unknown-owner")
     });
@@ -519,13 +521,17 @@ fn reflog_only_commit_holds() {
 #[test]
 fn stash_holds() {
     let fx = Fx::new("stash");
-    assert_unrecovered(held(&fx, |repo, fx| {
-        let bare = hosted(fx, repo);
-        fs::write(repo.join("f"), b"stashed").unwrap();
-        git(repo, &["stash", "-q"]);
-        git(repo, &["reflog", "expire", "--expire=now", "--all"]);
-        Some(bare)
-    }));
+    assert_eq!(
+        held(&fx, |repo, fx| {
+            let bare = hosted(fx, repo);
+            fs::write(repo.join("f"), b"stashed").unwrap();
+            git(repo, &["stash", "-q"]);
+            git(repo, &["reflog", "expire", "--expire=now", "--all"]);
+            Some(bare)
+        })
+        .as_deref(),
+        Some("kept:protected-descendant:git-stash")
+    );
 }
 
 #[test]
@@ -597,6 +603,10 @@ fn insteadof_rewritten_to_a_file_url_is_not_independent() {
 #[test]
 fn remote_classifier_rejects_loopback_private_and_local_forms() {
     let ssh = |_: &str, _: &str, host: &str| Some(host.to_owned());
+    let dns = |host: &str| match host {
+        "github.com" => Some(vec![IpAddr::from([140, 82, 112, 3])]),
+        _ => None,
+    };
     for url in [
         "https://localhost/x.git",
         "https://127.0.0.1/x.git",
@@ -614,7 +624,7 @@ fn remote_classifier_rejects_loopback_private_and_local_forms() {
         "https://gitbox/x.git",
         "https://nas.local/x.git",
     ] {
-        assert!(!independent(url, &ssh), "{url}");
+        assert!(!independent(url, &ssh, &dns), "{url}");
     }
     for url in [
         "https://github.com/a/b.git",
@@ -622,7 +632,7 @@ fn remote_classifier_rejects_loopback_private_and_local_forms() {
         "git@github.com:a/b.git",
         "https://[2606:4700::1111]/x.git",
     ] {
-        assert!(independent(url, &ssh), "{url}");
+        assert!(independent(url, &ssh, &dns), "{url}");
     }
 }
 
@@ -642,22 +652,26 @@ fn ssh_destination_is_resolved_with_the_actual_user_and_port() {
             .to_owned(),
         )
     };
+    let dns = |_: &str| Some(vec![IpAddr::from([203, 0, 113, 9])]);
     assert!(!independent(
         "ssh://git@code.example.test:2222/a.git",
-        &resolve
+        &resolve,
+        &dns
     ));
     assert!(independent(
         "ssh://deploy@code.example.test/a.git",
-        &resolve
+        &resolve,
+        &dns
     ));
     assert_eq!(
         seen.borrow()[0],
         ("git".into(), "2222".into(), "code.example.test".into())
     );
-    assert!(!independent("ssh://h/x", &|_: &str,
-                                        _: &str,
-                                        _: &str|
-     -> Option<String> { None }));
+    assert!(!independent(
+        "ssh://h/x",
+        &|_: &str, _: &str, _: &str| -> Option<String> { None },
+        &dns
+    ));
 }
 
 #[test]
@@ -1122,12 +1136,11 @@ fn git_state_changed_between_plan_and_stage_defers() {
     run.hooks.tips = probe(bare);
     let planned = plan(&run).unwrap();
     assert!(planned.removals.contains(&fx.root.join("u")));
+    // Only .git changes: identity and every watched timestamp stay as planned.
     git(&repo, &["checkout", "-qb", "late"]);
-    fs::write(repo.join("g"), b"2").unwrap();
-    git(&repo, &["add", "g"]);
-    git(&repo, &["commit", "-qm", "late"]);
+    git(&repo, &["commit", "--allow-empty", "-qm", "late"]);
     let report = apply(&run, &planned).unwrap();
-    assert!(repo.join("g").exists());
+    assert!(repo.join("f").exists());
     assert_eq!(report.deferred[0].1, "deferred:changed");
 }
 
@@ -1141,13 +1154,13 @@ fn commit_created_after_revalidation_before_staged_check_restores() {
     run.hooks.tips = probe(bare);
     run.hooks.after_stage = Box::new(|_, item| {
         let repo = item.join("repo");
+        // Only .git changes: identity and every watched timestamp stay as is.
         git(&repo, &["checkout", "-qb", "late"]);
-        fs::write(repo.join("g"), b"2").unwrap();
-        git(&repo, &["add", "g"]);
-        git(&repo, &["commit", "-qm", "late"]);
+        git(&repo, &["commit", "--allow-empty", "-qm", "late"]);
     });
-    sweep(&run).unwrap();
-    assert!(fx.root.join("u/repo/g").exists());
+    let report = sweep(&run).unwrap();
+    assert_eq!(report.deferred[0].1, "deferred:restored");
+    assert!(fx.root.join("u/repo/f").exists());
     assert!(rows(&fx).is_empty());
 }
 
@@ -1376,4 +1389,339 @@ fn expired_without_a_registered_scratch_volume_is_a_usage_error() {
     let message = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{message}");
     assert!(message.contains("Scratch"), "{message}");
+}
+
+// ---- review round: drain, gitfiles, leases, freshness, alternates, races ----
+
+#[test]
+fn run_capture_drains_a_listing_larger_than_the_pipe() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "head -c 8000000 /dev/zero | tr '\\0' x"]);
+    let (status, out, _) = run_capture(&mut command, None, Duration::from_secs(20)).unwrap();
+    assert!(status.success());
+    assert_eq!(out.len(), 8_000_000);
+}
+
+#[test]
+fn run_capture_times_out_a_stuck_command() {
+    let mut command = Command::new("sleep");
+    command.arg("5");
+    let error = run_capture(&mut command, None, Duration::from_millis(200)).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn clean_with_the_real_open_file_probe_removes_a_stale_folder() {
+    let fx = Fx::new("real-probe");
+    fx.file("a/deep/f");
+    let cutoff = age();
+    let mut run = run_for(&fx, cutoff);
+    run.clean = true;
+    run.log = log_of(&fx);
+    let report = sweep(&run).unwrap();
+    assert!(!fx.root.join("a").exists(), "{:?}", report.deferred);
+    assert_eq!(rows(&fx).len(), 1);
+}
+
+#[test]
+fn corrupt_gitfile_holds() {
+    let fx = Fx::new("corrupt-gitfile");
+    let unit = fx.root.join("u");
+    fs::create_dir_all(unit.join("repo")).unwrap();
+    for text in ["garbage", "gitdir:", ""] {
+        fs::write(unit.join("repo/.git"), text).unwrap();
+        assert!(why(&planned_after_age(&fx), "git-probe-failed"), "{text:?}");
+    }
+}
+
+fn planned_after_age(fx: &Fx) -> Plan {
+    std::thread::sleep(Duration::from_secs(2));
+    plan(&run_for(fx, now_ns() - 1_000_000_000)).unwrap()
+}
+
+#[test]
+fn unpublished_submodule_commit_holds() {
+    let fx = Fx::new("submodule");
+    let outside = fx.root.parent().unwrap();
+    let source = outside.join(format!(
+        "diskm-expired-submodule-{}-src",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    init(&source);
+    let superproject = fx.root.join("u/super");
+    init(&superproject);
+    git(
+        &superproject,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            source.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(&superproject, &["commit", "-qm", "add sub"]);
+    let bare = hosted(&fx, &superproject);
+    let sub = superproject.join("sub");
+    git(&sub, &["commit", "--allow-empty", "-qm", "unpublished"]);
+    let cutoff = age();
+    let mut run = git_run(&fx, cutoff, Some(bare.clone()));
+    let super_tips = probe(bare);
+    // The superproject is fully pushed; the submodule's remote has nothing.
+    run.hooks.tips = Box::new(move |dir, name| {
+        if dir.to_string_lossy().contains("/modules/") {
+            Ok(Vec::new())
+        } else {
+            super_tips(dir, name)
+        }
+    });
+    let plan = plan(&run).unwrap();
+    let _ = fs::remove_dir_all(&source);
+    assert!(
+        !plan.removals.contains(&fx.root.join("u")),
+        "{:?}",
+        plan.kept
+    );
+    assert!(why(&plan, "git-unrecovered-commits"), "{:?}", plan.kept);
+}
+
+fn lease_after_plan(reason: &'static str) -> impl Fn(&Path, &Path, &Path) -> Option<&'static str> {
+    // Free while planning and revalidating; marked once the tree is staged.
+    move |_, original, actual| (original != actual).then_some(reason)
+}
+
+#[test]
+fn lease_taken_after_planning_restores_the_staged_run() {
+    for reason in ["kept:evidence-run", "kept:live-or-unknown-owner"] {
+        let fx = Fx::new("lease-staged");
+        fx.file("runs/2026-11-22/repo/run1/f");
+        let cutoff = age();
+        let mut run = clean_run(&fx, cutoff);
+        run.hooks.lease = Box::new(lease_after_plan(reason));
+        let report = sweep(&run).unwrap();
+        assert!(
+            fx.root.join("runs/2026-11-22/repo/run1/f").exists(),
+            "{reason}"
+        );
+        assert!(report.removed.is_empty() && rows(&fx).is_empty());
+    }
+}
+
+#[test]
+fn deleting_stage_recovery_rechecks_the_lease() {
+    let fx = Fx::new("lease-recover");
+    let original = "runs/2026-11-22/repo/run1";
+    fs::create_dir_all(fx.root.join(original).parent().unwrap()).unwrap();
+    let (item, _) = stage(&fx, dead_pid(), "deleting", original, true);
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.lease = Box::new(lease_after_plan("kept:live-or-unknown-owner"));
+    sweep(&run).unwrap();
+    assert!(fx.root.join(original).join("f").exists() && !item.exists());
+    assert!(rows(&fx).is_empty());
+}
+
+fn set_newest(fx: &Fx, nonce: &str, newest: i64) {
+    let path = fx.root.join(format!(".diskm-expired/{nonce}.intent"));
+    let mut intent: Intent = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    intent.newest = newest;
+    fs::write(path, serde_json::to_vec(&intent).unwrap()).unwrap();
+}
+
+#[test]
+fn deleting_stage_with_a_file_written_during_downtime_is_restored() {
+    let fx = Fx::new("recover-fresh-file");
+    let (item, nonce) = stage(&fx, dead_pid(), "deleting", "late", true);
+    set_newest(&fx, &nonce, now_ns());
+    std::thread::sleep(Duration::from_millis(50));
+    fs::write(item.join("closed-new-file"), b"authored while down").unwrap();
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(fx.root.join("late/closed-new-file").exists());
+    assert!(rows(&fx).is_empty());
+}
+
+#[test]
+fn deleting_stage_with_only_our_own_removals_is_finished() {
+    let fx = Fx::new("recover-partial");
+    let (item, nonce) = stage(&fx, dead_pid(), "deleting", "half", true);
+    fs::create_dir_all(item.join("gone")).unwrap();
+    fs::write(item.join("gone/x"), b"x").unwrap();
+    set_newest(&fx, &nonce, now_ns());
+    std::thread::sleep(Duration::from_millis(50));
+    // The interrupted removal had already deleted one entry: only directory
+    // times moved.
+    fs::remove_file(item.join("gone/x")).unwrap();
+    let cutoff = age();
+    sweep(&clean_run(&fx, cutoff)).unwrap();
+    assert!(!item.exists() && !fx.root.join("half").exists());
+    assert_eq!(rows(&fx).len(), 1);
+}
+
+#[test]
+fn hidden_borrower_holds_the_lender() {
+    let fx = Fx::new("hidden-borrower");
+    let lender = fx.root.join("lender/repo");
+    init(&lender);
+    let bare = hosted(&fx, &lender);
+    git(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            "--shared",
+            lender.to_str().unwrap(),
+            fx.root.join(".hid/repo").to_str().unwrap(),
+        ],
+    );
+    let cutoff = age();
+    let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
+    assert!(
+        !plan.removals.contains(&fx.root.join("lender")),
+        "{:?}",
+        plan.kept
+    );
+    assert!(why(&plan, "git-alternates-dependent"), "{:?}", plan.kept);
+}
+
+#[test]
+fn unreadable_alternates_file_holds_every_repository() {
+    let fx = Fx::new("alternates-unreadable");
+    let lender = fx.root.join("lender/repo");
+    init(&lender);
+    let bare = hosted(&fx, &lender);
+    let borrower = fx.root.join("borrower/repo");
+    git(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            "--shared",
+            lender.to_str().unwrap(),
+            borrower.to_str().unwrap(),
+        ],
+    );
+    let alternates = borrower.join(".git/objects/info/alternates");
+    let cutoff = age();
+    fs::set_permissions(&alternates, fs::Permissions::from_mode(0o000)).unwrap();
+    let plan = plan(&git_run(&fx, cutoff, Some(bare)));
+    fs::set_permissions(&alternates, fs::Permissions::from_mode(0o600)).unwrap();
+    let plan = plan.unwrap();
+    assert!(
+        !plan.removals.contains(&fx.root.join("lender")),
+        "{:?}",
+        plan.kept
+    );
+}
+
+#[test]
+fn borrower_created_after_planning_defers_the_lender() {
+    let fx = Fx::new("alternates-late");
+    let lender = fx.root.join("lender/repo");
+    init(&lender);
+    let bare = hosted(&fx, &lender);
+    let borrower = fx.root.join("borrower/repo");
+    init(&borrower);
+    let cutoff = age();
+    let mut run = git_run(&fx, cutoff, Some(bare));
+    run.clean = true;
+    run.log = log_of(&fx);
+    run.hooks.open = Box::new(|_| Ok(false));
+    let planned = plan(&run).unwrap();
+    assert!(planned.removals.contains(&fx.root.join("lender")));
+    fs::write(
+        borrower.join(".git/objects/info/alternates"),
+        format!("{}\n", lender.join(".git/objects").display()),
+    )
+    .unwrap();
+    let report = apply(&run, &planned).unwrap();
+    assert!(lender.join("f").exists());
+    assert!(report
+        .deferred
+        .iter()
+        .any(|(path, why)| path == &fx.root.join("lender") && why == "deferred:changed"));
+}
+
+#[test]
+fn restore_never_overwrites_a_destination_created_during_the_restore() {
+    let fx = Fx::new("restore-race");
+    fx.file("a/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.open = Box::new(|_| Err(std::io::Error::other("probe failed")));
+    let target = fx.root.join("a");
+    run.hooks.crash = Box::new(move |point| {
+        if point == "restore" {
+            fs::write(&target, b"keep me").unwrap();
+        }
+        false
+    });
+    let report = sweep(&run).unwrap();
+    assert_eq!(fs::read(fx.root.join("a")).unwrap(), b"keep me");
+    assert!(report
+        .deferred
+        .iter()
+        .any(|(_, why)| why == "deferred:restore-blocked"));
+    let stages = fs::read_dir(fx.root.join(".diskm-expired"))
+        .unwrap()
+        .count();
+    assert_eq!(stages, 2, "stage directory and intent are both kept");
+}
+
+#[test]
+fn hostnames_are_classified_by_what_they_resolve_to() {
+    let ssh = |_: &str, _: &str, host: &str| Some(host.to_owned());
+    let dns = |host: &str| match host {
+        "loop.example" => Some(vec![IpAddr::from([127, 0, 0, 1])]),
+        "priv.example" => Some(vec![IpAddr::from([10, 2, 3, 4])]),
+        "mixed.example" => Some(vec![
+            IpAddr::from([8, 8, 8, 8]),
+            IpAddr::from([10, 0, 0, 1]),
+        ]),
+        "pub.example" => Some(vec![IpAddr::from([8, 8, 8, 8])]),
+        "empty.example" => Some(Vec::new()),
+        _ => None,
+    };
+    for host in ["loop", "priv", "mixed", "empty", "unresolvable"] {
+        assert!(
+            !independent(&format!("https://{host}.example/x.git"), &ssh, &dns),
+            "{host}"
+        );
+    }
+    assert!(independent("https://pub.example/x.git", &ssh, &dns));
+    assert!(independent("git@pub.example:x.git", &ssh, &dns));
+}
+
+#[test]
+fn stash_reachable_from_a_pushed_remote_still_holds() {
+    let fx = Fx::new("stash-pushed");
+    let reason = held(&fx, |repo, fx| {
+        let bare = hosted(fx, repo);
+        fs::write(repo.join("f"), b"stashed").unwrap();
+        git(repo, &["stash", "-q"]);
+        git(
+            repo,
+            &["push", "-q", "origin", "refs/stash:refs/heads/stashed"],
+        );
+        Some(bare)
+    });
+    assert_eq!(
+        reason.as_deref(),
+        Some("kept:protected-descendant:git-stash")
+    );
+}
+
+#[test]
+fn hidden_entries_under_runs_are_not_candidates() {
+    let fx = Fx::new("runs-hidden");
+    fx.file("runs/2026-11-22/.DS_Store");
+    fx.file("runs/2026-11-22/repo/done/f");
+    let cutoff = age();
+    assert_eq!(
+        planned(&fx, cutoff).removals,
+        vec![fx.root.join("runs/2026-11-22/repo/done")]
+    );
 }
