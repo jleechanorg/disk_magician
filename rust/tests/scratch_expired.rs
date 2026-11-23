@@ -2607,7 +2607,9 @@ const UNREADABLE: [&str; 6] = [
 ];
 
 fn chmod(path: &Path, mode: u32) {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    let done = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    // Restoring may find the tree gone (removed); locking must succeed.
+    assert!(mode != 0 || done.is_ok(), "cannot lock {}", path.display());
 }
 
 /// A stale repository whose only commit is local (no remote). Where Git would

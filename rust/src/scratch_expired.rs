@@ -396,6 +396,28 @@ fn lexical(path: &Path) -> PathBuf {
     out
 }
 
+/// The precondition for any Git recovery proof: the whole gitdir is listable
+/// and every file Git may read is openable, because Git silently skips what it
+/// cannot read and then reports a clean count. Object contents are not read:
+/// `objects/` and each of its subdirectories only need to be listable.
+fn readable(dir: &Path, top: bool) -> io::Result<()> {
+    for child in sorted_children(dir)? {
+        let info = fs::symlink_metadata(&child)?;
+        if !info.is_dir() {
+            fs::File::open(&child)?;
+        } else if top && child.file_name() == Some("objects".as_ref()) {
+            for sub in sorted_children(&child)? {
+                if fs::symlink_metadata(&sub)?.is_dir() {
+                    fs::read_dir(&sub)?;
+                }
+            }
+        } else {
+            readable(&child, false)?;
+        }
+    }
+    Ok(())
+}
+
 /// A repository holds its folder unless every commit is recoverable from a
 /// live, independent remote. `within` are the path prefixes that count as the
 /// candidate (its original and, while staged, its staged location).
@@ -464,17 +486,7 @@ fn git_protected(
     {
         return Some("kept:git-alternates-dependent");
     }
-    // Reflogs are part of the recovery proof; every one must be readable.
-    fn readable(path: &Path) -> io::Result<()> {
-        if fs::symlink_metadata(path)?.is_dir() {
-            sorted_children(path)?
-                .iter()
-                .try_for_each(|child| readable(child))
-        } else {
-            fs::File::open(path).map(drop)
-        }
-    }
-    match readable(&git_dir.join("logs")) {
+    match readable(git_dir, true) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return failed,
