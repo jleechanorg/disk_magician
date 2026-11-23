@@ -2119,6 +2119,7 @@ fn deinitialized_submodule(fx: &Fx) -> (PathBuf, PathBuf, PathBuf) {
     (source, superproject, bare)
 }
 
+#[allow(clippy::type_complexity)]
 fn module_blind_tips(bare: PathBuf) -> Box<dyn Fn(&Path, &str) -> std::io::Result<Vec<String>>> {
     let super_tips = probe(bare);
     Box::new(move |dir, name| {
@@ -2524,7 +2525,10 @@ fn each_tree_is_checked_right_after_it_is_staged_and_repo_less_trees_skip_the_sc
     fs::set_permissions(fx.root.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
     let report = sweep(&run).unwrap();
     fs::set_permissions(fx.root.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(*events.borrow(), ["stage:a", "open", "stage:b", "open"]);
+    assert_eq!(
+        *events.borrow(),
+        ["stage:a", "open", "open", "stage:b", "open", "open"]
+    );
     assert_eq!(report.removed.len(), 2, "{:?}", report.deferred);
 }
 
@@ -2594,8 +2598,6 @@ fn a_matching_legacy_record_with_mistyped_fields_keeps_the_run() {
 }
 
 // ---- round eight: diagnostics and unreadable reflogs are not proof ----
-
-/// A commit that now exists only in the reflog: made, then reset away.
 
 const UNREADABLE: [&str; 6] = [
     ".git/refs/heads",
