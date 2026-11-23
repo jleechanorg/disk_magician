@@ -496,25 +496,32 @@ fn default_lsof() -> &'static Path {
 }
 
 /// As `open_paths`, with the `lsof` executable named. The listing must parse:
-/// every line is a `p` (process) or `n` (name) field.
+/// every line starts with an ASCII field letter (`p` process, `n` name, and on
+/// macOS also `f`, `t`, ...), at least one process line exists, and only name
+/// lines are paths.
 pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
     let prefix = path.as_os_str().as_encoded_bytes();
     let Some(listing) = run_lsof(lsof, &["-nP", "-w", "-F", "n"], None)? else {
         return Ok(false);
     };
-    let mut found = false;
+    let (mut found, mut processes) = (false, false);
     for line in listing.lines() {
-        match line.as_bytes().first() {
-            Some(b'p') => {}
-            Some(b'n') => {
-                let name = &line.as_bytes()[1..];
-                found |= name.starts_with(prefix)
-                    && matches!(name.get(prefix.len()), None | Some(b'/' | b' '));
-            }
-            _ => return Err(io::Error::other("unparsable lsof listing")),
+        let [field, name @ ..] = line.as_bytes() else {
+            return Err(io::Error::other("unparsable lsof listing"));
+        };
+        if !field.is_ascii_alphabetic() {
+            return Err(io::Error::other("unparsable lsof listing"));
         }
+        processes |= *field == b'p';
+        found |= *field == b'n'
+            && name.starts_with(prefix)
+            && matches!(name.get(prefix.len()), None | Some(b'/' | b' '));
     }
-    Ok(found)
+    if processes {
+        Ok(found)
+    } else {
+        Err(io::Error::other("lsof listing has no process"))
+    }
 }
 
 /// Run a command to completion within `limit`, draining stdout and stderr
