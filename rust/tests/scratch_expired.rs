@@ -2924,3 +2924,29 @@ fn runs_beneath_an_evidence_ancestor_are_preserved() {
         Some("kept:protected-subtree:evidence")
     );
 }
+
+#[test]
+fn a_dot_git_symlink_is_not_proof() {
+    let fx = Fx::new("dot-git-symlink");
+    let repo = fx.root.join("u/repo");
+    let bare = pushed_repo_for(&fx, &repo, "");
+    let cutoff = age();
+    let control = plan(&git_run(&fx, cutoff, Some(bare.clone()))).unwrap();
+    assert!(
+        control.removals.contains(&fx.root.join("u")),
+        "{:?}",
+        control.kept
+    );
+    let ext = ext_of(&fx);
+    fs::create_dir_all(&ext).unwrap();
+    fs::rename(repo.join(".git"), ext.join("gitdir")).unwrap();
+    std::os::unix::fs::symlink(ext.join("gitdir"), repo.join(".git")).unwrap();
+    let planned = plan(&git_run(&fx, cutoff, Some(bare)));
+    let _ = fs::remove_dir_all(&ext);
+    let planned = planned.unwrap();
+    assert!(
+        !planned.removals.contains(&fx.root.join("u")),
+        "{:?}",
+        planned.kept
+    );
+}
