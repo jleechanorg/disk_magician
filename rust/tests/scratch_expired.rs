@@ -2637,7 +2637,6 @@ fn unreadable_reflog_after_staging_restores() {
     let repo = unit.join("repo");
     init(&repo);
     let bare = hosted(&fx, &repo);
-    reflog_only_commit(&repo);
     let cutoff = age();
     let mut run = lender_run(&fx, cutoff, bare);
     run.hooks.after_stage = Box::new(|_, item| {

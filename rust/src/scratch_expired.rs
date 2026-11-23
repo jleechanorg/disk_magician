@@ -250,9 +250,17 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
 // ---- Git protection: a repository holds unless recovery is proven ----
 
 fn bounded(command: &mut Command, input: Option<String>, limit: Duration) -> io::Result<String> {
-    let (status, stdout, _) = run_capture(command.env("GIT_TERMINAL_PROMPT", "0"), input, limit)?;
+    let (status, stdout, stderr) =
+        run_capture(command.env("GIT_TERMINAL_PROMPT", "0"), input, limit)?;
     if !status.success() {
         return Err(io::Error::other(format!("exited with {status}")));
+    }
+    // A command that succeeds yet complains proved nothing: it may have
+    // skipped what it could not read.
+    if !stderr.is_empty() {
+        let first = String::from_utf8_lossy(&stderr);
+        let first = first.lines().next().unwrap_or_default();
+        return Err(io::Error::other(format!("git-stderr:{first}")));
     }
     String::from_utf8(stdout).map_err(io::Error::other)
 }
@@ -455,6 +463,21 @@ fn git_protected(
         .any(|(file, target)| lent(target) && !inside(file))
     {
         return Some("kept:git-alternates-dependent");
+    }
+    // Reflogs are part of the recovery proof; every one must be readable.
+    fn readable(path: &Path) -> io::Result<()> {
+        if fs::symlink_metadata(path)?.is_dir() {
+            sorted_children(path)?
+                .iter()
+                .try_for_each(|child| readable(child))
+        } else {
+            fs::File::open(path).map(drop)
+        }
+    }
+    match readable(&git_dir.join("logs")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return failed,
     }
     let Ok(config) = git(git_dir, &["config", "--local", "--list"], None) else {
         return failed;
