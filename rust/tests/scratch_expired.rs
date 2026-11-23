@@ -1901,7 +1901,10 @@ fn run_capture_does_not_wait_for_a_descendant_holding_the_pipe() {
 // ---- the open-file probe against a fake lsof ----
 
 fn fake_lsof(fx: &Fx, script: &str) -> PathBuf {
-    let path = fx.root.join("fake-lsof");
+    let path = fx.root.parent().unwrap().join(format!(
+        "{}-fake-lsof",
+        fx.root.file_name().unwrap().to_str().unwrap()
+    ));
     fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     // A fork in another test thread can briefly hold the script's write

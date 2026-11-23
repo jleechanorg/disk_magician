@@ -502,7 +502,7 @@ fn default_lsof() -> &'static Path {
 pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
     let prefix = path.as_os_str().as_encoded_bytes();
     let Some(listing) = run_lsof(lsof, &["-nP", "-w", "-F", "n"], None)? else {
-        return Ok(false);
+        return Err(io::Error::other("lsof listed nothing"));
     };
     let (mut found, mut processes) = (false, false);
     for line in listing.lines() {
@@ -588,9 +588,11 @@ pub fn run_capture(
     Ok((status, out.unwrap_or_default(), err.unwrap_or_default()))
 }
 
-/// Standard output of `lsof`, or `None` when it found nothing. Exit status 1
-/// with a listing means some entries could not be read, which `lsof` reports
-/// beside a usable listing; any other failure is an error.
+/// Standard output of a complete `lsof` run (exit status 0; warnings on
+/// stderr alone are fine). Exit status 1 with nothing at all on either stream
+/// means it found nothing. Any other outcome, including a listing beside a
+/// failing status, is an error: a partial listing proves nothing about a path
+/// it omits.
 fn run_lsof(lsof: &Path, args: &[&str], path: Option<&Path>) -> io::Result<Option<String>> {
     let (status, stdout, stderr) = run_capture(
         Command::new(lsof).args(args).args(path),
@@ -598,10 +600,10 @@ fn run_lsof(lsof: &Path, args: &[&str], path: Option<&Path>) -> io::Result<Optio
         crate::time_windows::OPEN_FILE_PROBE_TIMEOUT,
     )?;
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
-    if !stdout.is_empty() && matches!(status.code(), Some(0 | 1)) {
+    if status.success() && !stdout.is_empty() {
         return Ok(Some(stdout));
     }
-    if status.code() == Some(1) && stderr.is_empty() {
+    if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {
         return Ok(None);
     }
     Err(io::Error::other(format!(

@@ -670,9 +670,12 @@ pub(crate) enum LegacyLease {
 /// match the run, so a replaced directory never inherits an old lease. Any
 /// process holding a recorded owner PID keeps the run; a PID reused by an
 /// unrelated process therefore errs toward keeping.
+/// With `strict`, a record that cannot be read or parsed is an error rather
+/// than skipped, so the caller cannot mistake it for "no lease".
 pub(crate) fn legacy_lease(
     bundle: &Path,
     staged: Option<&Path>,
+    strict: bool,
 ) -> io::Result<Option<LegacyLease>> {
     let directory = crate::job_receipt::state_dir(None)?.join("worktree_leases");
     let entries = match fs::read_dir(&directory) {
@@ -686,11 +689,15 @@ pub(crate) fn legacy_lease(
         if path.extension() != Some(OsStr::new("json")) {
             continue;
         }
-        let Ok(bytes) = crate::job_receipt::read_bounded(&path, 1 << 20) else {
-            continue;
+        let bytes = match crate::job_receipt::read_bounded(&path, 1 << 20) {
+            Ok(bytes) => bytes,
+            Err(error) if strict && error.kind() != io::ErrorKind::NotFound => return Err(error),
+            Err(_) => continue,
         };
-        let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue;
+        let record = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(record) => record,
+            Err(error) if strict => return Err(io::Error::other(error)),
+            Err(_) => continue,
         };
         if record["path"].as_str().map(Path::new) != Some(bundle)
             || record["checkout_dev"].as_u64() != Some(metadata.dev())

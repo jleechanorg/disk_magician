@@ -391,7 +391,13 @@ fn git_protected(
             .ancestors()
             .skip(1)
             .any(|up| up.file_name() == Some(".git".as_ref()));
-    let inside = |path: &Path| within.iter().any(|prefix| path.starts_with(prefix));
+    // Containment is physical: a symlink inside the candidate that leads
+    // outside it does not count as inside.
+    let physical: Vec<PathBuf> = within.iter().map(|prefix| resolve(prefix)).collect();
+    let inside = |path: &Path| {
+        let path = resolve(path);
+        physical.iter().any(|prefix| path.starts_with(prefix))
+    };
     let failed = Some("deferred:git-probe-failed");
     if git_dir.is_file() {
         // A gitfile: unparsable or unreadable fails closed; a target outside
@@ -534,7 +540,7 @@ fn run_lease(root: &Path, run: &Path, actual: &Path) -> Option<&'static str> {
     match scratch_lease::lookup_bundle_at(run, root, (run != actual).then_some(actual)) {
         Ok(found) => lease_protects(&found.lease.kind, &found.owner_process_state),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match scratch_lease::legacy_lease(run, (run != actual).then_some(actual)) {
+            match scratch_lease::legacy_lease(run, (run != actual).then_some(actual), true) {
                 Ok(None | Some(LegacyLease::Build { owner_live: false })) => None,
                 Ok(Some(_)) => Some("kept:live-or-unknown-owner"),
                 Err(_) => Some("deferred:lease-unavailable"),

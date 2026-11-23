@@ -746,7 +746,7 @@ pub fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static 
 /// build runs: a build run whose owner has exited qualifies unless a live
 /// process works in it.
 fn check_legacy_build(bundle: &Path) -> Result<(), &'static str> {
-    match scratch_lease::legacy_lease(bundle, None) {
+    match scratch_lease::legacy_lease(bundle, None, false) {
         Ok(None) => Err("kept:lease-missing"),
         Ok(Some(scratch_lease::LegacyLease::OtherKind)) => Err("kept:protected-bundle-kind"),
         Ok(Some(scratch_lease::LegacyLease::Build { owner_live: true })) => {
