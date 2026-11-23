@@ -2498,3 +2498,32 @@ fn a_restored_tree_reports_its_cause() {
         "deferred:restored:evidence"
     );
 }
+
+#[test]
+fn each_tree_is_checked_right_after_it_is_staged_and_repo_less_trees_skip_the_scan() {
+    let fx = Fx::new("check-order");
+    fx.file("a/f");
+    fx.file("b/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (staged, probed) = (events.clone(), events.clone());
+    run.hooks.after_stage = Box::new(move |path, _| {
+        staged.borrow_mut().push(format!(
+            "stage:{}",
+            path.file_name().unwrap().to_str().unwrap()
+        ));
+    });
+    run.hooks.open = Box::new(move |_| {
+        probed.borrow_mut().push("open".to_owned());
+        Ok(false)
+    });
+    // A directory the borrower scan cannot read must not matter to trees
+    // without repositories: they never need the scan.
+    fx.file("locked/f");
+    fs::set_permissions(fx.root.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+    let report = sweep(&run).unwrap();
+    fs::set_permissions(fx.root.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(*events.borrow(), ["stage:a", "open", "stage:b", "open"]);
+    assert_eq!(report.removed.len(), 2, "{:?}", report.deferred);
+}
