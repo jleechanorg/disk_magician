@@ -372,11 +372,11 @@ fn resolve_dns(host: &str) -> Option<Vec<IpAddr>> {
 fn ssh_hostname(user: &str, port: &str, host: &str) -> Option<String> {
     let mut cmd = Command::new("ssh");
     cmd.args(["-G", "-T"]);
-    for (f, v) in [("-l", user), ("-p", port)] {
+    let _ = [("-l", user), ("-p", port)].map(|(f, v)| {
         if !v.is_empty() {
             cmd.args([f, v]);
         }
-    }
+    });
     let text = bounded(cmd.arg(host), None, GIT_REMOTE_PROBE_TIMEOUT).ok()?;
     text.lines()
         .find_map(|l| l.strip_prefix("hostname ").map(str::to_owned))
@@ -498,6 +498,7 @@ fn git_protected(
     let Ok(config) = git(git_dir, &["config", "--local", "--list"], None, deadline) else {
         return failed;
     };
+    let has_wt = config.lines().any(|l| l.starts_with("core.worktree="));
     let remotes: Vec<_> = config
         .lines()
         .filter_map(|l| {
@@ -519,7 +520,7 @@ fn git_protected(
         Ok(_) => {
             // A non-bare git directory not named `.git` belongs to a working
             // tree elsewhere (`--separate-git-dir`), which deleting would orphan.
-            if !tree_inside && git_dir.file_name() != Some(".git".as_ref()) {
+            if !tree_inside && !has_wt && git_dir.file_name() != Some(".git".as_ref()) {
                 return Some("kept:git-external-worktree");
             }
             let Ok(top) = git(git_dir, &["rev-parse", "--show-toplevel"], None, deadline) else {
@@ -773,6 +774,12 @@ fn lease_of(run: &Run, original: &Path, actual: &Path) -> Option<&'static str> {
         .flatten()
 }
 
+fn has_gf(repos: &[PathBuf], d: &Path) -> bool {
+    repos
+        .iter()
+        .any(|r| gitfile_target(r).as_deref() == Some(d))
+}
+
 /// Why `path` cannot be removed whole: `(reason, own)` where `own` means the
 /// path itself is an indivisible protected subtree, not just a descendant.
 /// `full` adds the checks that matter only when removal is on the table.
@@ -812,11 +819,16 @@ fn protection(
         if Instant::now() >= run.deadline {
             return Ok(Some(("incomplete".into(), own)));
         }
-        let (alts, hooks, dl) = (&known.alts, &run.hooks, run.deadline);
+        let (alts, hooks, dl, ti) = (
+            &known.alts,
+            &run.hooks,
+            run.deadline,
+            has_gf(&obs.repos, git_dir),
+        );
         let reason = if known.blind {
             Some("deferred:incomplete-alternates-scan")
         } else {
-            git_protected(git_dir, within, alts, hooks, false, dl)
+            git_protected(git_dir, within, alts, hooks, ti, dl)
         };
         if let Some(reason) = reason {
             let reason = reason.split_once(':').map_or(reason, |(_, r)| r).to_owned();
@@ -901,15 +913,12 @@ const STAGES: &str = ".diskm-expired";
 /// What a stage records so an interrupted run can be finished or undone.
 #[derive(Serialize, Deserialize)]
 pub struct Intent {
-    /// `staged` (renamed, not yet verified) or `deleting`.
     pub state: String,
-    /// Original path relative to the Scratch root.
     pub original: PathBuf,
     pub device: u64,
     pub inode: u64,
     pub newest: i64,
     pub bytes: u64,
-    /// The exact deletion-log row, so replay appends it at most once.
     pub row: String,
 }
 
@@ -918,18 +927,15 @@ pub struct Report {
     pub removed: Vec<(PathBuf, u64)>,
     pub would_remove: Vec<PathBuf>,
     pub deferred: Vec<(PathBuf, String)>,
-    /// Kept units counted by reason; paths are not listed.
     pub kept: BTreeMap<String, usize>,
     pub interrupted: Vec<String>,
     pub timed_out: bool,
 }
 
-/// Longest list the report prints; the rest is counted under `truncated`.
 const LIST_CAP: usize = 500;
 
 impl Report {
-    /// The printable report: full (capped) lists of what was or would be
-    /// removed or deferred, and only counts for everything kept.
+    /// Printable report: capped lists for removed/would_remove/deferred, counts for kept.
     pub fn summary(&self) -> Value {
         let mut truncated = serde_json::Map::new();
         let mut cap = |n: &str, v: Vec<Value>| {
@@ -1065,7 +1071,8 @@ fn staged_ok(
     }
     let (alts, hooks, dl, pair) = (&known.alts, &run.hooks, run.deadline, [item, &original]);
     for git_dir in &seen.repos {
-        if let Some(reason) = git_protected(git_dir, &pair, alts, hooks, false, dl) {
+        let ti = has_gf(&seen.repos, git_dir);
+        if let Some(reason) = git_protected(git_dir, &pair, alts, hooks, ti, dl) {
             return Ok(Fail(short(reason)));
         }
     }
@@ -1287,8 +1294,7 @@ fn safe_stages(dir: &Path, device: u64) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Finish or undo the stages of dead processes; a live process's stage is
-/// never touched, and a dry run only lists them.
+/// Recover stages of dead processes (dry run only lists them).
 fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
     let dir = run.root.join(STAGES);
     if !safe_stages(&dir, run.device)? {
@@ -1351,12 +1357,11 @@ fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
     Ok(())
 }
 
-/// Apply a plan: recover interrupted stages, then remove each planned unit
-/// through the revalidate, stage, check, delete transaction.
+/// Recover interrupted stages, then apply `plan`.
 pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     let mut report = Report {
         timed_out: plan.timed_out,
-        ..Default::default()
+        ..Report::default()
     };
     for (_, reason) in &plan.kept {
         *report.kept.entry(reason.clone()).or_default() += 1;
@@ -1394,9 +1399,7 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     if pending.is_empty() {
         return Ok(report);
     }
-    // Trees holding repositories: every one is staged before the single fresh
-    // borrower scan, so a borrower that appeared since planning, or while
-    // staging, is seen against each item's final location.
+    // Trees with repos are staged before the single fresh alternates scan.
     let known = fresh_known(run)?;
     for mut unit in pending {
         step(&mut unit, Some(&known), &mut report)?;

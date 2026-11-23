@@ -3176,3 +3176,29 @@ fn restore_blocked_marks_report_incomplete() {
         .push(("x".into(), "deferred:restore-blocked".into()));
     assert!(!r.complete());
 }
+
+#[test]
+fn contained_separate_git_dir_with_recoverable_commits_is_eligible() {
+    let fx = Fx::new("contained-sep-git");
+    let tree = fx.root.join("u/tree");
+    let store = fx.root.join("u/store");
+    fs::create_dir_all(&tree).unwrap();
+    git(
+        &tree,
+        &["init", "-q", "--separate-git-dir", store.to_str().unwrap()],
+    );
+    fs::write(tree.join("f"), b"hi").unwrap();
+    git(&tree, &["add", "f"]);
+    git(&tree, &["commit", "-qm", "init"]);
+    let bare = hosted(&fx, &tree);
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.independent = Box::new(|_, _| true);
+    run.hooks.tips = probe(bare);
+    let planned = plan(&run).unwrap();
+    assert!(
+        planned.removals.contains(&fx.root.join("u")),
+        "{:?}",
+        planned.kept
+    );
+}
