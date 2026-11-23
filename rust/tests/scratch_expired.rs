@@ -2603,9 +2603,9 @@ fn reflog_only_commit(repo: &Path) {
     git(repo, &["reset", "-q", "--hard", "HEAD~1"]);
 }
 
-fn lock(path: &Path) -> impl FnOnce() + '_ {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
-    move || fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap()
+fn lock(path: PathBuf) -> impl FnOnce() {
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    move || fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap()
 }
 
 #[test]
@@ -2618,7 +2618,7 @@ fn unreadable_reflog_is_not_proof_at_planning() {
         let bare = hosted(&fx, &repo);
         reflog_only_commit(&repo);
         let cutoff = age();
-        let unlock = lock(&repo.join(target));
+        let unlock = lock(repo.join(target));
         let planned = plan(&git_run(&fx, cutoff, Some(bare)));
         unlock();
         let planned = planned.unwrap();
@@ -2659,20 +2659,16 @@ fn unreadable_reflog_in_recovery_restores() {
     let (item, bare) = recovery_stage_with_repo(&fx);
     reflog_only_commit(&item.join("repo"));
     let cutoff = age();
-    let logs = item.join("repo/.git/logs");
-    let unlock = lock(&logs);
+    fs::set_permissions(
+        item.join("repo/.git/logs"),
+        fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
     let swept = sweep(&lender_run(&fx, cutoff, bare));
     let _ = fs::set_permissions(
         fx.root.join("lender-back/repo/.git/logs"),
         fs::Permissions::from_mode(0o700),
     );
-    unlock_if_present(&logs, unlock);
     swept.unwrap();
     assert!(fx.root.join("lender-back/repo/f").exists() && !item.exists());
-}
-
-fn unlock_if_present(path: &Path, unlock: impl FnOnce()) {
-    if path.exists() {
-        unlock();
-    }
 }
