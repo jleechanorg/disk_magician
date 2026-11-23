@@ -2125,60 +2125,61 @@ fn deinitialized_submodule_with_unpublished_commits_holds() {
 fn module_commit_created_after_staging_restores() {
     let fx = Fx::new("deinit-staged");
     let (source, superproject, bare) = deinitialized_submodule(&fx);
-    // The module is fully published at planning time; only .git/modules changes.
     let module = superproject.join(".git/modules/sub");
+    // Publish the module's commits so planning finds everything recoverable.
+    let module_remote = fx.root.parent().unwrap().join(format!(
+        "{}-module-remote.git",
+        fx.root.file_name().unwrap().to_str().unwrap()
+    ));
+    let _ = fs::remove_dir_all(&module_remote);
     git(
         &module,
-        &["push", "-q", "origin", "HEAD:refs/heads/published"],
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            ".",
+            module_remote.to_str().unwrap(),
+        ],
+    );
+    git(
+        &module,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            module_remote.to_str().unwrap(),
+        ],
     );
     let cutoff = age();
     let mut run = lender_run(&fx, cutoff, bare.clone());
-    let module_remote = fx.root.parent().unwrap().join(format!(
-        "{}-remote.git",
-        fx.root.file_name().unwrap().to_str().unwrap()
-    ));
-    let _ = module_remote;
+    let (super_tips, module_tips) = (probe(bare), probe(module_remote.clone()));
     run.hooks.tips = Box::new(move |dir, name| {
-        let listing = git(
-            if dir.to_string_lossy().contains("/modules/") {
-                dir
-            } else {
-                &bare
-            },
-            &[
-                "for-each-ref",
-                "--format=%(objectname)",
-                "refs/heads",
-                "refs/tags",
-            ],
-        );
-        let _ = name;
-        Ok(listing.lines().map(str::to_owned).collect())
-    });
-    run.hooks.after_stage = Box::new(|_, item| {
-        let module = item.join("u/super/.git/modules/sub");
-        let module = if module.exists() {
-            module
+        if dir.to_string_lossy().contains("/modules/") {
+            module_tips(dir, name)
         } else {
-            item.join("super/.git/modules/sub")
-        };
-        git(&module, &["commit-tree", "-m", "late", "HEAD^{tree}"]);
-        git(
-            &module,
-            &[
-                "update-ref",
-                "refs/heads/late",
-                &git(
-                    &module,
-                    &["commit-tree", "-m", "late", "-p", "HEAD", "HEAD^{tree}"],
-                )
-                .trim()
-                .to_owned(),
-            ],
-        );
+            super_tips(dir, name)
+        }
     });
-    sweep(&run).unwrap();
+    let planned = plan(&run).unwrap();
+    assert!(
+        planned.removals.contains(&fx.root.join("u")),
+        "{:?}",
+        planned.kept
+    );
+    // Only .git/modules changes: identity and every watched time stay put.
+    run.hooks.after_stage = Box::new(|_, item| {
+        let module = item.join("super/.git/modules/sub");
+        let tree = git(&module, &["rev-parse", "HEAD^{tree}"]);
+        let late = git(
+            &module,
+            &["commit-tree", "-m", "late", "-p", "HEAD", tree.trim()],
+        );
+        git(&module, &["update-ref", "refs/heads/late", late.trim()]);
+    });
+    apply(&run, &planned).unwrap();
     let _ = fs::remove_dir_all(&source);
+    let _ = fs::remove_dir_all(&module_remote);
     assert!(superproject.join("f").exists());
 }
 

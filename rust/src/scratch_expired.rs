@@ -44,6 +44,26 @@ fn mtime(info: &fs::Metadata) -> i64 {
     nanos(info.mtime(), info.mtime_nsec())
 }
 
+/// Normalize `path` lexically (so `..` never depends on what exists, such as
+/// a lender that has since been staged) and resolve symlinks in the longest
+/// part that does exist.
+fn resolve(path: &Path) -> PathBuf {
+    let path = lexical(path);
+    let (mut head, mut rest) = (path.clone(), Vec::new());
+    loop {
+        if let Ok(real) = fs::canonicalize(&head) {
+            return rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (head.file_name().map(ToOwned::to_owned), head.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                head = parent.to_path_buf();
+            }
+            _ => return path,
+        }
+    }
+}
+
 /// Objects borrowed through `objects/info/alternates`; a file that exists but
 /// cannot be read is an error, never "no alternates".
 fn read_alternates(git_dir: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
@@ -56,10 +76,7 @@ fn read_alternates(git_dir: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
     Ok(text
         .lines()
         .filter(|line| !line.is_empty())
-        .map(|line| {
-            let target = git_dir.join("objects").join(line);
-            (file.clone(), fs::canonicalize(&target).unwrap_or(target))
-        })
+        .map(|line| (file.clone(), resolve(&git_dir.join("objects").join(line))))
         .collect())
 }
 
@@ -86,7 +103,9 @@ fn git_stores(entry: &Path) -> io::Result<Vec<PathBuf>> {
     let mut stores = Vec::new();
     let home = if entry.is_file() {
         match gitfile_target(entry) {
-            Some(target) if target.join("commondir").exists() => return Ok(stores),
+            Some(target) if fs::symlink_metadata(target.join("commondir")).is_ok() => {
+                return Ok(stores)
+            }
             Some(target) => target,
             None => return Err(io::Error::other("unparsable gitfile")),
         }
@@ -108,6 +127,11 @@ fn collect_stores(entry: &Path, found: &mut Observation) {
     match git_stores(entry) {
         Ok(stores) => {
             for store in stores {
+                // Retained submodule repositories get the full recovery proof
+                // even when no working tree points at them any more.
+                if store.starts_with(entry.join("modules")) {
+                    found.repos.push(store.clone());
+                }
                 match read_alternates(&store) {
                     Ok(pairs) => found.alternates.extend(pairs),
                     Err(error) => found
@@ -129,6 +153,11 @@ pub fn observe(unit: &Path, device: u64, deadline: Instant) -> Observation {
         complete: true,
         ..Observation::default()
     };
+    if unit.to_str().is_none() {
+        found
+            .gaps
+            .push(format!("{}: non-UTF-8 name", unit.display()));
+    }
     match fs::symlink_metadata(unit) {
         Ok(info) => {
             found.newest = mtime(&info);
@@ -356,6 +385,12 @@ fn git_protected(
     hooks: &Hooks,
     tree_inside: bool,
 ) -> Option<&'static str> {
+    // A repository kept under some `.git/modules` has its tree beside it.
+    let tree_inside = tree_inside
+        || git_dir
+            .ancestors()
+            .skip(1)
+            .any(|up| up.file_name() == Some(".git".as_ref()));
     let inside = |path: &Path| within.iter().any(|prefix| path.starts_with(prefix));
     let failed = Some("deferred:git-probe-failed");
     if git_dir.is_file() {
@@ -383,10 +418,13 @@ fn git_protected(
     let relative = within
         .iter()
         .find_map(|prefix| git_dir.strip_prefix(prefix).ok());
+    let Some(relative) = relative else {
+        return failed;
+    };
     let lent = |target: &Path| {
-        within.iter().any(|prefix| {
-            relative.is_some_and(|rel| target.starts_with(prefix.join(rel).join("objects")))
-        })
+        within
+            .iter()
+            .any(|prefix| target.starts_with(prefix.join(relative).join("objects")))
     };
     if alts
         .iter()
@@ -416,16 +454,21 @@ fn git_protected(
             remotes.push(name.to_owned());
         }
     }
-    if let Ok(linked) = fs::read_dir(git_dir.join("worktrees")) {
-        for entry in linked {
-            let Ok(text) = entry.and_then(|entry| fs::read_to_string(entry.path().join("gitdir")))
-            else {
-                return failed;
-            };
-            if !inside(&lexical(Path::new(text.trim()))) {
-                return Some("kept:git-external-worktree");
+    match fs::read_dir(git_dir.join("worktrees")) {
+        Ok(linked) => {
+            for entry in linked {
+                let Ok(text) =
+                    entry.and_then(|entry| fs::read_to_string(entry.path().join("gitdir")))
+                else {
+                    return failed;
+                };
+                if !inside(&lexical(Path::new(text.trim()))) {
+                    return Some("kept:git-external-worktree");
+                }
             }
         }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return failed,
     }
     match git(git_dir, &["for-each-ref", "refs/stash"], None) {
         Ok(text) if text.trim().is_empty() => {}
@@ -601,7 +644,7 @@ fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
             hidden.push(path);
         } else if name == "runs" && fs::symlink_metadata(&path)?.is_dir() {
             runs(&path, 0, &mut found, &mut hidden)?;
-        } else if name.to_str().is_some() {
+        } else {
             found.push(path);
         }
     }
@@ -656,13 +699,13 @@ fn repo_root(git_dir: &Path) -> &Path {
 /// at `original` and currently at `actual`; other paths have no lease.
 fn lease_of(run: &Run, original: &Path, actual: &Path) -> Option<&'static str> {
     let relative = original.strip_prefix(&run.root).ok()?;
-    let is_run = relative.components().count() == 4
-        && relative.starts_with("runs")
-        && fs::symlink_metadata(actual).is_ok_and(|info| info.is_dir());
-    if is_run {
-        (run.hooks.lease)(&run.root, original, actual)
-    } else {
-        None
+    if relative.components().count() != 4 || !relative.starts_with("runs") {
+        return None;
+    }
+    match fs::symlink_metadata(actual) {
+        Ok(info) if info.is_dir() => (run.hooks.lease)(&run.root, original, actual),
+        Ok(_) => None,
+        Err(_) => Some("deferred:lease-unavailable"),
     }
 }
 
@@ -751,7 +794,7 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
     {
         let seen = observe(&path, run.device, run.deadline);
         alts.extend(seen.alternates.iter().cloned());
-        stores.extend(seen.stores.iter().filter(|dir| dir.is_dir()).cloned());
+        stores.extend(seen.stores.iter().cloned());
         blind |= !seen.complete;
         if judged {
             units.push((path, seen));
@@ -825,17 +868,27 @@ impl Report {
             }
             list.into_iter().take(LIST_CAP).collect::<Vec<_>>()
         };
+        let text = |path: &Path| path.to_string_lossy().into_owned();
         let removed = capped(
             "removed",
-            self.removed.iter().map(|row| json!(row)).collect(),
+            self.removed
+                .iter()
+                .map(|(path, bytes)| json!([text(path), bytes]))
+                .collect(),
         );
         let would_remove = capped(
             "would_remove",
-            self.would_remove.iter().map(|row| json!(row)).collect(),
+            self.would_remove
+                .iter()
+                .map(|path| json!(text(path)))
+                .collect(),
         );
         let deferred = capped(
             "deferred",
-            self.deferred.iter().map(|row| json!(row)).collect(),
+            self.deferred
+                .iter()
+                .map(|(path, why)| json!([text(path), why]))
+                .collect(),
         );
         let interrupted = capped(
             "interrupted",
@@ -925,6 +978,15 @@ fn staged_ok(run: &Run, item: &Path, intent: &Intent, known: &Known) -> io::Resu
     Ok(matches!((run.hooks.open)(item), Ok(false)))
 }
 
+/// Metadata of `path`, or `None` only when it is truly absent.
+fn existing(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(info) => Ok(Some(info)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn crashed(run: &Run, point: &str) -> io::Result<()> {
     if (run.hooks.crash)(point) {
         return Err(io::Error::other(format!("simulated crash at {point}")));
@@ -942,7 +1004,7 @@ fn finish(
     report: &mut Report,
 ) -> io::Result<()> {
     let item = stage.join("item");
-    if let Ok(info) = fs::symlink_metadata(&item) {
+    if let Some(info) = existing(&item)? {
         if intent.state != "deleting" {
             intent.bytes = allocated(&item);
             let timestamp = crate::job_receipt::timestamp(std::time::SystemTime::now())?;
@@ -1079,7 +1141,6 @@ fn stage_unit(
     let alts = plan
         .stores
         .iter()
-        .filter(|dir| dir.is_dir())
         .map(|dir| read_alternates(dir))
         .collect::<io::Result<Vec<_>>>();
     let known = Known {
@@ -1133,9 +1194,9 @@ fn stage_unit(
 /// never touched, and a dry run only lists them.
 fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
     let dir = run.root.join(STAGES);
-    let Ok(_) = fs::symlink_metadata(&dir) else {
+    if existing(&dir)?.is_none() {
         return Ok(());
-    };
+    }
     for intent_path in sorted_children(&dir)? {
         let Some(name) = intent_path
             .file_name()
@@ -1160,7 +1221,7 @@ fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
         let item = stage.join("item");
         let mut intent: Intent =
             serde_json::from_slice(&fs::read(&intent_path)?).map_err(io::Error::other)?;
-        let present = fs::symlink_metadata(&item).is_ok();
+        let present = existing(&item)?.is_some();
         if intent.state == "deleting"
             && (!present || staged_ok(run, &item, &intent, &fresh_known(run)?)?)
         {
