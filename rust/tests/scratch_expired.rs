@@ -1943,3 +1943,37 @@ fn an_unparsable_or_failed_lsof_fails_closed() {
     }
     assert!(open_paths_with(Path::new("/held"), Path::new("/nonexistent/lsof")).is_err());
 }
+
+#[test]
+fn macos_shaped_listing_with_field_lines_is_parsed() {
+    let fx = Fx::new("fake-lsof-macos");
+    // macOS lsof also emits `f` (descriptor) lines between `p` and `n`.
+    let lsof = fake_lsof(
+        &fx,
+        "printf 'p123\\nfcwd\\nn/some/dir\\nftxt\\nn/bin/x\\np124\\nf3\\ntREG\\nn/other\\n'",
+    );
+    assert!(open_paths_with(Path::new("/some/dir"), &lsof).unwrap());
+    assert!(open_paths_with(Path::new("/bin/x"), &lsof).unwrap());
+    assert!(!open_paths_with(Path::new("/nowhere"), &lsof).unwrap());
+    // Only `n` lines are paths: a descriptor or type value is never matched.
+    assert!(!open_paths_with(
+        Path::new("/some"),
+        &fake_lsof(&fx, "printf 'p1\\nf/some\\nfcwd\\n'")
+    )
+    .unwrap());
+}
+
+#[test]
+fn a_listing_without_a_process_line_or_with_stray_lines_fails_closed() {
+    let fx = Fx::new("fake-lsof-shape");
+    for script in [
+        "printf 'fcwd\\nn/x\\n'",
+        "printf 'p1\\n/x\\n'",
+        "printf 'p1\\n 7\\n'",
+        "printf 'p1\\n9\\n'",
+        "printf '\\n\\n'",
+    ] {
+        let lsof = fake_lsof(&fx, script);
+        assert!(open_paths_with(Path::new("/x"), &lsof).is_err(), "{script}");
+    }
+}
