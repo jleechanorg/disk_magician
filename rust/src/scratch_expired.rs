@@ -846,7 +846,7 @@ fn protection(
 /// protected content; otherwise kept whole. Active workspaces are never
 /// descended into.
 fn judge(c: &mut Ctx, path: PathBuf, obs: Observation) -> io::Result<()> {
-    let stale = obs.complete && obs.newest < c.run.cutoff;
+    let stale = obs.complete && obs.newest.max(obs.newest_file) < c.run.cutoff;
     let held = protection(c.run, &c.known, &path, &obs, &[&path], stale)?;
     let reason = match held {
         Some((reason, true)) => format!("kept:protected-subtree:{reason}"),
@@ -1266,7 +1266,7 @@ fn stage_unit(
         alts: alts.iter().flatten().flatten().cloned().collect(),
         blind: plan.blind || alts.is_err(),
     };
-    let stale = seen.complete && seen.newest < run.cutoff;
+    let stale = seen.complete && seen.newest.max(seen.newest_file) < run.cutoff;
     let open = (run.hooks.open)(path);
     let held = !stale || protection(run, &known, path, &seen, &[path], true)?.is_some();
     if held || !matches!(open, Ok(false)) {

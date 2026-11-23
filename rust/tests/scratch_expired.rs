@@ -3017,3 +3017,22 @@ fn pre_stage_open_check_skips_staging() {
     assert!(!staged.load(std::sync::atomic::Ordering::SeqCst));
     assert!(fx.root.join("live/f").exists() && report.removed.is_empty());
 }
+
+#[test]
+fn top_level_file_ctime_counts_for_plan_and_stage() {
+    let fx = Fx::new("top-file-ctime");
+    let file = fx.file("top.txt");
+    let cutoff = age();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let run = run_for(&fx, cutoff);
+    let planned = plan(&run).unwrap();
+    assert!(planned.removals.is_empty(), "{:?}", planned.kept);
+    assert!(
+        planned
+            .kept
+            .iter()
+            .any(|(p, r)| p == &file && r == "kept:fresh"),
+        "{:?}",
+        planned.kept
+    );
+}
