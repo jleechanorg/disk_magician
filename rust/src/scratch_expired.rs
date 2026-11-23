@@ -398,20 +398,21 @@ fn lexical(path: &Path) -> PathBuf {
 
 /// The precondition for any Git recovery proof: the whole gitdir is listable
 /// and every file Git may read is openable, because Git silently skips what it
-/// cannot read and then reports a clean count. Object contents are not read:
+/// cannot read and then reports a clean count. Only regular files are opened
+/// (a socket or FIFO must not block or fail it). Object contents are not read:
 /// `objects/` and each of its subdirectories only need to be listable.
 fn readable(dir: &Path, top: bool) -> io::Result<()> {
     for child in sorted_children(dir)? {
         let info = fs::symlink_metadata(&child)?;
-        if !info.is_dir() {
+        if info.is_file() {
             fs::File::open(&child)?;
-        } else if top && child.file_name() == Some("objects".as_ref()) {
+        } else if info.is_dir() && top && child.file_name() == Some("objects".as_ref()) {
             for sub in sorted_children(&child)? {
                 if fs::symlink_metadata(&sub)?.is_dir() {
                     fs::read_dir(&sub)?;
                 }
             }
-        } else {
+        } else if info.is_dir() {
             readable(&child, false)?;
         }
     }
