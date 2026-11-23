@@ -44,24 +44,25 @@ fn mtime(info: &fs::Metadata) -> i64 {
     nanos(info.mtime(), info.mtime_nsec())
 }
 
-/// Normalize `path` lexically (so `..` never depends on what exists, such as
-/// a lender that has since been staged) and resolve symlinks in the longest
-/// part that does exist.
-fn resolve(path: &Path) -> PathBuf {
-    let path = lexical(path);
-    let (mut head, mut rest) = (path.clone(), Vec::new());
+/// `path` with every symlink resolved. When the tail no longer exists (a
+/// lender that has been staged) `..` after a symlink cannot be evaluated, so
+/// the lexical form is trusted only if the part that does exist has no symlink
+/// in it; otherwise the answer is `None` (unknown), which callers hold.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    if let Ok(real) = fs::canonicalize(path) {
+        return Some(real);
+    }
+    let mut head = path.to_path_buf();
     loop {
-        if let Ok(real) = fs::canonicalize(&head) {
-            return rest.iter().rev().fold(real, |acc, part| acc.join(part));
-        }
-        match (head.file_name().map(ToOwned::to_owned), head.parent()) {
-            (Some(name), Some(parent)) => {
-                rest.push(name);
-                head = parent.to_path_buf();
+        match fs::symlink_metadata(&head) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                head = head.parent()?.to_path_buf();
             }
-            _ => return path,
+            Err(_) => return None,
         }
     }
+    (fs::canonicalize(&head).ok()? == lexical(&head)).then(|| lexical(path))
 }
 
 /// Objects borrowed through `objects/info/alternates`; a file that exists but
@@ -73,11 +74,14 @@ fn read_alternates(git_dir: &Path) -> io::Result<Vec<(PathBuf, PathBuf)>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
-    Ok(text
-        .lines()
+    text.lines()
         .filter(|line| !line.is_empty())
-        .map(|line| (file.clone(), resolve(&git_dir.join("objects").join(line))))
-        .collect())
+        .map(|line| {
+            resolve(&git_dir.join("objects").join(line))
+                .map(|target| (file.clone(), target))
+                .ok_or_else(|| io::Error::other("unresolvable alternates path"))
+        })
+        .collect()
 }
 
 /// Every object store behind a `.git` entry or bare repository: the git
@@ -90,24 +94,29 @@ fn git_stores(entry: &Path) -> io::Result<Vec<PathBuf>> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
-        for child in children.into_iter().filter(|child| child.is_dir()) {
-            if child.join("HEAD").is_file() {
-                out.push(child.clone());
-                modules(&child.join("modules"), out)?;
-            } else {
-                modules(&child, out)?;
+        for child in children {
+            if !fs::symlink_metadata(&child)?.is_dir() {
+                continue;
+            }
+            match fs::symlink_metadata(child.join("HEAD")) {
+                Ok(head) if head.is_file() => {
+                    out.push(child.clone());
+                    modules(&child.join("modules"), out)?;
+                }
+                Ok(_) => modules(&child, out)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => modules(&child, out)?,
+                Err(error) => return Err(error),
             }
         }
         Ok(())
     }
     let mut stores = Vec::new();
-    let home = if entry.is_file() {
-        match gitfile_target(entry) {
-            Some(target) if fs::symlink_metadata(target.join("commondir")).is_ok() => {
-                return Ok(stores)
-            }
-            Some(target) => target,
-            None => return Err(io::Error::other("unparsable gitfile")),
+    let home = if fs::symlink_metadata(entry)?.is_file() {
+        let target = gitfile_target(entry).ok_or_else(|| io::Error::other("unparsable gitfile"))?;
+        match fs::symlink_metadata(target.join("commondir")) {
+            Ok(_) => return Ok(stores),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => target,
+            Err(error) => return Err(error),
         }
     } else {
         entry.to_path_buf()
@@ -120,7 +129,7 @@ fn git_stores(entry: &Path) -> io::Result<Vec<PathBuf>> {
 fn gitfile_target(file: &Path) -> Option<PathBuf> {
     let text = fs::read_to_string(file).ok()?;
     let relative = text.trim().strip_prefix("gitdir:")?.trim().to_owned();
-    Some(lexical(&file.parent()?.join(relative)))
+    resolve(&file.parent()?.join(relative))
 }
 
 fn collect_stores(entry: &Path, found: &mut Observation) {
@@ -393,13 +402,15 @@ fn git_protected(
             .any(|up| up.file_name() == Some(".git".as_ref()));
     // Containment is physical: a symlink inside the candidate that leads
     // outside it does not count as inside.
-    let physical: Vec<PathBuf> = within.iter().map(|prefix| resolve(prefix)).collect();
+    let physical: Vec<PathBuf> = within.iter().filter_map(|prefix| resolve(prefix)).collect();
     let inside = |path: &Path| {
-        let path = resolve(path);
-        physical.iter().any(|prefix| path.starts_with(prefix))
+        resolve(path).is_some_and(|path| physical.iter().any(|prefix| path.starts_with(prefix)))
     };
     let failed = Some("deferred:git-probe-failed");
-    if git_dir.is_file() {
+    let Ok(git_entry) = fs::symlink_metadata(git_dir) else {
+        return failed;
+    };
+    if git_entry.is_file() {
         // A gitfile: unparsable or unreadable fails closed; a target outside
         // the candidate is someone else's repository.
         let Some(target) = gitfile_target(git_dir) else {
@@ -414,7 +425,10 @@ fn git_protected(
         // judged as the repository it is.
         return match fs::symlink_metadata(target.join("commondir")) {
             Ok(_) => Some("kept:git-linked-worktree"),
-            Err(error) if error.kind() == io::ErrorKind::NotFound && target.is_dir() => {
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && fs::symlink_metadata(&target).is_ok_and(|info| info.is_dir()) =>
+            {
                 git_protected(&target, within, alts, hooks, true)
             }
             Err(_) => failed,
@@ -442,6 +456,7 @@ fn git_protected(
         return failed;
     };
     let mut remotes = Vec::new();
+    let mut worktree_set = false;
     for line in config.lines() {
         let (key, value) = line.split_once('=').unwrap_or((line, ""));
         // A non-bare git directory not named `.git` belongs to a working
@@ -450,7 +465,8 @@ fn git_protected(
             && key == "core.bare"
             && value == "false"
             && git_dir.file_name() != Some(".git".as_ref());
-        if detached || (key == "core.worktree" && !inside(&lexical(&git_dir.join(value)))) {
+        worktree_set |= key == "core.worktree";
+        if detached {
             return Some("kept:git-external-worktree");
         }
         if let Some(name) = key
@@ -458,6 +474,21 @@ fn git_protected(
             .and_then(|key| key.strip_suffix(".url"))
         {
             remotes.push(name.to_owned());
+        }
+    }
+    if worktree_set {
+        // Ask Git where its working tree really is; never re-derive its path
+        // rules. No answer, or an unresolvable one, holds.
+        let Ok(top) = git(git_dir, &["rev-parse", "--show-toplevel"], None) else {
+            return failed;
+        };
+        let top = top.trim();
+        if top.is_empty() || !inside(Path::new(top)) {
+            return Some(if top.is_empty() {
+                "deferred:git-probe-failed"
+            } else {
+                "kept:git-external-worktree"
+            });
         }
     }
     match fs::read_dir(git_dir.join("worktrees")) {
@@ -468,7 +499,7 @@ fn git_protected(
                 else {
                     return failed;
                 };
-                if !inside(&lexical(Path::new(text.trim()))) {
+                if !inside(Path::new(text.trim())) {
                     return Some("kept:git-external-worktree");
                 }
             }
