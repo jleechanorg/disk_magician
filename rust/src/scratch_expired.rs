@@ -357,7 +357,7 @@ fn resolve_dns(host: &str) -> Option<Vec<IpAddr>> {
 
 fn ssh_hostname(user: &str, port: &str, host: &str) -> Option<String> {
     let mut command = Command::new("ssh");
-    command.arg("-G");
+    command.args(["-G", "-T"]);
     if !user.is_empty() {
         command.args(["-l", user]);
     }
@@ -789,7 +789,12 @@ fn protection(
     full: bool,
 ) -> io::Result<Option<(String, bool)>> {
     let mut below = None;
-    if path.file_name().is_some_and(|name| name == "evidence") {
+    if path
+        .strip_prefix(&run.root)
+        .unwrap_or(path)
+        .components()
+        .any(|c| c.as_os_str() == "evidence")
+    {
         return Ok(Some(("evidence".into(), true)));
     }
     for held in &known.holds {
@@ -1424,32 +1429,15 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     let known = fresh_known(run)?;
     for mut unit in pending {
         let item = unit.stage.join("item");
+        let (s, p) = (&unit.stage, &unit.intent_path);
         match staged_ok(run, &item, &unit.intent, Some(&known))
             .unwrap_or_else(|error| Verdict::Fail(format!("check-error:{error}")))
         {
-            Verdict::Pass => finish(
-                run,
-                &unit.stage,
-                &unit.intent_path,
-                &mut unit.intent,
-                &mut report,
-            )?,
-            Verdict::Fail(cause) => restore(
-                run,
-                &unit.stage,
-                &unit.intent_path,
-                &unit.intent,
-                &cause,
-                &mut report,
-            )?,
-            Verdict::NeedsScan => restore(
-                run,
-                &unit.stage,
-                &unit.intent_path,
-                &unit.intent,
-                "scan-unavailable",
-                &mut report,
-            )?,
+            Verdict::Pass => finish(run, s, p, &mut unit.intent, &mut report)?,
+            Verdict::Fail(cause) => restore(run, s, p, &unit.intent, &cause, &mut report)?,
+            Verdict::NeedsScan => {
+                restore(run, s, p, &unit.intent, "scan-unavailable", &mut report)?
+            }
         }
     }
     Ok(report)

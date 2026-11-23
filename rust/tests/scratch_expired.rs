@@ -2778,3 +2778,16 @@ fn plan_stops_git_qualification_when_deadline_expires() {
     let planned = plan(&run).unwrap();
     assert!(planned.timed_out && !probed.load(std::sync::atomic::Ordering::SeqCst));
 }
+
+#[test]
+fn runs_beneath_an_evidence_ancestor_are_preserved() {
+    let fx = Fx::new("evidence-ancestor");
+    fx.file("runs/2026-11-22/evidence/run1/f");
+    let cutoff = age();
+    let planned = planned(&fx, cutoff);
+    assert!(planned.removals.is_empty(), "{:?}", planned.removals);
+    assert_eq!(
+        kept(&planned, &fx.root.join("runs/2026-11-22/evidence/run1")),
+        Some("kept:protected-subtree:evidence")
+    );
+}

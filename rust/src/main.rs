@@ -277,7 +277,10 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
 }
 
 fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
-    let mut options = scratch_sweep::Options::default();
+    let mut options = scratch_sweep::Options {
+        limit: 0,
+        ..Default::default()
+    };
     let mut deadline_set = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -297,12 +300,15 @@ fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Opera
         }
     }
     if options.expired {
-        if options.system_tmp || !options.paths.is_empty() {
-            return Err("--expired works only on the registered Scratch root; drop --root system-tmp and --path".into());
+        if options.system_tmp || !options.paths.is_empty() || options.limit != 0 {
+            return Err("--expired works only on the registered Scratch root; drop --root system-tmp, --path, and --max-candidates".into());
         }
         if !deadline_set {
             options.deadline = time_windows::EXPIRED_SWEEP_DEADLINE;
         }
+    }
+    if options.limit == 0 {
+        options.limit = scratch_sweep::Options::default().limit;
     }
     Ok(Operation::ScratchSweep(options))
 }
