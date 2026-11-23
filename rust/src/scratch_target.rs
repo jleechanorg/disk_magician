@@ -553,7 +553,7 @@ pub fn apply(
     Ok(report(state))
 }
 
-fn deletion_log_path() -> io::Result<PathBuf> {
+pub(crate) fn deletion_log_path() -> io::Result<PathBuf> {
     if let Some(path) =
         std::env::var_os("DISK_MAGICIAN_DELETION_LOG").filter(|path| !path.is_empty())
     {
@@ -563,7 +563,7 @@ fn deletion_log_path() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join("Library/Logs/disk-magician-deletions.log"))
 }
 
-fn flush_audit(pending: &mut Option<(PathBuf, String)>, replay: bool) -> io::Result<()> {
+pub(crate) fn flush_audit(pending: &mut Option<(PathBuf, String)>, replay: bool) -> io::Result<()> {
     let Some((path, row)) = pending.as_ref() else {
         return Ok(());
     };
@@ -746,7 +746,7 @@ pub fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static 
 /// build runs: a build run whose owner has exited qualifies unless a live
 /// process works in it.
 fn check_legacy_build(bundle: &Path) -> Result<(), &'static str> {
-    match scratch_lease::legacy_lease(bundle) {
+    match scratch_lease::legacy_lease(bundle, None, false) {
         Ok(None) => Err("kept:lease-missing"),
         Ok(Some(scratch_lease::LegacyLease::OtherKind)) => Err("kept:protected-bundle-kind"),
         Ok(Some(scratch_lease::LegacyLease::Build { owner_live: true })) => {

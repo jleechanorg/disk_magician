@@ -4,13 +4,14 @@
 use serde::Serialize;
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct FileIdentity {
@@ -465,45 +466,202 @@ fn rename_exclusive(
 }
 
 pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
-    #[cfg(target_os = "linux")]
-    let lsof = "/usr/bin/lsof";
-    #[cfg(target_os = "macos")]
-    let lsof = "/usr/sbin/lsof";
-    let mut child = Command::new(lsof)
-        .args(["-nP", "-t", "--"])
-        .arg(path)
+    let Some(stdout) = run_lsof(default_lsof(), &["-nP", "-t", "--"], path, true)? else {
+        return Ok(Vec::new());
+    };
+    let pids: Vec<u32> = stdout
+        .lines()
+        .map(|line| line.parse::<u32>().map_err(io::Error::other))
+        .collect::<io::Result<_>>()?;
+    if pids.is_empty() {
+        return Err(io::Error::other(
+            "lsof exited successfully without a process list",
+        ));
+    }
+    Ok(pids)
+}
+
+/// Whether any process has a file or working directory at or under `path`,
+/// from one listing of every open file. A failed or timed-out probe is an error.
+pub fn open_paths(path: &Path) -> io::Result<bool> {
+    open_paths_with(path, default_lsof())
+}
+
+fn default_lsof() -> &'static Path {
+    Path::new(if cfg!(target_os = "linux") {
+        "/usr/bin/lsof"
+    } else {
+        "/usr/sbin/lsof"
+    })
+}
+
+fn unescape_lsof(s: &[u8]) -> Vec<u8> {
+    let (mut out, mut i) = (Vec::with_capacity(s.len()), 0);
+    while i < s.len() {
+        let b = if s[i] == b'\\' && i + 1 < s.len() {
+            i += 2;
+            match s[i - 1] {
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'x' if i + 2 <= s.len() => {
+                    let hex = std::str::from_utf8(&s[i..i + 2]).unwrap_or("");
+                    u8::from_str_radix(hex, 16)
+                        .inspect(|_| i += 2)
+                        .unwrap_or(b'x')
+                }
+                c => c,
+            }
+        } else {
+            i += 1;
+            s[i - 1]
+        };
+        out.push(b);
+    }
+    out
+}
+
+/// As `open_paths`, with the `lsof` executable named. The listing must parse:
+/// every line starts with an ASCII field letter (`p` process, `n` name, and on
+/// macOS also `f`, `t`, ...), at least one process line exists, and only name
+/// lines are paths.
+pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
+    let prefix = path.as_os_str().as_encoded_bytes();
+    let Some(listing) = run_lsof(lsof, &["-nP", "-F", "n"], path, false)? else {
+        return Err(io::Error::other("lsof listed nothing"));
+    };
+    let (mut found, mut processes) = (false, false);
+    for line in listing.lines() {
+        let ([field, name @ ..], true) = (
+            line.as_bytes(),
+            line.as_bytes().first().is_some_and(u8::is_ascii_alphabetic),
+        ) else {
+            return Err(io::Error::other("unparsable lsof listing"));
+        };
+        processes |= *field == b'p';
+        let dec = (*field == b'n' && name.contains(&b'\\')).then(|| unescape_lsof(name));
+        let name = dec.as_deref().unwrap_or(name);
+        found |= *field == b'n'
+            && name.starts_with(prefix)
+            && matches!(name.get(prefix.len()), None | Some(b'/' | b' '));
+    }
+    if processes {
+        Ok(found)
+    } else {
+        Err(io::Error::other("lsof listing has no process"))
+    }
+}
+
+/// Run a command to completion within `limit`, draining stdout and stderr
+/// concurrently so a large listing cannot fill a pipe and stall the child.
+/// The whole collection is bounded by `limit`: a descendant that keeps a pipe
+/// open after the command exits is killed with its process group, never waited
+/// on.
+pub fn run_capture(
+    command: &mut Command,
+    input: Option<String>,
+    limit: Duration,
+) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .process_group(0);
+    let mut child = command.spawn()?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let drain = |stream: Option<Box<dyn Read + Send>>, is_stdout: bool| {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read = match stream {
+                Some(mut stream) => stream.read_to_end(&mut bytes).map(|_| bytes),
+                None => Ok(bytes),
+            };
+            let _ = sender.send((is_stdout, read));
+        });
+    };
+    drain(child.stdout.take().map(|s| Box::new(s) as _), true);
+    drain(child.stderr.take().map(|s| Box::new(s) as _), false);
+    drop(sender);
+    let group = child.id() as libc::pid_t;
     let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
-            let status = output.status;
-            let stdout = std::str::from_utf8(&output.stdout).map_err(io::Error::other)?;
-            let stderr = std::str::from_utf8(&output.stderr).map_err(io::Error::other)?;
-            if status.success() && stderr.is_empty() {
-                let pids: Vec<u32> = stdout
-                    .lines()
-                    .map(|line| line.parse::<u32>().map_err(io::Error::other))
-                    .collect::<io::Result<_>>()?;
-                if pids.is_empty() {
-                    return Err(io::Error::other(
-                        "lsof exited successfully without a process list",
-                    ));
-                }
-                return Ok(pids);
-            }
-            if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {
-                return Ok(Vec::new());
-            }
-            return Err(io::Error::other(format!("lsof failed: {}", stderr.trim())));
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
         }
-        if started.elapsed() > crate::time_windows::OPEN_FILE_PROBE_TIMEOUT {
-            child.kill()?;
+        if started.elapsed() > limit {
+            unsafe { libc::killpg(group, libc::SIGKILL) };
             child.wait()?;
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "lsof timeout"));
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "probe timeout"));
         }
         std::thread::sleep(crate::time_windows::PROBE_POLL);
+    };
+    let (mut out, mut err) = (None, None);
+    while out.is_none() || err.is_none() {
+        match receiver.recv_timeout(limit.saturating_sub(started.elapsed())) {
+            Ok((true, bytes)) => out = Some(bytes?),
+            Ok((false, bytes)) => err = Some(bytes?),
+            Err(_) => {
+                unsafe { libc::killpg(group, libc::SIGKILL) };
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "probe timeout"));
+            }
+        }
     }
+    Ok((status, out.unwrap_or_default(), err.unwrap_or_default()))
+}
+
+/// Standard output of a complete `lsof` run (exit status 0; warnings on
+/// stderr alone are fine). Exit status 1 with nothing at all on either stream
+/// means it found nothing. Any other outcome, including a listing beside a
+/// failing status, is an error: a partial listing proves nothing about a path
+/// it omits.
+fn lsof_stderr_ok(stderr: &[u8], target: Option<&Path>) -> bool {
+    let mut ok_warn = false;
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .all(|l| {
+            if l.is_empty() || (ok_warn && l == "Output information may be incomplete.") {
+                return true;
+            }
+            let overlap = l.rsplit_once("file system ").is_some_and(|(_, m)| {
+                target.is_some_and(|t| t.starts_with(m) || Path::new(m).starts_with(t))
+            });
+            ok_warn = l.contains("stat()") && l.contains("file system") && !overlap;
+            ok_warn
+        })
+}
+
+fn run_lsof(lsof: &Path, args: &[&str], target: &Path, scoped: bool) -> io::Result<Option<String>> {
+    let mut cmd = Command::new(lsof);
+    cmd.args(args).args(scoped.then_some(target));
+    let (status, stdout, stderr) =
+        run_capture(&mut cmd, None, crate::time_windows::OPEN_FILE_PROBE_TIMEOUT)?;
+    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+    if status.success() && !stdout.is_empty() && lsof_stderr_ok(&stderr, Some(target)) {
+        return Ok(Some(stdout));
+    }
+    if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {
+        return Ok(None);
+    }
+    Err(io::Error::other(format!(
+        "lsof failed: {}",
+        String::from_utf8_lossy(&stderr).trim()
+    )))
+}
+
+/// Rename without replacing anything at `to`; fails if `to` exists.
+pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let (old, new) = (
+        CString::new(from.as_os_str().as_bytes()).map_err(io::Error::other)?,
+        CString::new(to.as_os_str().as_bytes()).map_err(io::Error::other)?,
+    );
+    rename_exclusive(libc::AT_FDCWD, &old, libc::AT_FDCWD, &new)
 }

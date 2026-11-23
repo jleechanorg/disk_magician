@@ -31,7 +31,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm state-publish --repo DIR [--remote NAME] [--branch NAME] [--max-commits N] [--state-dir DIR]
   diskm state-commit --repo DIR [--state-dir DIR] [--publish] [--max-commits N]
   diskm evidence-holds refresh [--state-dir DIR] [--query Q]
-  diskm scratch-sweep [--root scratch|system-tmp] [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
+  diskm scratch-sweep [--root scratch|system-tmp | --expired] [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
   diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp]
   diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
@@ -277,14 +277,20 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
 }
 
 fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
-    let mut options = scratch_sweep::Options::default();
+    let mut options = scratch_sweep::Options {
+        limit: 0,
+        ..Default::default()
+    };
+    let mut deadline_set = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--clean") => options.clean = true,
+            Some("--expired") => options.expired = true,
             Some("--root") => options.system_tmp = parse_temp_root(&mut args)?,
             Some("--min-hours") => options.min_hours = positive(&mut args, "--min-hours")?,
             Some("--max-candidates") => options.limit = positive(&mut args, "--max-candidates")?,
             Some("--deadline-ms") => {
+                deadline_set = true;
                 options.deadline = Duration::from_millis(positive(&mut args, "--deadline-ms")?)
             }
             Some("--path") => options
@@ -292,6 +298,17 @@ fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Opera
                 .push(required_value(&mut args, "--path")?.into()),
             _ => return Err(format!("unexpected scratch-sweep argument {arg:?}")),
         }
+    }
+    if options.expired {
+        if options.system_tmp || !options.paths.is_empty() || options.limit != 0 {
+            return Err("--expired works only on the registered Scratch root; drop --root system-tmp, --path, and --max-candidates".into());
+        }
+        if !deadline_set {
+            options.deadline = time_windows::EXPIRED_SWEEP_DEADLINE;
+        }
+    }
+    if options.limit == 0 {
+        options.limit = scratch_sweep::Options::default().limit;
     }
     Ok(Operation::ScratchSweep(options))
 }
@@ -696,7 +713,13 @@ fn run(operation: Operation) -> io::Result<u8> {
             }
         }
         Operation::ScratchSweep(options) => {
-            let (report, complete) = scratch_sweep::run(&options)?;
+            let (report, complete) = match scratch_sweep::run(&options) {
+                Err(error) if options.expired && error.kind() == io::ErrorKind::InvalidInput => {
+                    eprintln!("diskm: {error}");
+                    return Ok(USAGE_ERROR);
+                }
+                result => result?,
+            };
             print_json(&report)?;
             if !complete {
                 return Ok(TEMPORARY_FAILURE);

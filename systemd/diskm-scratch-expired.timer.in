@@ -1,0 +1,9 @@
+[Unit]
+Description=Disk Magician expired Scratch sweep schedule
+
+[Timer]
+OnBootSec=@EXPIRED_SWEEP_INTERVAL_SECONDS@s
+OnUnitActiveSec=@EXPIRED_SWEEP_INTERVAL_SECONDS@s
+
+[Install]
+WantedBy=timers.target

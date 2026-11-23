@@ -55,10 +55,36 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
 - Preserve live or unknown owners, active leases, open files, live working
   directories, AO-owned worktrees, secrets, unmeasurable paths, dirty or
   unpushed work, and evidence still referenced by an open PR. Honor machine
-  safety rules, mount identity, and preservation checks. The never-delete
+  safety rules, mount identity, and preservation checks. Scoped amendments
+  (operator decision 2026-11-22) are in the next bullet. The never-delete
   list includes `~/.codex/sessions*`, `~/.codex/state*.sqlite`,
   `~/.codex/log`, and `~/.claude/projects`. Never replace a mutable tool
   state root with a symlink to another live state root.
+- Expired Scratch sweep (operator decision 2026-11-22; scheduled on the
+  `EXPIRED_SWEEP_INTERVAL` cadence, `diskm scratch-sweep --expired --clean`):
+  idle Scratch content is removed on a schedule, whatever the Scratch fill
+  level. A registered-Scratch folder whose newest content is past the content
+  floor is removed whole unless a hold applies (live or unknown lease owner,
+  evidence, `evidence-holds.json`, open files or working directories,
+  unrecoverable Git work, incomplete observation).
+  Candidates are only direct children of the Scratch root and run directories
+  under `runs/<date>/<repo>/<run>`, each judged whole: a fresh candidate, or
+  one containing a protected descendant, is kept whole and its stale children
+  are never removed. This is the protection for active workspaces.
+  - **Dirty-work scope, exactly:** uncommitted working-tree edits inside a
+    Scratch candidate that is otherwise unheld (every commit independently
+    proven recoverable, stale past the floor) are disposable. Leased runs are
+    governed by their lease verdicts first.
+  - **Secrets:** the secrets rule covers credential stores outside Scratch's
+    disposable namespace. Scratch is declared disposable; the job does no
+    keyword or pattern routing for secrets.
+  - **Machine-local safety rules:** the native cleaner reads none; protection
+    is the verified registered-Scratch-root scope plus the holds above.
+  - **Accepted residual risks:** (a) a repository outside Scratch that borrows
+    objects from a Scratch clone and needs objects no longer reachable from
+    that clone's refs or reflog; (b) a public-address remote that itself
+    borrows objects from the clone. Both need the operator to have shared a
+    clone's object store deliberately.
 - Allocate worktrees via `diskm worktree-new`. Use
   `diskm scratch-new <repo> <purpose> --kind build` for disposable run output
   and retain the returned producer lease until the run finishes. Publish
@@ -82,9 +108,9 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
 
 ## Rust migration production LOC budget
 
-The Rust migration's agreed maximum is **12,000 physical production lines** (raised from 10,500 on the operator's 2026-11-21 approval) across tracked Rust source files anywhere under the rust directory. Unit test implementations belong under rust/tests. Other tracked production sources there count toward the existing-code net-growth budget.
+The Rust migration's agreed maximum is **13,500 physical production lines** (raised from 12,000 on the operator's 2026-11-22 approval) across tracked Rust source files anywhere under the rust directory. Unit test implementations belong under rust/tests. Other tracked production sources there count toward the existing-code net-growth budget.
 
-- Rust production may not exceed 12,000 lines.
+- Rust production may not exceed 13,500 lines.
 - Existing non-generated production code may grow by at most 250 net lines per pull request compared with the PR base. Production source additions and deletions both count. Unit tests, test fixtures, documentation, `.github` tooling, and the generated `src/disk_magician/` package mirror are excluded.
 
 To change either limit, update the policy and the shared values in `.github/workflows/loc-budget.yml` in the same reviewed change.

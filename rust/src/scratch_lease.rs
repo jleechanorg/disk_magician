@@ -309,16 +309,26 @@ fn caller_owner() -> io::Result<ProcessOwner> {
     })
 }
 
-fn record_path(bundle: &Path, root: &Path) -> io::Result<(PathBuf, BundleLease)> {
-    let supplied_metadata = fs::symlink_metadata(bundle)?;
-    if supplied_metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "lease path cannot be a symlink",
-        ));
-    }
-    let absolute = bundle.canonicalize()?;
-    let metadata = fs::symlink_metadata(&absolute)?;
+/// `staged` names where a bundle's directory now lives while `bundle` is the
+/// path its lease was recorded under: identity is read from `staged`.
+fn record_path(
+    bundle: &Path,
+    root: &Path,
+    staged: Option<&Path>,
+) -> io::Result<(PathBuf, BundleLease)> {
+    let (absolute, metadata) = if let Some(staged) = staged {
+        (bundle.to_path_buf(), fs::symlink_metadata(staged)?)
+    } else {
+        if fs::symlink_metadata(bundle)?.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lease path cannot be a symlink",
+            ));
+        }
+        let absolute = bundle.canonicalize()?;
+        let metadata = fs::symlink_metadata(&absolute)?;
+        (absolute, metadata)
+    };
     let digest = Sha256::digest(absolute.as_os_str().as_bytes());
     let record = state_records()?.join(format!("{digest:x}.json"));
     let lease: BundleLease =
@@ -356,7 +366,15 @@ pub fn lookup_bundle(bundle: &Path) -> io::Result<VerifiedBundle> {
 }
 
 pub(crate) fn lookup_bundle_under_root(bundle: &Path, root: &Path) -> io::Result<VerifiedBundle> {
-    let (record_path, lease) = record_path(bundle, root)?;
+    lookup_bundle_at(bundle, root, None)
+}
+
+pub(crate) fn lookup_bundle_at(
+    bundle: &Path,
+    root: &Path,
+    staged: Option<&Path>,
+) -> io::Result<VerifiedBundle> {
+    let (record_path, lease) = record_path(bundle, root, staged)?;
     let finish_path = record_path.with_extension("finished.json");
     let finish = match fs::read(finish_path) {
         Ok(bytes) => {
@@ -652,30 +670,60 @@ pub(crate) enum LegacyLease {
 /// match the run, so a replaced directory never inherits an old lease. Any
 /// process holding a recorded owner PID keeps the run; a PID reused by an
 /// unrelated process therefore errs toward keeping.
-pub(crate) fn legacy_lease(bundle: &Path) -> io::Result<Option<LegacyLease>> {
+/// With `strict`, a record that cannot be read or parsed is an error rather
+/// than skipped, so the caller cannot mistake it for "no lease".
+pub(crate) fn legacy_lease(
+    bundle: &Path,
+    staged: Option<&Path>,
+    strict: bool,
+) -> io::Result<Option<LegacyLease>> {
     let directory = crate::job_receipt::state_dir(None)?.join("worktree_leases");
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let metadata = fs::symlink_metadata(bundle)?;
+    let metadata = fs::symlink_metadata(staged.unwrap_or(bundle))?;
     for entry in entries {
         let path = entry?.path();
         if path.extension() != Some(OsStr::new("json")) {
             continue;
         }
-        let Ok(bytes) = crate::job_receipt::read_bounded(&path, 1 << 20) else {
+        let bytes = match crate::job_receipt::read_bounded(&path, 1 << 20) {
+            Ok(bytes) => bytes,
+            Err(error) if strict && error.kind() != io::ErrorKind::NotFound => return Err(error),
+            Err(_) => continue,
+        };
+        let record = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(record) => record,
+            Err(error) if strict => return Err(io::Error::other(error)),
+            Err(_) => continue,
+        };
+        // Only a record that clearly belongs to another path is skipped; with
+        // `strict`, one that may be this run's but is mistyped is an error.
+        let Some(recorded) = record["path"].as_str() else {
+            if strict {
+                return Err(io::Error::other("legacy lease record has no usable path"));
+            }
             continue;
         };
-        let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        if Path::new(recorded) != bundle {
             continue;
-        };
-        if record["path"].as_str().map(Path::new) != Some(bundle)
-            || record["checkout_dev"].as_u64() != Some(metadata.dev())
-            || record["checkout_ino"].as_u64() != Some(metadata.ino())
-        {
+        }
+        let identity = (
+            record["checkout_dev"].as_u64(),
+            record["checkout_ino"].as_u64(),
+        );
+        if strict && (identity.0.is_none() || identity.1.is_none()) {
+            return Err(io::Error::other(
+                "legacy lease record has no usable identity",
+            ));
+        }
+        if identity != (Some(metadata.dev()), Some(metadata.ino())) {
             continue;
+        }
+        if strict && !record["owners"].is_array() {
+            return Err(io::Error::other("legacy lease record has no owners list"));
         }
         if record["kind"] != "build" {
             return Ok(Some(LegacyLease::OtherKind));

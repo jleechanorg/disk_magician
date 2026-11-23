@@ -27,6 +27,7 @@ pub mod preview_scopes;
 pub mod reclaim_report;
 pub mod scan;
 pub mod scratch_dir;
+pub mod scratch_expired;
 mod scratch_file_transaction;
 pub mod scratch_index;
 pub mod scratch_lease;
