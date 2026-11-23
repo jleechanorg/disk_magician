@@ -981,38 +981,61 @@ fn make_writable(path: &Path) -> io::Result<()> {
 /// working directory. While finishing a half-removed tree only surviving
 /// files and links count toward freshness, because our own removals changed
 /// directory times.
-fn staged_ok(run: &Run, item: &Path, intent: &Intent, known: &Known) -> io::Result<bool> {
+fn staged_ok(run: &Run, item: &Path, intent: &Intent, known: &Known) -> io::Result<Option<String>> {
+    let short = |reason: &str| {
+        reason
+            .split_once(':')
+            .map_or(reason, |(_, rest)| rest)
+            .to_owned()
+    };
     let original = run.root.join(&intent.original);
     let info = fs::symlink_metadata(item)?;
     let seen = observe(item, run.device, run.deadline);
-    let newer = if intent.state == "staged" {
+    let newest = if intent.state == "staged" {
         seen.newest
     } else {
         seen.newest_file
-    } > intent.newest;
-    if (info.dev(), info.ino()) != (intent.device, intent.inode)
-        || !seen.complete
-        || newer
-        || !seen.evidence.is_empty()
-    {
-        return Ok(false);
+    };
+    if (info.dev(), info.ino()) != (intent.device, intent.inode) {
+        return Ok(Some("identity".into()));
+    }
+    if !seen.complete {
+        return Ok(Some(format!(
+            "incomplete:{}",
+            seen.gaps.first().map_or("", String::as_str)
+        )));
+    }
+    if newest > intent.newest {
+        return Ok(Some("fresh-content".into()));
+    }
+    if !seen.evidence.is_empty() {
+        return Ok(Some("evidence".into()));
     }
     if read_holds(&run.holds)?
         .iter()
         .any(|held| original.starts_with(held) || held.starts_with(&original))
-        || lease_of(run, &original, item).is_some()
     {
-        return Ok(false);
+        return Ok(Some("hold".into()));
+    }
+    if let Some(reason) = lease_of(run, &original, item) {
+        return Ok(Some(format!("lease-{}", short(reason))));
     }
     // The borrower scan was incomplete: no repository can be proven unborrowed.
-    if (known.blind && !seen.repos.is_empty())
-        || seen.repos.iter().any(|git_dir| {
-            git_protected(git_dir, &[item, &original], &known.alts, &run.hooks, false).is_some()
-        })
-    {
-        return Ok(false);
+    if known.blind && !seen.repos.is_empty() {
+        return Ok(Some("alternates-scan-incomplete".into()));
     }
-    Ok(matches!((run.hooks.open)(item), Ok(false)))
+    for git_dir in &seen.repos {
+        if let Some(reason) =
+            git_protected(git_dir, &[item, &original], &known.alts, &run.hooks, false)
+        {
+            return Ok(Some(format!("git-{}", short(reason))));
+        }
+    }
+    Ok(match (run.hooks.open)(item) {
+        Ok(false) => None,
+        Ok(true) => Some("open-file".into()),
+        Err(error) => Some(format!("probe-error:{error}")),
+    })
 }
 
 /// Metadata of `path`, or `None` only when it is truly absent.
@@ -1083,18 +1106,19 @@ fn restore(
     stage: &Path,
     intent_path: &Path,
     intent: &Intent,
+    cause: &str,
     report: &mut Report,
 ) -> io::Result<()> {
     let original = run.root.join(&intent.original);
     crashed(run, "restore")?;
-    let verdict = if rename_noreplace(&stage.join("item"), &original).is_ok() {
+    let verdict: String = if rename_noreplace(&stage.join("item"), &original).is_ok() {
         fs::remove_file(intent_path)?;
         let _ = fs::remove_dir(stage);
-        "deferred:restored"
+        format!("deferred:restored:{cause}")
     } else {
-        "deferred:restore-blocked"
+        "deferred:restore-blocked".into()
     };
-    report.deferred.push((original, verdict.into()));
+    report.deferred.push((original, verdict));
     Ok(())
 }
 
@@ -1259,12 +1283,16 @@ fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
         let mut intent: Intent =
             serde_json::from_slice(&fs::read(&intent_path)?).map_err(io::Error::other)?;
         let present = existing(&item)?.is_some();
-        if intent.state == "deleting"
-            && (!present || staged_ok(run, &item, &intent, &fresh_known(run)?)?)
-        {
+        let cause = if present && intent.state == "deleting" {
+            staged_ok(run, &item, &intent, &fresh_known(run)?)?
+        } else {
+            Some("interrupted-stage".into())
+        };
+        if intent.state == "deleting" && (!present || cause.is_none()) {
             finish(run, &stage, &intent_path, &mut intent, report)?;
         } else if present {
-            restore(run, &stage, &intent_path, &intent, report)?;
+            let cause = cause.unwrap_or_default();
+            restore(run, &stage, &intent_path, &intent, &cause, report)?;
         } else {
             fs::remove_file(&intent_path)?;
             let _ = fs::remove_dir(&stage);
@@ -1305,22 +1333,24 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     let known = fresh_known(run)?;
     for mut unit in staged {
         let item = unit.stage.join("item");
-        if staged_ok(run, &item, &unit.intent, &known).unwrap_or(false) {
-            finish(
+        let cause = staged_ok(run, &item, &unit.intent, &known)
+            .unwrap_or_else(|error| Some(format!("check-error:{error}")));
+        match cause {
+            None => finish(
                 run,
                 &unit.stage,
                 &unit.intent_path,
                 &mut unit.intent,
                 &mut report,
-            )?;
-        } else {
-            restore(
+            )?,
+            Some(cause) => restore(
                 run,
                 &unit.stage,
                 &unit.intent_path,
                 &unit.intent,
+                &cause,
                 &mut report,
-            )?;
+            )?,
         }
     }
     Ok(report)

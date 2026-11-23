@@ -1161,7 +1161,10 @@ fn commit_created_after_revalidation_before_staged_check_restores() {
         git(&repo, &["commit", "--allow-empty", "-qm", "late"]);
     });
     let report = sweep(&run).unwrap();
-    assert_eq!(report.deferred[0].1, "deferred:restored");
+    assert_eq!(
+        report.deferred[0].1,
+        "deferred:restored:git-unrecovered-commits"
+    );
     assert!(fx.root.join("u/repo/f").exists());
     assert!(rows(&fx).is_empty());
 }
@@ -2457,4 +2460,41 @@ fn core_worktree_with_dotdot_after_a_symlink_is_resolved_by_git() {
     let _ = fs::remove_dir_all(&outside);
     assert!(!plan.removals.contains(&unit), "{:?}", plan.kept);
     assert!(why(&plan, "git-external-worktree"), "{:?}", plan.kept);
+}
+
+// ---- the report says why a staged tree was restored ----
+
+fn restore_cause(setup: impl FnOnce(&mut Run)) -> String {
+    let fx = Fx::new("restore-cause");
+    fx.file("a/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    setup(&mut run);
+    let report = sweep(&run).unwrap();
+    assert!(fx.root.join("a/f").exists());
+    report.deferred[0].1.clone()
+}
+
+#[test]
+fn a_restored_tree_reports_its_cause() {
+    assert_eq!(
+        restore_cause(|run| run.hooks.open = Box::new(|_| Ok(true))),
+        "deferred:restored:open-file"
+    );
+    assert_eq!(
+        restore_cause(
+            |run| run.hooks.open = Box::new(|_| Err(std::io::Error::other("lsof timeout")))
+        ),
+        "deferred:restored:probe-error:lsof timeout"
+    );
+    assert_eq!(
+        restore_cause(|run| run.hooks.after_stage =
+            Box::new(|_, item| fs::write(item.join("late"), b"x").unwrap())),
+        "deferred:restored:fresh-content"
+    );
+    assert_eq!(
+        restore_cause(|run| run.hooks.after_stage =
+            Box::new(|_, item| fs::create_dir(item.join("evidence")).unwrap())),
+        "deferred:restored:evidence"
+    );
 }
