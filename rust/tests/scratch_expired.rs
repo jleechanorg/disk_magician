@@ -2705,7 +2705,7 @@ fn heal(repo: &Path, target: &str, ext: &Path) {
     let _ = fs::remove_dir_all(ext);
 }
 
-fn pushed_repo(fx: &Fx, repo: &Path, target: &str) -> PathBuf {
+fn pushed_repo_for(fx: &Fx, repo: &Path, target: &str) -> PathBuf {
     init(repo);
     let bare = hosted(fx, repo);
     if target.contains("pack") {
@@ -2758,7 +2758,7 @@ fn readable_control_is_planned_and_the_damaged_gitdir_is_kept() {
     for target in all_targets() {
         let fx = Fx::new("gitdir-control-plan");
         let repo = fx.root.join("u/repo");
-        let bare = pushed_repo(&fx, &repo, target);
+        let bare = pushed_repo_for(&fx, &repo, target);
         let cutoff = age();
         let control = plan(&git_run(&fx, cutoff, Some(bare.clone()))).unwrap();
         assert!(
@@ -2783,7 +2783,7 @@ fn a_damaged_gitdir_after_staging_restores_and_the_control_is_removed() {
     for target in all_targets() {
         let fx = Fx::new("gitdir-control-stage");
         let repo = fx.root.join("u/repo");
-        let bare = pushed_repo(&fx, &repo, target);
+        let bare = pushed_repo_for(&fx, &repo, target);
         let cutoff = age();
         let control = sweep(&lender_run(&fx, cutoff, bare.clone())).unwrap();
         assert_eq!(
@@ -2794,7 +2794,7 @@ fn a_damaged_gitdir_after_staging_restores_and_the_control_is_removed() {
         );
         let fx = Fx::new("gitdir-damaged-stage");
         let repo = fx.root.join("u/repo");
-        let bare = pushed_repo(&fx, &repo, target);
+        let bare = pushed_repo_for(&fx, &repo, target);
         let cutoff = age();
         let mut run = lender_run(&fx, cutoff, bare);
         let fired = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -2819,7 +2819,7 @@ fn a_damaged_gitdir_in_recovery_restores_and_the_control_is_finished() {
     for target in all_targets() {
         let fx = Fx::new("gitdir-control-recover");
         let (item, _) = stage(&fx, dead_pid(), "deleting", "lender-back", true);
-        let bare = pushed_repo(&fx, &item.join("repo"), target);
+        let bare = pushed_repo_for(&fx, &item.join("repo"), target);
         let cutoff = age();
         sweep(&lender_run(&fx, cutoff, bare)).unwrap();
         assert!(
@@ -2828,7 +2828,7 @@ fn a_damaged_gitdir_in_recovery_restores_and_the_control_is_finished() {
         );
         let fx = Fx::new("gitdir-damaged-recover");
         let (item, _) = stage(&fx, dead_pid(), "deleting", "lender-back", true);
-        let bare = pushed_repo(&fx, &item.join("repo"), target);
+        let bare = pushed_repo_for(&fx, &item.join("repo"), target);
         let cutoff = age();
         damage(&item.join("repo"), target, &ext_of(&fx));
         let swept = sweep(&lender_run(&fx, cutoff, bare));
