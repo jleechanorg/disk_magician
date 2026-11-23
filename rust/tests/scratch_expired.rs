@@ -1916,21 +1916,45 @@ fn fake_lsof(fx: &Fx, script: &str) -> PathBuf {
 }
 
 #[test]
-fn lsof_warnings_with_a_usable_listing_do_not_fail_the_probe() {
+fn lsof_warnings_beside_a_complete_listing_do_not_fail_the_probe() {
     let fx = Fx::new("fake-lsof-warn");
-    // Linux lsof warns about unreadable mounts and exits 1 or 0 beside a listing.
-    for status in [0, 1] {
-        let lsof = fake_lsof(
-            &fx,
-            &format!(
-                "echo 'lsof: WARNING: cannot stat() fuse file system' >&2\nprintf 'p1\\nn/elsewhere/x\\np2\\nn/held/dir/file\\n'\nexit {status}"
-            ),
+    // Linux lsof warns about unreadable mounts yet exits 0 with a full listing.
+    let lsof = fake_lsof(
+        &fx,
+        "echo 'lsof: WARNING: cannot stat() fuse file system' >&2\nprintf 'p1\\nn/elsewhere/x\\np2\\nn/held/dir/file\\n'\nexit 0",
+    );
+    assert!(open_paths_with(Path::new("/held/dir"), &lsof).unwrap());
+    assert!(!open_paths_with(Path::new("/held/other"), &lsof).unwrap());
+    assert!(!open_paths_with(Path::new("/held/di"), &lsof).unwrap());
+}
+
+#[test]
+fn a_partial_listing_with_a_failing_status_fails_closed() {
+    let fx = Fx::new("fake-lsof-partial");
+    // Exit 1 means lsof could not read everything: the candidate may be missing.
+    for script in [
+        "printf 'p1\\nn/elsewhere/x\\n'\nexit 1",
+        "echo 'lsof: error' >&2\nprintf 'p1\\nn/elsewhere/x\\n'\nexit 1",
+        "printf 'p1\\nn/elsewhere/x\\n'\nexit 2",
+    ] {
+        let lsof = fake_lsof(&fx, script);
+        assert!(
+            open_paths_with(Path::new("/held/dir"), &lsof).is_err(),
+            "{script}"
         );
-        assert!(open_paths_with(Path::new("/held/dir"), &lsof).unwrap());
-        assert!(!open_paths_with(Path::new("/held/other"), &lsof).unwrap());
-        // A sibling that merely shares a name prefix is not inside the path.
-        assert!(!open_paths_with(Path::new("/held/di"), &lsof).unwrap());
     }
+}
+
+#[test]
+fn a_candidate_missing_from_a_partial_listing_is_kept() {
+    let fx = Fx::new("fake-lsof-kept");
+    fx.file("a/f");
+    let lsof = fake_lsof(&fx, "printf 'p1\\nn/elsewhere\\n'\nexit 1");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.open = Box::new(move |path| open_paths_with(path, &lsof));
+    let report = sweep(&run).unwrap();
+    assert!(fx.root.join("a/f").exists() && report.removed.is_empty());
 }
 
 #[test]
@@ -2253,4 +2277,124 @@ fn a_non_utf8_run_name_is_deferred_not_removed() {
         "{:?}",
         report.kept
     );
+}
+
+// ---- round five: real lease lookup, physical worktree containment ----
+
+static LEASE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A run under `runs/` with a retired-allocator lease record owned by `pid`,
+/// planned through the REAL lease lookup (not the stubbed hook).
+fn legacy_lease_plan(fx: &Fx, damage: impl FnOnce(&Path), pid: u32) -> Plan {
+    let _guard = LEASE_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = fx.root.parent().unwrap().join(format!(
+        "{}-state",
+        fx.root.file_name().unwrap().to_str().unwrap()
+    ));
+    let _ = fs::remove_dir_all(&state);
+    fs::create_dir_all(state.join("worktree_leases")).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    std::env::set_var("DISK_MAGICIAN_STATE_DIR", &state);
+    if cfg!(target_os = "linux") {
+        fs::create_dir_all(state.join("repo/config")).unwrap();
+        fs::write(state.join("repo/config/config.json"), "{}").unwrap();
+        std::env::set_var("DISK_MAGICIAN_STATE_REPO", state.join("repo"));
+    }
+    let run_dir = fx
+        .file("runs/20261101/repo/r1/out")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let info = fs::metadata(&run_dir).unwrap();
+    let record = state.join("worktree_leases/r1.json");
+    fs::write(
+        &record,
+        serde_json::json!({
+            "schema_version": 1, "path": run_dir, "creator": "scratch-new", "kind": "build",
+            "owner": {"pid": pid, "start_epoch": 1, "comm": "codex"},
+            "owners": [{"pid": pid, "start_epoch": 1, "comm": "codex"}],
+            "checkout_dev": info.dev(), "checkout_ino": info.ino(), "released_at": null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    damage(&record);
+    let cutoff = age();
+    let mut run = run_for(fx, cutoff);
+    run.hooks.lease = diskm_shadow::scratch_expired::Hooks::default().lease;
+    let planned = plan(&run);
+    let _ = fs::set_permissions(&record, fs::Permissions::from_mode(0o600));
+    let _ = fs::remove_dir_all(&state);
+    planned.unwrap()
+}
+
+#[test]
+fn a_legacy_lease_record_made_unreadable_keeps_the_run() {
+    let fx = Fx::new("lease-unreadable");
+    let plan = legacy_lease_plan(
+        &fx,
+        |record| fs::set_permissions(record, fs::Permissions::from_mode(0o000)).unwrap(),
+        std::process::id(),
+    );
+    assert!(plan.removals.is_empty(), "{:?}", plan.kept);
+    assert!(why(&plan, "lease-unavailable"), "{:?}", plan.kept);
+}
+
+#[test]
+fn a_malformed_legacy_lease_record_keeps_the_run() {
+    let fx = Fx::new("lease-malformed");
+    let plan = legacy_lease_plan(
+        &fx,
+        |record| fs::write(record, b"{ not json").unwrap(),
+        std::process::id(),
+    );
+    assert!(plan.removals.is_empty(), "{:?}", plan.kept);
+    assert!(why(&plan, "lease-unavailable"), "{:?}", plan.kept);
+}
+
+#[test]
+fn legacy_leases_still_decide_by_owner_when_readable() {
+    let fx = Fx::new("lease-live");
+    let plan = legacy_lease_plan(&fx, |_| {}, std::process::id());
+    assert!(
+        plan.removals.is_empty() && why(&plan, "live-or-unknown-owner"),
+        "{:?}",
+        plan.kept
+    );
+    let fx = Fx::new("lease-exited");
+    let plan = legacy_lease_plan(&fx, |_| {}, dead_pid());
+    assert_eq!(plan.removals, vec![fx.root.join("runs/20261101/repo/r1")]);
+}
+
+#[test]
+fn a_run_with_no_lease_record_at_all_is_unchanged() {
+    let fx = Fx::new("lease-absent");
+    let plan = legacy_lease_plan(
+        &fx,
+        |record| fs::remove_file(record).unwrap(),
+        std::process::id(),
+    );
+    assert_eq!(plan.removals, vec![fx.root.join("runs/20261101/repo/r1")]);
+}
+
+#[test]
+fn core_worktree_through_an_internal_symlink_to_outside_holds() {
+    let fx = Fx::new("core-worktree-symlink");
+    let unit = fx.root.join("u");
+    init(&unit.join("repo"));
+    let bare = hosted(&fx, &unit.join("repo"));
+    let outside = fx.root.parent().unwrap().join(format!(
+        "diskm-expired-core-symlink-{}-tree",
+        std::process::id()
+    ));
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, unit.join("tree")).unwrap();
+    git(&unit.join("repo"), &["config", "core.worktree", "../tree"]);
+    let cutoff = age();
+    let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
+    let _ = fs::remove_dir_all(&outside);
+    assert!(!plan.removals.contains(&unit), "{:?}", plan.kept);
+    assert!(why(&plan, "git-external-worktree"), "{:?}", plan.kept);
 }
