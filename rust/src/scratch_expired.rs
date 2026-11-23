@@ -461,7 +461,7 @@ fn git_protected(
     };
     let mut remotes = Vec::new();
     for line in config.lines() {
-        let (key, value) = line.split_once('=').unwrap_or((line, ""));
+        let key = line.split_once('=').map_or(line, |(key, _)| key);
         if let Some(name) = key
             .strip_prefix("remote.")
             .and_then(|key| key.strip_suffix(".url"))

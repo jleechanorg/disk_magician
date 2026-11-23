@@ -722,6 +722,9 @@ pub(crate) fn legacy_lease(
         if identity != (Some(metadata.dev()), Some(metadata.ino())) {
             continue;
         }
+        if strict && !record["owners"].is_array() {
+            return Err(io::Error::other("legacy lease record has no owners list"));
+        }
         if record["kind"] != "build" {
             return Ok(Some(LegacyLease::OtherKind));
         }
