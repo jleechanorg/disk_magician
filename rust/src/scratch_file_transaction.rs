@@ -483,8 +483,8 @@ pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
 
 /// Whether any process has a file or working directory at or under `path`,
 /// from one listing of every open file. A failed or timed-out probe is an error.
-pub fn open_paths(path: &Path) -> io::Result<bool> {
-    open_paths_with(path, default_lsof())
+pub fn open_paths(paths: &[&Path]) -> io::Result<bool> {
+    open_paths_with(paths, default_lsof())
 }
 
 fn default_lsof() -> &'static Path {
@@ -499,8 +499,7 @@ fn default_lsof() -> &'static Path {
 /// every line starts with an ASCII field letter (`p` process, `n` name, and on
 /// macOS also `f`, `t`, ...), at least one process line exists, and only name
 /// lines are paths.
-pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
-    let prefix = path.as_os_str().as_encoded_bytes();
+pub fn open_paths_with(paths: &[&Path], lsof: &Path) -> io::Result<bool> {
     let Some(listing) = run_lsof(lsof, &["-nP", "-w", "-F", "n"], None)? else {
         return Err(io::Error::other("lsof listed nothing"));
     };
@@ -514,8 +513,11 @@ pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
         }
         processes |= *field == b'p';
         found |= *field == b'n'
-            && name.starts_with(prefix)
-            && matches!(name.get(prefix.len()), None | Some(b'/' | b' '));
+            && paths.iter().any(|path| {
+                let prefix = path.as_os_str().as_encoded_bytes();
+                name.starts_with(prefix)
+                    && matches!(name.get(prefix.len()), None | Some(b'/' | b' '))
+            });
     }
     if processes {
         Ok(found)
