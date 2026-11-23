@@ -2974,4 +2974,12 @@ fn incomplete_observation_marks_report_incomplete() {
     let report = sweep(&clean_run(&fx, cutoff)).unwrap();
     chmod(&fx.root.join("locked"), 0o700);
     assert!(!report.timed_out && !report.complete());
+    for reason in [
+        "deferred:restored:incomplete:unreadable",
+        "deferred:restored:probe-error:lsof",
+    ] {
+        let mut r = diskm_shadow::scratch_expired::Report::default();
+        r.deferred.push(("c".into(), reason.into()));
+        assert!(!r.complete(), "{reason}");
+    }
 }
