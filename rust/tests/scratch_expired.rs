@@ -3202,3 +3202,20 @@ fn contained_separate_git_dir_with_recoverable_commits_is_eligible() {
         planned.kept
     );
 }
+
+#[test]
+fn bare_repo_with_symlinked_git_dirs_is_protected() {
+    let fx = Fx::new("bare-symlink");
+    let ext = fx.root.parent().unwrap().join("bare-symlink-ext");
+    let _ = fs::remove_dir_all(&ext);
+    fs::create_dir_all(ext.join("refs/heads")).unwrap();
+    fs::create_dir_all(ext.join("objects")).unwrap();
+    let repo = fx.root.join("bare");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--bare", "-q"]);
+    fs::remove_dir_all(repo.join("refs")).unwrap();
+    std::os::unix::fs::symlink(ext.join("refs"), repo.join("refs")).unwrap();
+    let planned = plan(&clean_run(&fx, age())).unwrap();
+    assert!(!planned.removals.contains(&repo), "{:?}", planned.kept);
+    let _ = fs::remove_dir_all(&ext);
+}

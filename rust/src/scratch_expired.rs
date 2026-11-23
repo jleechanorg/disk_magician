@@ -165,7 +165,6 @@ fn collect_stores(entry: &Path, found: &mut Observation) {
         }
     };
     for store in stores {
-        // Retained submodule repositories get full recovery proof without a working tree.
         if store.starts_with(entry.join("modules")) {
             found.repos.push(store.clone());
         }
@@ -246,8 +245,8 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
                 continue;
             }
             "HEAD" if !info.is_dir() => bare[0] = true,
-            "objects" if info.is_dir() => bare[1] = true,
-            "refs" if info.is_dir() => bare[2] = true,
+            "objects" if info.is_dir() || info.is_symlink() => bare[1] = true,
+            "refs" if info.is_dir() || info.is_symlink() => bare[2] = true,
             "evidence" if info.is_dir() => found.evidence.push(path.clone()),
             _ => {}
         }
@@ -445,8 +444,6 @@ fn git_protected(
             .ancestors()
             .skip(1)
             .any(|u| u.file_name() == Some(".git".as_ref()));
-    // Containment is physical: a symlink inside the candidate that leads
-    // outside it does not count as inside.
     let physical: Vec<PathBuf> = within.iter().filter_map(|p| resolve(p)).collect();
     let inside = |p: &Path| resolve(p).is_some_and(|p| physical.iter().any(|x| p.starts_with(x)));
     let failed = Some("deferred:git-probe-failed");
@@ -590,8 +587,6 @@ fn git_protected(
         _ => failed,
     }
 }
-
-// ---- Leases, holds and the plan ----
 
 /// A run is protected when its recorded owner may still be running or its
 /// lease is evidence, whatever kind or completion state it records.
@@ -906,8 +901,6 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
     })
 }
 
-// ---- Removal transaction, recovery and report ----
-
 const STAGES: &str = ".diskm-expired";
 
 /// What a stage records so an interrupted run can be finished or undone.
@@ -1165,8 +1158,8 @@ fn scan_stores(dir: &Path, deadline: Instant, out: &mut Vec<PathBuf>, complete: 
                 Err(_) => *complete = false,
             },
             Some("HEAD") if !kind.is_dir() => bare[0] = true,
-            Some("objects") if kind.is_dir() => bare[1] = true,
-            Some("refs") if kind.is_dir() => bare[2] = true,
+            Some("objects") if kind.is_dir() || kind.is_symlink() => bare[1] = true,
+            Some("refs") if kind.is_dir() || kind.is_symlink() => bare[2] = true,
             _ => {}
         }
         if kind.is_dir() && entry.file_name() != ".git" {
@@ -1220,7 +1213,6 @@ fn stage_unit(
     report: &mut Report,
 ) -> io::Result<Option<Staged>> {
     let seen = observe(path, run.device, run.deadline);
-    // Borrowers can appear after planning: re-read every known alternates file.
     let alts: io::Result<Vec<_>> = plan.stores.iter().map(|d| read_alternates(d)).collect();
     let blind = plan.blind || alts.is_err();
     let alts = alts.iter().flatten().flatten().cloned().collect();
@@ -1399,7 +1391,6 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     if pending.is_empty() {
         return Ok(report);
     }
-    // Trees with repos are staged before the single fresh alternates scan.
     let known = fresh_known(run)?;
     for mut unit in pending {
         step(&mut unit, Some(&known), &mut report)?;
@@ -1428,13 +1419,22 @@ pub fn run(
         holds: state.join("evidence-holds.json"),
         ..Run::new(&root, device, cutoff)
     };
+    let u = crate::scratch_target::measure_usage;
+    let before = options.clean.then(|| u(&root, device)).transpose()?;
     let report = sweep(&run)?;
+    let after = options.clean.then(|| u(&root, device)).transpose()?;
+    let freed = before
+        .zip(after)
+        .map(|(b, a)| i128::from(b) - i128::from(a));
     let ok = report.complete();
-    let status = match (ok, report.timed_out) {
-        (true, _) => "expired_sweep",
-        (false, true) => "deadline",
-        (false, false) => "partial",
+    let status = if ok {
+        "expired_sweep"
+    } else if report.timed_out {
+        "deadline"
+    } else {
+        "partial"
     };
-    let body = json!({"status":status,"clean":options.clean,"report":report.summary()});
+    let body = json!({"status": status, "clean": options.clean, "used_before_bytes": before,
+        "used_after_bytes": after, "freed_bytes": freed, "report": report.summary()});
     Ok((body, ok))
 }
