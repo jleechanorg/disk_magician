@@ -2610,12 +2610,34 @@ fn chmod(path: &Path, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-/// A pushed repository with packed refs, so every target in `UNREADABLE` exists.
-fn packed_repo(fx: &Fx, repo: &Path) -> PathBuf {
-    init(repo);
-    let bare = hosted(fx, repo);
-    git(repo, &["pack-refs", "--all"]);
-    bare
+/// A stale repository whose only commit is local (no remote). Where Git would
+/// otherwise see nothing it silently counts zero, so an unreadable part of the
+/// gitdir must hold it. Reflogs exist only for the `logs` targets.
+fn unpushed_repo(repo: &Path, target: &str) {
+    fs::create_dir_all(repo).unwrap();
+    git(repo, &["init", "-q", "-b", "main"]);
+    let logs = target.contains("logs");
+    if !logs {
+        git(repo, &["config", "core.logAllRefUpdates", "false"]);
+    }
+    fs::write(repo.join("f"), b"1").unwrap();
+    git(repo, &["add", "f"]);
+    git(repo, &["commit", "-qm", "one"]);
+    if logs {
+        fs::write(repo.join("g"), b"2").unwrap();
+        git(repo, &["add", "g"]);
+        git(repo, &["commit", "-qm", "reflog only"]);
+        git(repo, &["reset", "-q", "--hard", "HEAD~1"]);
+    }
+    if target.contains("packed-refs") || target.contains("pack") {
+        git(repo, &["gc", "-q", "--prune=now"]);
+    }
+}
+
+fn local_only_run(fx: &Fx, cutoff: i64) -> Run {
+    let mut run = clean_run(fx, cutoff);
+    run.hooks.independent = Box::new(|_, _| true);
+    run
 }
 
 #[test]
@@ -2623,10 +2645,10 @@ fn an_unreadable_part_of_the_gitdir_is_not_proof_at_planning() {
     for target in UNREADABLE {
         let fx = Fx::new("gitdir-plan");
         let repo = fx.root.join("u/repo");
-        let bare = packed_repo(&fx, &repo);
+        unpushed_repo(&repo, target);
         let cutoff = age();
         chmod(&repo.join(target), 0o000);
-        let planned = plan(&git_run(&fx, cutoff, Some(bare)));
+        let planned = plan(&local_only_run(&fx, cutoff));
         chmod(&repo.join(target), 0o700);
         let planned = planned.unwrap();
         assert!(
@@ -2642,9 +2664,13 @@ fn an_unreadable_part_of_the_gitdir_after_staging_restores() {
     for target in UNREADABLE {
         let fx = Fx::new("gitdir-stage");
         let repo = fx.root.join("u/repo");
-        let bare = packed_repo(&fx, &repo);
+        unpushed_repo(&repo, target);
         let cutoff = age();
-        let mut run = lender_run(&fx, cutoff, bare);
+        let mut run = local_only_run(&fx, cutoff);
+        // Readable at planning; the only protection left is the commit itself,
+        // so make the planner see a recoverable repository: published tips.
+        let bare = hosted(&fx, &repo);
+        run.hooks.tips = probe(bare);
         run.hooks.after_stage =
             Box::new(move |_, item| chmod(&item.join("repo").join(target), 0o000));
         let report = sweep(&run).unwrap();
@@ -2662,10 +2688,13 @@ fn an_unreadable_part_of_the_gitdir_in_recovery_restores() {
     for target in UNREADABLE {
         let fx = Fx::new("gitdir-recover");
         let (item, _) = stage(&fx, dead_pid(), "deleting", "lender-back", true);
-        let bare = packed_repo(&fx, &item.join("repo"));
+        unpushed_repo(&item.join("repo"), target);
+        let bare = hosted(&fx, &item.join("repo"));
         let cutoff = age();
         chmod(&item.join("repo").join(target), 0o000);
-        let swept = sweep(&lender_run(&fx, cutoff, bare));
+        let mut run = local_only_run(&fx, cutoff);
+        run.hooks.tips = probe(bare);
+        let swept = sweep(&run);
         chmod(&fx.root.join("lender-back/repo").join(target), 0o700);
         swept.unwrap();
         assert!(
