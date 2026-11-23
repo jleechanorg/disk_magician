@@ -979,9 +979,9 @@ impl Report {
     }
 
     pub fn complete(&self) -> bool {
-        let incomplete = |r: &str| {
-            r.contains("incomplete") || r.contains("probe-error:") || r.contains("check-error:")
-        };
+        let a = ["incomplete", "probe-error:", "check-error:"];
+        let b = ["git-probe-failed", "lease-unavailable"];
+        let incomplete = |r: &str| a.iter().chain(&b).any(|s| r.contains(s));
         !self.timed_out
             && !self.kept.keys().any(|k| incomplete(k))
             && !self.deferred.iter().any(|(_, r)| incomplete(r))

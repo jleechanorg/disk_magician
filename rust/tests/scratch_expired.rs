@@ -2994,12 +2994,15 @@ fn incomplete_observation_marks_report_incomplete() {
         r.deferred.push(("c".into(), reason.into()));
         assert!(!r.complete(), "{reason}");
     }
-    let mut r = diskm_shadow::scratch_expired::Report::default();
-    r.kept.insert(
-        "kept:protected-subtree:incomplete-alternates-scan".into(),
-        1,
-    );
-    assert!(!r.complete());
+    for reason in [
+        "kept:protected-subtree:incomplete-alternates-scan",
+        "kept:protected-subtree:git-probe-failed",
+        "kept:protected-subtree:deferred:lease-unavailable",
+    ] {
+        let mut r = diskm_shadow::scratch_expired::Report::default();
+        r.kept.insert(reason.into(), 1);
+        assert!(!r.complete(), "{reason}");
+    }
 }
 
 #[test]
