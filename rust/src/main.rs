@@ -36,6 +36,8 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
   diskm preview [--scope scratch|tmp|worktrees|ledger|all] [--state-dir DIR] [--min-hours N] [--max-candidates N] [--deadline-ms N] [--resume-state FILE] [--recheck PATH ...] [--dry-run]
+  diskm worktree-slim [--root DIR ...] [--config FILE] [--exclude DIR ...] [--clean] [--state-dir DIR]
+  diskm worktree-archive [--root DIR ...] [--min-days N] [--push-only] [--clean] [--archive-suffix STR] [--state-dir DIR]
 
 Preview --deadline-ms bounds Scratch discovery at any age. With --resume-state,
 preview can resume incomplete discovery. Verdict checks run after discovery.
@@ -846,6 +848,9 @@ fn main() -> ExitCode {
         return status;
     }
     if let Some(status) = diskm_shadow::scratch_lease::dispatch(&args) {
+        return status;
+    }
+    if let Some(status) = diskm_shadow::worktree_hygiene::dispatch(&args) {
         return status;
     }
     if args

@@ -560,7 +560,12 @@ pub(crate) fn deletion_log_path() -> io::Result<PathBuf> {
         return Ok(path.into());
     }
     let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is unavailable"))?;
-    Ok(PathBuf::from(home).join("Library/Logs/disk-magician-deletions.log"))
+    let sub = if cfg!(target_os = "linux") {
+        ".local/state/disk-magician/deletions.log"
+    } else {
+        "Library/Logs/disk-magician-deletions.log"
+    };
+    Ok(PathBuf::from(home).join(sub))
 }
 
 pub(crate) fn flush_audit(pending: &mut Option<(PathBuf, String)>, replay: bool) -> io::Result<()> {

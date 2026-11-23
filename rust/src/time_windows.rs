@@ -51,6 +51,8 @@ pub const EXPIRED_SWEEP_DEADLINE: Duration = Duration::from_secs(600);
 
 /// Timeout for one `git ls-remote` probe during expired-sweep Git protection.
 pub const GIT_REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+pub const WORKTREE_FLOOR_DAYS: u32 = 7;
+pub const WORKTREE_HYGIENE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Every window above, by placeholder name.
 pub fn listing() -> Vec<(&'static str, Duration)> {
@@ -83,5 +85,10 @@ pub fn listing() -> Vec<(&'static str, Duration)> {
         ("EXPIRED_SWEEP_INTERVAL", EXPIRED_SWEEP_INTERVAL),
         ("EXPIRED_SWEEP_DEADLINE", EXPIRED_SWEEP_DEADLINE),
         ("GIT_REMOTE_PROBE_TIMEOUT", GIT_REMOTE_PROBE_TIMEOUT),
+        (
+            "WORKTREE_FLOOR",
+            Duration::from_secs(u64::from(WORKTREE_FLOOR_DAYS) * 86_400),
+        ),
+        ("WORKTREE_HYGIENE_INTERVAL", WORKTREE_HYGIENE_INTERVAL),
     ]
 }

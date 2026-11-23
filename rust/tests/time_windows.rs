@@ -41,6 +41,9 @@ const ACTIVE_TEMPLATES: &[&str] = &[
     "launchd/com.jleechanorg.disk-magician-scratch-expired.plist.template",
     "systemd/diskm-scratch-expired.service.in",
     "systemd/diskm-scratch-expired.timer.in",
+    "launchd/com.jleechanorg.disk-magician-worktree-hygiene.plist.template",
+    "systemd/disk-magician-worktree-hygiene.service.in",
+    "systemd/disk-magician-worktree-hygiene.timer.in",
 ];
 
 #[test]
@@ -107,4 +110,16 @@ fn expired_templates_run_the_expired_sweep() {
         !timer.contains("scratch-sweep"),
         "a timer carries no command"
     );
+}
+
+#[test]
+fn worktree_hygiene_windows_are_exposed_by_cli() {
+    let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
+        .arg("time-windows")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "diskm time-windows failed");
+    let windows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(windows["WORKTREE_FLOOR_SECONDS"], 604_800);
+    assert_eq!(windows["WORKTREE_HYGIENE_INTERVAL_SECONDS"], 21_600);
 }
