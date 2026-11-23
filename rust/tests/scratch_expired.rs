@@ -1929,9 +1929,9 @@ fn lsof_warnings_beside_a_complete_listing_do_not_fail_the_probe() {
         &fx,
         "echo 'lsof: WARNING: cannot stat() fuse file system' >&2\nprintf 'p1\\nn/elsewhere/x\\np2\\nn/held/dir/file\\n'\nexit 0",
     );
-    assert!(open_paths_with(&[Path::new("/held/dir")], &lsof).unwrap());
-    assert!(!open_paths_with(&[Path::new("/held/other")], &lsof).unwrap());
-    assert!(!open_paths_with(&[Path::new("/held/di")], &lsof).unwrap());
+    assert!(open_paths_with(Path::new("/held/dir"), &lsof).unwrap());
+    assert!(!open_paths_with(Path::new("/held/other"), &lsof).unwrap());
+    assert!(!open_paths_with(Path::new("/held/di"), &lsof).unwrap());
 }
 
 #[test]
@@ -1945,7 +1945,7 @@ fn a_partial_listing_with_a_failing_status_fails_closed() {
     ] {
         let lsof = fake_lsof(&fx, script);
         assert!(
-            open_paths_with(&[Path::new("/held/dir")], &lsof).is_err(),
+            open_paths_with(Path::new("/held/dir"), &lsof).is_err(),
             "{script}"
         );
     }
@@ -1958,7 +1958,7 @@ fn a_candidate_missing_from_a_partial_listing_is_kept() {
     let lsof = fake_lsof(&fx, "printf 'p1\\nn/elsewhere\\n'\nexit 1");
     let cutoff = age();
     let mut run = clean_run(&fx, cutoff);
-    run.hooks.open = Box::new(move |paths| open_paths_with(paths, &lsof));
+    run.hooks.open = Box::new(move |path| open_paths_with(path, &lsof));
     let report = sweep(&run).unwrap();
     assert!(fx.root.join("a/f").exists() && report.removed.is_empty());
 }
@@ -1975,11 +1975,11 @@ fn an_unparsable_or_failed_lsof_fails_closed() {
     ] {
         let lsof = fake_lsof(&fx, script);
         assert!(
-            open_paths_with(&[Path::new("/held")], &lsof).is_err(),
+            open_paths_with(Path::new("/held"), &lsof).is_err(),
             "{script}"
         );
     }
-    assert!(open_paths_with(&[Path::new("/held")], Path::new("/nonexistent/lsof")).is_err());
+    assert!(open_paths_with(Path::new("/held"), Path::new("/nonexistent/lsof")).is_err());
 }
 
 #[test]
@@ -1990,9 +1990,9 @@ fn macos_shaped_listing_with_field_lines_is_parsed() {
         &fx,
         "printf 'p123\\nfcwd\\nn/some/dir\\nftxt\\nn/bin/x\\np124\\nf3\\ntREG\\nn/other\\n'",
     );
-    assert!(open_paths_with(&[Path::new("/some/dir")], &lsof).unwrap());
-    assert!(open_paths_with(&[Path::new("/bin/x")], &lsof).unwrap());
-    assert!(!open_paths_with(&[Path::new("/nowhere")], &lsof).unwrap());
+    assert!(open_paths_with(Path::new("/some/dir"), &lsof).unwrap());
+    assert!(open_paths_with(Path::new("/bin/x"), &lsof).unwrap());
+    assert!(!open_paths_with(Path::new("/nowhere"), &lsof).unwrap());
     // Only `n` lines are paths: a descriptor or type value is never matched.
     assert!(!open_paths_with(
         Path::new("/some"),
@@ -2012,10 +2012,7 @@ fn a_listing_without_a_process_line_or_with_stray_lines_fails_closed() {
         "printf '\\n\\n'",
     ] {
         let lsof = fake_lsof(&fx, script);
-        assert!(
-            open_paths_with(&[Path::new("/x")], &lsof).is_err(),
-            "{script}"
-        );
+        assert!(open_paths_with(Path::new("/x"), &lsof).is_err(), "{script}");
     }
 }
 
@@ -2840,43 +2837,6 @@ fn a_damaged_gitdir_in_recovery_restores_and_the_control_is_finished() {
         assert!(
             fx.root.join("lender-back/repo/f").exists() && !item.exists(),
             "{target}"
-        );
-    }
-}
-
-#[test]
-fn open_files_are_matched_under_the_staged_and_the_original_path() {
-    let fx = Fx::new("open-both");
-    for (script, restored) in [
-        ("printf 'p1\\nn/ORIG/s.sock\\n'", true),
-        ("printf 'p1\\nn/ITEM/f\\n'", true),
-        ("printf 'p1\\nn/elsewhere/x\\n'", false),
-    ] {
-        let fx2 = Fx::new("open-both-run");
-        fx2.file("a/f");
-        let cutoff = age();
-        let original = fx2.root.join("a").display().to_string();
-        let script = script.replace("/ORIG", &original);
-        let mut run = clean_run(&fx2, cutoff);
-        let item_seen = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
-        let seen = item_seen.clone();
-        let _ = &fx;
-        let lsof = fake_lsof(&fx2, &script.replace("/ITEM", "/__ITEM__"));
-        run.hooks.open = Box::new(move |paths| {
-            // Rewrite the fake listing's item placeholder to the staged path.
-            *seen.borrow_mut() = paths[0].display().to_string();
-            let body = fs::read_to_string(&lsof)
-                .unwrap()
-                .replace("/__ITEM__", &paths[0].display().to_string());
-            fs::write(&lsof, body).unwrap();
-            open_paths_with(paths, &lsof)
-        });
-        let report = sweep(&run).unwrap();
-        assert_eq!(
-            fx2.root.join("a/f").exists(),
-            restored,
-            "{script}: {:?}",
-            report.deferred
         );
     }
 }
