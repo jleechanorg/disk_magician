@@ -802,10 +802,7 @@ fn protection(
             git_protected(git_dir, within, alts, hooks, false, dl)
         };
         if let Some(reason) = reason {
-            let reason = reason
-                .split_once(':')
-                .map_or(reason, |(_, rest)| rest)
-                .to_owned();
+            let reason = reason.split_once(':').map_or(reason, |(_, r)| r).to_owned();
             if own {
                 return Ok(Some((reason, true)));
             }
@@ -870,14 +867,13 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
             judge(&mut ctx, path, seen)?;
         }
     }
-    let timed_out = Instant::now() >= run.deadline;
     Ok(Plan {
         removals: ctx.removals,
         kept: ctx.kept,
         alts: ctx.known.alts,
         stores,
         blind: ctx.known.blind,
-        timed_out,
+        timed_out: Instant::now() >= run.deadline,
     })
 }
 
@@ -947,13 +943,16 @@ impl Report {
     }
 
     pub fn complete(&self) -> bool {
-        let a = ["incomplete", "probe-error:", "check-error:"];
-        let b = ["git-probe-failed", "lease-unavailable"];
-        let incomplete = |r: &str| a.iter().chain(&b).any(|s| r.contains(s));
         !self.timed_out
-            && !self.kept.keys().any(|k| incomplete(k))
-            && !self.deferred.iter().any(|(_, r)| incomplete(r))
+            && !self.kept.keys().any(|k| incomplete_reason(k))
+            && !self.deferred.iter().any(|(_, r)| incomplete_reason(r))
     }
+}
+
+fn incomplete_reason(r: &str) -> bool {
+    let a = ["incomplete", "probe-error:", "check-error:"];
+    let b = ["git-probe-failed", "lease-unavailable"];
+    a.iter().chain(&b).any(|s| r.contains(s))
 }
 
 fn write_intent(path: &Path, intent: &Intent) -> io::Result<()> {
@@ -974,12 +973,12 @@ fn allocated(path: &Path) -> u64 {
     let Ok(info) = fs::symlink_metadata(path) else {
         return 0;
     };
-    let children = if info.is_dir() {
+    let kids = if info.is_dir() {
         sorted_children(path).unwrap_or_default()
     } else {
         Vec::new()
     };
-    info.blocks() * 512 + children.iter().map(|child| allocated(child)).sum::<u64>()
+    info.blocks() * 512 + kids.iter().map(|c| allocated(c)).sum::<u64>()
 }
 
 fn make_writable(path: &Path) -> io::Result<()> {
@@ -1088,34 +1087,24 @@ fn crashed(run: &Run, point: &str) -> io::Result<()> {
 
 /// Delete the staged item, then make the receipt durable, then drop the
 /// intent. Replaying skips a row already in the log.
-fn finish(
-    run: &Run,
-    stage: &Path,
-    ip: &Path,
-    intent: &mut Intent,
-    report: &mut Report,
-) -> io::Result<()> {
-    let item = stage.join("item");
+fn finish(run: &Run, s: &Path, ip: &Path, i: &mut Intent, r: &mut Report) -> io::Result<()> {
+    let item = s.join("item");
     if let Some(info) = existing(&item)? {
-        if intent.state != "deleting" {
-            intent.bytes = allocated(&item);
+        if i.state != "deleting" {
+            i.bytes = allocated(&item);
             let timestamp = crate::job_receipt::timestamp(std::time::SystemTime::now())?;
-            let p = run
-                .root
-                .join(&intent.original)
-                .to_string_lossy()
-                .into_owned();
+            let p = run.root.join(&i.original).to_string_lossy().into_owned();
             let path = p
                 .replace('\t', "\\t")
                 .replace('\r', "\\r")
                 .replace('\n', "\\n");
-            let nonce = stage.file_name().unwrap_or_default().to_string_lossy();
-            intent.row = format!(
+            let nonce = s.file_name().unwrap_or_default().to_string_lossy();
+            i.row = format!(
                 "{timestamp}\tdiskm-expired\tremove\t{}\t{path}\t{nonce}\n",
-                intent.bytes.div_ceil(1024)
+                i.bytes.div_ceil(1024)
             );
-            intent.state = "deleting".into();
-            write_intent(ip, intent)?;
+            i.state = "deleting".into();
+            write_intent(ip, i)?;
         }
         if info.is_dir() {
             make_writable(&item)?;
@@ -1125,34 +1114,25 @@ fn finish(
         }
     }
     crashed(run, "removed")?;
-    crate::scratch_target::flush_audit(&mut Some((run.log.clone(), intent.row.clone())), true)?;
+    crate::scratch_target::flush_audit(&mut Some((run.log.clone(), i.row.clone())), true)?;
     fs::remove_file(ip)?;
-    let _ = fs::remove_dir(stage);
-    report
-        .removed
-        .push((run.root.join(&intent.original), intent.bytes));
+    let _ = fs::remove_dir(s);
+    r.removed.push((run.root.join(&i.original), i.bytes));
     Ok(())
 }
 
 /// Put the staged item back; if its name is taken keep stage and intent.
-fn restore(
-    run: &Run,
-    stage: &Path,
-    ip: &Path,
-    intent: &Intent,
-    cause: &str,
-    report: &mut Report,
-) -> io::Result<()> {
-    let original = run.root.join(&intent.original);
+fn restore(run: &Run, s: &Path, ip: &Path, i: &Intent, c: &str, r: &mut Report) -> io::Result<()> {
+    let original = run.root.join(&i.original);
     crashed(run, "restore")?;
-    let verdict: String = if rename_noreplace(&stage.join("item"), &original).is_ok() {
+    let verdict: String = if rename_noreplace(&s.join("item"), &original).is_ok() {
         fs::remove_file(ip)?;
-        let _ = fs::remove_dir(stage);
-        format!("deferred:restored:{cause}")
+        let _ = fs::remove_dir(s);
+        format!("deferred:restored:{c}")
     } else {
         "deferred:restore-blocked".into()
     };
-    report.deferred.push((original, verdict));
+    r.deferred.push((original, verdict));
     Ok(())
 }
 
@@ -1241,14 +1221,21 @@ fn stage_unit(
         blind,
     };
     let stale = seen.complete && seen.newest.max(seen.newest_file) < run.cutoff;
-    let open = (run.hooks.open)(path);
-    let held = !stale || protection(run, &known, path, &seen, &[path], true)?.is_some();
-    if held || !matches!(open, Ok(false)) {
-        let why = match open {
-            Ok(true) if !held => "deferred:open-file".into(),
-            Err(e) if !held => format!("deferred:probe-error:{e}"),
-            _ => "deferred:changed".into(),
-        };
+    let (open, prot) = (
+        (run.hooks.open)(path),
+        protection(run, &known, path, &seen, &[path], true)?,
+    );
+    if let Some(why) = match prot.as_ref().map(|(r, _)| r.as_str()) {
+        Some(r) if incomplete_reason(r) => Some(format!("deferred:{r}")),
+        Some(_) => Some("deferred:changed".into()),
+        None if !seen.complete => Some("deferred:incomplete".into()),
+        None if !stale => Some("deferred:changed".into()),
+        None => match open {
+            Ok(true) => Some("deferred:open-file".into()),
+            Err(e) => Some(format!("deferred:probe-error:{e}")),
+            Ok(false) => None,
+        },
+    } {
         report.deferred.push((path.to_path_buf(), why));
         return Ok(None);
     }
@@ -1260,6 +1247,7 @@ fn stage_unit(
         epoch.map_or(0, |e| e.as_nanos())
     );
     let dir = run.root.join(STAGES);
+    let _ = safe_stages(&dir, run.device)?;
     let (stage, intent_path) = (dir.join(&name), dir.join(format!("{name}.intent")));
     fs::create_dir_all(&stage)?;
     let original = path
@@ -1287,11 +1275,21 @@ fn stage_unit(
     }))
 }
 
+fn safe_stages(dir: &Path, device: u64) -> io::Result<bool> {
+    let Some(m) = existing(dir)? else {
+        return Ok(false);
+    };
+    if m.file_type().is_symlink() || !m.is_dir() || m.dev() != device {
+        return Err(io::Error::other("unsafe staging root"));
+    }
+    Ok(true)
+}
+
 /// Finish or undo the stages of dead processes; a live process's stage is
 /// never touched, and a dry run only lists them.
 fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
     let dir = run.root.join(STAGES);
-    if existing(&dir)?.is_none() {
+    if !safe_stages(&dir, run.device)? {
         return Ok(());
     }
     for intent_path in sorted_children(&dir)? {

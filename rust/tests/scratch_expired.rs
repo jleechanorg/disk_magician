@@ -3112,3 +3112,41 @@ fn git_remote_loop_stops_when_deadline_expires() {
     assert!(calls.load(std::sync::atomic::Ordering::SeqCst) <= 1);
     assert!(!report.complete() && report.removed.is_empty());
 }
+
+#[test]
+fn recovery_rejects_symlink_staging_root() {
+    let fx = Fx::new("recover-root-link");
+    let outside = fx.root.parent().unwrap().join("recover-root-outside");
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(outside.join("999999-1")).unwrap();
+    let target = outside.join("999999-1/item");
+    fs::write(&target, b"keep").unwrap();
+    let info = fs::symlink_metadata(&target).unwrap();
+    fs::write(
+        outside.join("999999-1.intent"),
+        serde_json::json!({
+            "state": "deleting", "original": "gone", "device": info.dev(), "inode": info.ino(),
+            "newest": 0, "bytes": 0, "row": ""
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside, fx.root.join(".diskm-expired")).unwrap();
+    let err = sweep(&clean_run(&fx, age())).err().unwrap();
+    assert!(err.to_string().contains("unsafe staging root"), "{err}");
+    assert!(target.exists());
+    let _ = fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn revalidation_lease_unavailable_marks_report_incomplete() {
+    let fx = Fx::new("reval-lease-err");
+    fx.file("runs/20261101/repo/r1/out");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    let planned = plan(&run).unwrap();
+    assert_eq!(planned.removals.len(), 1);
+    run.hooks.lease = Box::new(|_, _, _| Some("deferred:lease-unavailable"));
+    let report = apply(&run, &planned).unwrap();
+    assert!(!report.complete() && report.removed.is_empty());
+}
