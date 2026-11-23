@@ -520,9 +520,10 @@ under `runs/<date>/<repo>/<run>`), on the operator's 2026-11-22 instruction:
   repository whose commits are not independently proven recoverable (every
   remote an independent hosted remote, live `git ls-remote` tips, no unpushed
   commits or stash; linked worktrees and repositories with external worktrees
-  or alternates are always protected). A mixed candidate is never removed
-  whole: the walk descends into it to a depth of 4 and judges each child, and
-  the descended parent is never removed by this job.
+  or alternates are always protected). Each candidate is judged **whole**: a
+  candidate with fresh content, or containing a protected descendant, is kept
+  whole, and its stale children are never removed beside it. This is the
+  protection for active workspaces.
 - Removal is staged (`<root>/.diskm-expired/`), rechecked on the staged tree
   (open files, holds, Git proof, newest content) and restored on any doubt;
   interrupted stages are recovered at the next run. Dirty working-tree edits in
