@@ -99,7 +99,7 @@ fn git_stores(entry: &Path) -> io::Result<Vec<PathBuf>> {
                 continue;
             }
             match fs::symlink_metadata(child.join("HEAD")) {
-                Ok(head) if head.is_file() => {
+                Ok(head) if !head.is_dir() => {
                     out.push(child.clone());
                     modules(&child.join("modules"), out)?;
                 }
@@ -226,7 +226,7 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
                 collect_stores(&path, found);
                 continue;
             }
-            "HEAD" if info.is_file() => bare[0] = true,
+            "HEAD" if !info.is_dir() => bare[0] = true,
             "objects" if info.is_dir() => bare[1] = true,
             "refs" if info.is_dir() => bare[2] = true,
             "evidence" if info.is_dir() => found.evidence.push(path.clone()),
@@ -259,7 +259,11 @@ fn bounded(command: &mut Command, input: Option<String>, limit: Duration) -> io:
 
 fn git(git_dir: &Path, args: &[&str], input: Option<String>) -> io::Result<String> {
     let mut command = Command::new("git");
-    command.arg("--git-dir").arg(git_dir).args(args);
+    command
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(args)
+        .current_dir(repo_root(git_dir));
     bounded(&mut command, input, GIT_REMOTE_PROBE_TIMEOUT)
 }
 
@@ -456,19 +460,8 @@ fn git_protected(
         return failed;
     };
     let mut remotes = Vec::new();
-    let mut worktree_set = false;
     for line in config.lines() {
         let (key, value) = line.split_once('=').unwrap_or((line, ""));
-        // A non-bare git directory not named `.git` belongs to a working
-        // tree elsewhere (`--separate-git-dir`), which deleting would orphan.
-        let detached = !tree_inside
-            && key == "core.bare"
-            && value == "false"
-            && git_dir.file_name() != Some(".git".as_ref());
-        worktree_set |= key == "core.worktree";
-        if detached {
-            return Some("kept:git-external-worktree");
-        }
         if let Some(name) = key
             .strip_prefix("remote.")
             .and_then(|key| key.strip_suffix(".url"))
@@ -476,20 +469,28 @@ fn git_protected(
             remotes.push(name.to_owned());
         }
     }
-    if worktree_set {
-        // Ask Git where its working tree really is; never re-derive its path
-        // rules. No answer, or an unresolvable one, holds.
-        let Ok(top) = git(git_dir, &["rev-parse", "--show-toplevel"], None) else {
-            return failed;
-        };
-        let top = top.trim();
-        if top.is_empty() || !inside(Path::new(top)) {
-            return Some(if top.is_empty() {
-                "deferred:git-probe-failed"
-            } else {
-                "kept:git-external-worktree"
-            });
+    // Never gate on a config key: Git itself says whether there is a working
+    // tree (`config.worktree` and other sources included) and where it is.
+    match git(git_dir, &["rev-parse", "--is-bare-repository"], None) {
+        Ok(text) if text.trim() == "true" => {}
+        Ok(_) => {
+            // A non-bare git directory not named `.git` belongs to a working
+            // tree elsewhere (`--separate-git-dir`), which deleting would orphan.
+            if !tree_inside && git_dir.file_name() != Some(".git".as_ref()) {
+                return Some("kept:git-external-worktree");
+            }
+            let Ok(top) = git(git_dir, &["rev-parse", "--show-toplevel"], None) else {
+                return failed;
+            };
+            let top = top.trim();
+            if top.is_empty() {
+                return failed;
+            }
+            if !inside(Path::new(top)) {
+                return Some("kept:git-external-worktree");
+            }
         }
+        Err(_) => return failed,
     }
     match fs::read_dir(git_dir.join("worktrees")) {
         Ok(linked) => {
@@ -1163,7 +1164,7 @@ fn scan_stores(dir: &Path, deadline: Instant, out: &mut Vec<PathBuf>, complete: 
                 Ok(stores) => out.extend(stores),
                 Err(_) => *complete = false,
             },
-            Some("HEAD") if kind.is_file() => bare[0] = true,
+            Some("HEAD") if !kind.is_dir() => bare[0] = true,
             Some("objects") if kind.is_dir() => bare[1] = true,
             Some("refs") if kind.is_dir() => bare[2] = true,
             _ => {}

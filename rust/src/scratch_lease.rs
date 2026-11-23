@@ -699,10 +699,27 @@ pub(crate) fn legacy_lease(
             Err(error) if strict => return Err(io::Error::other(error)),
             Err(_) => continue,
         };
-        if record["path"].as_str().map(Path::new) != Some(bundle)
-            || record["checkout_dev"].as_u64() != Some(metadata.dev())
-            || record["checkout_ino"].as_u64() != Some(metadata.ino())
-        {
+        // Only a record that clearly belongs to another path is skipped; with
+        // `strict`, one that may be this run's but is mistyped is an error.
+        let Some(recorded) = record["path"].as_str() else {
+            if strict {
+                return Err(io::Error::other("legacy lease record has no usable path"));
+            }
+            continue;
+        };
+        if Path::new(recorded) != bundle {
+            continue;
+        }
+        let identity = (
+            record["checkout_dev"].as_u64(),
+            record["checkout_ino"].as_u64(),
+        );
+        if strict && (identity.0.is_none() || identity.1.is_none()) {
+            return Err(io::Error::other(
+                "legacy lease record has no usable identity",
+            ));
+        }
+        if identity != (Some(metadata.dev()), Some(metadata.ino())) {
             continue;
         }
         if record["kind"] != "build" {
