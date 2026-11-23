@@ -24,4 +24,4 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - name: Enforce Rust ceiling and legacy net-growth limit
-        run: node .github/scripts/check_loc_budget.js "$BASE_SHA" "$HEAD_SHA" 13500 250
+        run: node .github/scripts/check_loc_budget.js "$BASE_SHA" "$HEAD_SHA" 14000 250

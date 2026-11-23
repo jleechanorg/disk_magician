@@ -1,8 +1,8 @@
 //! Native worktree hygiene: sparse-checkout slimming and gated archive-push.
 
 use crate::job_receipt::{self, Completion};
-use crate::scratch_file_transaction::{open_file_processes, run_capture};
-use crate::scratch_lease::legacy_lease;
+use crate::scratch_file_transaction::{open_paths, run_capture};
+use crate::scratch_lease::{legacy_lease, live_cwd_in};
 use crate::scratch_target::{deletion_log_path, flush_audit};
 use crate::time_windows::{GIT_REMOTE_PROBE_TIMEOUT, WORKTREE_FLOOR_DAYS};
 use serde_json::{json, Value};
@@ -349,11 +349,7 @@ fn archive_one(
     {
         return Err("ao_owned");
     }
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|c| fs::canonicalize(c).ok())
-        .is_some_and(|c| c.starts_with(&canon));
-    if cwd || !matches!(open_file_processes(&canon), Ok(p) if p.is_empty()) {
+    if !matches!(live_cwd_in(&canon), Ok(false)) || !matches!(open_paths(&canon), Ok(false)) {
         return Err("open_files");
     }
     let held = holds.as_ref().map_or(true, |o| {
