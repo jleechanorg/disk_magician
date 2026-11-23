@@ -979,12 +979,12 @@ impl Report {
     }
 
     pub fn complete(&self) -> bool {
-        let incomplete = |(_, r): &(_, String)| {
+        let incomplete = |r: &str| {
             r.contains("incomplete") || r.contains("probe-error:") || r.contains("check-error:")
         };
         !self.timed_out
-            && self.kept.get("deferred:incomplete").copied().unwrap_or(0) == 0
-            && !self.deferred.iter().any(incomplete)
+            && !self.kept.keys().any(|k| incomplete(k))
+            && !self.deferred.iter().any(|(_, r)| incomplete(r))
     }
 }
 

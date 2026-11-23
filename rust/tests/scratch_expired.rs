@@ -2982,4 +2982,10 @@ fn incomplete_observation_marks_report_incomplete() {
         r.deferred.push(("c".into(), reason.into()));
         assert!(!r.complete(), "{reason}");
     }
+    let mut r = diskm_shadow::scratch_expired::Report::default();
+    r.kept.insert(
+        "kept:protected-subtree:incomplete-alternates-scan".into(),
+        1,
+    );
+    assert!(!r.complete());
 }
