@@ -2527,3 +2527,68 @@ fn each_tree_is_checked_right_after_it_is_staged_and_repo_less_trees_skip_the_sc
     assert_eq!(*events.borrow(), ["stage:a", "open", "stage:b", "open"]);
     assert_eq!(report.removed.len(), 2, "{:?}", report.deferred);
 }
+
+// ---- round seven: Git decides the working tree; typed lease fields ----
+
+#[test]
+fn worktree_config_extension_pointing_outside_holds() {
+    let fx = Fx::new("worktree-config");
+    let unit = fx.root.join("u");
+    init(&unit.join("repo"));
+    let bare = hosted(&fx, &unit.join("repo"));
+    let outside = fx.root.parent().unwrap().join(format!(
+        "diskm-expired-worktree-config-{}-tree",
+        std::process::id()
+    ));
+    fs::create_dir_all(&outside).unwrap();
+    let repo = unit.join("repo");
+    git(&repo, &["config", "core.repositoryformatversion", "1"]);
+    git(&repo, &["config", "extensions.worktreeConfig", "true"]);
+    // Only .git/config.worktree names the tree; `config --local --list` omits it.
+    fs::write(
+        repo.join(".git/config.worktree"),
+        format!("[core]\n\tworktree = {}\n", outside.display()),
+    )
+    .unwrap();
+    let cutoff = age();
+    let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
+    let _ = fs::remove_dir_all(&outside);
+    assert!(!plan.removals.contains(&unit), "{:?}", plan.kept);
+    assert!(why(&plan, "git-external-worktree"), "{:?}", plan.kept);
+}
+
+fn retype(field: &'static str, value: serde_json::Value) -> impl FnOnce(&Path) {
+    move |record| {
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(record).unwrap()).unwrap();
+        match value {
+            serde_json::Value::Null => {
+                json.as_object_mut().unwrap().remove(field);
+            }
+            other => json[field] = other,
+        }
+        fs::write(record, json.to_string()).unwrap();
+    }
+}
+
+#[test]
+fn a_matching_legacy_record_with_mistyped_fields_keeps_the_run() {
+    use serde_json::{json, Value::Null};
+    let cases: [(&str, serde_json::Value); 6] = [
+        ("checkout_dev", json!("12")),
+        ("checkout_ino", json!("34")),
+        ("checkout_dev", Null),
+        ("owners", Null),
+        ("owners", json!([{"pid": "7"}])),
+        ("path", json!(5)),
+    ];
+    for (field, value) in cases {
+        let fx = Fx::new("lease-retyped");
+        let plan = legacy_lease_plan(&fx, retype(field, value.clone()), dead_pid());
+        assert!(
+            plan.removals.is_empty(),
+            "{field} = {value}: {:?}",
+            plan.kept
+        );
+    }
+}
