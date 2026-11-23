@@ -1005,11 +1005,11 @@ fn staged_ok(run: &Run, item: &Path, intent: &Intent, known: &Known) -> io::Resu
             seen.gaps.first().map_or("", String::as_str)
         )));
     }
-    if newest > intent.newest {
-        return Ok(Some("fresh-content".into()));
-    }
     if !seen.evidence.is_empty() {
         return Ok(Some("evidence".into()));
+    }
+    if newest > intent.newest {
+        return Ok(Some("fresh-content".into()));
     }
     if read_holds(&run.holds)?
         .iter()
@@ -1028,7 +1028,7 @@ fn staged_ok(run: &Run, item: &Path, intent: &Intent, known: &Known) -> io::Resu
         if let Some(reason) =
             git_protected(git_dir, &[item, &original], &known.alts, &run.hooks, false)
         {
-            return Ok(Some(format!("git-{}", short(reason))));
+            return Ok(Some(short(reason)));
         }
     }
     Ok(match (run.hooks.open)(item) {
