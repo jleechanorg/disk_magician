@@ -2401,3 +2401,60 @@ fn core_worktree_through_an_internal_symlink_to_outside_holds() {
     assert!(!plan.removals.contains(&unit), "{:?}", plan.kept);
     assert!(why(&plan, "git-external-worktree"), "{:?}", plan.kept);
 }
+
+// ---- round six: searchability, Git's own worktree resolution ----
+
+fn unsearchable_module_case(target: impl Fn(&Path) -> PathBuf, label: &str) {
+    let fx = Fx::new(label);
+    let (source, superproject, bare) = deinitialized_submodule(&fx);
+    let locked = target(&superproject.join(".git/modules"));
+    let cutoff = age();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut run = git_run(&fx, cutoff, Some(bare.clone()));
+    run.hooks.tips = module_blind_tips(bare);
+    let plan = plan(&run);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    let _ = fs::remove_dir_all(&source);
+    let plan = plan.unwrap();
+    assert!(
+        !plan.removals.contains(&fx.root.join("u")),
+        "{:?}",
+        plan.kept
+    );
+}
+
+#[test]
+fn unsearchable_modules_directory_keeps_the_candidate() {
+    unsearchable_module_case(|modules| modules.to_path_buf(), "modules-0600");
+}
+
+#[test]
+fn unsearchable_module_directory_keeps_the_candidate() {
+    unsearchable_module_case(|modules| modules.join("sub"), "module-sub-0600");
+}
+
+#[test]
+fn core_worktree_with_dotdot_after_a_symlink_is_resolved_by_git() {
+    let fx = Fx::new("core-dotdot");
+    let unit = fx.root.join("u");
+    init(&unit.join("repo"));
+    let bare = hosted(&fx, &unit.join("repo"));
+    let outside = fx.root.parent().unwrap().join(format!(
+        "diskm-expired-core-dotdot-{}-out",
+        std::process::id()
+    ));
+    fs::create_dir_all(outside.join("nested")).unwrap();
+    fs::create_dir_all(outside.join("tree")).unwrap();
+    std::os::unix::fs::symlink(outside.join("nested"), unit.join("repo/link")).unwrap();
+    // Lexically this is repo/tree (inside); Git follows the link to outside/tree.
+    fs::create_dir_all(unit.join("repo/tree")).unwrap();
+    git(
+        &unit.join("repo"),
+        &["config", "core.worktree", "../link/../tree"],
+    );
+    let cutoff = age();
+    let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
+    let _ = fs::remove_dir_all(&outside);
+    assert!(!plan.removals.contains(&unit), "{:?}", plan.kept);
+    assert!(why(&plan, "git-external-worktree"), "{:?}", plan.kept);
+}
