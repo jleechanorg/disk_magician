@@ -466,7 +466,7 @@ fn rename_exclusive(
 }
 
 pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
-    let Some(stdout) = run_lsof(default_lsof(), &["-nP", "-w", "-t", "--"], Some(path))? else {
+    let Some(stdout) = run_lsof(default_lsof(), &["-nP", "-t", "--"], path, true)? else {
         return Ok(Vec::new());
     };
     let pids: Vec<u32> = stdout
@@ -527,17 +527,17 @@ fn unescape_lsof(s: &[u8]) -> Vec<u8> {
 /// lines are paths.
 pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
     let prefix = path.as_os_str().as_encoded_bytes();
-    let Some(listing) = run_lsof(lsof, &["-nP", "-w", "-F", "n"], None)? else {
+    let Some(listing) = run_lsof(lsof, &["-nP", "-F", "n"], path, false)? else {
         return Err(io::Error::other("lsof listed nothing"));
     };
     let (mut found, mut processes) = (false, false);
     for line in listing.lines() {
-        let [field, name @ ..] = line.as_bytes() else {
+        let ([field, name @ ..], true) = (
+            line.as_bytes(),
+            line.as_bytes().first().is_some_and(u8::is_ascii_alphabetic),
+        ) else {
             return Err(io::Error::other("unparsable lsof listing"));
         };
-        if !field.is_ascii_alphabetic() {
-            return Err(io::Error::other("unparsable lsof listing"));
-        }
         processes |= *field == b'p';
         let dec = (*field == b'n' && name.contains(&b'\\')).then(|| unescape_lsof(name));
         let name = dec.as_deref().unwrap_or(name);
@@ -622,14 +622,30 @@ pub fn run_capture(
 /// means it found nothing. Any other outcome, including a listing beside a
 /// failing status, is an error: a partial listing proves nothing about a path
 /// it omits.
-fn run_lsof(lsof: &Path, args: &[&str], path: Option<&Path>) -> io::Result<Option<String>> {
-    let (status, stdout, stderr) = run_capture(
-        Command::new(lsof).args(args).args(path),
-        None,
-        crate::time_windows::OPEN_FILE_PROBE_TIMEOUT,
-    )?;
+fn lsof_stderr_ok(stderr: &[u8], target: Option<&Path>) -> bool {
+    let mut ok_warn = false;
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .all(|l| {
+            if l.is_empty() || (ok_warn && l == "Output information may be incomplete.") {
+                return true;
+            }
+            let overlap = l.rsplit_once("file system ").is_some_and(|(_, m)| {
+                target.is_some_and(|t| t.starts_with(m) || Path::new(m).starts_with(t))
+            });
+            ok_warn = l.contains("stat()") && l.contains("file system") && !overlap;
+            ok_warn
+        })
+}
+
+fn run_lsof(lsof: &Path, args: &[&str], target: &Path, scoped: bool) -> io::Result<Option<String>> {
+    let mut cmd = Command::new(lsof);
+    cmd.args(args).args(scoped.then_some(target));
+    let (status, stdout, stderr) =
+        run_capture(&mut cmd, None, crate::time_windows::OPEN_FILE_PROBE_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
-    if status.success() && !stdout.is_empty() {
+    if status.success() && !stdout.is_empty() && lsof_stderr_ok(&stderr, Some(target)) {
         return Ok(Some(stdout));
     }
     if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {

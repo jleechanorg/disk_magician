@@ -3039,3 +3039,76 @@ fn top_level_file_ctime_counts_for_plan_and_stage() {
         planned.kept
     );
 }
+
+#[test]
+fn lsof_target_fs_warning_fails_closed() {
+    let fx = Fx::new("lsof-target-warn");
+    let lsof = fake_lsof(
+        &fx,
+        "echo 'lsof: WARNING: cannot stat() tmpfs file system /held' >&2\necho '      Output information may be incomplete.' >&2\nprintf 'p1\\nn/elsewhere/x\\n'\nexit 0",
+    );
+    assert!(open_paths_with(Path::new("/held/dir"), &lsof).is_err());
+    assert!(!open_paths_with(Path::new("/other/dir"), &lsof).unwrap());
+}
+
+#[test]
+fn recovery_rejects_symlink_stage_and_escaping_original() {
+    let fx = Fx::new("recover-escape");
+    let outside = fx.root.parent().unwrap().join("recover-outside-target");
+    fs::create_dir_all(&outside).unwrap();
+    let stages = fx.root.join(".diskm-expired");
+    fs::create_dir_all(&stages).unwrap();
+    let stage = stages.join("999999-1");
+    std::os::unix::fs::symlink(&outside, &stage).unwrap();
+    fs::write(
+        stages.join("999999-1.intent"),
+        serde_json::json!({
+            "state": "deleting", "original": "gone", "device": 1, "inode": 1, "newest": 0,
+            "bytes": 0, "row": ""
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let err = sweep(&clean_run(&fx, age())).err().unwrap();
+    assert!(err.to_string().contains("unsafe stage"), "{err}");
+    let _ = fs::remove_dir_all(&outside);
+
+    let fx2 = Fx::new("recover-escape-orig");
+    let stages2 = fx2.root.join(".diskm-expired");
+    fs::create_dir_all(stages2.join("999999-2")).unwrap();
+    fs::write(
+        stages2.join("999999-2.intent"),
+        serde_json::json!({
+            "state": "staged", "original": "../outside", "device": 1, "inode": 1, "newest": 0,
+            "bytes": 0, "row": ""
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let err2 = sweep(&clean_run(&fx2, age())).err().unwrap();
+    assert!(err2.to_string().contains("unsafe original path"), "{err2}");
+}
+
+#[test]
+fn git_remote_loop_stops_when_deadline_expires() {
+    let fx = Fx::new("git-deadline");
+    fx.file("repo/src/main.rs");
+    let repo = fx.root.join("repo");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["commit", "-qm", "init", "--allow-empty"]);
+    git(&repo, &["remote", "add", "r1", "https://example.invalid/a"]);
+    git(&repo, &["remote", "add", "r2", "https://example.invalid/b"]);
+    let mut run = clean_run(&fx, age());
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    run.hooks.independent = Box::new(|_, _| true);
+    run.hooks.tips = Box::new(move |_, _| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(80));
+        Ok(Vec::new())
+    });
+    run.deadline = std::time::Instant::now() + Duration::from_millis(40);
+    let report = sweep(&run).unwrap();
+    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) <= 1);
+    assert!(!report.complete() && report.removed.is_empty());
+}
