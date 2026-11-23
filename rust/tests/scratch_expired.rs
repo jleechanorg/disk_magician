@@ -1904,6 +1904,14 @@ fn fake_lsof(fx: &Fx, script: &str) -> PathBuf {
     let path = fx.root.join("fake-lsof");
     fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    // A fork in another test thread can briefly hold the script's write
+    // descriptor ("text file busy"); run it once until it starts.
+    for _ in 0..100 {
+        if Command::new(&path).output().is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     path
 }
 
