@@ -1929,9 +1929,9 @@ fn lsof_warnings_beside_a_complete_listing_do_not_fail_the_probe() {
         &fx,
         "echo 'lsof: WARNING: cannot stat() fuse file system' >&2\nprintf 'p1\\nn/elsewhere/x\\np2\\nn/held/dir/file\\n'\nexit 0",
     );
-    assert!(open_paths_with(Path::new("/held/dir"), &lsof).unwrap());
-    assert!(!open_paths_with(Path::new("/held/other"), &lsof).unwrap());
-    assert!(!open_paths_with(Path::new("/held/di"), &lsof).unwrap());
+    assert!(open_paths_with(&[Path::new("/held/dir")], &lsof).unwrap());
+    assert!(!open_paths_with(&[Path::new("/held/other")], &lsof).unwrap());
+    assert!(!open_paths_with(&[Path::new("/held/di")], &lsof).unwrap());
 }
 
 #[test]
@@ -1945,7 +1945,7 @@ fn a_partial_listing_with_a_failing_status_fails_closed() {
     ] {
         let lsof = fake_lsof(&fx, script);
         assert!(
-            open_paths_with(Path::new("/held/dir"), &lsof).is_err(),
+            open_paths_with(&[Path::new("/held/dir")], &lsof).is_err(),
             "{script}"
         );
     }
@@ -1958,7 +1958,7 @@ fn a_candidate_missing_from_a_partial_listing_is_kept() {
     let lsof = fake_lsof(&fx, "printf 'p1\\nn/elsewhere\\n'\nexit 1");
     let cutoff = age();
     let mut run = clean_run(&fx, cutoff);
-    run.hooks.open = Box::new(move |path| open_paths_with(path, &lsof));
+    run.hooks.open = Box::new(move |paths| open_paths_with(paths, &lsof));
     let report = sweep(&run).unwrap();
     assert!(fx.root.join("a/f").exists() && report.removed.is_empty());
 }
@@ -1975,11 +1975,11 @@ fn an_unparsable_or_failed_lsof_fails_closed() {
     ] {
         let lsof = fake_lsof(&fx, script);
         assert!(
-            open_paths_with(Path::new("/held"), &lsof).is_err(),
+            open_paths_with(&[Path::new("/held")], &lsof).is_err(),
             "{script}"
         );
     }
-    assert!(open_paths_with(Path::new("/held"), Path::new("/nonexistent/lsof")).is_err());
+    assert!(open_paths_with(&[Path::new("/held")], Path::new("/nonexistent/lsof")).is_err());
 }
 
 #[test]
@@ -1990,9 +1990,9 @@ fn macos_shaped_listing_with_field_lines_is_parsed() {
         &fx,
         "printf 'p123\\nfcwd\\nn/some/dir\\nftxt\\nn/bin/x\\np124\\nf3\\ntREG\\nn/other\\n'",
     );
-    assert!(open_paths_with(Path::new("/some/dir"), &lsof).unwrap());
-    assert!(open_paths_with(Path::new("/bin/x"), &lsof).unwrap());
-    assert!(!open_paths_with(Path::new("/nowhere"), &lsof).unwrap());
+    assert!(open_paths_with(&[Path::new("/some/dir")], &lsof).unwrap());
+    assert!(open_paths_with(&[Path::new("/bin/x")], &lsof).unwrap());
+    assert!(!open_paths_with(&[Path::new("/nowhere")], &lsof).unwrap());
     // Only `n` lines are paths: a descriptor or type value is never matched.
     assert!(!open_paths_with(
         Path::new("/some"),
@@ -2012,7 +2012,10 @@ fn a_listing_without_a_process_line_or_with_stray_lines_fails_closed() {
         "printf '\\n\\n'",
     ] {
         let lsof = fake_lsof(&fx, script);
-        assert!(open_paths_with(Path::new("/x"), &lsof).is_err(), "{script}");
+        assert!(
+            open_paths_with(&[Path::new("/x")], &lsof).is_err(),
+            "{script}"
+        );
     }
 }
 
@@ -2663,22 +2666,149 @@ fn an_unreadable_part_of_the_gitdir_is_not_proof_at_planning() {
     }
 }
 
+const SYMLINKED: [&str; 3] = [
+    "symlink:.git/logs",
+    "symlink:.git/logs/HEAD",
+    "symlink:.git/refs/heads/x",
+];
+
+fn ext_of(fx: &Fx) -> PathBuf {
+    fx.root.parent().unwrap().join(format!(
+        "{}-ext",
+        fx.root.file_name().unwrap().to_str().unwrap()
+    ))
+}
+
+/// Make part of a repository's gitdir unreadable, or replace it by a symlink.
+fn damage(repo: &Path, target: &str, ext: &Path) {
+    fs::create_dir_all(ext).unwrap();
+    let link = |real: PathBuf, at: PathBuf| std::os::unix::fs::symlink(real, at).unwrap();
+    match target {
+        "symlink:.git/logs" => {
+            fs::rename(repo.join(".git/logs"), ext.join("logs")).unwrap();
+            chmod(&ext.join("logs"), 0o000);
+            link(ext.join("logs"), repo.join(".git/logs"));
+        }
+        "symlink:.git/logs/HEAD" => {
+            fs::rename(repo.join(".git/logs/HEAD"), ext.join("logs")).unwrap();
+            chmod(&ext.join("logs"), 0o000);
+            link(ext.join("logs"), repo.join(".git/logs/HEAD"));
+        }
+        "symlink:.git/refs/heads/x" => {
+            fs::write(ext.join("logs"), git(repo, &["rev-parse", "HEAD"])).unwrap();
+            link(ext.join("logs"), repo.join(".git/refs/heads/x"));
+        }
+        other => chmod(&repo.join(other), 0o000),
+    }
+}
+
+fn heal(repo: &Path, target: &str, ext: &Path) {
+    chmod(&ext.join("logs"), 0o700);
+    chmod(&repo.join(target), 0o700);
+    let _ = fs::remove_dir_all(ext);
+}
+
+fn pushed_repo(fx: &Fx, repo: &Path, target: &str) -> PathBuf {
+    init(repo);
+    let bare = hosted(fx, repo);
+    if target.contains("pack") {
+        git(repo, &["gc", "-q", "--prune=now"]);
+    }
+    bare
+}
+
+fn all_targets() -> impl Iterator<Item = &'static str> {
+    UNREADABLE.into_iter().chain(SYMLINKED)
+}
+
 #[test]
-fn an_unreadable_part_of_the_gitdir_after_staging_restores() {
-    for target in UNREADABLE {
-        let fx = Fx::new("gitdir-stage");
+fn a_symlink_inside_a_gitdir_is_not_proof_at_planning() {
+    // The only copy of the commit is in a reflog that the symlink hides.
+    for target in ["symlink:.git/logs", "symlink:.git/logs/HEAD"] {
+        let fx = Fx::new("gitdir-symlink-plan");
         let repo = fx.root.join("u/repo");
-        unpushed_repo(&repo, target);
-        let cutoff = age();
-        let mut run = local_only_run(&fx, cutoff);
-        // Readable at planning; the only protection left is the commit itself,
-        // so make the planner see a recoverable repository: published tips.
+        init(&repo);
         let bare = hosted(&fx, &repo);
-        run.hooks.tips = probe(bare);
-        run.hooks.after_stage =
-            Box::new(move |_, item| chmod(&item.join("repo").join(target), 0o000));
+        fs::write(repo.join("g"), b"2").unwrap();
+        git(&repo, &["add", "g"]);
+        git(&repo, &["commit", "-qm", "reflog only"]);
+        git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+        let cutoff = age();
+        let control = plan(&git_run(&fx, cutoff, Some(bare.clone()))).unwrap();
+        assert!(
+            !control.removals.contains(&fx.root.join("u")),
+            "the reflog commit protects"
+        );
+        damage(&repo, target, &ext_of(&fx));
+        let planned = plan(&git_run(&fx, cutoff, Some(bare)));
+        heal(&repo, target, &ext_of(&fx));
+        let planned = planned.unwrap();
+        assert!(
+            !planned.removals.contains(&fx.root.join("u")),
+            "{target}: {:?}",
+            planned.kept
+        );
+        assert!(
+            why(&planned, "git-probe-failed"),
+            "{target}: {:?}",
+            planned.kept
+        );
+    }
+}
+
+#[test]
+fn readable_control_is_planned_and_the_damaged_gitdir_is_kept() {
+    for target in all_targets() {
+        let fx = Fx::new("gitdir-control-plan");
+        let repo = fx.root.join("u/repo");
+        let bare = pushed_repo(&fx, &repo, target);
+        let cutoff = age();
+        let control = plan(&git_run(&fx, cutoff, Some(bare.clone()))).unwrap();
+        assert!(
+            control.removals.contains(&fx.root.join("u")),
+            "control {target}: {:?}",
+            control.kept
+        );
+        damage(&repo, target, &ext_of(&fx));
+        let planned = plan(&git_run(&fx, cutoff, Some(bare)));
+        heal(&repo, target, &ext_of(&fx));
+        let planned = planned.unwrap();
+        assert!(
+            !planned.removals.contains(&fx.root.join("u")),
+            "{target}: {:?}",
+            planned.kept
+        );
+    }
+}
+
+#[test]
+fn a_damaged_gitdir_after_staging_restores_and_the_control_is_removed() {
+    for target in all_targets() {
+        let fx = Fx::new("gitdir-control-stage");
+        let repo = fx.root.join("u/repo");
+        let bare = pushed_repo(&fx, &repo, target);
+        let cutoff = age();
+        let control = sweep(&lender_run(&fx, cutoff, bare.clone())).unwrap();
+        assert_eq!(
+            control.removed.len(),
+            1,
+            "control {target}: {:?}",
+            control.deferred
+        );
+        let fx = Fx::new("gitdir-damaged-stage");
+        let repo = fx.root.join("u/repo");
+        let bare = pushed_repo(&fx, &repo, target);
+        let cutoff = age();
+        let mut run = lender_run(&fx, cutoff, bare);
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (flag, ext) = (fired.clone(), ext_of(&fx));
+        run.hooks.after_stage = Box::new(move |_, item| {
+            flag.set(true);
+            damage(&item.join("repo"), target, &ext);
+        });
         let report = sweep(&run).unwrap();
-        chmod(&repo.join(target), 0o700);
+        heal(&repo, target, &ext_of(&fx));
+        assert!(fired.get(), "{target}: nothing was staged");
         assert!(
             repo.join("f").exists() && report.removed.is_empty(),
             "{target}: {:?}",
@@ -2688,22 +2818,65 @@ fn an_unreadable_part_of_the_gitdir_after_staging_restores() {
 }
 
 #[test]
-fn an_unreadable_part_of_the_gitdir_in_recovery_restores() {
-    for target in UNREADABLE {
-        let fx = Fx::new("gitdir-recover");
+fn a_damaged_gitdir_in_recovery_restores_and_the_control_is_finished() {
+    for target in all_targets() {
+        let fx = Fx::new("gitdir-control-recover");
         let (item, _) = stage(&fx, dead_pid(), "deleting", "lender-back", true);
-        unpushed_repo(&item.join("repo"), target);
-        let bare = hosted(&fx, &item.join("repo"));
+        let bare = pushed_repo(&fx, &item.join("repo"), target);
         let cutoff = age();
-        chmod(&item.join("repo").join(target), 0o000);
-        let mut run = local_only_run(&fx, cutoff);
-        run.hooks.tips = probe(bare);
-        let swept = sweep(&run);
-        chmod(&fx.root.join("lender-back/repo").join(target), 0o700);
+        sweep(&lender_run(&fx, cutoff, bare)).unwrap();
+        assert!(
+            !item.exists() && !fx.root.join("lender-back").exists(),
+            "control {target}"
+        );
+        let fx = Fx::new("gitdir-damaged-recover");
+        let (item, _) = stage(&fx, dead_pid(), "deleting", "lender-back", true);
+        let bare = pushed_repo(&fx, &item.join("repo"), target);
+        let cutoff = age();
+        damage(&item.join("repo"), target, &ext_of(&fx));
+        let swept = sweep(&lender_run(&fx, cutoff, bare));
+        heal(&fx.root.join("lender-back/repo"), target, &ext_of(&fx));
         swept.unwrap();
         assert!(
             fx.root.join("lender-back/repo/f").exists() && !item.exists(),
             "{target}"
+        );
+    }
+}
+
+#[test]
+fn open_files_are_matched_under_the_staged_and_the_original_path() {
+    let fx = Fx::new("open-both");
+    for (script, restored) in [
+        ("printf 'p1\\nn/ORIG/s.sock\\n'", true),
+        ("printf 'p1\\nn/ITEM/f\\n'", true),
+        ("printf 'p1\\nn/elsewhere/x\\n'", false),
+    ] {
+        let fx2 = Fx::new("open-both-run");
+        fx2.file("a/f");
+        let cutoff = age();
+        let original = fx2.root.join("a").display().to_string();
+        let script = script.replace("/ORIG", &original);
+        let mut run = clean_run(&fx2, cutoff);
+        let item_seen = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let seen = item_seen.clone();
+        let _ = &fx;
+        let lsof = fake_lsof(&fx2, &script.replace("/ITEM", "/__ITEM__"));
+        run.hooks.open = Box::new(move |paths| {
+            // Rewrite the fake listing's item placeholder to the staged path.
+            *seen.borrow_mut() = paths[0].display().to_string();
+            let body = fs::read_to_string(&lsof)
+                .unwrap()
+                .replace("/__ITEM__", &paths[0].display().to_string());
+            fs::write(&lsof, body).unwrap();
+            open_paths_with(paths, &lsof)
+        });
+        let report = sweep(&run).unwrap();
+        assert_eq!(
+            fx2.root.join("a/f").exists(),
+            restored,
+            "{script}: {:?}",
+            report.deferred
         );
     }
 }
