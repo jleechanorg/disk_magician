@@ -1754,7 +1754,19 @@ fn borrow_from(borrower_git_store: &Path, lender: &Path) {
 
 #[test]
 fn submodule_borrower_elsewhere_holds_the_lender() {
-    let fx = Fx::new("submodule-borrower");
+    for checked_out in [true, false] {
+        submodule_borrower_case(checked_out);
+    }
+}
+
+/// With the submodule checked out its gitfile leads to the module store;
+/// without it only `.git/modules` does.
+fn submodule_borrower_case(checked_out: bool) {
+    let fx = Fx::new(if checked_out {
+        "sub-borrower-in"
+    } else {
+        "sub-borrower-out"
+    });
     let (lender, bare) = lender_with_bare(&fx);
     let source = fx.root.parent().unwrap().join(format!(
         "diskm-expired-submodule-borrower-{}-src",
@@ -1777,6 +1789,9 @@ fn submodule_borrower_elsewhere_holds_the_lender() {
         ],
     );
     borrow_from(&superproject.join(".git/modules/sub"), &lender);
+    if !checked_out {
+        fs::remove_dir_all(superproject.join("sub")).unwrap();
+    }
     let cutoff = age();
     let plan = plan(&git_run(&fx, cutoff, Some(bare))).unwrap();
     let _ = fs::remove_dir_all(&source);
