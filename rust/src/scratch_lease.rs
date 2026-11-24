@@ -662,6 +662,7 @@ fn inspect_bundle(args: &[OsString]) -> io::Result<String> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LegacyLease {
     Build { owner_live: bool },
+    Worktree { owner_live: bool },
     OtherKind,
 }
 
@@ -686,7 +687,11 @@ pub(crate) fn legacy_lease(
     let metadata = fs::symlink_metadata(staged.unwrap_or(bundle))?;
     for entry in entries {
         let path = entry?.path();
-        if path.extension() != Some(OsStr::new("json")) {
+        if path.extension() != Some(OsStr::new("json"))
+            || path
+                .file_name()
+                .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."))
+        {
             continue;
         }
         let bytes = match crate::job_receipt::read_bounded(&path, 1 << 20) {
@@ -725,7 +730,8 @@ pub(crate) fn legacy_lease(
         if strict && !record["owners"].is_array() {
             return Err(io::Error::other("legacy lease record has no owners list"));
         }
-        if record["kind"] != "build" {
+        let kind = record["kind"].as_str();
+        if !matches!(kind, Some("build" | "worktree")) {
             return Ok(Some(LegacyLease::OtherKind));
         }
         // An owner entry without a usable PID is an unknown owner; keep the run.
@@ -741,19 +747,23 @@ pub(crate) fn legacy_lease(
             .iter()
             .filter_map(|owner| owner["pid"].as_u64())
             .collect();
-        if pids.len() != owners.len() {
-            return Ok(Some(LegacyLease::Build { owner_live: true }));
-        }
-        let alive = |pid: u64| {
-            let Ok(pid) = libc::pid_t::try_from(pid) else {
-                return true;
-            };
-            pid <= 1
-                || unsafe { libc::kill(pid, 0) } == 0
-                || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        let owner_live = if pids.len() != owners.len() || pids.is_empty() {
+            true
+        } else {
+            pids.into_iter().any(|pid| {
+                let Ok(pid) = libc::pid_t::try_from(pid) else {
+                    return true;
+                };
+                pid <= 1
+                    || unsafe { libc::kill(pid, 0) } == 0
+                    || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            })
         };
-        let owner_live = pids.is_empty() || pids.into_iter().any(alive);
-        return Ok(Some(LegacyLease::Build { owner_live }));
+        return Ok(Some(if kind == Some("worktree") {
+            LegacyLease::Worktree { owner_live }
+        } else {
+            LegacyLease::Build { owner_live }
+        }));
     }
     Ok(None)
 }

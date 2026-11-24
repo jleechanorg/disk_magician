@@ -146,3 +146,18 @@ fn legacy_null_owner_entry_keeps_the_run() {
     fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
     assert_eq!(verdict(&f, &run), Err("kept:producer-still-live"));
 }
+
+#[test]
+fn legacy_worktree_lease_is_protected_from_scratch_build_cleanup() {
+    let f = fixture("worktree-kind");
+    let run = legacy_run(&f, "wt-exited", "worktree", exited_pid());
+    assert_eq!(verdict(&f, &run), Err("kept:protected-bundle-kind"));
+}
+
+#[test]
+fn hidden_temp_lease_files_do_not_block_strict_lease_reads() {
+    let f = fixture("hidden-tmp");
+    fs::write(f.state.join("worktree_leases/.lease-aborted.json"), "").unwrap();
+    let run = legacy_run(&f, "build-ok", "build", exited_pid());
+    assert_eq!(verdict(&f, &run), Ok(()));
+}

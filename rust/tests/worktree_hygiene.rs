@@ -304,6 +304,48 @@ fn archive_refuses_without_approval_and_on_holds() {
     git(&wt_ready, &["commit", "-q", "-m", "ready commit"]);
     age_files(&wt_ready, 10);
 
+    // An aborted dot-prefixed temp lease file and an exited-owner worktree lease
+    // must NOT block archiving wt_ready.
+    fs::write(state.join("worktree_leases/.lease-aborted.json"), "").unwrap();
+    let mut dead_child = Command::new("true").spawn().unwrap();
+    let dead_pid = dead_child.id();
+    dead_child.wait().unwrap();
+    let ready_meta = fs::metadata(&wt_ready).unwrap();
+    fs::write(
+        state.join("worktree_leases/wt-ready-exited.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "path": wt_ready,
+            "kind": "worktree",
+            "owner": {"pid": dead_pid},
+            "owners": [{"pid": dead_pid}],
+            "checkout_dev": ready_meta.dev(),
+            "checkout_ino": ready_meta.ino(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // A worktree lease with null/empty owner (unknown owner) MUST remain held.
+    let wt_null_owner = wt_root.join("app/wt-null-owner");
+    add_worktree(&repo, &wt_null_owner, "b-null-owner");
+    age_files(&wt_null_owner, 10);
+    let null_meta = fs::metadata(&wt_null_owner).unwrap();
+    fs::write(
+        state.join("worktree_leases/wt-null-owner.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "path": wt_null_owner,
+            "kind": "worktree",
+            "owner": null,
+            "owners": [],
+            "checkout_dev": null_meta.dev(),
+            "checkout_ino": null_meta.ino(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
     let dry = run_diskm(
         &[
             "worktree-archive",

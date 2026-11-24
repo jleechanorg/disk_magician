@@ -2,7 +2,7 @@
 
 use crate::job_receipt::{self, Completion};
 use crate::scratch_file_transaction::{open_paths, run_capture};
-use crate::scratch_lease::{legacy_lease, live_cwd_in};
+use crate::scratch_lease::{legacy_lease, live_cwd_in, LegacyLease};
 use crate::scratch_target::{deletion_log_path, flush_audit};
 use crate::time_windows::{GIT_REMOTE_PROBE_TIMEOUT, WORKTREE_FLOOR_DAYS};
 use serde_json::{json, Value};
@@ -117,13 +117,7 @@ fn run(cmd: &str, args: &[OsString]) -> io::Result<Value> {
             &state.join("evidence-holds.json"),
             16 << 20,
         );
-        let mode = if clean {
-            2
-        } else if push {
-            1
-        } else {
-            0
-        };
+        let mode = if clean { 2 } else { usize::from(push) };
         let rows: Vec<Value> = wts
             .iter()
             .map(|wt| {
@@ -316,12 +310,10 @@ fn slim_one(
             json!({"path": wt, "status": "candidate", "reason": null, "excludes": ex, "apparent_delta_bytes": before}),
         );
     }
-    let mut args = vec![
-        "sparse-checkout".into(),
-        "set".into(),
-        "--no-cone".into(),
-        "/*".into(),
-    ];
+    let mut args = vec!["sparse-checkout", "set", "--no-cone", "/*"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     args.extend(ex.iter().map(|d| format!("!/{d}/")));
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     git_out(wt, &refs).ok_or("sparse_checkout_failed")?;
@@ -339,10 +331,8 @@ fn archive_one(
     sfx: Option<&str>,
     holds: &io::Result<Option<BTreeMap<PathBuf, String>>>,
 ) -> Result<Value, &'static str> {
-    let (canon, s) = (
-        fs::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf()),
-        wt.to_string_lossy(),
-    );
+    let canon = fs::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf());
+    let s = wt.to_string_lossy();
     if s.contains("/.ao/")
         || s.contains("/.ao-")
         || fs::symlink_metadata(wt.join(".ao-owner")).is_ok()
@@ -364,10 +354,13 @@ fn archive_one(
             })
         })
     });
-    if held
-        || !matches!(legacy_lease(wt, None, true), Ok(None))
-        || !matches!(legacy_lease(&canon, None, true), Ok(None))
-    {
+    let ok_lease = |p: &Path| {
+        matches!(
+            legacy_lease(p, None, true),
+            Ok(None | Some(LegacyLease::Worktree { owner_live: false }))
+        )
+    };
+    if held || !ok_lease(wt) || !ok_lease(&canon) {
         return Err("held");
     }
     let list = git_out(wt, &["worktree", "list", "--porcelain"]).ok_or("locked")?;
@@ -399,10 +392,8 @@ fn archive_one(
         .and_then(|n| n.to_str())
         .ok_or("invalid_name")?;
     let tgt = sfx.map_or_else(|| name.to_owned(), |x| format!("{name}-{x}"));
-    let (rref, tref) = (
-        format!("refs/heads/archive/{tgt}"),
-        format!("refs/remotes/origin/archive/{tgt}"),
-    );
+    let rref = format!("refs/heads/archive/{tgt}");
+    let tref = format!("refs/remotes/origin/archive/{tgt}");
     let ls = git_out(wt, &["ls-remote", "--heads", "origin", &rref]).ok_or("remote_error")?;
     let mut push = true;
     if !ls.trim().is_empty() {
