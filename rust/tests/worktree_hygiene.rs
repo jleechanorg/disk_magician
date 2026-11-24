@@ -346,6 +346,93 @@ fn archive_refuses_without_approval_and_on_holds() {
     )
     .unwrap();
 
+    // An ownerless adopt/birth-audit ledger entry (pending: false) is non-blocking.
+    let wt_adopt = wt_root.join("app/wt-adopt-ownerless");
+    add_worktree(&repo, &wt_adopt, "b-adopt-ownerless");
+    age_files(&wt_adopt, 10);
+    let adopt_meta = fs::metadata(&wt_adopt).unwrap();
+    fs::write(
+        state.join("worktree_leases/wt-adopt-ownerless.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "path": wt_adopt,
+            "kind": "worktree",
+            "creator": "adopt",
+            "pending": false,
+            "owner": null,
+            "owners": [],
+            "checkout_dev": adopt_meta.dev(),
+            "checkout_ino": adopt_meta.ino(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // A pending adopt entry MUST remain held.
+    let wt_adopt_pending = wt_root.join("app/wt-adopt-pending");
+    add_worktree(&repo, &wt_adopt_pending, "b-adopt-pending");
+    age_files(&wt_adopt_pending, 10);
+    let adopt_pending_meta = fs::metadata(&wt_adopt_pending).unwrap();
+    fs::write(
+        state.join("worktree_leases/wt-adopt-pending.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "path": wt_adopt_pending,
+            "kind": "worktree",
+            "creator": "adopt",
+            "pending": true,
+            "owner": null,
+            "owners": [],
+            "checkout_dev": adopt_pending_meta.dev(),
+            "checkout_ino": adopt_pending_meta.ino(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // An adopt entry missing the "owner" key MUST fail closed (held).
+    let wt_adopt_no_owner_key = wt_root.join("app/wt-adopt-no-owner-key");
+    add_worktree(&repo, &wt_adopt_no_owner_key, "b-adopt-no-owner-key");
+    age_files(&wt_adopt_no_owner_key, 10);
+    let no_owner_meta = fs::metadata(&wt_adopt_no_owner_key).unwrap();
+    fs::write(
+        state.join("worktree_leases/wt-adopt-no-owner-key.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "path": wt_adopt_no_owner_key,
+            "kind": "worktree",
+            "creator": "adopt",
+            "pending": false,
+            "owners": [],
+            "checkout_dev": no_owner_meta.dev(),
+            "checkout_ino": no_owner_meta.ino(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // A birth-audit ownerless entry (pending: false) is also non-blocking.
+    let wt_birth = wt_root.join("app/wt-birth-audit");
+    add_worktree(&repo, &wt_birth, "b-birth-audit");
+    age_files(&wt_birth, 10);
+    let birth_meta = fs::metadata(&wt_birth).unwrap();
+    fs::write(
+        state.join("worktree_leases/wt-birth-audit.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "path": wt_birth,
+            "kind": "worktree",
+            "creator": "birth-audit",
+            "pending": false,
+            "owner": null,
+            "owners": [],
+            "checkout_dev": birth_meta.dev(),
+            "checkout_ino": birth_meta.ino(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
     let dry = run_diskm(
         &[
             "worktree-archive",
@@ -365,6 +452,11 @@ fn archive_refuses_without_approval_and_on_holds() {
     assert_eq!(find_wt(&dry, &wt_ao_path)["reason"], "ao_owned");
     assert_eq!(find_wt(&dry, &wt_ev)["reason"], "held");
     assert_eq!(find_wt(&dry, &wt_lease)["reason"], "held");
+    assert_eq!(find_wt(&dry, &wt_null_owner)["reason"], "held");
+    assert_eq!(find_wt(&dry, &wt_adopt_pending)["reason"], "held");
+    assert_eq!(find_wt(&dry, &wt_adopt_no_owner_key)["reason"], "held");
+    assert_eq!(find_wt(&dry, &wt_adopt)["status"], "candidate");
+    assert_eq!(find_wt(&dry, &wt_birth)["status"], "candidate");
     assert_eq!(find_wt(&dry, &wt_cwd)["reason"], "open_files");
     assert_eq!(find_wt(&dry, &wt_ready)["status"], "candidate");
     assert!(
