@@ -734,6 +734,14 @@ pub(crate) fn legacy_lease(
         if !matches!(kind, Some("build" | "worktree")) {
             return Ok(Some(LegacyLease::OtherKind));
         }
+        if kind == Some("worktree")
+            && record["pending"].as_bool() == Some(false)
+            && record["owner"].is_null()
+            && record["owners"].as_array().is_some_and(Vec::is_empty)
+            && matches!(record["creator"].as_str(), Some("adopt" | "birth-audit"))
+        {
+            return Ok(Some(LegacyLease::Worktree { owner_live: false }));
+        }
         // An owner entry without a usable PID is an unknown owner; keep the run.
         // Only an absent top-level `owner` key is skipped; a null entry counts
         // as an owner without a PID.
