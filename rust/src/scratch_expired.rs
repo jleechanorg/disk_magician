@@ -693,14 +693,22 @@ fn sorted_children(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(c)
 }
 
+const MACOS_VOLUME_METADATA: &[&[u8]] = &[
+    b".DocumentRevisions-V100",
+    b".Spotlight-V100",
+    b".TemporaryItems",
+    b".Trashes",
+    b".fseventsd",
+];
+
 /// `(candidates, scan-only)`: hidden entries are never candidates but are
 /// still scanned for repositories that may borrow objects. Stages of this job
-/// are neither.
+/// and macOS APFS volume metadata directories at the root are neither.
 fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let (mut found, mut hidden) = (Vec::new(), Vec::new());
     for path in sorted_children(root)? {
         let name = path.file_name().unwrap_or_default();
-        if name == STAGES {
+        if name == STAGES || MACOS_VOLUME_METADATA.contains(&name.as_encoded_bytes()) {
             continue;
         } else if name.as_encoded_bytes().starts_with(b".") {
             hidden.push(path);

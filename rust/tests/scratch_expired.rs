@@ -3290,3 +3290,58 @@ fn recovery_restores_when_new_dir_added_during_deleting() {
     );
     assert!(report.removed.is_empty());
 }
+
+#[test]
+fn macos_volume_metadata_dirs_do_not_blind_alternates_scan() {
+    let fx = Fx::new("macos-vol-meta");
+    let (_repo, bare) = pushed_repo(&fx);
+
+    let mut meta_dirs = Vec::new();
+    for name in [
+        ".DocumentRevisions-V100",
+        ".Spotlight-V100",
+        ".TemporaryItems",
+        ".Trashes",
+        ".fseventsd",
+    ] {
+        let dir = fx.root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+        meta_dirs.push(dir);
+    }
+
+    let mut run = clean_run(&fx, age());
+    run.hooks.independent = Box::new(|_, _| true);
+    run.hooks.tips = probe(bare);
+    let planned = plan(&run).unwrap();
+
+    for dir in &meta_dirs {
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+    }
+
+    assert!(!planned.blind, "volume metadata dirs should not blind scan");
+    assert!(
+        planned.removals.contains(&fx.root.join("u")),
+        "clean pushed repo should be eligible: kept={:?}",
+        planned.kept
+    );
+    for dir in &meta_dirs {
+        assert!(!planned.removals.contains(dir));
+    }
+}
+
+#[test]
+fn non_metadata_unreadable_hidden_dir_still_blinds_scan() {
+    let fx = Fx::new("hidden-blinds");
+    let hidden = fx.root.join(".custom-hidden");
+    fs::create_dir_all(&hidden).unwrap();
+    fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let planned = plan(&clean_run(&fx, age())).unwrap();
+    let _ = fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755));
+
+    assert!(
+        planned.blind,
+        "unreadable user hidden dir must still blind scan"
+    );
+}
