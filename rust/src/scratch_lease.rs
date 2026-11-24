@@ -736,7 +736,7 @@ pub(crate) fn legacy_lease(
         }
         if kind == Some("worktree")
             && record["pending"].as_bool() == Some(false)
-            && record["owner"].is_null()
+            && record.get("owner").is_some_and(serde_json::Value::is_null)
             && record["owners"].as_array().is_some_and(Vec::is_empty)
             && matches!(record["creator"].as_str(), Some("adopt" | "birth-audit"))
         {
