@@ -3291,12 +3291,22 @@ fn recovery_restores_when_new_dir_added_during_deleting() {
     assert!(report.removed.is_empty());
 }
 
+struct RestorePerms(Vec<PathBuf>);
+impl Drop for RestorePerms {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[test]
-fn macos_volume_metadata_dirs_do_not_blind_alternates_scan() {
+fn macos_volume_metadata_dirs_do_not_blind_sweep() {
     let fx = Fx::new("macos-vol-meta");
     let (_repo, bare) = pushed_repo(&fx);
 
-    let mut meta_dirs = Vec::new();
+    let mut guard = RestorePerms(Vec::new());
     for name in [
         ".DocumentRevisions-V100",
         ".Spotlight-V100",
@@ -3307,26 +3317,30 @@ fn macos_volume_metadata_dirs_do_not_blind_alternates_scan() {
         let dir = fx.root.join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
-        meta_dirs.push(dir);
+        guard.0.push(dir);
     }
 
     let mut run = clean_run(&fx, age());
     run.hooks.independent = Box::new(|_, _| true);
-    run.hooks.tips = probe(bare);
-    let planned = plan(&run).unwrap();
+    run.hooks.tips = probe(bare.clone());
+    let report = sweep(&run).unwrap();
+    let _ = fs::remove_dir_all(&bare);
 
-    for dir in &meta_dirs {
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
-    }
-
-    assert!(!planned.blind, "volume metadata dirs should not blind scan");
     assert!(
-        planned.removals.contains(&fx.root.join("u")),
-        "clean pushed repo should be eligible: kept={:?}",
-        planned.kept
+        report.complete(),
+        "sweep should complete cleanly: deferred={:?} kept={:?}",
+        report.deferred,
+        report.kept
     );
-    for dir in &meta_dirs {
-        assert!(!planned.removals.contains(dir));
+    assert!(
+        report.removed.iter().any(|(p, _)| p == &fx.root.join("u")),
+        "clean pushed repo should be removed through plan+apply: deferred={:?} kept={:?}",
+        report.deferred,
+        report.kept
+    );
+    assert!(!fx.root.join("u").exists());
+    for dir in &guard.0 {
+        assert!(dir.exists(), "volume metadata dir must not be removed");
     }
 }
 
@@ -3336,9 +3350,9 @@ fn non_metadata_unreadable_hidden_dir_still_blinds_scan() {
     let hidden = fx.root.join(".custom-hidden");
     fs::create_dir_all(&hidden).unwrap();
     fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+    let _guard = RestorePerms(vec![hidden]);
 
     let planned = plan(&clean_run(&fx, age())).unwrap();
-    let _ = fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755));
 
     assert!(
         planned.blind,

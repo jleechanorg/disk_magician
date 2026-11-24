@@ -693,22 +693,27 @@ fn sorted_children(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(c)
 }
 
-const MACOS_VOLUME_METADATA: &[&[u8]] = &[
-    b".DocumentRevisions-V100",
-    b".Spotlight-V100",
-    b".TemporaryItems",
-    b".Trashes",
-    b".fseventsd",
-];
+fn is_unreadable_macos_volume_metadata(path: &Path, name: &std::ffi::OsStr) -> bool {
+    cfg!(target_os = "macos")
+        && matches!(
+            name.as_encoded_bytes(),
+            b".DocumentRevisions-V100"
+                | b".Spotlight-V100"
+                | b".TemporaryItems"
+                | b".Trashes"
+                | b".fseventsd"
+        )
+        && fs::read_dir(path).is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
+}
 
 /// `(candidates, scan-only)`: hidden entries are never candidates but are
 /// still scanned for repositories that may borrow objects. Stages of this job
-/// and macOS APFS volume metadata directories at the root are neither.
+/// and unreadable macOS APFS volume metadata directories at the root are neither.
 fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let (mut found, mut hidden) = (Vec::new(), Vec::new());
     for path in sorted_children(root)? {
         let name = path.file_name().unwrap_or_default();
-        if name == STAGES || MACOS_VOLUME_METADATA.contains(&name.as_encoded_bytes()) {
+        if name == STAGES || is_unreadable_macos_volume_metadata(&path, name) {
             continue;
         } else if name.as_encoded_bytes().starts_with(b".") {
             hidden.push(path);
@@ -1146,7 +1151,13 @@ fn restore(run: &Run, s: &Path, ip: &Path, i: &Intent, c: &str, r: &mut Report) 
 
 /// One pass over the whole root, reading directory entries only, for every
 /// object store; a directory it cannot read marks the scan incomplete.
-fn scan_stores(dir: &Path, deadline: Instant, out: &mut Vec<PathBuf>, complete: &mut bool) {
+fn scan_stores(
+    dir: &Path,
+    is_root: bool,
+    deadline: Instant,
+    out: &mut Vec<PathBuf>,
+    complete: &mut bool,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         *complete = false;
         return;
@@ -1158,6 +1169,9 @@ fn scan_stores(dir: &Path, deadline: Instant, out: &mut Vec<PathBuf>, complete: 
             *complete = false;
             continue;
         };
+        if is_root && is_unreadable_macos_volume_metadata(&entry.path(), &entry.file_name()) {
+            continue;
+        }
         match entry.file_name().to_str() {
             Some(".git") => match git_stores(&entry.path()) {
                 Ok(stores) => out.extend(stores),
@@ -1183,14 +1197,14 @@ fn scan_stores(dir: &Path, deadline: Instant, out: &mut Vec<PathBuf>, complete: 
             *complete = false;
             return;
         }
-        scan_stores(&sub, deadline, out, complete);
+        scan_stores(&sub, false, deadline, out, complete);
     }
 }
 
 /// Holds and borrower dependencies as they are now, found by a fresh pass.
 fn fresh_known(run: &Run) -> io::Result<Known> {
     let (mut stores, mut complete) = (Vec::new(), true);
-    scan_stores(&run.root, run.deadline, &mut stores, &mut complete);
+    scan_stores(&run.root, true, run.deadline, &mut stores, &mut complete);
     let mut alts = Vec::new();
     for store in &stores {
         match read_alternates(store) {
