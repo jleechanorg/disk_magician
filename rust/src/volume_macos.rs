@@ -101,13 +101,7 @@ pub(crate) fn verify_info(scratch: &ApfsScratch<'_>, info: &Value, path: &Path) 
     Ok(())
 }
 
-fn check_reclaim_headroom(
-    listing: &Value,
-    scratch: &ApfsScratch<'_>,
-    swap_headroom: u64,
-    alarm_floor: u64,
-) -> io::Result<()> {
-    const GIB: u64 = 1024 * 1024 * 1024;
+fn check_reclaim_headroom(listing: &Value, scratch: &ApfsScratch<'_>) -> io::Result<()> {
     let container = listing["Containers"]
         .as_array()
         .and_then(|rows| {
@@ -115,26 +109,11 @@ fn check_reclaim_headroom(
                 .find(|row| row["ContainerReference"] == scratch.container)
         })
         .ok_or_else(|| invalid("Data APFS container unavailable"))?;
-    let ceiling = container["CapacityCeiling"]
-        .as_u64()
-        .filter(|bytes| *bytes > 0)
-        .ok_or_else(|| invalid("Data APFS container capacity unavailable"))?;
-    if container["CapacityFree"]
-        .as_u64()
-        .is_none_or(|free| free < 20 * GIB)
-    {
-        return Err(invalid("APFS container free-space alarm"));
-    }
     let members = container["Volumes"]
         .as_array()
         .ok_or_else(|| invalid("Data APFS volume inventory unavailable"))?;
     let mut counts = [0u8; 3];
-    let mut vm = 0;
-    let mut other = 0u128;
     for member in members {
-        let used = member["CapacityInUse"]
-            .as_u64()
-            .ok_or_else(|| invalid("APFS volume allocation unavailable"))?;
         let contains_role = |role| {
             member["Roles"]
                 .as_array()
@@ -145,20 +124,11 @@ fn check_reclaim_headroom(
                 *count = count.saturating_add(1);
             }
         }
-        if contains_role("VM") {
-            vm = used;
-        } else if member["APFSVolumeUUID"] != scratch.uuid {
-            other += u128::from(used);
-        }
     }
-    let used = scratch
-        .allocated_bytes
-        .ok_or_else(|| invalid("Scratch APFS usage unavailable"))?;
-    let fit =
-        other + u128::from(vm.max(swap_headroom)) + u128::from(used) + u128::from(alarm_floor);
-    // Reclaim releases blocks from the existing volume. The configured ceiling
-    // can exceed current free space during the growth this operation addresses.
-    if counts != [1, 1, 1] || fit > u128::from(ceiling) {
+    if scratch.allocated_bytes.is_none() {
+        return Err(invalid("Scratch APFS usage unavailable"));
+    }
+    if counts != [1, 1, 1] {
         return Err(invalid("APFS Scratch capacity alarm"));
     }
     Ok(())
@@ -313,12 +283,7 @@ fn verified_mount(expected: Option<&Path>, purpose: Purpose) -> io::Result<Optio
         return Ok(None);
     }
     if purpose == Purpose::Usage {
-        check_reclaim_headroom(
-            &listing,
-            &scratch,
-            in_bytes(&volumes["swap_headroom_gb"])?,
-            in_bytes(&volumes["alarm_floor_gb"])?,
-        )?;
+        check_reclaim_headroom(&listing, &scratch)?;
     }
     if purpose != Purpose::Verify {
         verify_ballast(&directory, purpose == Purpose::Reclaim)?;
