@@ -753,7 +753,9 @@ pub fn check_completed_build(root: &Path, bundle: &Path) -> Result<(), &'static 
 fn check_legacy_build(bundle: &Path) -> Result<(), &'static str> {
     match scratch_lease::legacy_lease(bundle, None, false) {
         Ok(None) => Err("kept:lease-missing"),
-        Ok(Some(scratch_lease::LegacyLease::OtherKind)) => Err("kept:protected-bundle-kind"),
+        Ok(Some(
+            scratch_lease::LegacyLease::OtherKind | scratch_lease::LegacyLease::Worktree { .. },
+        )) => Err("kept:protected-bundle-kind"),
         Ok(Some(scratch_lease::LegacyLease::Build { owner_live: true })) => {
             Err("kept:producer-still-live")
         }
