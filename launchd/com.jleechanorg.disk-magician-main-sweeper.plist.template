@@ -20,8 +20,9 @@
   <string>com.jleechanorg.disk-magician-main-sweeper</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@HOME@/.local/bin/diskm</string>
-    <string>sweep</string>
+    <string>@BASH@</string>
+    <string>@REPO_ROOT@/scripts/main_sweeper.sh</string>
+    <string>--clean</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

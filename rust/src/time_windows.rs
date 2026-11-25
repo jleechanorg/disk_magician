@@ -8,6 +8,17 @@ use std::time::Duration;
 /// (operator decision 2026-11-22). `--min-hours` overrides it per invocation.
 pub const CONTENT_FLOOR_HOURS: u32 = 12;
 
+/// The floor for one run: `DISK_MAGICIAN_CONTENT_FLOOR_HOURS` when it parses to a
+/// sane hour count, otherwise `CONTENT_FLOOR_HOURS`. `--min-hours` still wins
+/// because it is applied after this value seeds the option parser.
+pub fn resolved_content_floor_hours() -> u32 {
+    std::env::var("DISK_MAGICIAN_CONTENT_FLOOR_HOURS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|hours| (1..=8760).contains(hours))
+        .unwrap_or(CONTENT_FLOOR_HOURS)
+}
+
 /// Bounded scan budget for `scan`, `scratch-qualify`, `scratch-sweep` and
 /// manifest qualification. `--deadline-ms` overrides it.
 pub const SCAN_DEADLINE: Duration = Duration::from_secs(30);

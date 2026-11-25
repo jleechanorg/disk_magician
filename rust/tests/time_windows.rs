@@ -123,3 +123,50 @@ fn worktree_hygiene_windows_are_exposed_by_cli() {
     assert_eq!(windows["WORKTREE_FLOOR_SECONDS"], 604_800);
     assert_eq!(windows["WORKTREE_HYGIENE_INTERVAL_SECONDS"], 21_600);
 }
+
+#[test]
+fn content_floor_env_var_reaches_a_real_run() {
+    // A real subprocess proves the variable is read, without depending on a Scratch
+    // volume being configured (CI has none, and `scratch-qualify` errors out there).
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let run = |value: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_diskm"));
+        cmd.current_dir(&root)
+            .arg("time-windows")
+            .stdout(std::process::Stdio::piped());
+        match value {
+            Some(v) => cmd.env("DISK_MAGICIAN_CONTENT_FLOOR_HOURS", v),
+            None => cmd.env_remove("DISK_MAGICIAN_CONTENT_FLOOR_HOURS"),
+        };
+        assert!(
+            cmd.output().unwrap().status.success(),
+            "time-windows failed"
+        );
+        String::from_utf8_lossy(&cmd.output().unwrap().stdout).to_string()
+    };
+    assert!(run(None).contains("CONTENT_FLOOR_SECONDS"));
+    // Malformed and out-of-range values must not change the reported window.
+    for bad in ["bogus", "", "0", "99999", "-5"] {
+        assert!(
+            run(Some(bad)).contains("43200"),
+            "value {bad:?} must fall back to 12 h"
+        );
+    }
+}
+
+#[test]
+fn malformed_floor_env_falls_back_to_the_constant() {
+    use diskm_shadow::time_windows::{resolved_content_floor_hours, CONTENT_FLOOR_HOURS};
+    for bad in ["", "bogus", "0", "99999"] {
+        // SAFETY: single-threaded assertion helper; no other thread reads this var.
+        std::env::set_var("DISK_MAGICIAN_CONTENT_FLOOR_HOURS", bad);
+        assert_eq!(
+            resolved_content_floor_hours(),
+            CONTENT_FLOOR_HOURS,
+            "value {bad:?} must fall back to the constant"
+        );
+    }
+    std::env::set_var("DISK_MAGICIAN_CONTENT_FLOOR_HOURS", "6");
+    assert_eq!(resolved_content_floor_hours(), 6);
+    std::env::remove_var("DISK_MAGICIAN_CONTENT_FLOOR_HOURS");
+}
