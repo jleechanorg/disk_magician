@@ -125,36 +125,33 @@ fn worktree_hygiene_windows_are_exposed_by_cli() {
 }
 
 #[test]
-fn content_floor_env_var_overrides_the_constant() {
+fn content_floor_env_var_reaches_a_real_run() {
+    // A real subprocess proves the variable is read, without depending on a Scratch
+    // volume being configured (CI has none, and `scratch-qualify` errors out there).
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let run = |value: Option<&str>| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_diskm"));
-        cmd.current_dir(&root).arg("scratch-qualify").args([
-            "--older-than",
-            "12h",
-            "--path",
-            "/nonexistent-diskm-floor-probe",
-            "--deadline-ms",
-            "1500",
-        ]);
+        cmd.current_dir(&root)
+            .arg("time-windows")
+            .stdout(std::process::Stdio::piped());
         match value {
             Some(v) => cmd.env("DISK_MAGICIAN_CONTENT_FLOOR_HOURS", v),
             None => cmd.env_remove("DISK_MAGICIAN_CONTENT_FLOOR_HOURS"),
         };
-        let out = cmd.output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string();
-        text
-    };
-    // Malformed values must not change the default; a real value must be accepted.
-    for bad in ["bogus", "0", "", "-5"] {
-        let text = run(Some(bad));
         assert!(
-            text.contains("cutoff_epoch_seconds"),
-            "qualify produced no cutoff for {bad:?}: {text}"
+            cmd.output().unwrap().status.success(),
+            "time-windows failed"
+        );
+        String::from_utf8_lossy(&cmd.output().unwrap().stdout).to_string()
+    };
+    assert!(run(None).contains("CONTENT_FLOOR_SECONDS"));
+    // Malformed and out-of-range values must not change the reported window.
+    for bad in ["bogus", "", "0", "99999", "-5"] {
+        assert!(
+            run(Some(bad)).contains("43200"),
+            "value {bad:?} must fall back to 12 h"
         );
     }
-    let text = run(Some("24"));
-    assert!(text.contains("cutoff_epoch_seconds"), "env=24 rejected");
 }
 
 #[test]
