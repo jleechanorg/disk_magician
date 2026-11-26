@@ -907,7 +907,11 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
         }
         let mut all = Vec::with_capacity(items.len());
         for handle in handles {
-            all.extend(handle.join().expect("expired-sweep observer thread panicked"));
+            all.extend(
+                handle
+                    .join()
+                    .expect("expired-sweep observer thread panicked"),
+            );
         }
         all
     });
