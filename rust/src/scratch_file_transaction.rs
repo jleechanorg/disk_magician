@@ -466,33 +466,123 @@ fn rename_exclusive(
 }
 
 pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
-    let Some(stdout) = run_lsof(default_lsof(), &["-nP", "-t", "--"], path, true)? else {
-        return Ok(Vec::new());
-    };
-    let pids: Vec<u32> = stdout
-        .lines()
-        .map(|line| line.parse::<u32>().map_err(io::Error::other))
-        .collect::<io::Result<_>>()?;
-    if pids.is_empty() {
-        return Err(io::Error::other(
-            "lsof exited successfully without a process list",
-        ));
+    #[cfg(target_os = "linux")]
+    return open_pids_in_proc(Path::new("/proc"), path);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Some(stdout) = run_lsof(default_lsof(), &["-nP", "-t", "--"], path, true)? else {
+            return Ok(Vec::new());
+        };
+        let pids: Vec<u32> = stdout
+            .lines()
+            .map(|l| l.parse::<u32>().map_err(io::Error::other))
+            .collect::<io::Result<_>>()?;
+        (!pids.is_empty())
+            .then_some(pids)
+            .ok_or_else(|| io::Error::other("lsof exited successfully without a process list"))
+    }
+}
+
+/// Whether any process has a file or working directory at or under `path`.
+/// A failed or timed-out probe is an error.
+pub fn open_paths(path: &Path) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    return open_pids_in_proc(Path::new("/proc"), path).map(|pids| !pids.is_empty());
+    #[cfg(not(target_os = "linux"))]
+    open_paths_with(path, default_lsof())
+}
+
+fn proc_opt<T>(res: io::Result<T>) -> io::Result<Option<T>> {
+    let ignore = [libc::ENOENT, libc::EACCES, libc::EPERM, libc::ESRCH];
+    match res {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e.raw_os_error().is_some_and(|c| ignore.contains(&c)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn proc_match(entry: &[u8], prefix: &[u8]) -> bool {
+    (prefix == b"/" && entry.starts_with(b"/"))
+        || entry
+            .strip_prefix(prefix)
+            .is_some_and(|r| r.is_empty() || r.starts_with(b"/") || r == b" (deleted)")
+}
+
+fn inspect_proc_pid(dir: &Path, matches: &impl Fn(&[u8]) -> bool) -> io::Result<(bool, bool)> {
+    let mut seen = false;
+    let hit_link = |p: std::path::PathBuf| matches(p.as_os_str().as_bytes());
+    for link in ["cwd", "root", "exe"] {
+        if let Some(target) = proc_opt(fs::read_link(dir.join(link)))? {
+            seen = true;
+            if hit_link(target) {
+                return Ok((true, true));
+            }
+        }
+    }
+    if let Some(fds) = proc_opt(fs::read_dir(dir.join("fd")))? {
+        seen = true;
+        for entry in fds {
+            let Some(e) = proc_opt(entry)? else { continue };
+            if proc_opt(fs::read_link(e.path()))?.is_some_and(hit_link) {
+                return Ok((true, true));
+            }
+        }
+    }
+    if let Some(bytes) = proc_opt(fs::read(dir.join("maps")))? {
+        seen = true;
+        if bytes.split(|&b| b == b'\n').any(|l| {
+            l.splitn(6, |&b| b == b' ')
+                .nth(5)
+                .map(<[u8]>::trim_ascii_start)
+                .is_some_and(|p| p.starts_with(b"/") && matches(p))
+        }) {
+            return Ok((true, true));
+        }
+    }
+    Ok((false, seen))
+}
+
+/// Scan a Linux `/proc`-shaped tree for processes referencing `path` via
+/// `cwd`, `root`, `exe`, `fd/*`, or `maps`. Fails closed on read/empty errors.
+pub fn open_pids_in_proc(proc_root: &Path, path: &Path) -> io::Result<Vec<u32>> {
+    fn trim(b: &[u8]) -> &[u8] {
+        b.strip_suffix(b"/")
+            .filter(|s| !s.is_empty())
+            .map_or(b, trim)
+    }
+    let raw = trim(path.as_os_str().as_bytes());
+    if raw.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"));
+    }
+    let canon = fs::canonicalize(path).ok();
+    let canon = canon
+        .as_deref()
+        .map(|p| trim(p.as_os_str().as_bytes()))
+        .filter(|b| *b != raw);
+    let matches = |e: &[u8]| proc_match(e, raw) || canon.is_some_and(|c| proc_match(e, c));
+    let (require_self, self_pid) = (proc_root == Path::new("/proc"), std::process::id());
+    let (mut pids, mut readable, mut saw_self) = (Vec::new(), 0usize, false);
+    for entry in fs::read_dir(proc_root)? {
+        let entry = entry?;
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        let (matched, seen) = inspect_proc_pid(&entry.path(), &matches)?;
+        if matched {
+            pids.push(pid);
+        }
+        readable += usize::from(seen);
+        saw_self |= seen && pid == self_pid;
+    }
+    if readable == 0 || (require_self && !saw_self) {
+        return Err(io::Error::other("proc scan read no process"));
     }
     Ok(pids)
 }
 
-/// Whether any process has a file or working directory at or under `path`,
-/// from one listing of every open file. A failed or timed-out probe is an error.
-pub fn open_paths(path: &Path) -> io::Result<bool> {
-    open_paths_with(path, default_lsof())
-}
-
+#[cfg(not(target_os = "linux"))]
 fn default_lsof() -> &'static Path {
-    Path::new(if cfg!(target_os = "linux") {
-        "/usr/bin/lsof"
-    } else {
-        "/usr/sbin/lsof"
-    })
+    Path::new("/usr/sbin/lsof")
 }
 
 fn unescape_lsof(s: &[u8]) -> Vec<u8> {
