@@ -255,3 +255,135 @@ fn real_linux_proc_probe_detects_open_fd_and_cwd_and_clears_unheld() {
         "three /proc probes took too long: {elapsed:?}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_linux_expired_sweep_parity_with_controls_and_terminal_receipt() {
+    use diskm_shadow::job_receipt::{self, Completion};
+    use serde_json::json;
+    use std::process::Command;
+
+    let fx = TempTree::new("real-linux-parity");
+    let root = fs::canonicalize(&fx.root).unwrap();
+    let state = TempTree::new("real-linux-state");
+
+    let eligible = root.join("eligible-disposable");
+    let open_dir = root.join("control-open-file");
+    let cwd_dir = root.join("control-live-cwd");
+    let ev_dir = root.join("control-evidence");
+    let git_dir = root.join("control-unpushed-git");
+
+    for d in [&eligible, &open_dir, &cwd_dir, &git_dir] {
+        fs::create_dir_all(d).unwrap();
+        fs::write(d.join("f.txt"), b"fixture").unwrap();
+    }
+    fs::create_dir_all(ev_dir.join("evidence")).unwrap();
+    fs::write(ev_dir.join("evidence/proof.txt"), b"keep").unwrap();
+
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "test@example.com"],
+        &["config", "user.name", "Test"],
+        &["add", "f.txt"],
+        &["commit", "-q", "-m", "unpushed"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&git_dir)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    let mut fd_child = Command::new("sh")
+        .args([
+            "-c",
+            &format!("exec 3< '{}'; sleep 30", open_dir.join("f.txt").display()),
+        ])
+        .spawn()
+        .unwrap();
+    let mut cwd_child = Command::new("sh")
+        .args(["-c", &format!("cd '{}' && sleep 30", cwd_dir.display())])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let cutoff = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64
+        + Duration::from_secs(60).as_nanos() as i64;
+    let dev = fs::symlink_metadata(&root).unwrap().dev();
+    let mut run = Run::new(&root, dev, cutoff);
+    run.clean = true;
+    run.log = state.root.join("deletions.tsv");
+    run.holds = state.root.join("evidence-holds.json");
+
+    let started = SystemTime::now();
+    let t0 = std::time::Instant::now();
+    let report = sweep(&run).unwrap();
+    let elapsed = t0.elapsed();
+
+    let _ = fd_child.kill();
+    let _ = fd_child.wait();
+    let _ = cwd_child.kill();
+    let _ = cwd_child.wait();
+
+    assert!(
+        report.complete(),
+        "expected complete sweep: {:?}",
+        report.summary()
+    );
+    assert!(!report.timed_out);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "isolated Linux parity sweep took too long: {elapsed:?}"
+    );
+    assert!(
+        !eligible.exists(),
+        "eligible disposable dir must be removed"
+    );
+    assert_eq!(report.removed.len(), 1);
+    assert_eq!(report.removed[0].0, eligible);
+    assert!(
+        open_dir.join("f.txt").exists(),
+        "open-file control must be retained"
+    );
+    assert!(
+        cwd_dir.join("f.txt").exists(),
+        "live-cwd control must be retained"
+    );
+    assert!(
+        ev_dir.join("evidence/proof.txt").exists(),
+        "evidence control must be retained"
+    );
+    assert!(
+        git_dir.join("f.txt").exists(),
+        "unpushed git control must be retained"
+    );
+
+    let doc = job_receipt::publish_terminal(
+        &state.root,
+        "scratch_sweep",
+        started,
+        Completion::Success,
+        json!({"root": root, "expired": true}),
+        report.summary(),
+        json!({}),
+    )
+    .unwrap();
+    assert_eq!(doc["outcome"], "success");
+    let receipt_files: Vec<_> = fs::read_dir(state.root.join("receipts/scratch_sweep"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(receipt_files.len(), 1);
+    eprintln!(
+        "LINUX_PARITY_RECEIPT elapsed_ms={} removed={} deferred={} kept={} receipt_id={}",
+        elapsed.as_millis(),
+        report.removed.len(),
+        report.deferred.len(),
+        report.kept.len(),
+        doc["id"]
+    );
+}
