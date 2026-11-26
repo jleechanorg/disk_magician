@@ -38,7 +38,7 @@ impl Default for Options {
             clean: false,
             system_tmp: false,
             min_hours: crate::time_windows::CONTENT_FLOOR_HOURS,
-            limit: 20,
+            limit: 1000,
             deadline: crate::time_windows::SCAN_DEADLINE,
             paths: Vec::new(),
             expired: false,

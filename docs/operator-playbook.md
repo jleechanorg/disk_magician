@@ -503,8 +503,10 @@ Rules that follow, and that any new reclaim code must obey:
 `diskm scratch-sweep --expired --clean` (job `scratch-expired`; interval and
 deadline are `EXPIRED_SWEEP_INTERVAL` and `EXPIRED_SWEEP_DEADLINE` in
 `rust/src/time_windows.rs`) is the one deliberate exception to per-file
-judgement, for direct children of the registered Scratch root (and each run
-under `runs/<date>/<repo>/<run>`), on the operator's 2026-11-22 instruction:
+judgement, for direct children of the registered Scratch root, each run
+under `runs/<date>/<repo>/<run>` (operator decision 2026-11-22), and direct
+children of the shared umbrella containers `tmp/` and `worldarchitect.ai/`
+(operator decision 2026-11-26; the umbrella directories themselves stay):
 
 - **Folder rule.** A candidate whose newest content (max of mtime and ctime
   over everything strictly under it, excluding `.git` contents, plus the root's

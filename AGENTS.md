@@ -67,10 +67,13 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
   floor is removed whole unless a hold applies (live or unknown lease owner,
   evidence, `evidence-holds.json`, open files or working directories,
   unrecoverable Git work, incomplete observation).
-  Candidates are only direct children of the Scratch root and run directories
-  under `runs/<date>/<repo>/<run>`, each judged whole: a fresh candidate, or
-  one containing a protected descendant, is kept whole and its stale children
-  are never removed. This is the protection for active workspaces.
+  Candidates are only direct children of the Scratch root, run directories
+  under `runs/<date>/<repo>/<run>`, and direct children of the shared umbrella
+  containers `tmp/` and `worldarchitect.ai/` (operator decision 2026-11-26;
+  the umbrella containers themselves are never deleted), each judged whole: a
+  fresh candidate, or one containing a protected descendant, is kept whole and
+  its stale children are never removed. This is the protection for active
+  workspaces.
   - **Dirty-work scope, exactly:** uncommitted working-tree edits inside a
     Scratch candidate that is otherwise unheld (every commit independently
     proven recoverable, stale past the floor) are disposable. Leased runs are

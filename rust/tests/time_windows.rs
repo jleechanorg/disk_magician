@@ -7,6 +7,7 @@ fn sweep_defaults_come_from_time_windows() {
     let options = Options::default();
     assert_eq!(options.min_hours, CONTENT_FLOOR_HOURS);
     assert_eq!(options.deadline, SCAN_DEADLINE);
+    assert_eq!(options.limit, 1000);
 }
 
 #[test]
