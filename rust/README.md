@@ -83,3 +83,21 @@ older unmanaged cleanup remain pending.
 
 See the [reimplementation plan](../docs/rust-reimplementation-plan.md) for
 the remaining policy, recovery and deployment work.
+
+## Observed disk capacity is not classified inventory
+
+The macOS snapshot timer measures `/System/Volumes/Data`; Linux measures `/`.
+Manual snapshot paths stay explicit. APFS available bytes may be shared across
+volumes. After the existing state-commit job saves scoped snapshots, run
+`diskm history --capacity --state-dir BACKUP_REPO --days 7` (or `--days 30`).
+The minimum is over observed captures for the reported host, filesystem source
+and mountpoint, not over every moment or every day. Default `history` still
+requires a complete top-down ledger; the retired frontier/observer commands
+do not produce one in native Disk Magician. No old samples are rewritten.
+
+For bounded expiry preview, run `diskm scratch-sweep --expired --path ABSOLUTE_PATH`
+on a whole eligible Scratch unit. The original content floor and all holds
+apply; a preview is not deletion authority. Only the full expired sweep recovers
+interrupted stages. The systemd supervisor allows headroom beyond the native
+deadline for a terminal receipt. A stalled global open-file probe still holds
+a candidate; do not infer it is safe from a timed-out listing.

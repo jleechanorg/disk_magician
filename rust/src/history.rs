@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 const LEDGER_PATH: &str = "ledger/topdown-5g.json";
-const MAX_COMMITS: usize = 128;
+const SNAPSHOT_PATH: &str = "snapshots/disk_snapshot.json";
 const MAX_LEDGER_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -27,6 +27,7 @@ pub struct FloorSample {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HistoryReport {
+    pub scope: Option<Scope>,
     pub source: &'static str,
     pub requested_days: u32,
     pub availability: HistoryAvailability,
@@ -43,17 +44,34 @@ pub struct HistoryReport {
 struct Candidate {
     sample: FloorSample,
     captured_epoch: i64,
-    root: String,
-    hostname: String,
+    scope: Scope,
 }
 
-/// Select the lowest-used qualifying canonical ledger sample from Git history.
-///
-/// The result describes observed samples, not daily coverage. Partial, malformed,
-/// and scope-incompatible ledgers are ignored. Disk snapshots are not substituted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Scope {
+    mounted_at: String,
+    hostname: String,
+    filesystem: Option<String>,
+}
+
+/// Read only complete top-down ledger observations.
 pub fn history(state_repo: &Path, days: u32) -> std::io::Result<HistoryReport> {
+    read_history(state_repo, days, LEDGER_PATH, 128)
+}
+
+pub fn capacity_history(state_repo: &Path, days: u32) -> std::io::Result<HistoryReport> {
+    read_history(state_repo, days, SNAPSHOT_PATH, 256)
+}
+
+fn read_history(
+    state_repo: &Path,
+    days: u32,
+    source: &'static str,
+    max_commits: usize,
+) -> std::io::Result<HistoryReport> {
     if days != 7 && days != 30 {
         return Ok(empty_report(
+            source,
             days,
             HistoryAvailability::NoValidFloor,
             "history_window_unsupported",
@@ -68,58 +86,66 @@ pub fn history(state_repo: &Path, days: u32) -> std::io::Result<HistoryReport> {
             "--since-as-filter",
             &format!("{days}.days.ago"),
             "-n",
-            "129",
+            &(max_commits + 1).to_string(),
             "--format=%H",
         ])
         .arg("--")
-        .arg(LEDGER_PATH)
+        .arg(source)
         .output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(
-            "cannot read canonical ledger Git history",
+            "cannot read Disk Magician Git history",
         ));
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
     let commits: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
-    let history_truncated = commits.len() > MAX_COMMITS;
+    let history_truncated = commits.len() > max_commits;
     let mut total_bytes = 0_u64;
     let mut candidates = Vec::new();
 
-    for commit in commits.iter().take(MAX_COMMITS) {
-        let object = format!("{commit}:{LEDGER_PATH}");
+    for commit in commits.iter().take(max_commits) {
+        let object = format!("{commit}:{source}");
         let size = git_blob_size(state_repo, &object)?;
         if size > MAX_LEDGER_BYTES || total_bytes.saturating_add(size) > MAX_TOTAL_BYTES {
-            return Ok(incomplete_report(days, candidates));
+            return Ok(incomplete_report(source, days, candidates));
         }
         total_bytes += size;
         let ledger = git_blob_json(state_repo, &object)?;
-        if let Some(candidate) = qualifying_sample(&ledger, commit, days) {
+        let candidate = if source == SNAPSHOT_PATH {
+            capacity_sample(&ledger, commit, days)
+        } else {
+            qualifying_sample(&ledger, commit, days)
+        };
+        if let Some(candidate) = candidate {
             candidates.push(candidate);
         }
     }
 
     if history_truncated {
-        return Ok(incomplete_report(days, candidates));
+        return Ok(incomplete_report(source, days, candidates));
     }
     if candidates.is_empty() {
         return Ok(empty_report(
+            source,
             days,
             HistoryAvailability::NoValidFloor,
-            "no_complete_comparable_ledger",
+            if source == LEDGER_PATH {
+                "no_complete_comparable_ledger"
+            } else {
+                "no_comparable_capacity_sample"
+            },
         ));
     }
 
-    // Keep only observations from the newest valid scope in this state repository.
-    let latest_scope = candidates
+    let scope = candidates
         .iter()
-        .max_by_key(|candidate| (candidate.captured_epoch, candidate.sample.commit.as_str()))
-        .map(|candidate| (candidate.root.clone(), candidate.hostname.clone()))
+        .rev()
+        .max_by_key(|candidate| candidate.captured_epoch)
+        .map(|candidate| candidate.scope.clone())
         .expect("candidates is non-empty");
     let before_scope_filter = candidates.len();
-    candidates.retain(|candidate| {
-        candidate.root == latest_scope.0 && candidate.hostname == latest_scope.1
-    });
+    candidates.retain(|candidate| candidate.scope == scope);
     let incompatible_samples = before_scope_filter - candidates.len();
 
     candidates.sort_by(|left, right| {
@@ -129,6 +155,7 @@ pub fn history(state_repo: &Path, days: u32) -> std::io::Result<HistoryReport> {
             .then_with(|| left.sample.commit.cmp(&right.sample.commit))
     });
     Ok(report_from_candidates(
+        source,
         days,
         HistoryAvailability::Available,
         candidates,
@@ -138,26 +165,17 @@ pub fn history(state_repo: &Path, days: u32) -> std::io::Result<HistoryReport> {
 }
 
 fn empty_report(
+    source: &'static str,
     days: u32,
     availability: HistoryAvailability,
     reason: &'static str,
 ) -> HistoryReport {
-    HistoryReport {
-        source: LEDGER_PATH,
-        requested_days: days,
-        availability,
-        floor: None,
-        valid_samples: 0,
-        incompatible_samples: 0,
-        observed_dates: Vec::new(),
-        observed_span_days: None,
-        coverage_status: "none",
-        reason: Some(reason),
-    }
+    report_from_candidates(source, days, availability, Vec::new(), 0, Some(reason))
 }
 
-fn incomplete_report(days: u32, candidates: Vec<Candidate>) -> HistoryReport {
+fn incomplete_report(source: &'static str, days: u32, candidates: Vec<Candidate>) -> HistoryReport {
     report_from_candidates(
+        source,
         days,
         HistoryAvailability::IncompleteHistory,
         candidates,
@@ -167,6 +185,7 @@ fn incomplete_report(days: u32, candidates: Vec<Candidate>) -> HistoryReport {
 }
 
 fn report_from_candidates(
+    source: &'static str,
     days: u32,
     availability: HistoryAvailability,
     candidates: Vec<Candidate>,
@@ -179,16 +198,10 @@ fn report_from_candidates(
         .collect();
     observed_dates.sort();
     observed_dates.dedup();
-    let observed_span_days = candidates
-        .iter()
-        .map(|candidate| candidate.captured_epoch)
+    let epochs = || candidates.iter().map(|candidate| candidate.captured_epoch);
+    let observed_span_days = epochs()
         .min()
-        .zip(
-            candidates
-                .iter()
-                .map(|candidate| candidate.captured_epoch)
-                .max(),
-        )
+        .zip(epochs().max())
         .map(|(first, last)| (last - first) as f64 / 86_400.0);
     let floor = if availability == HistoryAvailability::Available {
         candidates.first().map(|candidate| FloorSample {
@@ -207,7 +220,11 @@ fn report_from_candidates(
         "incomplete"
     };
     HistoryReport {
-        source: LEDGER_PATH,
+        source,
+        scope: candidates
+            .first()
+            .filter(|_| floor.is_some())
+            .map(|c| c.scope.clone()),
         requested_days: days,
         availability,
         floor,
@@ -252,11 +269,7 @@ fn qualifying_sample(ledger: &Value, commit: &str, days: u32) -> Option<Candidat
         return None;
     }
     let captured_at = ledger.get("captured_at")?.as_str()?.to_owned();
-    let captured_epoch = parse_utc(&captured_at)?;
-    let age = unix_now().checked_sub(captured_epoch)?;
-    if age < 0 || age > i64::from(days) * 86_400 {
-        return None;
-    }
+    let captured_epoch = captured_in_window(&captured_at, days)?;
     let disk_used_kb = ledger.get("disk_used_kb")?.as_u64()?;
     let scope_root = ledger
         .get("scope")
@@ -293,8 +306,48 @@ fn qualifying_sample(ledger: &Value, commit: &str, days: u32) -> Option<Candidat
             disk_used_kb,
         },
         captured_epoch,
-        root,
-        hostname,
+        scope: Scope {
+            mounted_at: root,
+            hostname,
+            filesystem: None,
+        },
+    })
+}
+
+fn captured_in_window(captured_at: &str, days: u32) -> Option<i64> {
+    let epoch = parse_utc(captured_at)?;
+    (0..=i64::from(days) * 86_400)
+        .contains(&unix_now().checked_sub(epoch)?)
+        .then_some(epoch)
+}
+
+fn capacity_sample(value: &Value, commit: &str, days: u32) -> Option<Candidate> {
+    let metadata = value.get("snapshot_metadata")?;
+    let text = |key| {
+        metadata
+            .get(key)?
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+    };
+    let captured_at = value.get("timestamp")?.as_str()?.to_owned();
+    let captured_epoch = captured_in_window(&captured_at, days)?;
+    let mounted_at = text("mounted_at")?;
+    if text("scope")?.as_str() != "capacity_only" || !mounted_at.starts_with('/') {
+        return None;
+    }
+    Some(Candidate {
+        sample: FloorSample {
+            commit: commit.to_owned(),
+            captured_at,
+            disk_used_kb: metadata.get("used_kib")?.as_u64()?,
+        },
+        captured_epoch,
+        scope: Scope {
+            mounted_at,
+            hostname: text("hostname")?,
+            filesystem: Some(text("filesystem")?),
+        },
     })
 }
 

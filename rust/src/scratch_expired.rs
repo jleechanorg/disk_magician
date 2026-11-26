@@ -1,7 +1,9 @@
 //! Hourly removal of Scratch folders whose newest content is past the floor.
 
 use crate::scratch_file_transaction::rename_noreplace;
-pub use crate::scratch_file_transaction::{open_paths, open_paths_with, run_capture};
+pub use crate::scratch_file_transaction::{
+    open_paths, open_paths_any, open_paths_any_with, open_paths_with, run_capture,
+};
 use crate::scratch_lease::{self, BundleKind, LegacyLease, OwnerProcessState};
 use crate::time_windows::GIT_REMOTE_PROBE_TIMEOUT;
 use serde::{Deserialize, Serialize};
@@ -215,6 +217,10 @@ fn walk(dir: &Path, device: u64, deadline: Instant, found: &mut Observation) {
     };
     let mut bare = [false; 3];
     for entry in entries {
+        if Instant::now() >= deadline {
+            found.gaps.push(format!("{}: deadline", dir.display()));
+            return;
+        }
         let g = &mut found.gaps;
         let Ok(entry) = entry else {
             g.push(format!("{}: unreadable entry", dir.display()));
@@ -620,7 +626,7 @@ pub struct Hooks {
     pub independent: Box<dyn Fn(&Path, &str) -> bool>,
     pub tips: Box<dyn Fn(&Path, &str) -> io::Result<Vec<String>>>,
     pub lease: Box<dyn Fn(&Path, &Path, &Path) -> Option<&'static str>>,
-    pub open: Box<dyn Fn(&Path) -> io::Result<bool>>,
+    pub open: Box<dyn Fn(&[&Path]) -> io::Result<bool>>,
     pub after_stage: Box<dyn Fn(&Path, &Path)>,
     pub crash: Box<dyn Fn(&str) -> bool>,
 }
@@ -631,7 +637,7 @@ impl Default for Hooks {
             independent: Box::new(independent_remote),
             tips: Box::new(remote_tips),
             lease: Box::new(run_lease),
-            open: Box::new(open_paths),
+            open: Box::new(open_paths_any),
             after_stage: Box::new(|_, _| {}),
             crash: Box::new(|_| false),
         }
@@ -640,6 +646,7 @@ impl Default for Hooks {
 
 pub struct Run {
     pub root: PathBuf,
+    pub paths: Vec<PathBuf>,
     pub device: u64,
     /// Content newer than this (nanoseconds since the epoch) is fresh.
     pub cutoff: i64,
@@ -654,6 +661,7 @@ impl Run {
     pub fn new(root: &Path, device: u64, cutoff: i64) -> Self {
         Self {
             root: root.to_path_buf(),
+            paths: Vec::new(),
             device,
             cutoff,
             clean: false,
@@ -870,7 +878,21 @@ fn judge(c: &mut Ctx, path: PathBuf, obs: Observation) -> io::Result<()> {
 /// Judge every candidate under the Scratch root. Nothing is changed.
 pub fn plan(run: &Run) -> io::Result<Plan> {
     let (mut units, mut alts, mut stores, mut blind) = (Vec::new(), Vec::new(), Vec::new(), false);
-    let (found, hidden) = candidates(&run.root)?;
+    let (mut found, mut hidden) = candidates(&run.root)?;
+    if !run.paths.is_empty() {
+        if run.paths.iter().any(|path| {
+            !found.contains(path)
+                || !path.is_dir()
+                || crate::preview::check_path(&run.root, path, run.device).is_some()
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not an exact expired Scratch candidate",
+            ));
+        }
+        found.retain(|path| run.paths.contains(path));
+        hidden.clear();
+    }
     let it = found
         .into_iter()
         .map(|p| (p, true))
@@ -884,10 +906,14 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
             units.push((path, seen));
         }
     }
-    let known = Known {
-        holds: read_holds(&run.holds)?,
-        alts,
-        blind,
+    let known = if !run.paths.is_empty() && units.iter().any(|(_, seen)| !seen.repos.is_empty()) {
+        fresh_known(run)?
+    } else {
+        Known {
+            holds: read_holds(&run.holds)?,
+            alts,
+            blind,
+        }
     };
     let mut ctx = Ctx {
         run,
@@ -1056,12 +1082,10 @@ fn staged_ok(
     if let Some(reason) = lease_of(run, &original, item) {
         return Ok(Fail(format!("lease-{}", short(reason))));
     }
-    for target in [item, &original] {
-        match (run.hooks.open)(target) {
-            Ok(false) => {}
-            Ok(true) => return Ok(Fail("open-file".into())),
-            Err(error) => return Ok(Fail(format!("probe-error:{error}"))),
-        }
+    match (run.hooks.open)(&[item, &original]) {
+        Ok(false) => {}
+        Ok(true) => return Ok(Fail("open-file".into())),
+        Err(error) => return Ok(Fail(format!("probe-error:{error}"))),
     }
     if seen.repos.is_empty() {
         return Ok(Verdict::Pass);
@@ -1164,6 +1188,10 @@ fn scan_stores(
     };
     let (mut bare, mut subdirs) = ([false; 3], Vec::new());
     for entry in entries {
+        if Instant::now() >= deadline {
+            *complete = false;
+            return;
+        }
         let Ok((entry, kind)) = entry.and_then(|entry| entry.file_type().map(|kind| (entry, kind)))
         else {
             *complete = false;
@@ -1234,7 +1262,9 @@ fn stage_unit(
 ) -> io::Result<Option<Staged>> {
     let seen = observe(path, run.device, run.deadline);
     let alts: io::Result<Vec<_>> = plan.stores.iter().map(|d| read_alternates(d)).collect();
-    let blind = plan.blind || alts.is_err();
+    let blind = plan.blind
+        || alts.is_err()
+        || (!run.paths.is_empty() && seen.stores.iter().any(|store| !plan.stores.contains(store)));
     let alts = alts.iter().flatten().flatten().cloned().collect();
     let known = Known {
         holds: read_holds(&run.holds)?,
@@ -1242,16 +1272,13 @@ fn stage_unit(
         blind,
     };
     let stale = seen.complete && seen.newest.max(seen.newest_file) < run.cutoff;
-    let (open, prot) = (
-        (run.hooks.open)(path),
-        protection(run, &known, path, &seen, &[path], true)?,
-    );
+    let prot = protection(run, &known, path, &seen, &[path], true)?;
     if let Some(why) = match prot.as_ref().map(|(r, _)| r.as_str()) {
         Some(r) if incomplete_reason(r) => Some(format!("deferred:{r}")),
         Some(_) => Some("deferred:changed".into()),
         None if !seen.complete => Some("deferred:incomplete".into()),
         None if !stale => Some("deferred:changed".into()),
-        None => match open {
+        None => match (run.hooks.open)(&[path]) {
             Ok(true) => Some("deferred:open-file".into()),
             Err(e) => Some(format!("deferred:probe-error:{e}")),
             Ok(false) => None,
@@ -1378,7 +1405,9 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
     for (_, reason) in &plan.kept {
         *report.kept.entry(reason.clone()).or_default() += 1;
     }
-    recover(run, &mut report)?;
+    if run.paths.is_empty() {
+        recover(run, &mut report)?;
+    }
     if !run.clean {
         report.would_remove = plan.removals.clone();
         return Ok(report);
@@ -1387,6 +1416,10 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
         let (s, p, item) = (&u.stage, &u.intent_path, u.stage.join("item"));
         let v = staged_ok(run, &item, &u.intent, k);
         match v.unwrap_or_else(|e| Verdict::Fail(format!("check-error:{e}"))) {
+            Verdict::Pass if Instant::now() >= run.deadline => {
+                rep.timed_out = true;
+                restore(run, s, p, &u.intent, "deadline", rep).map(|_| false)
+            }
             Verdict::Pass => finish(run, s, p, &mut u.intent, rep).map(|_| false),
             Verdict::Fail(c) => restore(run, s, p, &u.intent, &c, rep).map(|_| false),
             Verdict::NeedsScan if k.is_none() => Ok(true),
@@ -1419,7 +1452,9 @@ pub fn apply(run: &Run, plan: &Plan) -> io::Result<Report> {
 }
 
 pub fn sweep(run: &Run) -> io::Result<Report> {
-    apply(run, &plan(run)?)
+    let mut report = apply(run, &plan(run)?)?;
+    report.timed_out |= Instant::now() >= run.deadline;
+    Ok(report)
 }
 
 /// `diskm scratch-sweep --expired`: sweep the registered Scratch root.
@@ -1428,13 +1463,16 @@ pub fn run(
     options: &crate::scratch_sweep::Options,
     precondition: &mut Value,
 ) -> io::Result<(Value, bool)> {
+    let deadline = Instant::now() + options.deadline;
     let (root, device) = crate::preview::registered_scratch()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    *precondition = json!({"root":root,"min_hours":options.min_hours,"expired":true});
+    *precondition =
+        json!({"root":root,"min_hours":options.min_hours,"expired":true,"paths":options.paths});
     let cutoff = crate::preview::current_cutoff(options.min_hours)? * 1_000_000_000;
     let run = Run {
         clean: options.clean,
-        deadline: Instant::now() + options.deadline,
+        paths: options.paths.clone(),
+        deadline,
         log: crate::scratch_target::deletion_log_path()?,
         holds: state.join("evidence-holds.json"),
         ..Run::new(&root, device, cutoff)

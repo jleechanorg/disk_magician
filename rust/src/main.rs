@@ -18,7 +18,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm status [PATH] [--state-dir DIR] [--json]
   diskm scan PATH [--deadline-ms N] [--max-entries N] [--json]
   diskm reclaim-ledger --read-existing [--state-dir DIR]
-  diskm history --state-dir DIR [--days 7|30] [--json]
+  diskm history --state-dir DIR [--days 7|30] [--capacity] [--json]
   diskm scratch-dir [SUBPATH]
   diskm scratch-new REPO PURPOSE [--kind build|evidence|scratch]
   diskm scratch-temp-file REPO PURPOSE
@@ -68,6 +68,7 @@ enum Operation {
     History {
         state_dir: PathBuf,
         days: u32,
+        capacity: bool,
     },
     ScratchManifest {
         cutoff: i64,
@@ -155,6 +156,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     let mut deadline_ms = time_windows::SCAN_DEADLINE.as_millis() as u64;
     let mut max_entries = 100_000;
     let mut days = time_windows::HISTORY_DAYS;
+    let mut capacity = false;
     let mut preview_scope = "scratch";
     let mut min_hours = time_windows::resolved_content_floor_hours();
     let mut max_candidates = None;
@@ -207,6 +209,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
             Some("--max-entries") if command == "scan" => {
                 max_entries = positive(&mut args, "--max-entries")?;
             }
+            Some("--capacity") if command == "history" => capacity = true,
             Some("--days") if command == "history" => {
                 days = match required_value(&mut args, "--days")?.to_str() {
                     Some("7") => 7,
@@ -240,6 +243,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
         "history" => Ok(Operation::History {
             state_dir: state_dir.ok_or("history requires --state-dir")?,
             days,
+            capacity,
         }),
         "preview" => {
             if preview_resume_state.is_some() && preview_scope != "scratch" {
@@ -302,8 +306,8 @@ fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Opera
         }
     }
     if options.expired {
-        if options.system_tmp || !options.paths.is_empty() || options.limit != 0 {
-            return Err("--expired works only on the registered Scratch root; drop --root system-tmp, --path, and --max-candidates".into());
+        if options.system_tmp || options.limit != 0 {
+            return Err("--expired works only on the registered Scratch root; drop --root system-tmp and --max-candidates".into());
         }
         if !deadline_set {
             options.deadline = time_windows::EXPIRED_SWEEP_DEADLINE;
@@ -761,8 +765,17 @@ fn run(operation: Operation) -> io::Result<u8> {
                 return Ok(TEMPORARY_FAILURE);
             }
         }
-        Operation::History { state_dir, days } => {
-            print_json(&history::history(&state_dir, days)?)?;
+        Operation::History {
+            state_dir,
+            days,
+            capacity,
+        } => {
+            let reader = if capacity {
+                history::capacity_history
+            } else {
+                history::history
+            };
+            print_json(&reader(&state_dir, days)?)?;
         }
         Operation::Preview {
             scope,

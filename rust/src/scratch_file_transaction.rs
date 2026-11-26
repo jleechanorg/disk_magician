@@ -466,7 +466,7 @@ fn rename_exclusive(
 }
 
 pub(crate) fn open_file_processes(path: &Path) -> io::Result<Vec<u32>> {
-    let Some(stdout) = run_lsof(default_lsof(), &["-nP", "-t", "--"], path, true)? else {
+    let Some(stdout) = run_lsof(default_lsof(), &["-nP", "-t", "--"], &[path], true)? else {
         return Ok(Vec::new());
     };
     let pids: Vec<u32> = stdout
@@ -522,12 +522,16 @@ fn unescape_lsof(s: &[u8]) -> Vec<u8> {
 }
 
 /// As `open_paths`, with the `lsof` executable named. The listing must parse:
-/// every line starts with an ASCII field letter (`p` process, `n` name, and on
-/// macOS also `f`, `t`, ...), at least one process line exists, and only name
-/// lines are paths.
 pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
-    let prefix = path.as_os_str().as_encoded_bytes();
-    let Some(listing) = run_lsof(lsof, &["-nP", "-F", "n"], path, false)? else {
+    open_paths_any_with(&[path], lsof)
+}
+
+pub fn open_paths_any(paths: &[&Path]) -> io::Result<bool> {
+    open_paths_any_with(paths, default_lsof())
+}
+
+pub fn open_paths_any_with(paths: &[&Path], lsof: &Path) -> io::Result<bool> {
+    let Some(listing) = run_lsof(lsof, &["-nP", "-F", "n"], paths, false)? else {
         return Err(io::Error::other("lsof listed nothing"));
     };
     let (mut found, mut processes) = (false, false);
@@ -542,8 +546,11 @@ pub fn open_paths_with(path: &Path, lsof: &Path) -> io::Result<bool> {
         let dec = (*field == b'n' && name.contains(&b'\\')).then(|| unescape_lsof(name));
         let name = dec.as_deref().unwrap_or(name);
         found |= *field == b'n'
-            && name.starts_with(prefix)
-            && matches!(name.get(prefix.len()), None | Some(b'/' | b' '));
+            && paths.iter().any(|path| {
+                let prefix = path.as_os_str().as_encoded_bytes();
+                name.starts_with(prefix)
+                    && matches!(name.get(prefix.len()), None | Some(b'/' | b' '))
+            });
     }
     if processes {
         Ok(found)
@@ -622,7 +629,7 @@ pub fn run_capture(
 /// means it found nothing. Any other outcome, including a listing beside a
 /// failing status, is an error: a partial listing proves nothing about a path
 /// it omits.
-fn lsof_stderr_ok(stderr: &[u8], target: Option<&Path>) -> bool {
+fn lsof_stderr_ok(stderr: &[u8], targets: &[&Path]) -> bool {
     let mut ok_warn = false;
     String::from_utf8_lossy(stderr)
         .lines()
@@ -632,20 +639,28 @@ fn lsof_stderr_ok(stderr: &[u8], target: Option<&Path>) -> bool {
                 return true;
             }
             let overlap = l.rsplit_once("file system ").is_some_and(|(_, m)| {
-                target.is_some_and(|t| t.starts_with(m) || Path::new(m).starts_with(t))
+                targets
+                    .iter()
+                    .any(|t| t.starts_with(m) || Path::new(m).starts_with(t))
             });
             ok_warn = l.contains("stat()") && l.contains("file system") && !overlap;
             ok_warn
         })
 }
 
-fn run_lsof(lsof: &Path, args: &[&str], target: &Path, scoped: bool) -> io::Result<Option<String>> {
+fn run_lsof(
+    lsof: &Path,
+    args: &[&str],
+    targets: &[&Path],
+    scoped: bool,
+) -> io::Result<Option<String>> {
     let mut cmd = Command::new(lsof);
-    cmd.args(args).args(scoped.then_some(target));
+    cmd.args(args)
+        .args(targets.iter().take(usize::from(scoped)));
     let (status, stdout, stderr) =
         run_capture(&mut cmd, None, crate::time_windows::OPEN_FILE_PROBE_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
-    if status.success() && !stdout.is_empty() && lsof_stderr_ok(&stderr, Some(target)) {
+    if status.success() && !stdout.is_empty() && lsof_stderr_ok(&stderr, targets) {
         return Ok(Some(stdout));
     }
     if status.code() == Some(1) && stdout.is_empty() && stderr.is_empty() {

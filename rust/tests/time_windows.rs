@@ -170,3 +170,12 @@ fn malformed_floor_env_falls_back_to_the_constant() {
     assert_eq!(resolved_content_floor_hours(), 6);
     std::env::remove_var("DISK_MAGICIAN_CONTENT_FLOOR_HOURS");
 }
+
+#[test]
+fn expired_service_has_terminal_receipt_headroom() {
+    let template = include_str!("../../systemd/diskm-scratch-expired.service.in");
+    let listing: std::collections::HashMap<_, _> =
+        diskm_shadow::time_windows::listing().into_iter().collect();
+    assert!(template.contains("TimeoutStartSec=@EXPIRED_SWEEP_SERVICE_TIMEOUT_SECONDS@"));
+    assert!(listing["EXPIRED_SWEEP_SERVICE_TIMEOUT"] > listing["EXPIRED_SWEEP_DEADLINE"]);
+}
