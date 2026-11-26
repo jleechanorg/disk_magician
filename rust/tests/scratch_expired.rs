@@ -1340,7 +1340,7 @@ fn open_file_in_the_candidate_restores() {
     let mut child = keep_alive(&format!("exec 3< '{}'; sleep 30", file.display()));
     let cutoff = age();
     let mut run = clean_run(&fx, cutoff);
-    run.hooks.open = Box::new(diskm_shadow::scratch_expired::open_paths);
+    run.hooks.open = Box::new(diskm_shadow::scratch_expired::open_paths_any);
     let report = sweep(&run).unwrap();
     child.kill().unwrap();
     child.wait().unwrap();
@@ -1354,7 +1354,7 @@ fn process_working_directory_in_the_candidate_restores() {
     let mut child = keep_alive(&format!("cd '{}' && sleep 30", fx.root.join("a").display()));
     let cutoff = age();
     let mut run = clean_run(&fx, cutoff);
-    run.hooks.open = Box::new(diskm_shadow::scratch_expired::open_paths);
+    run.hooks.open = Box::new(diskm_shadow::scratch_expired::open_paths_any);
     let report = sweep(&run).unwrap();
     child.kill().unwrap();
     child.wait().unwrap();
@@ -1363,7 +1363,7 @@ fn process_working_directory_in_the_candidate_restores() {
 
 #[test]
 fn expired_with_a_conflicting_option_is_a_usage_error() {
-    for args in [["--root", "system-tmp"], ["--path", "/tmp/x"]] {
+    for args in [["--root", "system-tmp"], ["--max-candidates", "1"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
             .args(["scratch-sweep", "--expired"])
             .args(args)
@@ -1662,7 +1662,9 @@ fn restore_never_overwrites_a_destination_created_during_the_restore() {
     let cutoff = age();
     let mut run = clean_run(&fx, cutoff);
     run.hooks.open = Box::new(|p| {
-        if p.to_string_lossy().contains(".diskm-expired") {
+        if p.iter()
+            .any(|p| p.to_string_lossy().contains(".diskm-expired"))
+        {
             Err(std::io::Error::other("probe failed"))
         } else {
             Ok(false)
@@ -1964,7 +1966,8 @@ fn a_candidate_missing_from_a_partial_listing_is_kept() {
     let lsof = fake_lsof(&fx, "printf 'p1\\nn/elsewhere\\n'\nexit 1");
     let cutoff = age();
     let mut run = clean_run(&fx, cutoff);
-    run.hooks.open = Box::new(move |path| open_paths_with(path, &lsof));
+    run.hooks.open =
+        Box::new(move |paths| diskm_shadow::scratch_expired::open_paths_any_with(paths, &lsof));
     let report = sweep(&run).unwrap();
     assert!(fx.root.join("a/f").exists() && report.removed.is_empty());
 }
@@ -2485,14 +2488,16 @@ fn restore_cause(setup: impl FnOnce(&mut Run)) -> String {
 #[test]
 fn a_restored_tree_reports_its_cause() {
     assert_eq!(
-        restore_cause(
-            |run| run.hooks.open = Box::new(|p| Ok(p.to_string_lossy().contains(".diskm-expired")))
-        ),
+        restore_cause(|run| run.hooks.open = Box::new(|p| Ok(p
+            .iter()
+            .any(|p| p.to_string_lossy().contains(".diskm-expired"))))),
         "deferred:restored:open-file"
     );
     assert_eq!(
         restore_cause(|run| run.hooks.open = Box::new(|p| {
-            if p.to_string_lossy().contains(".diskm-expired") {
+            if p.iter()
+                .any(|p| p.to_string_lossy().contains(".diskm-expired"))
+            {
                 Err(std::io::Error::other("lsof timeout"))
             } else {
                 Ok(false)
@@ -2527,8 +2532,8 @@ fn each_tree_is_checked_right_after_it_is_staged_and_repo_less_trees_skip_the_sc
             path.file_name().unwrap().to_str().unwrap()
         ));
     });
-    run.hooks.open = Box::new(move |_| {
-        probed.borrow_mut().push("open".to_owned());
+    run.hooks.open = Box::new(move |paths| {
+        probed.borrow_mut().push(format!("open:{}", paths.len()));
         Ok(false)
     });
     // A directory the borrower scan cannot read must not matter to trees
@@ -2539,7 +2544,7 @@ fn each_tree_is_checked_right_after_it_is_staged_and_repo_less_trees_skip_the_sc
     fs::set_permissions(fx.root.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(
         *events.borrow(),
-        ["open", "stage:a", "open", "open", "open", "stage:b", "open", "open"]
+        ["open:1", "stage:a", "open:2", "open:1", "stage:b", "open:2"]
     );
     assert_eq!(report.removed.len(), 2, "{:?}", report.deferred);
 }
@@ -2902,7 +2907,7 @@ fn open_file_check_also_checks_original_path_when_staged() {
     fx.file("sockdir/sock");
     let mut run = clean_run(&fx, age());
     let orig = target.clone();
-    run.hooks.open = Box::new(move |path| Ok(path == orig));
+    run.hooks.open = Box::new(move |paths| Ok(paths.contains(&orig.as_path())));
     let report = sweep(&run).unwrap();
     assert!(target.exists() && report.removed.is_empty());
 }
@@ -3358,4 +3363,164 @@ fn non_metadata_unreadable_hidden_dir_still_blinds_scan() {
         planned.blind,
         "unreadable user hidden dir must still blind scan"
     );
+}
+
+#[test]
+fn cli_parses_exact_expired_scope_without_admitting_an_unregistered_root() {
+    let fx = Fx::new("expired-cli-scope");
+    let out = Command::new(env!("CARGO_BIN_EXE_diskm"))
+        .args(["scratch-sweep", "--expired", "--path"])
+        .arg(fx.file("not-registered"))
+        .env("DISK_MAGICIAN_CONFIG", fx.root.join("missing-config"))
+        .env("DISK_MAGICIAN_STATE_DIR", &fx.root)
+        .env("HOME", &fx.root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(!error.contains("drop --root system-tmp, --path"), "{error}");
+    assert!(fx.root.join("not-registered").exists());
+}
+
+#[test]
+fn exact_scope_preserves_other_units_holds_and_prior_intents() {
+    let fx = Fx::new("exact");
+    let selected = fx.root.join("selected");
+    let held = fx.root.join("held");
+    let unrelated = fx.file("other/leaf");
+    let nested = fx.file("selected/nested/leaf");
+    fx.file("held/leaf");
+    let (staged, _) = stage(&fx, dead_pid(), "staged", "previous", true);
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    fs::write(
+        &run.holds,
+        serde_json::json!({(held.to_string_lossy()):"fixture"}).to_string(),
+    )
+    .unwrap();
+    run.paths = vec![nested.clone()];
+    assert!(plan(&run).is_err());
+    assert!(nested.exists());
+    run.paths = vec![selected.clone()];
+    run.clean = false;
+    assert_eq!(sweep(&run).unwrap().would_remove, vec![selected.clone()]);
+    assert!(selected.exists());
+    run.clean = true;
+    run.paths = vec![selected.clone(), held.clone()];
+    let report = sweep(&run).unwrap();
+    assert_eq!(
+        report.removed.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        vec![&selected]
+    );
+    assert!(held.exists() && unrelated.exists() && staged.exists());
+    assert_eq!(rows(&fx).len(), 1);
+    assert!(!fx.root.join("previous").exists());
+    run.paths.clear();
+    let report = sweep(&run).unwrap();
+    assert!(!staged.exists());
+    assert!(
+        fx.root.join("previous/leaf").exists() || fx.root.join("previous/f").exists(),
+        "{:?}",
+        report.deferred
+    );
+}
+
+#[test]
+fn exact_scope_does_not_remove_a_new_git_store() {
+    let fx = Fx::new("exact-late-git");
+    fx.file("selected/doc");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    let selected = fx.root.join("selected");
+    run.paths.push(selected.clone());
+    let nominated = plan(&run).unwrap();
+    assert_eq!(nominated.removals, vec![selected.clone()]);
+    run.hooks.after_stage = Box::new(|_, item| {
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(item)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(
+            item.join(".git/objects/info/alternates"),
+            "/unverified/store\n",
+        )
+        .unwrap();
+    });
+    let report = apply(&run, &nominated).unwrap();
+    assert!(report.removed.is_empty());
+    assert!(selected.join(".git").exists());
+    assert!(rows(&fx).is_empty());
+}
+
+#[test]
+fn eligible_unit_needs_two_fresh_open_listings_not_three() {
+    let fx = Fx::new("open-probe-count");
+    fx.file("a/f");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let observed = calls.clone();
+    run.hooks.open = Box::new(move |_| {
+        observed.set(observed.get() + 1);
+        Ok(false)
+    });
+    let report = sweep(&run).unwrap();
+    assert_eq!(report.removed.len(), 1);
+    assert_eq!(calls.get(), 2, "fresh before and after staging");
+}
+
+#[test]
+fn grouped_open_listing_fails_closed_for_either_prefix() {
+    use diskm_shadow::scratch_expired::open_paths_any_with;
+    let fx = Fx::new("grouped-probe");
+    let original = fx.root.join("original");
+    let staged = fx.root.join("staged");
+    let paths = &[original.as_path(), staged.as_path()];
+    for target in paths {
+        let hit = fake_lsof(
+            &fx,
+            &format!("printf 'p99\\nn{}/leaf\\n'", target.display()),
+        );
+        assert!(open_paths_any_with(paths, &hit).unwrap());
+        let warning = fake_lsof(&fx, &format!(
+            "printf 'p99\\nn/elsewhere\\n'; printf 'lsof: WARNING: cannot stat() file system {}\\nOutput information may be incomplete.\\n' >&2",
+            target.display()
+        ));
+        assert!(open_paths_any_with(paths, &warning).is_err());
+    }
+    let near = fake_lsof(
+        &fx,
+        &format!("printf 'p99\\nn{}-other/leaf\\n'", original.display()),
+    );
+    assert!(!open_paths_any_with(paths, &near).unwrap());
+}
+
+#[test]
+fn exact_mode_defers_a_repo_detected_before_rename() {
+    let fx = Fx::new("exact-new-repo");
+    fx.file("selected/f");
+    let leaf = fx.file("file-not-directory");
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.paths = vec![leaf];
+    assert!(plan(&run).is_err());
+    let selected = fx.root.join("selected");
+    run.paths = vec![selected.clone()];
+    let picked = plan(&run).unwrap();
+    assert_eq!(picked.removals, vec![selected.clone()]);
+    let original_mtime = fs::metadata(&selected).unwrap().modified().unwrap();
+    init(&selected);
+    fs::File::open(&selected)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    run.hooks.after_stage = Box::new(|_, _| panic!("new repository must not be renamed"));
+    let report = apply(&run, &picked).unwrap();
+    assert!(report
+        .deferred
+        .iter()
+        .any(|(path, why)| path == &selected && why.contains("alternates")));
+    assert!(selected.join(".git").exists());
 }

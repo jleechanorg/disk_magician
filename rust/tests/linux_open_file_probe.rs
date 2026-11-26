@@ -186,8 +186,13 @@ fn sweep_restores_when_proc_scan_sees_staged_rename_or_original_path() {
     run.clean = true;
     run.log = root.join(".audit.log");
     let proc_for_open = proc.root.clone();
-    run.hooks.open = Box::new(move |target| {
-        open_pids_in_proc(&proc_for_open, target).map(|pids| !pids.is_empty())
+    run.hooks.open = Box::new(move |targets| {
+        for target in targets {
+            if !open_pids_in_proc(&proc_for_open, target)?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     });
     let holder_fd = holder.join("fd/9");
     run.hooks.after_stage = Box::new(move |_original, staged_item| {
