@@ -3524,3 +3524,26 @@ fn exact_mode_defers_a_repo_detected_before_rename() {
         .any(|(path, why)| path == &selected && why.contains("alternates")));
     assert!(selected.join(".git").exists());
 }
+
+#[test]
+fn parallel_plan_preserves_deterministic_order_and_alternates() {
+    let fx = Fx::new("parallel-plan");
+    for i in 0..16 {
+        fx.file(&format!("stale-{i:02}/payload.txt"));
+    }
+    let cutoff = age();
+    fx.file("fresh-00/recent.txt");
+    let run = clean_run(&fx, cutoff);
+    let first = plan(&run).unwrap();
+    let second = plan(&run).unwrap();
+    let expected: Vec<PathBuf> = (0..16)
+        .map(|i| fx.root.join(format!("stale-{i:02}")))
+        .collect();
+    assert_eq!(first.removals, expected);
+    assert_eq!(second.removals, expected);
+    assert_eq!(first.kept, second.kept);
+    assert!(first
+        .kept
+        .iter()
+        .any(|(p, r)| p == &fx.root.join("fresh-00") && r == "kept:fresh"));
+}

@@ -350,6 +350,19 @@ fn is_git_name(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == ".git")
 }
 
+pub(crate) fn is_unreadable_macos_volume_metadata(path: &Path, name: &std::ffi::OsStr) -> bool {
+    cfg!(target_os = "macos")
+        && matches!(
+            name.as_encoded_bytes(),
+            b".DocumentRevisions-V100"
+                | b".Spotlight-V100"
+                | b".TemporaryItems"
+                | b".Trashes"
+                | b".fseventsd"
+        )
+        && fs::read_dir(path).is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
+}
+
 fn max_epoch(left: Option<i64>, right: Option<i64>) -> Option<i64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.max(right)),
@@ -577,6 +590,9 @@ fn scan_internal(
                 break;
             }
             let path = entry.path();
+            if parent == 0 && is_unreadable_macos_volume_metadata(&path, &entry.file_name()) {
+                continue;
+            }
             let metadata = match fs::symlink_metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
