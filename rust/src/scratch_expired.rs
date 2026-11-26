@@ -702,19 +702,6 @@ fn sorted_children(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(c)
 }
 
-fn is_unreadable_macos_volume_metadata(path: &Path, name: &std::ffi::OsStr) -> bool {
-    cfg!(target_os = "macos")
-        && matches!(
-            name.as_encoded_bytes(),
-            b".DocumentRevisions-V100"
-                | b".Spotlight-V100"
-                | b".TemporaryItems"
-                | b".Trashes"
-                | b".fseventsd"
-        )
-        && fs::read_dir(path).is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
-}
-
 /// `(candidates, scan-only)`: hidden entries are never candidates but are
 /// still scanned for repositories that may borrow objects. Stages of this job
 /// and unreadable macOS APFS volume metadata directories at the root are neither.
@@ -722,7 +709,7 @@ fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let (mut found, mut hidden) = (Vec::new(), Vec::new());
     for path in sorted_children(root)? {
         let name = path.file_name().unwrap_or_default();
-        if name == STAGES || is_unreadable_macos_volume_metadata(&path, name) {
+        if name == STAGES || crate::scan::is_unreadable_macos_volume_metadata(&path, name) {
             continue;
         } else if name.as_encoded_bytes().starts_with(b".") {
             hidden.push(path);
@@ -894,12 +881,38 @@ pub fn plan(run: &Run) -> io::Result<Plan> {
         found.retain(|path| run.paths.contains(path));
         hidden.clear();
     }
-    let it = found
+    let items: Vec<(PathBuf, bool)> = found
         .into_iter()
         .map(|p| (p, true))
-        .chain(hidden.into_iter().map(|p| (p, false)));
-    for (path, judged) in it {
-        let seen = observe(&path, run.device, run.deadline);
+        .chain(hidden.into_iter().map(|p| (p, false)))
+        .collect();
+    let workers = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 8)
+        .min(items.len().max(1));
+    let (device, deadline) = (run.device, run.deadline);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut observed: Vec<(usize, Observation)> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            handles.push(scope.spawn(|| {
+                let mut local = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((path, _)) = items.get(i) else { break };
+                    local.push((i, observe(path, device, deadline)));
+                }
+                local
+            }));
+        }
+        let mut all = Vec::with_capacity(items.len());
+        for handle in handles {
+            all.extend(handle.join().expect("expired-sweep observer thread panicked"));
+        }
+        all
+    });
+    observed.sort_unstable_by_key(|(i, _)| *i);
+    for ((path, judged), (_, seen)) in items.into_iter().zip(observed) {
         alts.extend(seen.alternates.iter().cloned());
         stores.extend(seen.stores.iter().cloned());
         blind |= !seen.complete;
@@ -1198,7 +1211,9 @@ fn scan_stores(
             *complete = false;
             continue;
         };
-        if is_root && is_unreadable_macos_volume_metadata(&entry.path(), &entry.file_name()) {
+        if is_root
+            && crate::scan::is_unreadable_macos_volume_metadata(&entry.path(), &entry.file_name())
+        {
             continue;
         }
         match entry.file_name().to_str() {
