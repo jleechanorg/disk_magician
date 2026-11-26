@@ -27,6 +27,7 @@ pub struct CapacityReport {
     pub available_bytes: u64,
     pub percent_used: u8,
     pub mounted_at: String,
+    pub filesystem: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +141,7 @@ fn parse_df_output(output: &str) -> io::Result<CapacityReport> {
         available_bytes: bytes(3, "available")?,
         percent_used,
         mounted_at: fields[5..].join(" "),
+        filesystem: fields[0].to_owned(),
     })
 }
 
@@ -441,56 +443,5 @@ fn unsigned(object: &Map<String, Value>, key: &str) -> Option<u64> {
 }
 
 fn parse_timestamp(value: &str) -> Option<u64> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 20
-        || bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || bytes[10] != b'T'
-        || bytes[13] != b':'
-        || bytes[16] != b':'
-        || bytes[19] != b'Z'
-    {
-        return None;
-    }
-    let year = value[0..4].parse::<i32>().ok()?;
-    let month = value[5..7].parse::<u32>().ok()?;
-    let day = value[8..10].parse::<u32>().ok()?;
-    let hour = value[11..13].parse::<u32>().ok()?;
-    let minute = value[14..16].parse::<u32>().ok()?;
-    let second = value[17..19].parse::<u32>().ok()?;
-    if !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
-        return None;
-    }
-    let month_days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap_year(year) => 29,
-        2 => 28,
-        _ => return None,
-    };
-    if day == 0 || day > month_days {
-        return None;
-    }
-    let mut y = i64::from(year);
-    let m = i64::from(month);
-    y -= if m <= 2 { 1 } else { 0 };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = y - era * 400;
-    let mp = m + if m > 2 { -3 } else { 9 };
-    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    if days < 0 {
-        return None;
-    }
-    u64::try_from(
-        days.checked_mul(86_400)?
-            .checked_add(i64::from(hour) * 3600)?
-            .checked_add(i64::from(minute) * 60)?
-            .checked_add(i64::from(second))?,
-    )
-    .ok()
-}
-fn leap_year(year: i32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    u64::try_from(crate::history::parse_utc(value)?).ok()
 }

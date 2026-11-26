@@ -8,10 +8,25 @@ use std::path::Path;
 use std::time::SystemTime;
 
 pub fn collect(root: &Path) -> io::Result<Value> {
-    format_sample(&status::status(root, None)?.capacity)
+    format_sample(root, &status::status(root, None)?.capacity)
 }
 
-fn format_sample(capacity: &status::CapacityReport) -> io::Result<Value> {
+fn format_sample(root: &Path, capacity: &status::CapacityReport) -> io::Result<Value> {
+    if cfg!(target_os = "macos")
+        && root == Path::new("/System/Volumes/Data")
+        && capacity.mounted_at != "/System/Volumes/Data"
+    {
+        return Err(io::Error::other(
+            "Data volume is not mounted at /System/Volumes/Data",
+        ));
+    }
+    let host = std::process::Command::new("hostname").output()?;
+    let hostname = std::str::from_utf8(&host.stdout)
+        .map_err(io::Error::other)?
+        .trim();
+    if !host.status.success() || hostname.is_empty() {
+        return Err(io::Error::other("cannot identify snapshot host"));
+    }
     let timestamp = job_receipt::timestamp(SystemTime::now())?;
     // A capacity sample does not claim coverage of the file inventory.
     let gib = |bytes| bytes as f64 / 1_073_741_824.0;
@@ -26,6 +41,9 @@ fn format_sample(capacity: &status::CapacityReport) -> io::Result<Value> {
             "measurement_status": "partial",
             "scope": "capacity_only",
             "mounted_at": capacity.mounted_at,
+            "filesystem": capacity.filesystem,
+            "hostname": hostname,
+            "used_kib": capacity.used_bytes / 1024,
         },
     }))
 }
@@ -53,7 +71,7 @@ pub fn run(
     let result = (|| -> io::Result<Value> {
         let capacity = status::status(root, None)?.capacity;
         before = Some(capacity.available_bytes);
-        let snapshot = format_sample(&capacity)?;
+        let snapshot = format_sample(root, &capacity)?;
         phase = "local_write_failed";
         if output_override.is_none() {
             fs::create_dir_all(state_dir.join("snapshots"))?;

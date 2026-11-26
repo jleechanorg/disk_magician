@@ -9,7 +9,7 @@
     <string>@HOME@/.local/bin/diskm</string>
     <string>snapshot</string>
     <string>--path</string>
-    <string>/</string>
+    <string>/System/Volumes/Data</string>
     <string>--state-dir</string>
     <string>@HOME@/.disk_magician_state</string>
   </array>
