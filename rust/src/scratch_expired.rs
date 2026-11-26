@@ -702,9 +702,13 @@ fn sorted_children(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(c)
 }
 
+const UMBRELLA_CONTAINERS: &[&str] = &["tmp", "worldarchitect.ai"];
+
 /// `(candidates, scan-only)`: hidden entries are never candidates but are
 /// still scanned for repositories that may borrow objects. Stages of this job
 /// and unreadable macOS APFS volume metadata directories at the root are neither.
+/// `runs/<date>/<repo>/<run>` descends to run level, and declared umbrella
+/// containers (`tmp`, `worldarchitect.ai`) descend one level.
 fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let (mut found, mut hidden) = (Vec::new(), Vec::new());
     for path in sorted_children(root)? {
@@ -713,8 +717,14 @@ fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
             continue;
         } else if name.as_encoded_bytes().starts_with(b".") {
             hidden.push(path);
-        } else if name == "runs" && fs::symlink_metadata(&path)?.is_dir() {
-            runs(&path, 0, &mut found, &mut hidden)?;
+        } else if (name == "runs"
+            || name
+                .to_str()
+                .is_some_and(|n| UMBRELLA_CONTAINERS.contains(&n)))
+            && fs::symlink_metadata(&path)?.is_dir()
+        {
+            let start_lvl = if name == "runs" { 0 } else { 2 };
+            descend(&path, start_lvl, &mut found, &mut hidden)?;
         } else {
             found.push(path);
         }
@@ -722,8 +732,10 @@ fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     Ok((found, hidden))
 }
 
-/// `runs/<date>/<repo>/<run>`: each run is a candidate; the levels above stay.
-fn runs(dir: &Path, lvl: u32, out: &mut Vec<PathBuf>, hid: &mut Vec<PathBuf>) -> io::Result<()> {
+/// Descend container levels without adding the container itself as a candidate:
+/// `runs` starts at level 0 (`runs/<date>/<repo>/<run>`); single-level umbrella
+/// containers (`tmp`, `worldarchitect.ai`) start at level 2.
+fn descend(dir: &Path, lvl: u32, out: &mut Vec<PathBuf>, hid: &mut Vec<PathBuf>) -> io::Result<()> {
     for path in sorted_children(dir)? {
         let dot = path
             .file_name()
@@ -731,7 +743,7 @@ fn runs(dir: &Path, lvl: u32, out: &mut Vec<PathBuf>, hid: &mut Vec<PathBuf>) ->
         if dot {
             hid.push(path);
         } else if lvl < 2 && fs::symlink_metadata(&path)?.is_dir() {
-            runs(&path, lvl + 1, out, hid)?;
+            descend(&path, lvl + 1, out, hid)?;
         } else {
             out.push(path);
         }

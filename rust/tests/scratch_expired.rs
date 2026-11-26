@@ -3547,3 +3547,103 @@ fn parallel_plan_preserves_deterministic_order_and_alternates() {
         .iter()
         .any(|(p, r)| p == &fx.root.join("fresh-00") && r == "kept:fresh"));
 }
+
+#[test]
+fn umbrella_containers_descend_one_level_and_preserve_umbrella_dir() {
+    let fx = Fx::new("umbrella-descent");
+    fx.file("tmp/stale-dir/payload");
+    fx.file("tmp/stale-file");
+    fx.file("tmp/with-evidence/evidence/e");
+    init(&fx.root.join("tmp/unpushed-repo"));
+    fx.file("tmp/open-dir/payload");
+    fx.file("tmp/.hidden-keep/secret");
+    fx.file("worldarchitect.ai/stale-wt/payload");
+    init(&fx.root.join("worldarchitect.ai/unpushed-wt"));
+
+    let cutoff = age();
+    fx.file("tmp/fresh-dir/recent");
+    fx.file("worldarchitect.ai/fresh-wt/recent");
+
+    let open_target = fx.root.join("tmp/open-dir");
+    let mut run = clean_run(&fx, cutoff);
+    run.hooks.open = Box::new(move |paths| Ok(paths.contains(&open_target.as_path())));
+
+    let planned = plan(&run).unwrap();
+    let mut removals = planned.removals.clone();
+    removals.sort();
+    assert_eq!(
+        removals,
+        vec![
+            fx.root.join("tmp/open-dir"),
+            fx.root.join("tmp/stale-dir"),
+            fx.root.join("tmp/stale-file"),
+            fx.root.join("worldarchitect.ai/stale-wt"),
+        ]
+    );
+    assert_eq!(
+        kept(&planned, &fx.root.join("tmp/fresh-dir")),
+        Some("kept:fresh")
+    );
+    assert_eq!(
+        kept(&planned, &fx.root.join("worldarchitect.ai/fresh-wt")),
+        Some("kept:fresh")
+    );
+    assert!(kept(&planned, &fx.root.join("tmp/with-evidence"))
+        .unwrap()
+        .starts_with("kept:protected-descendant:evidence"));
+    assert!(kept(&planned, &fx.root.join("tmp/unpushed-repo"))
+        .unwrap()
+        .starts_with("kept:protected-subtree:git-unrecovered-commits"));
+    assert!(
+        kept(&planned, &fx.root.join("worldarchitect.ai/unpushed-wt"))
+            .unwrap()
+            .starts_with("kept:protected-subtree:git-unrecovered-commits")
+    );
+    assert!(kept(&planned, &fx.root.join("tmp/.hidden-keep")).is_none());
+
+    let report = apply(&run, &planned).unwrap();
+    let mut removed: Vec<PathBuf> = report.removed.iter().map(|(p, _)| p.clone()).collect();
+    removed.sort();
+    assert_eq!(
+        removed,
+        vec![
+            fx.root.join("tmp/stale-dir"),
+            fx.root.join("tmp/stale-file"),
+            fx.root.join("worldarchitect.ai/stale-wt"),
+        ]
+    );
+    assert!(report
+        .deferred
+        .iter()
+        .any(|(p, why)| p == &fx.root.join("tmp/open-dir") && why == "deferred:open-file"));
+    assert!(fx.root.join("tmp").is_dir());
+    assert!(fx.root.join("worldarchitect.ai").is_dir());
+    assert!(fx.root.join("tmp/fresh-dir/recent").exists());
+    assert!(fx.root.join("tmp/with-evidence/evidence/e").exists());
+    assert!(fx.root.join("tmp/unpushed-repo/.git").exists());
+    assert!(fx.root.join("tmp/open-dir/payload").exists());
+    assert!(fx.root.join("tmp/.hidden-keep/secret").exists());
+    assert!(fx.root.join("worldarchitect.ai/fresh-wt/recent").exists());
+    assert!(fx.root.join("worldarchitect.ai/unpushed-wt/.git").exists());
+}
+
+#[test]
+fn umbrella_dir_survives_when_all_children_are_removed() {
+    let fx = Fx::new("umbrella-empty");
+    fx.file("tmp/old-a/f");
+    fx.file("worldarchitect.ai/old-b/f");
+    let cutoff = age();
+    let run = clean_run(&fx, cutoff);
+    let report = sweep(&run).unwrap();
+    let mut removed: Vec<PathBuf> = report.removed.iter().map(|(p, _)| p.clone()).collect();
+    removed.sort();
+    assert_eq!(
+        removed,
+        vec![
+            fx.root.join("tmp/old-a"),
+            fx.root.join("worldarchitect.ai/old-b"),
+        ]
+    );
+    assert!(fx.root.join("tmp").is_dir());
+    assert!(fx.root.join("worldarchitect.ai").is_dir());
+}
