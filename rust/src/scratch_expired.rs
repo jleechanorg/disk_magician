@@ -2,7 +2,8 @@
 
 use crate::scratch_file_transaction::rename_noreplace;
 pub use crate::scratch_file_transaction::{
-    open_paths, open_paths_any, open_paths_any_with, open_paths_with, run_capture,
+    open_paths, open_paths_any, open_paths_any_with, open_paths_with, open_pids_in_proc,
+    run_capture,
 };
 use crate::scratch_lease::{self, BundleKind, LegacyLease, OwnerProcessState};
 use crate::time_windows::GIT_REMOTE_PROBE_TIMEOUT;
