@@ -63,6 +63,10 @@ leases.
 Users and operators setting up a workstation or CI host are encouraged to
 optionally partition/provision a dedicated Scratch volume via
 `diskm setup --scratch [--quota-gb 200]` (or interactively during `diskm setup`).
+On a fresh Linux host, run `sudo scripts/install_linux_scratch.sh` to create the
+sparse `ext4` image, register it for native `diskm`, and install the `/etc/fstab`
+entry with `discard` enabled so deleted Scratch blocks return to host `/`
+automatically without manual `sudo fstrim`.
 This isolates disposable agent and CI artifacts so they cannot exhaust host free
 space. The automatic Scratch quota defaults trigger at 70% usage and aim for
 50%. Conservative cleanup and safety holds can leave usage above the target.
