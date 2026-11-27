@@ -1363,16 +1363,15 @@ fn process_working_directory_in_the_candidate_restores() {
 
 #[test]
 fn expired_with_a_conflicting_option_is_a_usage_error() {
-    for args in [["--root", "system-tmp"], ["--max-candidates", "1"]] {
-        let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
-            .args(["scratch-sweep", "--expired"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(2), "{args:?}");
-        let message = String::from_utf8_lossy(&output.stderr);
-        assert!(message.contains("--expired works only"), "{message}");
-    }
+    let args = ["--max-candidates", "1"];
+    let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
+        .args(["scratch-sweep", "--expired"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{args:?}");
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(message.contains("--expired works only"), "{message}");
 }
 
 #[test]
@@ -3646,4 +3645,135 @@ fn umbrella_dir_survives_when_all_children_are_removed() {
     );
     assert!(fx.root.join("tmp").is_dir());
     assert!(fx.root.join("worldarchitect.ai").is_dir());
+}
+
+#[test]
+fn system_tmp_expired_sweeps_stale_user_entries_and_preserves_protected() {
+    let fx = Fx::new("sys-tmp");
+    fx.file("old-dir/payload");
+    let old_file = fx.file("old-file");
+    let old_link = fx.root.join("old-link");
+    std::os::unix::fs::symlink(fx.root.join("old-dir"), &old_link).unwrap();
+    fx.file("tmux-1000/sock");
+    fx.file("ssh-agent/s");
+    fx.file("com.apple.launchd.foo/bar");
+    fx.file("systemd-private-123/tmp");
+    fx.file("snap-private-tmp/x");
+    fx.file(".X11-unix/X0");
+    fx.file(".diskm-expired/old");
+    let fifo = fx.root.join("stale-fifo");
+    let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+    init(&fx.root.join("unpushed-repo"));
+    fx.file("open-dir/payload");
+
+    let cutoff = age();
+    fx.file("fresh-dir/recent");
+
+    let open_target = fx.root.join("open-dir");
+    let mut run = clean_run(&fx, cutoff);
+    run.system_tmp = true;
+    run.hooks.open = Box::new(move |paths| Ok(paths.contains(&open_target.as_path())));
+
+    let report = sweep(&run).unwrap();
+    let mut removed: Vec<PathBuf> = report.removed.iter().map(|(p, _)| p.clone()).collect();
+    removed.sort();
+    assert_eq!(
+        removed,
+        vec![fx.root.join("old-dir"), old_file, old_link.clone()]
+    );
+    assert!(!fx.root.join("old-dir").exists());
+    assert!(!fx.root.join("old-file").exists());
+    assert!(fs::symlink_metadata(&old_link).is_err());
+
+    for keep in [
+        "tmux-1000/sock",
+        "ssh-agent/s",
+        "com.apple.launchd.foo/bar",
+        "systemd-private-123/tmp",
+        "snap-private-tmp/x",
+        ".X11-unix/X0",
+        ".diskm-expired/old",
+        "stale-fifo",
+        "unpushed-repo/.git",
+        "open-dir/payload",
+        "fresh-dir/recent",
+    ] {
+        assert!(fx.root.join(keep).exists(), "missing {keep}");
+    }
+
+    let uid = unsafe { libc::geteuid() };
+    let stages = fx.root.join(format!(".diskm-expired-{uid}"));
+    let meta = fs::symlink_metadata(&stages).unwrap();
+    assert_eq!(meta.uid(), uid);
+    assert_eq!(meta.mode() & 0o777, 0o700);
+}
+
+#[test]
+fn system_tmp_skips_other_uid_and_dotfiles_without_marking_incomplete() {
+    let fx = Fx::new("sys-tmp-uid");
+    fx.file("other-user-dir/f");
+    let hidden = fx.root.join(".X11-unix");
+    fs::create_dir_all(&hidden).unwrap();
+    fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+    let _guard = RestorePerms(vec![hidden]);
+
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.system_tmp = true;
+    run.owner_uid = Some(unsafe { libc::geteuid() } + 1);
+
+    let report = sweep(&run).unwrap();
+    assert!(report.complete(), "{:?}", report.summary());
+    assert!(report.removed.is_empty());
+    assert!(fx.root.join("other-user-dir/f").exists());
+}
+
+#[test]
+fn system_tmp_rejects_insecure_staging_dir_and_allows_exact_file_path() {
+    let fx = Fx::new("sys-tmp-stage");
+    let target = fx.file("stale-file");
+    let uid = unsafe { libc::geteuid() };
+    let stages = fx.root.join(format!(".diskm-expired-{uid}"));
+    fs::create_dir(&stages).unwrap();
+    fs::set_permissions(&stages, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let cutoff = age();
+    let mut run = clean_run(&fx, cutoff);
+    run.system_tmp = true;
+    run.paths = vec![target.clone()];
+    assert!(sweep(&run).is_err());
+    assert!(target.exists());
+
+    fs::set_permissions(&stages, fs::Permissions::from_mode(0o700)).unwrap();
+    let report = sweep(&run).unwrap();
+    assert_eq!(report.removed.len(), 1);
+    assert!(!target.exists());
+}
+
+#[test]
+fn system_tmp_cli_accepts_expired_with_root_system_tmp() {
+    let fx = Fx::new("sys-tmp-cli");
+    let output = Command::new(env!("CARGO_BIN_EXE_diskm"))
+        .args([
+            "scratch-sweep",
+            "--expired",
+            "--root",
+            "system-tmp",
+            "--deadline-ms",
+            "5000",
+        ])
+        .env("HOME", &fx.root)
+        .env("DISK_MAGICIAN_STATE_DIR", &fx.root)
+        .output()
+        .unwrap();
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["clean"], false);
+    assert!(body["report"].is_object());
 }

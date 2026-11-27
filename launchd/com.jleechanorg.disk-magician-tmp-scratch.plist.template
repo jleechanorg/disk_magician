@@ -9,6 +9,7 @@
   <array>
     <string>@HOME@/.local/bin/diskm</string>
     <string>scratch-sweep</string>
+    <string>--expired</string>
     <string>--root</string>
     <string>system-tmp</string>
     <string>--clean</string>

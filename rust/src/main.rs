@@ -31,7 +31,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
   diskm state-publish --repo DIR [--remote NAME] [--branch NAME] [--max-commits N] [--state-dir DIR]
   diskm state-commit --repo DIR [--state-dir DIR] [--publish] [--max-commits N]
   diskm evidence-holds refresh [--state-dir DIR] [--query Q]
-  diskm scratch-sweep [--root scratch|system-tmp | --expired] [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
+  diskm scratch-sweep [--root scratch|system-tmp] [--expired] [--clean] [--min-hours N] [--deadline-ms N] [--max-candidates N] [--path PATH ...]
   diskm scratch-manifest (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp]
   diskm scratch-qualify (--before-epoch SECONDS | --older-than Nh) (--path PATH | --paths-from FILE) [--root scratch|system-tmp] [--jobs N] [--deadline-ms N] [--max-entries N]
   diskm scratch-target-apply --manifest FILE --manifest-sha256 SHA --resume-state FILE --target-used-bytes N [--path REL ... | --all | --ack-restored REL | --restore-staged REL]
@@ -306,8 +306,8 @@ fn parse_scratch_sweep(mut args: impl Iterator<Item = OsString>) -> Result<Opera
         }
     }
     if options.expired {
-        if options.system_tmp || options.limit != 0 {
-            return Err("--expired works only on the registered Scratch root; drop --root system-tmp and --max-candidates".into());
+        if options.limit != 0 {
+            return Err("--expired works only without --max-candidates".into());
         }
         if !deadline_set {
             options.deadline = time_windows::EXPIRED_SWEEP_DEADLINE;
