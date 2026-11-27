@@ -85,16 +85,22 @@ fn sweep(
     started: SystemTime,
     precondition: &mut Value,
 ) -> io::Result<(Value, bool)> {
-    if options.expired {
-        return crate::scratch_expired::run(state, options, precondition);
-    }
     let (root, device) = if options.system_tmp {
         let root = scratch_lease::temp_path()?;
-        let device = fs::symlink_metadata(&root)?.dev();
-        (root, device)
+        (root.clone(), fs::symlink_metadata(&root)?.dev())
     } else {
-        preview::registered_scratch()?
+        preview::registered_scratch().map_err(|e| {
+            let kind = if options.expired {
+                io::ErrorKind::InvalidInput
+            } else {
+                e.kind()
+            };
+            io::Error::new(kind, e)
+        })?
     };
+    if options.expired {
+        return crate::scratch_expired::run(state, options, &root, device, precondition);
+    }
     let recovery = if options.clean && options.paths.is_empty() {
         scratch_target::recover_sweeps(state, &root)?
     } else {

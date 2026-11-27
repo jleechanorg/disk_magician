@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, fs, process::Command};
@@ -656,6 +656,8 @@ pub struct Run {
     pub log: PathBuf,
     pub holds: PathBuf,
     pub hooks: Hooks,
+    pub system_tmp: bool,
+    pub owner_uid: Option<u32>,
 }
 
 impl Run {
@@ -670,6 +672,8 @@ impl Run {
             log: PathBuf::new(),
             holds: PathBuf::new(),
             hooks: Hooks::default(),
+            system_tmp: false,
+            owner_uid: None,
         }
     }
 }
@@ -704,16 +708,34 @@ fn sorted_children(dir: &Path) -> io::Result<Vec<PathBuf>> {
 
 const UMBRELLA_CONTAINERS: &[&str] = &["tmp", "worldarchitect.ai"];
 
+fn uid(run: &Run) -> u32 {
+    run.owner_uid.unwrap_or_else(|| unsafe { libc::geteuid() })
+}
+
+fn tmp_keep(path: &Path, owner: u32, dev: u64) -> io::Result<bool> {
+    let b = path.file_name().unwrap_or_default().as_encoded_bytes();
+    let pfx = "com.apple.,tmux-,ssh-,systemd-private-,snap-private-tmp";
+    let skip = b.starts_with(b".") || pfx.split(',').any(|p| b.starts_with(p.as_bytes()));
+    let keep = |m: fs::Metadata| {
+        m.uid() == owner && m.dev() == dev && (m.is_file() || m.is_dir() || m.is_symlink())
+    };
+    Ok(!skip && existing(path)?.is_some_and(keep))
+}
+
 /// `(candidates, scan-only)`: hidden entries are never candidates but are
 /// still scanned for repositories that may borrow objects. Stages of this job
 /// and unreadable macOS APFS volume metadata directories at the root are neither.
 /// `runs/<date>/<repo>/<run>` descends to run level, and declared umbrella
 /// containers (`tmp`, `worldarchitect.ai`) descend one level.
-fn candidates(root: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+fn candidates(run: &Run) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let (mut found, mut hidden) = (Vec::new(), Vec::new());
-    for path in sorted_children(root)? {
+    for path in sorted_children(&run.root)? {
         let name = path.file_name().unwrap_or_default();
-        if name == STAGES || crate::scan::is_unreadable_macos_volume_metadata(&path, name) {
+        if run.system_tmp {
+            if tmp_keep(&path, uid(run), run.device)? {
+                found.push(path);
+            }
+        } else if name == STAGES || crate::scan::is_unreadable_macos_volume_metadata(&path, name) {
             continue;
         } else if name.as_encoded_bytes().starts_with(b".") {
             hidden.push(path);
@@ -776,14 +798,16 @@ fn repo_root(git_dir: &Path) -> &Path {
 /// The lease verdict for a run directory (`runs/<date>/<repo>/<run>`) recorded
 /// at `original` and currently at `actual`; other paths have no lease.
 fn lease_of(run: &Run, original: &Path, actual: &Path) -> Option<&'static str> {
-    let relative = original.strip_prefix(&run.root).ok()?;
-    if relative.components().count() != 4 || !relative.starts_with("runs") {
-        return None;
-    }
+    let rel = original.strip_prefix(&run.root).ok()?;
+    let is_run = rel.components().count() == 4 && rel.starts_with("runs");
+    let is_tmp = run.system_tmp
+        && rel
+            .to_str()
+            .is_some_and(|n| !n.contains('/') && n.starts_with("diskm-temp-"));
     let Ok(info) = fs::symlink_metadata(actual) else {
-        return Some("deferred:lease-unavailable");
+        return (is_run || is_tmp).then_some("deferred:lease-unavailable");
     };
-    info.is_dir()
+    ((is_run && info.is_dir()) || (is_tmp && info.is_file()))
         .then(|| (run.hooks.lease)(&run.root, original, actual))
         .flatten()
 }
@@ -878,12 +902,13 @@ fn judge(c: &mut Ctx, path: PathBuf, obs: Observation) -> io::Result<()> {
 /// Judge every candidate under the Scratch root. Nothing is changed.
 pub fn plan(run: &Run) -> io::Result<Plan> {
     let (mut units, mut alts, mut stores, mut blind) = (Vec::new(), Vec::new(), Vec::new(), false);
-    let (mut found, mut hidden) = candidates(&run.root)?;
+    let (mut found, mut hidden) = candidates(run)?;
     if !run.paths.is_empty() {
         if run.paths.iter().any(|path| {
             !found.contains(path)
-                || !path.is_dir()
-                || crate::preview::check_path(&run.root, path, run.device).is_some()
+                || (!run.system_tmp
+                    && (!path.is_dir()
+                        || crate::preview::check_path(&run.root, path, run.device).is_some()))
         }) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1263,8 +1288,16 @@ fn scan_stores(
 
 /// Holds and borrower dependencies as they are now, found by a fresh pass.
 fn fresh_known(run: &Run) -> io::Result<Known> {
-    let (mut stores, mut complete) = (Vec::new(), true);
-    scan_stores(&run.root, true, run.deadline, &mut stores, &mut complete);
+    let (mut stores, mut complete, dl) = (Vec::new(), true, run.deadline);
+    let mut roots = vec![run.root.clone()];
+    if run.system_tmp {
+        roots = candidates(run)?.0;
+    }
+    for p in roots {
+        if !run.system_tmp || fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
+            scan_stores(&p, !run.system_tmp, dl, &mut stores, &mut complete);
+        }
+    }
     let mut alts = Vec::new();
     for store in &stores {
         match read_alternates(store) {
@@ -1326,10 +1359,9 @@ fn stage_unit(
         std::process::id(),
         epoch.map_or(0, |e| e.as_nanos())
     );
-    let dir = run.root.join(STAGES);
-    let _ = safe_stages(&dir, run.device)?;
+    let dir = safe_stages(run, true)?.ok_or_else(|| io::Error::other("missing staging root"))?;
     let (stage, intent_path) = (dir.join(&name), dir.join(format!("{name}.intent")));
-    fs::create_dir_all(&stage)?;
+    fs::create_dir(&stage)?;
     let original = path
         .strip_prefix(&run.root)
         .map_err(io::Error::other)?
@@ -1355,22 +1387,27 @@ fn stage_unit(
     }))
 }
 
-fn safe_stages(dir: &Path, device: u64) -> io::Result<bool> {
-    let Some(m) = existing(dir)? else {
-        return Ok(false);
+fn safe_stages(run: &Run, create: bool) -> io::Result<Option<PathBuf>> {
+    let s = run.system_tmp.then(|| format!("{STAGES}-{}", uid(run)));
+    let dir = run.root.join(s.as_deref().unwrap_or(STAGES));
+    if create {
+        let _ = fs::DirBuilder::new().mode(0o700).create(&dir);
+    }
+    let Some(m) = existing(&dir)? else {
+        return Ok(None);
     };
-    if m.file_type().is_symlink() || !m.is_dir() || m.dev() != device {
+    let bad = run.system_tmp && (m.uid() != uid(run) || m.mode() & 0o077 != 0);
+    if m.file_type().is_symlink() || !m.is_dir() || m.dev() != run.device || bad {
         return Err(io::Error::other("unsafe staging root"));
     }
-    Ok(true)
+    Ok(Some(dir))
 }
 
 /// Recover stages of dead processes (dry run only lists them).
 fn recover(run: &Run, report: &mut Report) -> io::Result<()> {
-    let dir = run.root.join(STAGES);
-    if !safe_stages(&dir, run.device)? {
+    let Some(dir) = safe_stages(run, false)? else {
         return Ok(());
-    }
+    };
     for intent_path in sorted_children(&dir)? {
         let f = intent_path.file_name().and_then(|n| n.to_str());
         let Some(name) = f.and_then(|n| n.strip_suffix(".intent")) else {
@@ -1493,26 +1530,27 @@ pub fn sweep(run: &Run) -> io::Result<Report> {
 pub fn run(
     state: &Path,
     options: &crate::scratch_sweep::Options,
+    root: &Path,
+    device: u64,
     precondition: &mut Value,
 ) -> io::Result<(Value, bool)> {
     let deadline = Instant::now() + options.deadline;
-    let (root, device) = crate::preview::registered_scratch()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     *precondition =
         json!({"root":root,"min_hours":options.min_hours,"expired":true,"paths":options.paths});
     let cutoff = crate::preview::current_cutoff(options.min_hours)? * 1_000_000_000;
     let run = Run {
         clean: options.clean,
+        system_tmp: options.system_tmp,
         paths: options.paths.clone(),
         deadline,
         log: crate::scratch_target::deletion_log_path()?,
         holds: state.join("evidence-holds.json"),
-        ..Run::new(&root, device, cutoff)
+        ..Run::new(root, device, cutoff)
     };
     let u = crate::scratch_target::measure_usage;
-    let before = options.clean.then(|| u(&root, device)).transpose()?;
+    let before = options.clean.then(|| u(root, device)).transpose()?;
     let report = sweep(&run)?;
-    let after = options.clean.then(|| u(&root, device)).transpose()?;
+    let after = options.clean.then(|| u(root, device)).transpose()?;
     let freed = before
         .zip(after)
         .map(|(b, a)| i128::from(b) - i128::from(a));
