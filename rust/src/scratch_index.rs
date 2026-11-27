@@ -237,22 +237,19 @@ impl ScratchIndex {
                      DROP TABLE entries; ALTER TABLE entries_v2 RENAME TO entries;"
                 )
             };
-            let transaction = self
+            let tx = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(&format!(
-                "{ddl}
-                 CREATE INDEX entries_age ON entries(root_key, effective_modified_ns, path, kind);
-                 CREATE INDEX entries_birth ON entries(root_key, created_ns, path, kind);
-                 PRAGMA user_version=2;"
+            tx.execute_batch(&format!(
+                "{ddl} CREATE INDEX entries_age ON entries(root_key, effective_modified_ns, path, kind); \
+                 CREATE INDEX entries_birth ON entries(root_key, created_ns, path, kind); PRAGMA user_version=2;"
             ))?;
-            transaction.commit()?;
+            tx.commit()?;
         }
-        if self
+        let av: i64 = self
             .connection
-            .query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))?
-            != 2
-        {
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        if av != 2 {
             self.connection.execute_batch(
                 "PRAGMA auto_vacuum=INCREMENTAL; VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
             )?;
