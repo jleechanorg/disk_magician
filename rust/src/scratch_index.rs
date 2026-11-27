@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MAX_PAGE_ROWS: usize = 4096;
 
 /// Which observed timestamp is used for age filtering and ordering.
@@ -169,6 +169,9 @@ impl ScratchIndex {
         )?;
         connection.busy_timeout(std::time::Duration::ZERO)?;
         connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;")?;
+        if connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? == 0 {
+            connection.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
+        }
         connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))?;
         let mut index = Self { connection, path };
         index.initialize_schema()?;
@@ -203,58 +206,57 @@ impl ScratchIndex {
         let version = self
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
-        if version == SCHEMA_VERSION {
-            return Ok(());
-        }
-        if version != 0 {
-            return Err(IndexError::UnsupportedSchema(version));
-        }
-
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute_batch(
-            "CREATE TABLE roots (
-                root_key TEXT PRIMARY KEY NOT NULL,
-                generation INTEGER NOT NULL,
-                root_path BLOB NOT NULL,
-                root_device BLOB NOT NULL CHECK(length(root_device)=8),
-                root_inode BLOB NOT NULL CHECK(length(root_inode)=8),
-                scan_complete INTEGER NOT NULL CHECK(scan_complete IN (0,1)),
-                entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
-                gap_count INTEGER NOT NULL CHECK(gap_count >= 0)
-             );
-             CREATE TABLE entries (
-                root_key TEXT NOT NULL REFERENCES roots(root_key) ON DELETE CASCADE,
-                path BLOB NOT NULL,
-                kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 3),
-                created_ns INTEGER,
-                modified_ns INTEGER,
-                changed_ns INTEGER,
-                effective_modified_ns INTEGER,
+        if version != SCHEMA_VERSION {
+            if version != 0 && version != 1 {
+                return Err(IndexError::UnsupportedSchema(version));
+            }
+            let entries_cols = "root_key TEXT NOT NULL REFERENCES roots(root_key) ON DELETE CASCADE,
+                path BLOB NOT NULL, kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 3),
+                created_ns INTEGER, modified_ns INTEGER, changed_ns INTEGER, effective_modified_ns INTEGER,
                 allocated_bytes BLOB NOT NULL CHECK(length(allocated_bytes)=8),
                 apparent_bytes BLOB NOT NULL CHECK(length(apparent_bytes)=8),
-                device BLOB NOT NULL CHECK(length(device)=8),
-                inode BLOB NOT NULL CHECK(length(inode)=8),
-                complete INTEGER NOT NULL CHECK(complete IN (0,1)),
-                PRIMARY KEY(root_key, path)
-             );
-             CREATE INDEX entries_age ON entries(root_key, effective_modified_ns, path);
-             CREATE INDEX entries_kind_age ON entries(root_key, kind, effective_modified_ns, path);
-             CREATE INDEX entries_birth ON entries(root_key, created_ns, path);
-             CREATE INDEX entries_kind_birth ON entries(root_key, kind, created_ns, path);
-             CREATE INDEX entries_path ON entries(root_key, path);
-             CREATE TABLE gaps (
-                root_key TEXT NOT NULL REFERENCES roots(root_key) ON DELETE CASCADE,
-                ordinal INTEGER NOT NULL,
-                path BLOB NOT NULL,
-                kind TEXT NOT NULL,
-                message TEXT NOT NULL,
-                PRIMARY KEY(root_key, ordinal)
-             );
-             PRAGMA user_version=1;",
-        )?;
-        transaction.commit()?;
+                device BLOB NOT NULL CHECK(length(device)=8), inode BLOB NOT NULL CHECK(length(inode)=8),
+                complete INTEGER NOT NULL CHECK(complete IN (0,1)), PRIMARY KEY(root_key, path)";
+            let ddl = if version == 0 {
+                format!(
+                    "CREATE TABLE roots (root_key TEXT PRIMARY KEY NOT NULL, generation INTEGER NOT NULL,
+                        root_path BLOB NOT NULL, root_device BLOB NOT NULL CHECK(length(root_device)=8),
+                        root_inode BLOB NOT NULL CHECK(length(root_inode)=8),
+                        scan_complete INTEGER NOT NULL CHECK(scan_complete IN (0,1)),
+                        entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
+                        gap_count INTEGER NOT NULL CHECK(gap_count >= 0));
+                     CREATE TABLE entries ({entries_cols}) WITHOUT ROWID;
+                     CREATE TABLE gaps (root_key TEXT NOT NULL REFERENCES roots(root_key) ON DELETE CASCADE,
+                        ordinal INTEGER NOT NULL, path BLOB NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL,
+                        PRIMARY KEY(root_key, ordinal));"
+                )
+            } else {
+                format!(
+                    "CREATE TABLE entries_v2 ({entries_cols}) WITHOUT ROWID;
+                     INSERT INTO entries_v2 SELECT root_key,path,kind,created_ns,modified_ns,changed_ns,effective_modified_ns,allocated_bytes,apparent_bytes,device,inode,complete FROM entries;
+                     DROP TABLE entries; ALTER TABLE entries_v2 RENAME TO entries;"
+                )
+            };
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(&format!(
+                "{ddl}
+                 CREATE INDEX entries_age ON entries(root_key, effective_modified_ns, path, kind);
+                 CREATE INDEX entries_birth ON entries(root_key, created_ns, path, kind);
+                 PRAGMA user_version=2;"
+            ))?;
+            transaction.commit()?;
+        }
+        if self
+            .connection
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))?
+            != 2
+        {
+            self.connection.execute_batch(
+                "PRAGMA auto_vacuum=INCREMENTAL; VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
+            )?;
+        }
         Ok(())
     }
 
@@ -341,6 +343,13 @@ impl ScratchIndex {
         insert_entries(&transaction, root_key, &report.entries)?;
         insert_gaps(&transaction, root_key, &report.gaps)?;
         transaction.commit()?;
+        {
+            let mut stmt = self.connection.prepare("PRAGMA incremental_vacuum")?;
+            let mut rows = stmt.query([])?;
+            while rows.next()?.is_some() {}
+        }
+        self.connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(RootSnapshot {
             root_key: root_key.to_owned(),
             root_path_bytes: report.root_path_bytes.clone(),
@@ -479,19 +488,20 @@ fn query_rows(
     query: &Query,
     limit: usize,
 ) -> Result<Vec<AgeMeasurement>, IndexError> {
-    let time_column = query.time_field.sql_column();
-    let age_index = match (query.kind.is_some(), query.time_field) {
-        (true, AgeTimeField::EffectiveModified) => "entries_kind_age",
-        (false, AgeTimeField::EffectiveModified) => "entries_age",
-        (true, AgeTimeField::Created) => "entries_kind_birth",
-        (false, AgeTimeField::Created) => "entries_birth",
+    let time_col = query.time_field.sql_column();
+    let age_index = match query.time_field {
+        AgeTimeField::EffectiveModified => "entries_age",
+        AgeTimeField::Created => "entries_birth",
     };
-    // A literal path range gives narrow subtree searches a path-index plan. The exact
-    // directory row is matched separately. Descendant bounds end at the next BLOB prefix.
-    let source_index = if query.path_prefix.is_some() {
-        "entries_path"
+    // Unary `+` on `time_col` suppresses secondary age indexes for subtree queries so SQLite
+    // scans the contiguous `WITHOUT ROWID` primary key `(root_key, path)` range instead.
+    let (from_clause, time_expr) = if query.path_prefix.is_some() {
+        ("entries".to_owned(), format!("+{time_col}"))
     } else {
-        age_index
+        (
+            format!("entries INDEXED BY {age_index}"),
+            time_col.to_owned(),
+        )
     };
     let mut values = vec![
         Value::Text(query.root_key.clone()),
@@ -499,7 +509,7 @@ fn query_rows(
     ];
     let mut filters = vec![
         "root_key=?1".to_owned(),
-        format!("{time_column} IS NOT NULL AND {time_column}<?2"),
+        format!("{time_expr} IS NOT NULL AND {time_expr}<?2"),
     ];
     if let Some(kind) = query.kind {
         values.push(Value::Integer(kind_code(kind)));
@@ -511,16 +521,15 @@ fn query_rows(
         let exact_bind = values.len();
         values.push(Value::Blob(lower));
         let lower_bind = values.len();
-        let descendants = if let Some(upper) = upper {
+        let upper_cond = if let Some(upper) = upper {
             values.push(Value::Blob(upper));
-            format!(
-                "(path=?{exact_bind} OR (path>=?{lower_bind} AND path<?{}))",
-                values.len()
-            )
+            format!(" AND path<?{}", values.len())
         } else {
-            format!("(path=?{exact_bind} OR path>=?{lower_bind})")
+            String::new()
         };
-        filters.push(descendants);
+        filters.push(format!(
+            "path>=?{exact_bind}{upper_cond} AND (path=?{exact_bind} OR path>=?{lower_bind})"
+        ));
     }
     if let Some(cursor) = &query.cursor {
         values.push(Value::Integer(cursor.last_epoch_nanos));
@@ -528,7 +537,7 @@ fn query_rows(
         values.push(Value::Blob(cursor.last_path_bytes.clone()));
         let path_bind = values.len();
         filters.push(format!(
-            "({time_column}>?{epoch_bind} OR ({time_column}=?{epoch_bind} AND path>?{path_bind}))"
+            "({time_expr}>?{epoch_bind} OR ({time_expr}=?{epoch_bind} AND path>?{path_bind}))"
         ));
     }
     values.push(Value::Integer(sqlite_count(limit + 1, "page limit")?));
@@ -536,8 +545,8 @@ fn query_rows(
     let sql = format!(
         "SELECT path,kind,created_ns,modified_ns,changed_ns,effective_modified_ns,
                 allocated_bytes,apparent_bytes,device,inode,complete
-         FROM entries INDEXED BY {source_index}
-         WHERE {} ORDER BY {time_column} ASC,path ASC LIMIT ?{limit_bind}",
+         FROM {from_clause}
+         WHERE {} ORDER BY {time_expr} ASC,path ASC LIMIT ?{limit_bind}",
         filters.join(" AND ")
     );
     let mut statement = connection.prepare(&sql)?;
