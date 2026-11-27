@@ -89,6 +89,8 @@ fn expired_templates_run_the_expired_sweep() {
     for template in [
         "launchd/com.jleechanorg.disk-magician-scratch-expired.plist.template",
         "systemd/diskm-scratch-expired.service.in",
+        "launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template",
+        "systemd/diskm-temp-clean.service.in",
     ] {
         let text = read(template);
         assert!(
@@ -96,6 +98,16 @@ fn expired_templates_run_the_expired_sweep() {
                 && text.contains("--expired")
                 && text.contains("--clean"),
             "{template} must run scratch-sweep --expired --clean"
+        );
+    }
+    for template in [
+        "launchd/com.jleechanorg.disk-magician-tmp-scratch.plist.template",
+        "systemd/diskm-temp-clean.service.in",
+    ] {
+        let text = read(template);
+        assert!(
+            text.contains("--root") && text.contains("system-tmp"),
+            "{template} must target --root system-tmp"
         );
     }
     let timer = read("systemd/diskm-scratch-expired.timer.in");
