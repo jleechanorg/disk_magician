@@ -115,7 +115,7 @@ fn read_history(
         let candidate = if source == SNAPSHOT_PATH {
             capacity_sample(&ledger, commit, days)
         } else {
-            qualifying_sample(&ledger, commit, days)
+            qualifying_candidate(&ledger, commit, days)
         };
         if let Some(candidate) = candidate {
             candidates.push(candidate);
@@ -264,7 +264,11 @@ fn git_blob_json(state_repo: &Path, object: &str) -> std::io::Result<Value> {
     Ok(serde_json::from_slice(&output.stdout).unwrap_or(Value::Null))
 }
 
-fn qualifying_sample(ledger: &Value, commit: &str, days: u32) -> Option<Candidate> {
+pub fn qualifying_sample(ledger: &Value, commit: &str, days: u32) -> Option<FloorSample> {
+    qualifying_candidate(ledger, commit, days).map(|candidate| candidate.sample)
+}
+
+fn qualifying_candidate(ledger: &Value, commit: &str, days: u32) -> Option<Candidate> {
     if !complete_and_balanced(ledger) {
         return None;
     }

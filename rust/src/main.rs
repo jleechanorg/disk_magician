@@ -1,6 +1,6 @@
 use diskm_shadow::{
-    artifact_batch, artifact_discovery, evidence_holds, history, preview, reclaim_report, scan,
-    scratch_dir, scratch_manifest, scratch_sweep, scratch_target, snapshot, state_commit,
+    artifact_batch, artifact_discovery, evidence_holds, frontier, history, preview, reclaim_report,
+    scan, scratch_dir, scratch_manifest, scratch_sweep, scratch_target, snapshot, state_commit,
     state_publish, status, time_windows,
 };
 use serde::Serialize;
@@ -17,6 +17,7 @@ const USAGE: &str = "diskm — Disk Magician migration candidate; inventory outp
 
   diskm status [PATH] [--state-dir DIR] [--json]
   diskm scan PATH [--deadline-ms N] [--max-entries N] [--json]
+  diskm frontier [--root PATH ...] [--min-mb N] [--deadline-ms N] [--output FILE | --state-dir DIR] [--json]
   diskm reclaim-ledger --read-existing [--state-dir DIR]
   diskm history --state-dir DIR [--days 7|30] [--capacity] [--json]
   diskm scratch-dir [SUBPATH]
@@ -65,6 +66,7 @@ enum Operation {
         root: PathBuf,
         options: scan::ScanOptions,
     },
+    Frontier(frontier::Options),
     History {
         state_dir: PathBuf,
         days: u32,
@@ -139,6 +141,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> 
     match command {
         "-h" | "--help" | "help" => return Ok(Operation::Help),
         "snapshot" => return parse_snapshot(args),
+        "frontier" => return parse_frontier(args),
         "time-windows" => return Ok(Operation::TimeWindows),
         "state-publish" => return parse_state_publish(args),
         "state-commit" => return parse_state_commit(args),
@@ -465,6 +468,33 @@ fn parse_snapshot(mut args: impl Iterator<Item = OsString>) -> Result<Operation,
     })
 }
 
+fn parse_frontier(mut args: impl Iterator<Item = OsString>) -> Result<Operation, String> {
+    let (mut roots, mut min_mb, mut output, mut state_dir) = (Vec::new(), 5120_u64, None, None);
+    let mut deadline_ms = time_windows::EXPIRED_SWEEP_DEADLINE.as_millis() as u64;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Ok(Operation::Help),
+            Some("--json") => {}
+            Some("--root") => roots.push(PathBuf::from(required_value(&mut args, "--root")?)),
+            Some("--min-mb") => min_mb = positive(&mut args, "--min-mb")?,
+            Some("--deadline-ms") => deadline_ms = positive(&mut args, "--deadline-ms")?,
+            Some("--output") if output.is_none() => output = Some(PathBuf::from(required_value(&mut args, "--output")?)),
+            Some("--state-dir") if state_dir.is_none() => state_dir = Some(PathBuf::from(required_value(&mut args, "--state-dir")?)),
+            _ => return Err("frontier accepts --root PATH, --min-mb N, --deadline-ms N, --output FILE or --state-dir DIR, --json".into()),
+        }
+    }
+    if output.is_some() && state_dir.is_some() {
+        return Err("frontier --output and --state-dir are mutually exclusive".into());
+    }
+    Ok(Operation::Frontier(frontier::Options {
+        roots,
+        min_mb,
+        deadline: Duration::from_millis(deadline_ms),
+        output,
+        state_dir,
+    }))
+}
+
 fn relative_age_cutoff(value: OsString) -> Result<i64, String> {
     let hours = value
         .to_str()
@@ -671,6 +701,13 @@ fn run(operation: Operation) -> io::Result<u8> {
             let report = scan::scan(&root, options)?;
             print_json(&report)?;
             if !report.complete {
+                return Ok(TEMPORARY_FAILURE);
+            }
+        }
+        Operation::Frontier(options) => {
+            let (report, complete) = frontier::run(&options)?;
+            print_json(&report)?;
+            if !complete {
                 return Ok(TEMPORARY_FAILURE);
             }
         }
