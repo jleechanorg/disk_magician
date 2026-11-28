@@ -111,9 +111,9 @@ outputs, caches, finished-run logs, and completed scratch artifacts.
 
 ## Rust migration production LOC budget
 
-The Rust migration's agreed maximum is **14,300 physical production lines** (raised from 14,100 on the operator's 2026-11-26 approval; 14,100 had been raised from 14,000 on 2026-11-25, and 14,000 from 13,500 on 2026-11-23) across tracked Rust source files anywhere under the rust directory. Unit test implementations belong under rust/tests. Other tracked production sources there count toward the existing-code net-growth budget.
+The Rust migration's agreed maximum is **14,600 physical production lines** (raised from 14,300 pending operator approval for Phase 4 native `diskm frontier` / `disk_magician-5fba`; 14,300 had been raised from 14,100 on 2026-11-26, 14,100 from 14,000 on 2026-11-25, and 14,000 from 13,500 on 2026-11-23) across tracked Rust source files anywhere under the rust directory. Unit test implementations belong under rust/tests. Other tracked production sources there count toward the existing-code net-growth budget.
 
-- Rust production may not exceed 14,300 lines.
+- Rust production may not exceed 14,600 lines.
 - Existing non-generated production code may grow by at most 250 net lines per pull request compared with the PR base. Production source additions and deletions both count. Unit tests, test fixtures, documentation, `.github` tooling, and the generated `src/disk_magician/` package mirror are excluded.
 
 To change either limit, update the policy and the shared values in `.github/workflows/loc-budget.yml` in the same reviewed change.

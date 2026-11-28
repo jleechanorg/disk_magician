@@ -20,6 +20,7 @@ pub fn verified_scratch_volume(
 pub mod artifact_batch;
 pub mod artifact_discovery;
 pub mod evidence_holds;
+pub mod frontier;
 pub mod history;
 pub mod job_receipt;
 pub mod preview;
